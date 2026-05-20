@@ -16,6 +16,7 @@ type Config struct {
 	ContextWindow     int             `json:"context_window"`
 	MaxCostPerSession float64         `json:"max_cost_per_session"`
 	OrchestratorAddr  string          `json:"orchestrator_addr"`
+	SessionDBPath     string          `json:"session_db_path"`
 	Permissions       PermissionConfig `json:"permissions"`
 	Hooks             []HookConfig     `json:"hooks"`
 	MCPConfig         string          `json:"mcp_config"`
@@ -54,6 +55,7 @@ func Default(projectRoot string) Config {
 		ContextWindow:     128000,
 		MaxCostPerSession: 5.0,
 		OrchestratorAddr:  "127.0.0.1:50051",
+		SessionDBPath:     filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
 		MCPConfig:         ".mcp.json",
 		MemoryDir:         filepath.Join(projectRoot, ".agent", "memory"),
 		WorktreeBaseRef:   "fresh",
@@ -79,8 +81,10 @@ func Load(projectRoot string) (Config, error) {
 		}
 	}
 
-	if err := os.MkdirAll(cfg.MemoryDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-		return Config{}, fmt.Errorf("create memory dir: %w", err)
+	for _, dir := range []string{cfg.MemoryDir, filepath.Dir(cfg.SessionDBPath)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return Config{}, fmt.Errorf("create config dir %s: %w", dir, err)
+		}
 	}
 
 	return cfg, nil
@@ -119,6 +123,9 @@ func mergeConfig(dst *Config, patch Config) {
 	}
 	if patch.OrchestratorAddr != "" {
 		dst.OrchestratorAddr = patch.OrchestratorAddr
+	}
+	if patch.SessionDBPath != "" {
+		dst.SessionDBPath = patch.SessionDBPath
 	}
 	if len(patch.Permissions.Allow) > 0 || len(patch.Permissions.Deny) > 0 {
 		dst.Permissions = patch.Permissions

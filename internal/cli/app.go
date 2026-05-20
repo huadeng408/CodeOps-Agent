@@ -80,7 +80,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		renderer:     NewStreamRenderer(stdout),
 		status:       NewStatusLine(),
 		metrics:      metrics.NewCollector(),
-		session:      session.NewManager(nil),
+		session:      session.NewManager(session.NewSQLiteStore(cfg.SessionDBPath)),
 		memory:       memory.NewManager(cfg.MemoryDir),
 		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
 		orchestrator: orchestratorClient,
@@ -144,6 +144,7 @@ func (a *App) renderBootstrap() {
 		"working dir: " + a.cfg.WorkingDir,
 		"model: " + a.cfg.Model,
 		"orchestrator: " + a.cfg.OrchestratorAddr,
+		"session db: " + a.cfg.SessionDBPath,
 		"instructions: " + fmt.Sprint(len(a.instructions)),
 	})
 	if len(a.instructions) > 0 {
@@ -222,7 +223,7 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	}
 }
 
-func (a *App) handleSlashCommand(_ context.Context, raw string) bool {
+func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
 		return true
@@ -256,6 +257,7 @@ func (a *App) handleSlashCommand(_ context.Context, raw string) bool {
 			"context window: " + fmt.Sprint(a.cfg.ContextWindow),
 			"max cost: " + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession),
 			"orchestrator: " + a.cfg.OrchestratorAddr,
+			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
 		})
@@ -272,7 +274,16 @@ func (a *App) handleSlashCommand(_ context.Context, raw string) bool {
 	case "/diff":
 		a.renderer.PrintLine("diff placeholder")
 	case "/resume":
-		a.renderer.PrintLine("session resume placeholder")
+		resumed, ok, err := a.session.ResumeLatest(ctx)
+		if err != nil {
+			a.renderer.PrintLine("resume failed: " + err.Error())
+			return true
+		}
+		if !ok {
+			a.renderer.PrintLine("no previous session found")
+			return true
+		}
+		a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
 	default:
 		return false
 	}

@@ -96,6 +96,54 @@ func (m *Manager) Reset() Session {
 	return m.NewSession(m.current.WorkingDir)
 }
 
+func (m *Manager) ResumeLatest(ctx context.Context) (Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sessions, err := m.store.List(ctx)
+	if err != nil {
+		return Session{}, false, err
+	}
+	for _, candidate := range sessions {
+		if candidate.ID == "" || candidate.ID == m.current.ID {
+			continue
+		}
+		m.current = cloneSession(candidate)
+		return cloneSession(m.current), true, nil
+	}
+	return Session{}, false, nil
+}
+
+func (m *Manager) Load(ctx context.Context, id string) (Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	loaded, err := m.store.Load(ctx, id)
+	if err != nil {
+		return Session{}, err
+	}
+	if loaded == nil {
+		return Session{}, ErrNotFound
+	}
+	m.current = cloneSession(*loaded)
+	return cloneSession(m.current), nil
+}
+
+func (m *Manager) List(ctx context.Context) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sessions, err := m.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Session, len(sessions))
+	for i, session := range sessions {
+		out[i] = cloneSession(session)
+	}
+	return out, nil
+}
+
 func (m *Manager) Messages() []Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
