@@ -63,6 +63,10 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	for _, rule := range cfg.Permissions.Allow {
 		allowlist = append(allowlist, permission.AllowRule{Tool: rule.Tool, Pattern: rule.Pattern})
 	}
+	denylist := make([]permission.AllowRule, 0, len(cfg.Permissions.Deny))
+	for _, rule := range cfg.Permissions.Deny {
+		denylist = append(denylist, permission.AllowRule{Tool: rule.Tool, Pattern: rule.Pattern})
+	}
 	levels := map[string]permission.Level{}
 	for tool, level := range permission.DefaultPermissions {
 		levels[tool] = level
@@ -78,7 +82,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		metrics:      metrics.NewCollector(),
 		session:      session.NewManager(nil),
 		memory:       memory.NewManager(cfg.MemoryDir),
-		permissions:  permission.NewController(levels, allowlist),
+		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
 		orchestrator: orchestratorClient,
 		hooks:        hooks.NewEngine(),
 		executor:     tools.NewExecutor(cfg.ProjectRoot),
@@ -184,9 +188,13 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	}
 
 	if decision := a.permissions.Check(call.Name, params); decision != permission.Approve {
+		reason := "permission required"
+		if decision == permission.Deny {
+			reason = "permission denied by policy"
+		}
 		return orchestrator.ToolResult{
 			ToolName: call.Name,
-			Error:    "permission required",
+			Error:    reason,
 			ExitCode: 1,
 		}
 	}

@@ -22,6 +22,7 @@ type Controller struct {
 	mu              sync.Mutex
 	levels          map[string]Level
 	allowlist       []AllowRule
+	denylist        []AllowRule
 	sessionApproved map[string]bool
 }
 
@@ -47,9 +48,21 @@ func NewController(levels map[string]Level, allowlist []AllowRule) *Controller {
 	}
 }
 
+func NewControllerWithRules(levels map[string]Level, allowlist []AllowRule, denylist []AllowRule) *Controller {
+	controller := NewController(levels, allowlist)
+	controller.denylist = denylist
+	return controller
+}
+
 func (c *Controller) Check(tool string, params map[string]any) Decision {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	for _, rule := range c.denylist {
+		if rule.Matches(tool, params) {
+			return Deny
+		}
+	}
 
 	for _, rule := range c.allowlist {
 		if rule.Matches(tool, params) {
