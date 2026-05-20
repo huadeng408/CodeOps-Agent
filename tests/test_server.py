@@ -6,7 +6,8 @@ import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.llm.client import ChatResponse, ToolCall
-from orchestrator.server import OrchestratorServer, OrchestratorService
+from orchestrator.memory.manager import MemoryManager
+from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 
 
 class FakeLLM:
@@ -71,11 +72,12 @@ class TodoFakeLLM:
         return ChatResponse(text="todo list updated")
 
 
-def test_health_and_converse(monkeypatch) -> None:
+def test_health_and_converse(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
-        OrchestratorService(OrchestratorServer()),
+        OrchestratorService(app),
         server,
     )
     port = server.add_insecure_port("127.0.0.1:0")
@@ -108,9 +110,9 @@ def test_health_and_converse(monkeypatch) -> None:
         server.stop(grace=0)
 
 
-def test_llm_tool_call_roundtrip(monkeypatch) -> None:
+def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
-    app = OrchestratorServer()
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
     app.llm = FakeLLM()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
@@ -146,9 +148,9 @@ def test_llm_tool_call_roundtrip(monkeypatch) -> None:
         server.stop(grace=0)
 
 
-def test_todo_write_emits_update_and_persists(monkeypatch) -> None:
+def test_todo_write_emits_update_and_persists(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
-    app = OrchestratorServer()
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
     app.llm = TodoFakeLLM()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
@@ -174,5 +176,57 @@ def test_todo_write_emits_update_and_persists(monkeypatch) -> None:
             assert responses[-1].done.success
             assert app.todos.snapshot()[0].content == "Draft the plan"
             assert len(app.todos.snapshot()) == 2
+    finally:
+        server.stop(grace=0)
+
+
+def test_markdown_memory_manager_persists_and_searches(tmp_path) -> None:
+    manager = MemoryManager(str(tmp_path))
+    saved = manager.add("Prefer Markdown memory files for durable project facts.", ["project", "#memory"])
+
+    assert (tmp_path / f"{saved.name}.md").exists()
+    assert (tmp_path / "MEMORY.md").read_text(encoding="utf-8").find(saved.name) >= 0
+
+    reloaded = MemoryManager(str(tmp_path))
+    matches = reloaded.load_relevant("durable")
+    assert len(matches) == 1
+    assert matches[0].content == "Prefer Markdown memory files for durable project facts."
+    assert matches[0].tags == ["project", "memory"]
+
+
+def test_relevant_memory_is_added_to_llm_prompt(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = FakeLLM()
+    app.memory.add("Use the memory subsystem when users mention durable facts.", ["memory"])
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="check memory behavior")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="orchestrator/memory/manager.py",
+                        )
+                    ),
+                ]
+            )
+            list(stub.Converse(messages))
+
+            system_prompt = app.llm.requests[0].messages[0].content
+            assert "Relevant memories:" in system_prompt
+            assert "Use the memory subsystem" in system_prompt
     finally:
         server.stop(grace=0)

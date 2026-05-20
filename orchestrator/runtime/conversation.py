@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from codeagent import orchestrator_pb2
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient
+from orchestrator.memory.manager import Memory, MemoryManager
 from orchestrator.todo.manager import Todo, TodoManager
 
 from .tools import ToolRegistry
@@ -19,6 +20,7 @@ class ConversationRunner:
     llm: LLMClient | None
     tool_registry: ToolRegistry
     todo_manager: TodoManager
+    memory_manager: MemoryManager
     max_tool_rounds: int = 6
 
     def run(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
@@ -108,14 +110,19 @@ class ConversationRunner:
         yield self._done(True)
 
     def _initial_messages(self, user_text: str) -> list[ChatMessage]:
+        memories = self.memory_manager.load_relevant(user_text)
+        memory_context = self._memory_context(memories)
+        system_prompt = (
+            "You are the Python orchestrator for a local code agent. "
+            "Use tools when you need workspace facts or file changes. "
+            "The Go harness executes tools and enforces permissions."
+        )
+        if memory_context:
+            system_prompt += "\n\nRelevant memories:\n" + memory_context
         return [
             ChatMessage(
                 role="system",
-                content=(
-                    "You are the Python orchestrator for a local code agent. "
-                    "Use tools when you need workspace facts or file changes. "
-                    "The Go harness executes tools and enforces permissions."
-                ),
+                content=system_prompt,
             ),
             ChatMessage(role="user", content=user_text),
         ]
@@ -180,6 +187,19 @@ class ConversationRunner:
         if not value.strip():
             return 0
         return len(value.splitlines())
+
+    @staticmethod
+    def _memory_context(memories: list[Memory]) -> str:
+        if not memories:
+            return ""
+        lines = []
+        for item in memories[:5]:
+            tags = ", ".join(item.tags) if item.tags else "none"
+            content = " ".join(item.content.split())
+            if len(content) > 360:
+                content = content[:357].rstrip() + "..."
+            lines.append(f"- {item.name} (tags: {tags}): {content}")
+        return "\n".join(lines)
 
     @staticmethod
     def _decode_todos(arguments_json: str) -> list[Todo]:

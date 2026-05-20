@@ -327,7 +327,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/compact compress context",
 			"/clear reset the current conversation",
 			"/config show loaded configuration",
-			"/memory show memory status",
+			"/memory manage persistent memories (add/list/find/show/delete)",
 			"/tasks show task status",
 			"/undo revert the last recorded change set",
 			"/diff show the current session diff summary",
@@ -352,7 +352,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"mcp config: " + a.cfg.MCPConfig,
 		})
 	case "/memory":
-		a.renderer.PrintLine(a.memorySummary())
+		a.handleMemoryCommand(raw, fields)
 	case "/tasks":
 		a.renderer.PrintBlock("tasks", a.todos.Lines())
 	case "/undo":
@@ -387,5 +387,144 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 
 func (a *App) memorySummary() string {
 	stats := a.memory.Snapshot()
-	return fmt.Sprintf("memories: %d | dir: %s", stats.Count, stats.Dir)
+	return fmt.Sprintf("memories: %d | dir: %s | index: %s", stats.Count, stats.Dir, stats.File)
+}
+
+func (a *App) handleMemoryCommand(raw string, fields []string) {
+	if len(fields) == 1 {
+		lines := []string{a.memorySummary()}
+		items := a.memory.List()
+		if len(items) == 0 {
+			lines = append(lines, "no memories saved")
+		} else {
+			lines = append(lines, "recent:")
+			lines = append(lines, formatMemoryItems(items, 5)...)
+		}
+		a.renderer.PrintBlock("memory", lines)
+		return
+	}
+
+	subcommand := fields[1]
+	args := slashArgs(raw, 2)
+	switch subcommand {
+	case "add":
+		content, tags := extractInlineTags(args)
+		if strings.TrimSpace(content) == "" {
+			a.renderer.PrintLine("usage: /memory add <content> [#tag...]")
+			return
+		}
+		item := a.memory.Add(content, tags...)
+		a.renderer.PrintLine("saved memory: " + item.Name)
+	case "list":
+		items := a.memory.List()
+		a.renderer.PrintBlock("memory", formatMemoryItems(items, 0))
+	case "find":
+		if strings.TrimSpace(args) == "" {
+			a.renderer.PrintLine("usage: /memory find <query>")
+			return
+		}
+		items := a.memory.LoadRelevant(args)
+		a.renderer.PrintBlock("memory matches", formatMemoryItems(items, 0))
+	case "show":
+		if strings.TrimSpace(args) == "" {
+			a.renderer.PrintLine("usage: /memory show <name>")
+			return
+		}
+		item, ok := a.memory.Get(args)
+		if !ok {
+			a.renderer.PrintLine("memory not found: " + args)
+			return
+		}
+		a.renderer.PrintBlock("memory "+item.Name, formatMemoryDetail(item))
+	case "delete":
+		if strings.TrimSpace(args) == "" {
+			a.renderer.PrintLine("usage: /memory delete <name>")
+			return
+		}
+		if err := a.memory.Delete(args); err != nil {
+			a.renderer.PrintLine("delete failed: " + err.Error())
+			return
+		}
+		a.renderer.PrintLine("deleted memory: " + args)
+	default:
+		a.renderer.PrintBlock("memory", []string{
+			a.memorySummary(),
+			"commands: add, list, find, show, delete",
+		})
+	}
+}
+
+func formatMemoryItems(items []memory.Memory, limit int) []string {
+	if len(items) == 0 {
+		return []string{"no memories found"}
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		tags := strings.Join(item.Tags, ", ")
+		if tags == "" {
+			tags = "none"
+		}
+		lines = append(lines, fmt.Sprintf("%s | tags: %s | %s", item.Name, tags, firstMemoryLine(item.Content)))
+	}
+	return lines
+}
+
+func formatMemoryDetail(item memory.Memory) []string {
+	tags := strings.Join(item.Tags, ", ")
+	if tags == "" {
+		tags = "none"
+	}
+	lines := []string{
+		"id: " + item.ID,
+		"tags: " + tags,
+		"created: " + item.CreatedAt.Format("2006-01-02 15:04:05"),
+		"updated: " + item.UpdatedAt.Format("2006-01-02 15:04:05"),
+		"content:",
+	}
+	for _, line := range strings.Split(item.Content, "\n") {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func slashArgs(raw string, skip int) string {
+	value := strings.TrimSpace(raw)
+	for i := 0; i < skip; i++ {
+		_, rest, ok := strings.Cut(value, " ")
+		if !ok {
+			return ""
+		}
+		value = strings.TrimSpace(rest)
+	}
+	return value
+}
+
+func extractInlineTags(value string) (string, []string) {
+	fields := strings.Fields(value)
+	tags := []string{}
+	content := []string{}
+	for _, field := range fields {
+		if strings.HasPrefix(field, "#") && len(field) > 1 {
+			tags = append(tags, strings.TrimPrefix(field, "#"))
+			continue
+		}
+		content = append(content, field)
+	}
+	return strings.Join(content, " "), tags
+}
+
+func firstMemoryLine(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if len(line) > 80 {
+				return strings.TrimSpace(line[:77]) + "..."
+			}
+			return line
+		}
+	}
+	return ""
 }

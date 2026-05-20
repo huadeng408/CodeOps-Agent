@@ -10,6 +10,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from .config import load_dotenv
 from .graph.main_graph import build_graph
 from .llm.providers.openai import OpenAIClient
+from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
 from .todo.manager import TodoManager
 
@@ -18,6 +19,7 @@ from .todo.manager import TodoManager
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 50051
+    memory_dir: str = ".agent/memory"
 
 
 class OrchestratorServer:
@@ -28,6 +30,7 @@ class OrchestratorServer:
         self.llm = OpenAIClient.from_env()
         self.tools = ToolRegistry()
         self.todos = TodoManager()
+        self.memory = MemoryManager(self.config.memory_dir)
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -68,6 +71,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             llm=self.app.llm,
             tool_registry=self.app.tools,
             todo_manager=self.app.todos,
+            memory_manager=self.app.memory,
         )
         yield from runner.run(user_text, request_iterator)
 
@@ -85,12 +89,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument("--memory-dir", default=".agent/memory")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    server = OrchestratorServer(ServerConfig(host=args.host, port=args.port))
+    server = OrchestratorServer(
+        ServerConfig(host=args.host, port=args.port, memory_dir=args.memory_dir)
+    )
     server.serve()
 
 
