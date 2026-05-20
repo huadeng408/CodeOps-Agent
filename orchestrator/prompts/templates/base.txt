@@ -1,0 +1,11 @@
+{{identity}}
+
+{{capabilities}}
+
+{{tools}}
+
+{{project}}
+
+{{memory}}
+
+{{session}}

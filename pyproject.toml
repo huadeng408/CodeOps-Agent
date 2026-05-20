@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-agent"
+version = "0.1.0"
+description = "Local code agent skeleton"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["codeagent*", "orchestrator*"]
+
+[tool.setuptools.package-data]
+orchestrator = ["prompts/templates/*.txt"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

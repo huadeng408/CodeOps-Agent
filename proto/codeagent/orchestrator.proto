@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package codeagent.v1;
+
+option go_package = "code-agent/gen/codeagentpb;codeagentpb";
+
+service Orchestrator {
+  rpc Converse(stream HarnessMessage) returns (stream OrchestratorMessage);
+  rpc Health(Empty) returns (HealthResponse);
+}
+
+message Empty {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+message HarnessMessage {
+  oneof payload {
+    UserInput user_input = 1;
+    ToolResult tool_result = 2;
+    PermissionDecision permission_decision = 3;
+    Signal signal = 4;
+  }
+}
+
+message OrchestratorMessage {
+  oneof payload {
+    TextChunk text = 1;
+    ToolRequest tool_request = 2;
+    PlanUpdate plan_update = 3;
+    TodoUpdate todo_update = 4;
+    AgentSpawn agent_spawn = 5;
+    SessionMeta session_meta = 6;
+    Done done = 7;
+  }
+}
+
+message UserInput {
+  string text = 1;
+}
+
+message ToolResult {
+  string tool_name = 1;
+  string output = 2;
+  string error = 3;
+  int32 exit_code = 4;
+  bool truncated = 5;
+}
+
+message PermissionDecision {
+  string tool_name = 1;
+  PermissionLevel decision = 2;
+  string reason = 3;
+}
+
+message Signal {
+  SignalType type = 1;
+  string message = 2;
+}
+
+message TextChunk {
+  string text = 1;
+}
+
+message ToolRequest {
+  string tool_name = 1;
+  string parameters_json = 2;
+  PermissionLevel required_permission = 3;
+}
+
+message PlanUpdate {
+  repeated string steps = 1;
+  int32 current_index = 2;
+  string mode = 3;
+}
+
+message TodoUpdate {
+  repeated TodoItem todos = 1;
+}
+
+message TodoItem {
+  string content = 1;
+  string active_form = 2;
+  string status = 3;
+}
+
+message AgentSpawn {
+  string kind = 1;
+  string task = 2;
+  string context_json = 3;
+  bool parallel = 4;
+}
+
+message SessionMeta {
+  int64 turn = 1;
+  int64 tokens_in = 2;
+  int64 tokens_out = 3;
+  double cost = 4;
+  string model = 5;
+}
+
+message Done {
+  bool success = 1;
+  string message = 2;
+}
+
+message ToolRequestBatch {
+  repeated ToolRequest requests = 1;
+  bool parallel = 2;
+}
+
+message AskUserRequest {
+  string question = 1;
+  repeated Option options = 2;
+  bool multi_select = 3;
+}
+
+message Option {
+  string label = 1;
+  string description = 2;
+  string preview = 3;
+}
+
+enum PermissionLevel {
+  PERMISSION_LEVEL_UNSPECIFIED = 0;
+  AUTO_ALLOW = 1;
+  ASK_SESSION = 2;
+  ALWAYS_ASK = 3;
+}
+
+enum SignalType {
+  SIGNAL_TYPE_UNSPECIFIED = 0;
+  CTRL_C = 1;
+  SESSION_RESUME = 2;
+}
