@@ -3,6 +3,7 @@ package codeagent_test
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -47,5 +48,44 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 	}
 	if !strings.Contains(glob.Output, filepath.ToSlash("notes/demo.txt")) {
 		t.Fatalf("glob output missing file: %q", glob.Output)
+	}
+}
+
+func TestExecutorBashRunsSafeCommand(t *testing.T) {
+	root := t.TempDir()
+	executor := tools.NewExecutor(root)
+	command := "printf ok"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output ok"
+	}
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Bash",
+		Arguments: map[string]any{
+			"command": command,
+		},
+	})
+	if err != nil {
+		t.Fatalf("bash failed: %v output=%q", err, result.Output)
+	}
+	if !strings.Contains(result.Output, "ok") {
+		t.Fatalf("unexpected bash output: %q", result.Output)
+	}
+}
+
+func TestExecutorBashBlocksDangerousCommand(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Bash",
+		Arguments: map[string]any{
+			"command": "rm -rf /",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected dangerous command to be blocked")
+	}
+	if !strings.Contains(result.Error, "blocked command") {
+		t.Fatalf("unexpected error: %q", result.Error)
 	}
 }
