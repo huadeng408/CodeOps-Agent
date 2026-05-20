@@ -1,8 +1,12 @@
 package worktree
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -87,4 +91,62 @@ func (m *Manager) List() []Worktree {
 		out = append(out, tree)
 	}
 	return out
+}
+
+func (m *Manager) DiffLines(ctx context.Context) ([]string, error) {
+	root := m.root
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+
+	staged, err := gitOutput(ctx, root, "diff", "--cached", "--stat", "--")
+	if err != nil {
+		return nil, err
+	}
+	unstaged, err := gitOutput(ctx, root, "diff", "--stat", "--")
+	if err != nil {
+		return nil, err
+	}
+	status, err := gitOutput(ctx, root, "status", "--short", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+
+	staged = strings.TrimSpace(staged)
+	unstaged = strings.TrimSpace(unstaged)
+	status = strings.TrimSpace(status)
+	if staged == "" && unstaged == "" && status == "" {
+		return []string{"working tree clean"}, nil
+	}
+
+	lines := make([]string, 0, 16)
+	if staged != "" {
+		lines = append(lines, "staged changes:")
+		lines = append(lines, strings.Split(staged, "\n")...)
+	}
+	if unstaged != "" {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "unstaged changes:")
+		lines = append(lines, strings.Split(unstaged, "\n")...)
+	}
+	if status != "" {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "status:")
+		lines = append(lines, strings.Split(status, "\n")...)
+	}
+	return lines, nil
+}
+
+func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-C", root}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }

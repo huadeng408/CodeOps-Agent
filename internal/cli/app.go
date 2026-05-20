@@ -362,7 +362,12 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			a.renderer.PrintLine("nothing to undo")
 		}
 	case "/diff":
-		a.renderer.PrintLine("diff placeholder")
+		lines, err := a.worktree.DiffLines(ctx)
+		if err != nil {
+			a.renderer.PrintLine("diff failed: " + err.Error())
+			return true
+		}
+		a.renderer.PrintBlock("diff", lines)
 	case "/resume":
 		resumed, ok, err := a.session.ResumeLatest(ctx)
 		if err != nil {
