@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from codeagent import orchestrator_pb2
-from orchestrator.context import load_git_diff_context
+from orchestrator.context import BudgetStatus, TokenBudget, load_git_diff_context
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient
 from orchestrator.memory.manager import Memory, MemoryManager
@@ -36,10 +36,13 @@ class ConversationRunner:
     skills: SkillManager
     project_root: str
     working_dir: str
+    token_budget: TokenBudget | None = None
     injection_detector: InjectionDetector | None = None
     max_tool_rounds: int = 6
 
     def __post_init__(self) -> None:
+        if self.token_budget is None:
+            self.token_budget = TokenBudget()
         if self.injection_detector is None:
             self.injection_detector = InjectionDetector()
 
@@ -53,16 +56,32 @@ class ConversationRunner:
         total_tokens_out = 0
         total_cost = 0.0
         for turn in range(1, self.max_tool_rounds + 1):
+            if self._budget_status() == BudgetStatus.EXCEEDED:
+                yield self._text(self._budget_exceeded_message())
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._done(False)
+                return
+
             response = self._chat(messages)
             total_tokens_in += response.usage.input_tokens
             total_tokens_out += response.usage.output_tokens
-            total_cost += self._estimate_cost(
+            response_cost = self._estimate_cost(
                 getattr(self.llm, "model", ""),
                 response.usage.input_tokens,
                 response.usage.output_tokens,
             )
+            total_cost += response_cost
+            self._consume_budget(
+                response.usage.input_tokens + response.usage.output_tokens,
+                response_cost,
+            )
             if response.text:
                 yield self._text(response.text)
+            if self._budget_status() == BudgetStatus.EXCEEDED:
+                yield self._text(self._budget_exceeded_message())
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._done(False)
+                return
             if not response.tool_calls:
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
                 yield self._done(True)
@@ -276,6 +295,7 @@ class ConversationRunner:
             f"- Working directory: {self.working_dir}",
             f"- Project root: {self.project_root}",
             f"- Current request: {user_text.strip()}",
+            f"- Token budget: {self._budget_summary()}",
         ]
         git_context = load_git_diff_context(self.project_root, self.working_dir)
         if git_context:
@@ -383,6 +403,30 @@ class ConversationRunner:
             return 0.0
         input_rate, output_rate = pricing
         return max(tokens_in, 0) / 1000.0 * input_rate + max(tokens_out, 0) / 1000.0 * output_rate
+
+    def _consume_budget(self, tokens: int, cost: float) -> None:
+        if self.token_budget is not None:
+            self.token_budget.consume(tokens, cost)
+
+    def _budget_status(self) -> BudgetStatus:
+        if self.token_budget is None:
+            return BudgetStatus.OK
+        return self.token_budget.check()
+
+    def _budget_exceeded_message(self) -> str:
+        if self.token_budget is None:
+            return "Token budget exceeded."
+        return self.token_budget.on_exceeded()
+
+    def _budget_summary(self) -> str:
+        if self.token_budget is None:
+            return "unlimited"
+        status = self.token_budget.check().value
+        return (
+            f"{status}; used_tokens={self.token_budget.used_tokens}/"
+            f"{self.token_budget.max_tokens}; used_cost=${self.token_budget.used_cost:.6f}/"
+            f"${self.token_budget.max_cost:.6f}"
+        )
 
     @staticmethod
     def _decode_todos(arguments_json: str) -> list[Todo]:

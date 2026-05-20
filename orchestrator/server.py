@@ -9,6 +9,7 @@ import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from .config import load_dotenv
+from .context import TokenBudget
 from .graph.main_graph import build_graph
 from .llm.providers.openai import OpenAIClient
 from .memory.manager import MemoryManager
@@ -24,6 +25,8 @@ class ServerConfig:
     memory_dir: str = ".agent/memory"
     project_root: str = "."
     working_dir: str = "."
+    max_tokens: int = 1_000_000
+    max_cost: float = 5.0
 
 
 class OrchestratorServer:
@@ -38,6 +41,10 @@ class OrchestratorServer:
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
         self.skills = SkillManager()
+        self.token_budget = TokenBudget(
+            max_tokens=self.config.max_tokens,
+            max_cost=self.config.max_cost,
+        )
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -82,6 +89,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             skills=self.app.skills,
             project_root=self.app.project_root,
             working_dir=self.app.working_dir,
+            token_budget=self.app.token_budget,
         )
         yield from runner.run(user_text, request_iterator)
 
@@ -102,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-dir", default=".agent/memory")
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--working-dir", default=".")
+    parser.add_argument("--max-tokens", type=int, default=1_000_000)
+    parser.add_argument("--max-cost", type=float, default=5.0)
     return parser
 
 
@@ -114,6 +124,8 @@ def main(argv: list[str] | None = None) -> None:
             memory_dir=args.memory_dir,
             project_root=args.project_root,
             working_dir=args.working_dir,
+            max_tokens=args.max_tokens,
+            max_cost=args.max_cost,
         )
     )
     server.serve()

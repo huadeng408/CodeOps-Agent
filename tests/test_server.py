@@ -167,6 +167,28 @@ class UsageFakeLLM:
         )
 
 
+class BudgetToolFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(
+            text="need workspace",
+            tool_calls=[
+                ToolCall(
+                    id="budget-tool-1",
+                    name="Glob",
+                    arguments={"pattern": "**/*.py"},
+                    arguments_json='{"pattern":"**/*.py"}',
+                )
+            ],
+            usage=Usage(input_tokens=9, output_tokens=3),
+        )
+
+
 def test_health_and_converse(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
@@ -574,5 +596,46 @@ def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
             assert responses[1].session_meta.tokens_out == 50
             assert responses[1].session_meta.cost > 0
             assert responses[-1].done.success
+            assert app.token_budget.used_tokens == 150
+            assert app.token_budget.used_cost > 0
+    finally:
+        server.stop(grace=0)
+
+
+def test_token_budget_stops_before_tool_execution(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(
+        ServerConfig(
+            memory_dir=str(tmp_path),
+            max_tokens=10,
+            max_cost=5.0,
+        )
+    )
+    app.llm = BudgetToolFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="measure budget")
+                    )
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].text.text == "need workspace"
+            assert "Token budget exceeded" in responses[1].text.text
+            assert responses[2].session_meta.tokens_in == 9
+            assert responses[2].session_meta.tokens_out == 3
+            assert responses[-1].done.success is False
+            assert all(not response.HasField("tool_request") for response in responses)
+            assert app.token_budget.used_tokens == 12
     finally:
         server.stop(grace=0)
