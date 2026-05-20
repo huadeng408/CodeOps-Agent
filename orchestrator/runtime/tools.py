@@ -36,8 +36,11 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
+    def list(self) -> list[ToolSpec]:
+        return sorted(self._tools.values(), key=lambda tool: tool.name.lower())
+
     def openai_schemas(self) -> list[dict[str, Any]]:
-        return [tool.to_openai_schema() for tool in self._tools.values()]
+        return [tool.to_openai_schema() for tool in self.list()]
 
     def permission_for(self, name: str) -> int:
         spec = self.get(name)
@@ -148,6 +151,64 @@ class ToolRegistry:
                         }
                     },
                     "required": ["todos"],
+                },
+            ),
+            ToolSpec(
+                name="PlanWrite",
+                description="Update the current plan for the conversation.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "current_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "Planning mode label.",
+                        },
+                    },
+                    "required": ["steps"],
+                },
+            ),
+            ToolSpec(
+                name="SpawnAgent",
+                description="Spawn a sub-agent for an independent task.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Sub-agent type such as explore, general, plan, or background.",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short task title.",
+                        },
+                        "objective": {
+                            "type": "string",
+                            "description": "Task objective for the sub-agent.",
+                        },
+                        "parallel": {
+                            "type": "boolean",
+                            "description": "Whether the task can run in parallel.",
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Structured context for the sub-agent.",
+                        },
+                        "context_json": {
+                            "type": "string",
+                            "description": "Serialized structured context for the sub-agent.",
+                        },
+                    },
+                    "required": ["kind", "title", "objective"],
                 },
             ),
             ToolSpec(

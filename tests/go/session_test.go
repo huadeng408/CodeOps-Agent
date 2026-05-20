@@ -82,3 +82,31 @@ func TestManagerResumeLatest(t *testing.T) {
 		t.Fatalf("expected to resume first session, got %s", resumed.ID)
 	}
 }
+
+func TestManagerCompactSummarizesMessages(t *testing.T) {
+	manager := session.NewManager(nil)
+	manager.NewSession("workspace")
+	manager.Append(session.RoleUser, "first message")
+	manager.Append(session.RoleAssistant, "second message")
+	manager.Append(session.RoleUser, "third message")
+	manager.Append(session.RoleAssistant, "fourth message")
+
+	compacted, removed, summary := manager.Compact(2)
+	if removed != 2 {
+		t.Fatalf("expected to remove 2 messages, got %d", removed)
+	}
+	if summary == "" {
+		t.Fatal("expected a compaction summary")
+	}
+
+	messages := compacted.Messages
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages after compaction, got %d", len(messages))
+	}
+	if messages[0].Role != session.RoleSystem {
+		t.Fatalf("expected summary message to be system role, got %s", messages[0].Role)
+	}
+	if messages[1].Content != "third message" || messages[2].Content != "fourth message" {
+		t.Fatalf("unexpected retained messages: %#v", messages)
+	}
+}

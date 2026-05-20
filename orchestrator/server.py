@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from concurrent import futures
+from pathlib import Path
 
 import grpc
 
@@ -12,6 +13,7 @@ from .graph.main_graph import build_graph
 from .llm.providers.openai import OpenAIClient
 from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
+from .skills.manager import SkillManager
 from .todo.manager import TodoManager
 
 
@@ -20,17 +22,22 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 50051
     memory_dir: str = ".agent/memory"
+    project_root: str = "."
+    working_dir: str = "."
 
 
 class OrchestratorServer:
     def __init__(self, config: ServerConfig | None = None) -> None:
         load_dotenv()
         self.config = config or ServerConfig()
+        self.project_root = str(Path(self.config.project_root).resolve())
+        self.working_dir = str(Path(self.config.working_dir).resolve())
         self.graph = build_graph()
         self.llm = OpenAIClient.from_env()
         self.tools = ToolRegistry()
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
+        self.skills = SkillManager()
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -72,6 +79,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             tool_registry=self.app.tools,
             todo_manager=self.app.todos,
             memory_manager=self.app.memory,
+            skills=self.app.skills,
+            project_root=self.app.project_root,
+            working_dir=self.app.working_dir,
         )
         yield from runner.run(user_text, request_iterator)
 
@@ -90,13 +100,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument("--memory-dir", default=".agent/memory")
+    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--working-dir", default=".")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     server = OrchestratorServer(
-        ServerConfig(host=args.host, port=args.port, memory_dir=args.memory_dir)
+        ServerConfig(
+            host=args.host,
+            port=args.port,
+            memory_dir=args.memory_dir,
+            project_root=args.project_root,
+            working_dir=args.working_dir,
+        )
     )
     server.serve()
 

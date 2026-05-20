@@ -54,6 +54,7 @@ type App struct {
 	recovery     *recovery.Engine
 	skills       *skills.Manager
 	prompts      *prompts.Builder
+	planMode     bool
 	instructions []config.InstructionSource
 }
 
@@ -174,6 +175,9 @@ func (a *App) renderBootstrap() {
 }
 
 func (a *App) handleUserInput(ctx context.Context, input string) string {
+	if a.planMode {
+		input = "[plan mode] " + input
+	}
 	analysis := a.safety.AnalyzeCommand(input)
 	if !analysis.Allowed {
 		return "[blocked] " + analysis.Reason
@@ -295,6 +299,47 @@ func hooksCancelled(results []hooks.Result) bool {
 
 func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Event) {
 	_ = ctx
+	if event.SessionMeta != nil {
+		a.session.MergeMetadata(map[string]string{
+			"last_turn":       fmt.Sprint(event.SessionMeta.GetTurn()),
+			"last_tokens_in":  fmt.Sprint(event.SessionMeta.GetTokensIn()),
+			"last_tokens_out": fmt.Sprint(event.SessionMeta.GetTokensOut()),
+			"last_cost":       fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
+			"last_model":      event.SessionMeta.GetModel(),
+		})
+	}
+
+	if event.AgentSpawn != nil {
+		lines := []string{
+			"kind: " + event.AgentSpawn.GetKind(),
+			"task: " + event.AgentSpawn.GetTask(),
+			"parallel: " + fmt.Sprint(event.AgentSpawn.GetParallel()),
+		}
+		contextJSON := strings.TrimSpace(event.AgentSpawn.GetContextJson())
+		if contextJSON != "" {
+			if len(contextJSON) > 160 {
+				contextJSON = contextJSON[:157] + "..."
+			}
+			lines = append(lines, "context: "+contextJSON)
+		}
+		a.renderer.PrintBlock("agent", lines)
+	}
+
+	if event.PlanUpdate != nil {
+		lines := make([]string, 0, len(event.PlanUpdate.GetSteps())+1)
+		lines = append(lines, fmt.Sprintf("mode: %s | current: %d", event.PlanUpdate.GetMode(), event.PlanUpdate.GetCurrentIndex()))
+		for idx, step := range event.PlanUpdate.GetSteps() {
+			prefix := "[ ]"
+			if idx < int(event.PlanUpdate.GetCurrentIndex()) {
+				prefix = "[x]"
+			} else if idx == int(event.PlanUpdate.GetCurrentIndex()) {
+				prefix = "[~]"
+			}
+			lines = append(lines, fmt.Sprintf("%d. %s %s", idx+1, prefix, step))
+		}
+		a.renderer.PrintBlock("plan", lines)
+	}
+
 	if event.TodoUpdate == nil {
 		return
 	}
@@ -323,8 +368,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	case "/help":
 		a.renderer.PrintBlock("help", []string{
 			"/help show this help",
-			"/plan enter planning mode",
-			"/compact compress context",
+			"/plan toggle planning mode",
+			"/compact compress the current session",
 			"/clear reset the current conversation",
 			"/config show loaded configuration",
 			"/memory manage persistent memories (add/list/find/show/delete)",
@@ -334,9 +379,23 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/resume resume the last session",
 		})
 	case "/plan":
-		a.renderer.PrintLine("planning mode placeholder")
+		a.planMode = !a.planMode
+		mode := "off"
+		if a.planMode {
+			mode = "on"
+		}
+		_ = a.session.SetMetadata("mode", map[bool]string{true: "plan", false: "chat"}[a.planMode])
+		a.renderer.PrintLine("planning mode " + mode)
 	case "/compact":
-		a.renderer.PrintLine("compaction placeholder")
+		compacted, removed, summary := a.session.Compact(12)
+		if removed == 0 {
+			a.renderer.PrintLine("nothing to compact")
+			return true
+		}
+		a.renderer.PrintLine(fmt.Sprintf("compacted session %s, removed %d messages", compacted.ID, removed))
+		if strings.TrimSpace(summary) != "" {
+			a.renderer.PrintBlock("summary", strings.Split(summary, "\n"))
+		}
 	case "/clear":
 		a.session.Reset()
 		a.renderer.PrintLine("session cleared")
@@ -350,6 +409,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
+			"planning mode: " + map[bool]string{true: "on", false: "off"}[a.planMode],
 		})
 	case "/memory":
 		a.handleMemoryCommand(raw, fields)

@@ -5,7 +5,7 @@ from concurrent import futures
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
-from orchestrator.llm.client import ChatResponse, ToolCall
+from orchestrator.llm.client import ChatResponse, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 
@@ -70,6 +70,100 @@ class TodoFakeLLM:
                 ]
             )
         return ChatResponse(text="todo list updated")
+
+
+class PlanFakeLLM:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="plan-1",
+                        name="PlanWrite",
+                        arguments={
+                            "steps": [
+                                "Inspect the repository",
+                                "Implement the requested change",
+                                "Run the tests",
+                            ],
+                            "current_index": 1,
+                            "mode": "plan",
+                        },
+                        arguments_json=(
+                            '{"steps":['
+                            '"Inspect the repository",'
+                            '"Implement the requested change",'
+                            '"Run the tests"],'
+                            '"current_index":1,'
+                            '"mode":"plan"}'
+                        ),
+                    )
+                ]
+            )
+        return ChatResponse(text="plan updated")
+
+
+class SpawnFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="spawn-1",
+                        name="SpawnAgent",
+                        arguments={
+                            "kind": "review",
+                            "title": "Review current changes",
+                            "objective": "Inspect the edited files and summarize risks.",
+                            "parallel": False,
+                            "context": {
+                                "files": [
+                                    "orchestrator/runtime/conversation.py",
+                                    "tests/test_server.py",
+                                ]
+                            },
+                        },
+                        arguments_json=(
+                            '{"kind":"review",'
+                            '"title":"Review current changes",'
+                            '"objective":"Inspect the edited files and summarize risks.",'
+                            '"parallel":false,'
+                            '"context":{"files":["orchestrator/runtime/conversation.py","tests/test_server.py"]}'
+                            "}"
+                        ),
+                    )
+                ]
+            )
+        return ChatResponse(
+            text="spawn requested",
+            usage=Usage(input_tokens=40, output_tokens=10),
+        )
+
+
+class UsageFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(
+            text="all done",
+            usage=Usage(input_tokens=100, output_tokens=50),
+        )
 
 
 def test_health_and_converse(monkeypatch, tmp_path) -> None:
@@ -228,5 +322,153 @@ def test_relevant_memory_is_added_to_llm_prompt(monkeypatch, tmp_path) -> None:
             system_prompt = app.llm.requests[0].messages[0].content
             assert "Relevant memories:" in system_prompt
             assert "Use the memory subsystem" in system_prompt
+    finally:
+        server.stop(grace=0)
+
+
+def test_agent_md_is_included_in_system_prompt(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "project"
+    working_dir = project_root / "subdir"
+    working_dir.mkdir(parents=True)
+    (project_root / "AGENT.md").write_text(
+        "Project rule: prefer concise answers.\n",
+        encoding="utf-8",
+    )
+    (working_dir / "AGENT.md").write_text(
+        "Subdir rule: preserve layout.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(
+        ServerConfig(
+            memory_dir=str(tmp_path / "memory"),
+            project_root=str(project_root),
+            working_dir=str(working_dir),
+        )
+    )
+    app.llm = FakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="check instructions")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="orchestrator/server.py",
+                        )
+                    ),
+                ]
+            )
+            list(stub.Converse(messages))
+
+            system_prompt = app.llm.requests[0].messages[0].content
+            assert "Project rule: prefer concise answers." in system_prompt
+            assert "Subdir rule: preserve layout." in system_prompt
+    finally:
+        server.stop(grace=0)
+
+
+def test_plan_write_emits_update(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = PlanFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="plan this change")
+                    )
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].plan_update.steps[0] == "Inspect the repository"
+            assert responses[0].plan_update.current_index == 1
+            assert responses[1].text.text == "plan updated"
+            assert responses[-1].done.success
+    finally:
+        server.stop(grace=0)
+
+
+def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = SpawnFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="spawn a review agent")
+                    )
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].agent_spawn.kind == "review"
+            assert responses[0].agent_spawn.parallel is False
+            assert "Review current changes" in responses[0].agent_spawn.task
+            assert "orchestrator/runtime/conversation.py" in responses[0].agent_spawn.context_json
+            assert responses[1].text.text == "spawn requested"
+            assert responses[2].session_meta.cost > 0
+            assert responses[-1].done.success
+    finally:
+        server.stop(grace=0)
+
+
+def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = UsageFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="measure usage")
+                    )
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].text.text == "all done"
+            assert responses[1].session_meta.tokens_in == 100
+            assert responses[1].session_meta.tokens_out == 50
+            assert responses[1].session_meta.cost > 0
+            assert responses[-1].done.success
     finally:
         server.stop(grace=0)
