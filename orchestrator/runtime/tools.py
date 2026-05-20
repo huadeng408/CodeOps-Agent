@@ -125,6 +125,32 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="TodoWrite",
+                description="Update the task list for the current conversation.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string"},
+                                    "active_form": {"type": "string"},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"],
+                                    },
+                                },
+                                "required": ["content", "active_form", "status"],
+                            },
+                        }
+                    },
+                    "required": ["todos"],
+                },
+            ),
+            ToolSpec(
                 name="Git",
                 description="Run a safe git subcommand.",
                 permission=orchestrator_pb2.ASK_SESSION,

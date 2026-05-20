@@ -30,6 +30,15 @@ type ToolResult struct {
 
 type ToolHandler func(context.Context, ToolCall) ToolResult
 
+type Event struct {
+	TodoUpdate  *codeagentpb.TodoUpdate
+	PlanUpdate  *codeagentpb.PlanUpdate
+	SessionMeta *codeagentpb.SessionMeta
+	AgentSpawn  *codeagentpb.AgentSpawn
+}
+
+type EventHandler func(context.Context, Event)
+
 type Client struct {
 	target string
 	conn   *grpc.ClientConn
@@ -78,6 +87,10 @@ func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error
 }
 
 func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHandler) (string, error) {
+	return c.ConverseWithEvents(ctx, input, nil, handlers...)
+}
+
+func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHandler EventHandler, handlers ...ToolHandler) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("orchestrator client is nil")
 	}
@@ -117,6 +130,22 @@ func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHan
 		case *codeagentpb.OrchestratorMessage_Text:
 			if payload.Text != nil {
 				parts = append(parts, payload.Text.Text)
+			}
+		case *codeagentpb.OrchestratorMessage_TodoUpdate:
+			if eventHandler != nil {
+				eventHandler(ctx, Event{TodoUpdate: payload.TodoUpdate})
+			}
+		case *codeagentpb.OrchestratorMessage_PlanUpdate:
+			if eventHandler != nil {
+				eventHandler(ctx, Event{PlanUpdate: payload.PlanUpdate})
+			}
+		case *codeagentpb.OrchestratorMessage_SessionMeta:
+			if eventHandler != nil {
+				eventHandler(ctx, Event{SessionMeta: payload.SessionMeta})
+			}
+		case *codeagentpb.OrchestratorMessage_AgentSpawn:
+			if eventHandler != nil {
+				eventHandler(ctx, Event{AgentSpawn: payload.AgentSpawn})
 			}
 		case *codeagentpb.OrchestratorMessage_ToolRequest:
 			if payload.ToolRequest == nil {

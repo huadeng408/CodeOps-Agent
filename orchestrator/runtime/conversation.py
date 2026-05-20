@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from codeagent import orchestrator_pb2
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient
+from orchestrator.todo.manager import Todo, TodoManager
 
 from .tools import ToolRegistry
 
@@ -17,6 +18,7 @@ class ConversationRunner:
     graph: MainGraph
     llm: LLMClient | None
     tool_registry: ToolRegistry
+    todo_manager: TodoManager
     max_tool_rounds: int = 6
 
     def run(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
@@ -34,6 +36,52 @@ class ConversationRunner:
                 return
 
             for call in response.tool_calls:
+                if call.name == "TodoWrite":
+                    try:
+                        todo_items = self._decode_todos(call.arguments_json or json.dumps(call.arguments))
+                    except ValueError as exc:
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                name=call.name,
+                                tool_call_id=call.id or call.name,
+                                content=f"Invalid TodoWrite payload: {exc}",
+                            )
+                        )
+                        yield self._text(f"TodoWrite rejected: {exc}")
+                        continue
+                    self.todo_manager.update(todo_items)
+                    snapshot = self.todo_manager.snapshot()
+                    payload = orchestrator_pb2.TodoUpdate(
+                        todos=[
+                            orchestrator_pb2.TodoItem(
+                                content=item.content,
+                                active_form=item.active_form,
+                                status=item.status,
+                            )
+                            for item in snapshot
+                        ]
+                    )
+                    yield orchestrator_pb2.OrchestratorMessage(todo_update=payload)
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            name=call.name,
+                            tool_call_id=call.id or call.name,
+                            content=json.dumps(
+                                [
+                                    {
+                                        "content": item.content,
+                                        "active_form": item.active_form,
+                                        "status": item.status,
+                                    }
+                                    for item in snapshot
+                                ],
+                                ensure_ascii=False,
+                            ),
+                        )
+                    )
+                    continue
                 request = self._tool_request(call.name, call.arguments_json or json.dumps(call.arguments))
                 yield request
                 result = self._next_tool_result(request_iterator)
@@ -132,3 +180,27 @@ class ConversationRunner:
         if not value.strip():
             return 0
         return len(value.splitlines())
+
+    @staticmethod
+    def _decode_todos(arguments_json: str) -> list[Todo]:
+        try:
+            payload = json.loads(arguments_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        raw_todos = payload.get("todos", [])
+        if not isinstance(raw_todos, list):
+            raise ValueError("todos must be a list")
+        todos: list[Todo] = []
+        for raw in raw_todos:
+            if not isinstance(raw, dict):
+                continue
+            todos.append(
+                Todo(
+                    content=str(raw.get("content", "")).strip(),
+                    active_form=str(raw.get("active_form", "")).strip(),
+                    status=str(raw.get("status", "pending")).strip(),
+                )
+            )
+        return todos

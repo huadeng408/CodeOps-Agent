@@ -31,6 +31,46 @@ class FakeLLM:
         return ChatResponse(text="found python files")
 
 
+class TodoFakeLLM:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="todo-1",
+                        name="TodoWrite",
+                        arguments={
+                            "todos": [
+                                {
+                                    "content": "Draft the plan",
+                                    "active_form": "drafting the plan",
+                                    "status": "in_progress",
+                                },
+                                {
+                                    "content": "Review the plan",
+                                    "active_form": "reviewing the plan",
+                                    "status": "pending",
+                                },
+                            ]
+                        },
+                        arguments_json=(
+                            '{"todos":['
+                            '{"content":"Draft the plan","active_form":"drafting the plan","status":"in_progress"},'
+                            '{"content":"Review the plan","active_form":"reviewing the plan","status":"pending"}'
+                            ']}'
+                        ),
+                    )
+                ]
+            )
+        return ChatResponse(text="todo list updated")
+
+
 def test_health_and_converse(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
@@ -102,5 +142,37 @@ def test_llm_tool_call_roundtrip(monkeypatch) -> None:
             assert responses[-1].done.success
             assert app.llm.requests[1].messages[-1].role == "tool"
             assert app.llm.requests[1].messages[-1].content == "orchestrator/server.py"
+    finally:
+        server.stop(grace=0)
+
+
+def test_todo_write_emits_update_and_persists(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer()
+    app.llm = TodoFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="track tasks")
+                    )
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].todo_update.todos[0].content == "Draft the plan"
+            assert responses[0].todo_update.todos[0].status == "in_progress"
+            assert responses[1].text.text == "todo list updated"
+            assert responses[-1].done.success
+            assert app.todos.snapshot()[0].content == "Draft the plan"
+            assert len(app.todos.snapshot()) == 2
     finally:
         server.stop(grace=0)

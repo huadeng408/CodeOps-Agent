@@ -21,6 +21,7 @@ import (
 	"code-agent/internal/safety"
 	"code-agent/internal/session"
 	"code-agent/internal/skills"
+	"code-agent/internal/todo"
 	"code-agent/internal/tools"
 	"code-agent/internal/undo"
 	"code-agent/internal/worktree"
@@ -41,6 +42,7 @@ type App struct {
 	metrics      *metrics.Collector
 	session      *session.Manager
 	memory       *memory.Manager
+	todos        *todo.Manager
 	permissions  *permission.Controller
 	orchestrator *orchestrator.Client
 	hooks        *hooks.Engine
@@ -92,6 +94,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		metrics:      metrics.NewCollector(),
 		session:      session.NewManager(session.NewSQLiteStore(cfg.SessionDBPath)),
 		memory:       memory.NewManager(cfg.MemoryDir),
+		todos:        todo.NewManager(),
 		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
 		orchestrator: orchestratorClient,
 		hooks:        hookEngine,
@@ -177,7 +180,7 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 	}
 
 	if a.orchestrator != nil {
-		reply, err := a.orchestrator.Converse(ctx, input, a.handleToolCall)
+		reply, err := a.orchestrator.ConverseWithEvents(ctx, input, a.handleOrchestratorEvent, a.handleToolCall)
 		if err == nil && strings.TrimSpace(reply) != "" {
 			return reply
 		}
@@ -290,6 +293,26 @@ func hooksCancelled(results []hooks.Result) bool {
 	return false
 }
 
+func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Event) {
+	_ = ctx
+	if event.TodoUpdate == nil {
+		return
+	}
+
+	items := make([]todo.Item, 0, len(event.TodoUpdate.GetTodos()))
+	for _, item := range event.TodoUpdate.GetTodos() {
+		if item == nil {
+			continue
+		}
+		items = append(items, todo.Item{
+			Content:    item.GetContent(),
+			ActiveForm: item.GetActiveForm(),
+			Status:     item.GetStatus(),
+		})
+	}
+	a.todos.Update(items)
+}
+
 func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
@@ -331,7 +354,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	case "/memory":
 		a.renderer.PrintLine(a.memorySummary())
 	case "/tasks":
-		a.renderer.PrintLine("task list placeholder")
+		a.renderer.PrintBlock("tasks", a.todos.Lines())
 	case "/undo":
 		if entry, ok := a.undo.RevertLast(); ok {
 			a.renderer.PrintLine("reverted: " + entry.Description)

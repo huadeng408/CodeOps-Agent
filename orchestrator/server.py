@@ -11,6 +11,7 @@ from .config import load_dotenv
 from .graph.main_graph import build_graph
 from .llm.providers.openai import OpenAIClient
 from .runtime import ConversationRunner, ToolRegistry
+from .todo.manager import TodoManager
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class OrchestratorServer:
         self.graph = build_graph()
         self.llm = OpenAIClient.from_env()
         self.tools = ToolRegistry()
+        self.todos = TodoManager()
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -65,6 +67,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             graph=self.app.graph,
             llm=self.app.llm,
             tool_registry=self.app.tools,
+            todo_manager=self.app.todos,
         )
         yield from runner.run(user_text, request_iterator)
 
