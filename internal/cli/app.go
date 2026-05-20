@@ -143,10 +143,8 @@ func (a *App) Run(ctx context.Context) error {
 
 		a.metrics.BeginTurn()
 		a.session.Append(session.RoleUser, line)
-		a.metrics.RecordInput(line)
 		reply := a.handleUserInput(ctx, line)
 		a.session.Append(session.RoleAssistant, reply)
-		a.metrics.RecordOutput(reply)
 		a.metrics.EndTurn()
 		a.renderer.PrintLine(reply)
 		a.renderer.PrintLine(a.status.Format(a.metrics.Snapshot()))
@@ -304,6 +302,12 @@ func hooksCancelled(results []hooks.Result) bool {
 func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Event) {
 	_ = ctx
 	if event.SessionMeta != nil {
+		a.metrics.RecordLLMUsage(
+			event.SessionMeta.GetModel(),
+			int(event.SessionMeta.GetTokensIn()),
+			int(event.SessionMeta.GetTokensOut()),
+			event.SessionMeta.GetCost(),
+		)
 		a.session.MergeMetadata(map[string]string{
 			"last_turn":       fmt.Sprint(event.SessionMeta.GetTurn()),
 			"last_tokens_in":  fmt.Sprint(event.SessionMeta.GetTokensIn()),

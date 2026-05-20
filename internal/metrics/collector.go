@@ -23,24 +23,25 @@ type SessionMetrics struct {
 }
 
 type TurnMetrics struct {
-	StartTime  time.Time
-	TokensIn   int
-	TokensOut  int
-	ToolCalls  int
-	Duration   time.Duration
+	StartTime time.Time
+	TokensIn  int
+	TokensOut int
+	ToolCalls int
+	Duration  time.Duration
 }
 
 type Collector struct {
 	mu      sync.Mutex
 	session SessionMetrics
 	current TurnMetrics
+	models  map[string]struct{}
 }
 
 var modelPricing = map[string]Pricing{
-	"gpt-4o":             {InputPer1K: 0.0025, OutputPer1K: 0.01},
-	"gpt-4o-mini":        {InputPer1K: 0.00015, OutputPer1K: 0.0006},
-	"claude-sonnet-4-6":  {InputPer1K: 0.003, OutputPer1K: 0.015},
-	"claude-opus-4-7":    {InputPer1K: 0.015, OutputPer1K: 0.075},
+	"gpt-4o":            {InputPer1K: 0.0025, OutputPer1K: 0.01},
+	"gpt-4o-mini":       {InputPer1K: 0.00015, OutputPer1K: 0.0006},
+	"claude-sonnet-4-6": {InputPer1K: 0.003, OutputPer1K: 0.015},
+	"claude-opus-4-7":   {InputPer1K: 0.015, OutputPer1K: 0.075},
 }
 
 func NewCollector() *Collector {
@@ -48,6 +49,7 @@ func NewCollector() *Collector {
 	return &Collector{
 		session: SessionMetrics{StartTime: now},
 		current: TurnMetrics{StartTime: now},
+		models:  make(map[string]struct{}),
 	}
 }
 
@@ -69,17 +71,22 @@ func (c *Collector) EndTurn() {
 }
 
 func (c *Collector) RecordLLMCall(model string, tokensIn, tokensOut int) {
+	cost := EstimateCost(model, tokensIn, tokensOut)
+	c.RecordLLMUsage(model, tokensIn, tokensOut, cost)
+}
+
+func (c *Collector) RecordLLMUsage(model string, tokensIn, tokensOut int, cost float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	pricing := modelPricing[model]
-	cost := float64(tokensIn)/1000*pricing.InputPer1K + float64(tokensOut)/1000*pricing.OutputPer1K
 
 	c.session.TotalTokensIn += tokensIn
 	c.session.TotalTokensOut += tokensOut
 	c.session.TotalCost += cost
 	c.current.TokensIn += tokensIn
 	c.current.TokensOut += tokensOut
+	if model != "" {
+		c.models[model] = struct{}{}
+	}
 }
 
 func (c *Collector) RecordToolCall() {
@@ -120,6 +127,11 @@ func (c *Collector) Snapshot() SessionMetrics {
 	defer c.mu.Unlock()
 
 	return c.session
+}
+
+func EstimateCost(model string, tokensIn, tokensOut int) float64 {
+	pricing := modelPricing[model]
+	return float64(tokensIn)/1000*pricing.InputPer1K + float64(tokensOut)/1000*pricing.OutputPer1K
 }
 
 func (c *Collector) StatusLine() string {

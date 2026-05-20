@@ -42,6 +42,19 @@ func (s *todoEventServer) Converse(stream codeagentpb.Orchestrator_ConverseServe
 	}); err != nil {
 		return err
 	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_SessionMeta{
+			SessionMeta: &codeagentpb.SessionMeta{
+				Turn:      1,
+				TokensIn:  100,
+				TokensOut: 50,
+				Cost:      0.00075,
+				Model:     "gpt-4o",
+			},
+		},
+	}); err != nil {
+		return err
+	}
 	return stream.Send(&codeagentpb.OrchestratorMessage{
 		Payload: &codeagentpb.OrchestratorMessage_Done{
 			Done: &codeagentpb.Done{Success: true},
@@ -69,8 +82,12 @@ func TestClientReceivesTodoUpdates(t *testing.T) {
 	defer client.Close()
 
 	var updates []string
+	var meta *codeagentpb.SessionMeta
 	reply, err := client.ConverseWithEvents(context.Background(), "track tasks", func(ctx context.Context, event orchestrator.Event) {
 		_ = ctx
+		if event.SessionMeta != nil {
+			meta = event.SessionMeta
+		}
 		if event.TodoUpdate == nil {
 			return
 		}
@@ -90,5 +107,8 @@ func TestClientReceivesTodoUpdates(t *testing.T) {
 	}
 	if len(updates) != 1 || updates[0] != "Draft plan:in_progress" {
 		t.Fatalf("unexpected todo updates: %#v", updates)
+	}
+	if meta == nil || meta.GetTokensIn() != 100 || meta.GetTokensOut() != 50 || meta.GetModel() != "gpt-4o" {
+		t.Fatalf("unexpected session meta: %+v", meta)
 	}
 }
