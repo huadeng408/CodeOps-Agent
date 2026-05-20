@@ -15,13 +15,21 @@ type Context struct {
 	SessionID string
 	ToolName  string
 	Payload   map[string]any
-	Metadata   map[string]string
+	Metadata  map[string]string
 }
 
 type Result struct {
 	Values  map[string]any
 	Cancel  bool
 	Message string
+}
+
+type CommandHook struct {
+	Phase   Phase
+	Matcher string
+	Command string
+	WorkDir string
+	Timeout int
 }
 
 type Handler func(context.Context, Context) (Result, error)

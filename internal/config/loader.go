@@ -9,19 +9,19 @@ import (
 )
 
 type Config struct {
-	ProjectRoot       string          `json:"-"`
-	WorkingDir        string          `json:"-"`
-	Model             string          `json:"model"`
-	ModelFast         string          `json:"model_fast"`
-	ContextWindow     int             `json:"context_window"`
-	MaxCostPerSession float64         `json:"max_cost_per_session"`
-	OrchestratorAddr  string          `json:"orchestrator_addr"`
-	SessionDBPath     string          `json:"session_db_path"`
+	ProjectRoot       string           `json:"-"`
+	WorkingDir        string           `json:"-"`
+	Model             string           `json:"model"`
+	ModelFast         string           `json:"model_fast"`
+	ContextWindow     int              `json:"context_window"`
+	MaxCostPerSession float64          `json:"max_cost_per_session"`
+	OrchestratorAddr  string           `json:"orchestrator_addr"`
+	SessionDBPath     string           `json:"session_db_path"`
 	Permissions       PermissionConfig `json:"permissions"`
 	Hooks             []HookConfig     `json:"hooks"`
-	MCPConfig         string          `json:"mcp_config"`
-	MemoryDir         string          `json:"memory_dir"`
-	WorktreeBaseRef   string          `json:"worktree_base_ref"`
+	MCPConfig         string           `json:"mcp_config"`
+	MemoryDir         string           `json:"memory_dir"`
+	WorktreeBaseRef   string           `json:"worktree_base_ref"`
 }
 
 type PermissionConfig struct {
@@ -38,6 +38,7 @@ type HookConfig struct {
 	Type    string `json:"type"`
 	Matcher string `json:"matcher"`
 	Command string `json:"command"`
+	Timeout int    `json:"timeout"`
 }
 
 func Default(projectRoot string) Config {

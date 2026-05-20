@@ -34,24 +34,24 @@ type Options struct {
 }
 
 type App struct {
-	cfg         config.Config
-	input       *InputBuffer
-	renderer    *StreamRenderer
-	status      *StatusLine
-	metrics     *metrics.Collector
-	session     *session.Manager
-	memory      *memory.Manager
-	permissions *permission.Controller
+	cfg          config.Config
+	input        *InputBuffer
+	renderer     *StreamRenderer
+	status       *StatusLine
+	metrics      *metrics.Collector
+	session      *session.Manager
+	memory       *memory.Manager
+	permissions  *permission.Controller
 	orchestrator *orchestrator.Client
-	hooks       *hooks.Engine
-	executor    *tools.Executor
-	safety      *safety.Analyzer
-	mcp         *mcp.Manager
-	worktree    *worktree.Manager
-	undo        *undo.Manager
-	recovery    *recovery.Engine
-	skills      *skills.Manager
-	prompts     *prompts.Builder
+	hooks        *hooks.Engine
+	executor     *tools.Executor
+	safety       *safety.Analyzer
+	mcp          *mcp.Manager
+	worktree     *worktree.Manager
+	undo         *undo.Manager
+	recovery     *recovery.Engine
+	skills       *skills.Manager
+	prompts      *prompts.Builder
 	instructions []config.InstructionSource
 }
 
@@ -73,6 +73,16 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 
 	orchestratorClient, _ := orchestrator.NewClient(cfg.OrchestratorAddr)
+	hookEngine := hooks.NewEngine()
+	for _, hookConfig := range cfg.Hooks {
+		hookEngine.RegisterCommandHook(hooks.CommandHook{
+			Phase:   hooks.Phase(hookConfig.Type),
+			Matcher: hookConfig.Matcher,
+			Command: hookConfig.Command,
+			WorkDir: cfg.ProjectRoot,
+			Timeout: hookConfig.Timeout,
+		})
+	}
 
 	return &App{
 		cfg:          cfg,
@@ -84,7 +94,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		memory:       memory.NewManager(cfg.MemoryDir),
 		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
 		orchestrator: orchestratorClient,
-		hooks:        hooks.NewEngine(),
+		hooks:        hookEngine,
 		executor:     tools.NewExecutor(cfg.ProjectRoot),
 		safety:       safety.NewAnalyzer(),
 		mcp:          mcp.NewManager(),
@@ -200,11 +210,49 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		}
 	}
 
+	current := a.session.Current()
+	hookCtx := hooks.Context{
+		SessionID: current.ID,
+		ToolName:  call.Name,
+		Payload:   params,
+		Metadata: map[string]string{
+			"phase": "pre_tool",
+		},
+	}
+	preResults, err := a.hooks.Run(ctx, hooks.PhasePreTool, hookCtx)
+	if err != nil || hooksCancelled(preResults) {
+		if err == nil {
+			err = errors.New("hook blocked tool execution")
+		}
+		return orchestrator.ToolResult{
+			ToolName: call.Name,
+			Output:   hookMessages(preResults),
+			Error:    err.Error(),
+			ExitCode: 1,
+		}
+	}
+
 	result, err := a.executor.Execute(ctx, tools.ToolRequest{
 		Name:      call.Name,
 		Arguments: params,
 	})
 	a.metrics.RecordToolCall()
+	postCtx := hookCtx
+	postCtx.Metadata = map[string]string{
+		"phase":      "post_tool",
+		"exit_code":  fmt.Sprint(result.ExitCode),
+		"truncated":  fmt.Sprint(result.Truncated),
+		"tool_error": result.Error,
+	}
+	if postResults, hookErr := a.hooks.Run(ctx, hooks.PhasePostTool, postCtx); (hookErr != nil || hooksCancelled(postResults)) && result.Error == "" {
+		if hookErr != nil {
+			result.Error = hookErr.Error()
+		} else {
+			result.Error = "post hook blocked tool execution"
+		}
+		result.ExitCode = 1
+		result.Output = strings.TrimSpace(result.Output + "\n" + hookMessages(postResults))
+	}
 	if err != nil {
 		return orchestrator.ToolResult{
 			ToolName:  call.Name,
@@ -221,6 +269,25 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		ExitCode:  int32(result.ExitCode),
 		Truncated: result.Truncated,
 	}
+}
+
+func hookMessages(results []hooks.Result) string {
+	parts := make([]string, 0, len(results))
+	for _, result := range results {
+		if strings.TrimSpace(result.Message) != "" {
+			parts = append(parts, result.Message)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func hooksCancelled(results []hooks.Result) bool {
+	for _, result := range results {
+		if result.Cancel {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
