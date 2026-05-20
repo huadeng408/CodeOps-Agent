@@ -10,12 +10,15 @@ class ChatMessage:
     role: str
     content: str
     name: str | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(slots=True)
 class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    id: str = ""
+    arguments_json: str = "{}"
 
 
 @dataclass(slots=True)

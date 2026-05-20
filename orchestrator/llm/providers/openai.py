@@ -36,14 +36,7 @@ class OpenAIClient(LLMClient):
     def _chat_sync(self, request: ChatRequest) -> ChatResponse:
         payload = {
             "model": request.model or self.model,
-            "messages": [
-                {
-                    "role": message.role,
-                    "content": message.content,
-                    **({"name": message.name} if message.name else {}),
-                }
-                for message in request.messages
-            ],
+            "messages": [self._message_payload(message) for message in request.messages],
             "temperature": request.temperature,
         }
         if request.tools:
@@ -80,6 +73,18 @@ class OpenAIClient(LLMClient):
         return f"{base}/v1/chat/completions"
 
     @staticmethod
+    def _message_payload(message) -> dict[str, Any]:
+        payload = {
+            "role": message.role,
+            "content": message.content,
+        }
+        if message.name:
+            payload["name"] = message.name
+        if message.tool_call_id:
+            payload["tool_call_id"] = message.tool_call_id
+        return payload
+
+    @staticmethod
     def _parse_response(payload: dict[str, Any]) -> ChatResponse:
         choice = payload.get("choices", [{}])[0]
         message = choice.get("message", {}) or {}
@@ -94,8 +99,10 @@ class OpenAIClient(LLMClient):
                 arguments = {"raw": raw_arguments}
             tool_calls.append(
                 ToolCall(
+                    id=call.get("id", ""),
                     name=function.get("name", ""),
                     arguments=arguments,
+                    arguments_json=raw_arguments,
                 )
             )
 
