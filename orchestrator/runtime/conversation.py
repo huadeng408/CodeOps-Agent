@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from codeagent import orchestrator_pb2
+from orchestrator.context import load_git_diff_context
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient
 from orchestrator.memory.manager import Memory, MemoryManager
@@ -276,6 +277,9 @@ class ConversationRunner:
             f"- Project root: {self.project_root}",
             f"- Current request: {user_text.strip()}",
         ]
+        git_context = load_git_diff_context(self.project_root, self.working_dir)
+        if git_context:
+            lines.extend(["", git_context])
         return "\n".join(lines)
 
     def _session_meta(

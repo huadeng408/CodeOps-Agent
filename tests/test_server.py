@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent import futures
+import subprocess
 
 import grpc
 
@@ -414,6 +415,71 @@ def test_agent_md_is_included_in_system_prompt(monkeypatch, tmp_path) -> None:
             system_prompt = app.llm.requests[0].messages[0].content
             assert "Project rule: prefer concise answers." in system_prompt
             assert "Subdir rule: preserve layout." in system_prompt
+    finally:
+        server.stop(grace=0)
+
+
+def test_git_diff_context_is_included_in_system_prompt(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess_run = subprocess.run
+    subprocess_run(["git", "init"], cwd=project_root, check=True, capture_output=True)
+    subprocess_run(
+        ["git", "config", "user.email", "agent@example.test"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess_run(
+        ["git", "config", "user.name", "Agent Test"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    (project_root / "tracked.txt").write_text("before\n", encoding="utf-8")
+    subprocess_run(["git", "add", "tracked.txt"], cwd=project_root, check=True, capture_output=True)
+    subprocess_run(["git", "commit", "-m", "initial"], cwd=project_root, check=True, capture_output=True)
+    (project_root / "tracked.txt").write_text("after\n", encoding="utf-8")
+    (project_root / "new.txt").write_text("new\n", encoding="utf-8")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(
+        ServerConfig(
+            memory_dir=str(tmp_path / "memory"),
+            project_root=str(project_root),
+            working_dir=str(project_root),
+        )
+    )
+    app.llm = FakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="check diff")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="tracked.txt",
+                        )
+                    ),
+                ]
+            )
+            list(stub.Converse(messages))
+
+            system_prompt = app.llm.requests[0].messages[0].content
+            assert "Git diff context:" in system_prompt
+            assert "tracked.txt" in system_prompt
+            assert "new.txt" in system_prompt
     finally:
         server.stop(grace=0)
 
