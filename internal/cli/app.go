@@ -76,6 +76,9 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 
 	orchestratorClient, _ := orchestrator.NewClient(cfg.OrchestratorAddr)
+	mcpManager := mcp.NewManager()
+	_ = mcpManager.LoadConfigFile(resolveConfigPath(cfg.ProjectRoot, cfg.MCPConfig))
+	_ = mcpManager.StartAll(context.Background())
 	hookEngine := hooks.NewEngine()
 	for _, hookConfig := range cfg.Hooks {
 		hookEngine.RegisterCommandHook(hooks.CommandHook{
@@ -101,7 +104,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		hooks:        hookEngine,
 		executor:     tools.NewExecutor(cfg.ProjectRoot),
 		safety:       safety.NewAnalyzer(),
-		mcp:          mcp.NewManager(),
+		mcp:          mcpManager,
 		worktree:     worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
 		undo:         undo.NewManager(),
 		recovery:     recovery.NewEngine(),
@@ -160,6 +163,7 @@ func (a *App) renderBootstrap() {
 		"orchestrator: " + a.cfg.OrchestratorAddr,
 		"session db: " + a.cfg.SessionDBPath,
 		"instructions: " + fmt.Sprint(len(a.instructions)),
+		"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
 	})
 	if len(a.instructions) > 0 {
 		lines := make([]string, 0, len(a.instructions))
@@ -409,6 +413,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
+			"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
 			"planning mode: " + map[bool]string{true: "on", false: "off"}[a.planMode],
 		})
 	case "/memory":
@@ -587,4 +592,11 @@ func firstMemoryLine(content string) string {
 		}
 	}
 	return ""
+}
+
+func resolveConfigPath(projectRoot, path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(projectRoot, path)
 }
