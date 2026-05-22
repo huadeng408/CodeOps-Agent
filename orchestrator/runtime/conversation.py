@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from codeagent import orchestrator_pb2
 from orchestrator.context import BudgetStatus, TokenBudget, load_git_diff_context
 from orchestrator.graph.main_graph import MainGraph
-from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient
+from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient, ToolCall
 from orchestrator.memory.manager import Memory, MemoryManager
 from orchestrator.prompts import build_system_prompt, load_agent_instructions
+from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
 from orchestrator.security import InjectionDetector
 from orchestrator.skills.manager import SkillManager
 from orchestrator.todo.manager import Todo, TodoManager
@@ -38,6 +39,7 @@ class ConversationRunner:
     working_dir: str
     token_budget: TokenBudget | None = None
     injection_detector: InjectionDetector | None = None
+    recovery: ErrorRecoveryEngine | None = None
     max_tool_rounds: int = 6
 
     def __post_init__(self) -> None:
@@ -45,6 +47,8 @@ class ConversationRunner:
             self.token_budget = TokenBudget()
         if self.injection_detector is None:
             self.injection_detector = InjectionDetector()
+        if self.recovery is None:
+            self.recovery = ErrorRecoveryEngine()
 
     def run(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         if self.llm is None:
@@ -55,6 +59,7 @@ class ConversationRunner:
         total_tokens_in = 0
         total_tokens_out = 0
         total_cost = 0.0
+        consecutive_errors = 0
         for turn in range(1, self.max_tool_rounds + 1):
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
@@ -77,6 +82,14 @@ class ConversationRunner:
             )
             if response.text:
                 yield self._text(response.text)
+            if response.text or response.tool_calls:
+                messages.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=response.text,
+                        tool_calls=list(response.tool_calls),
+                    )
+                )
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
@@ -87,17 +100,34 @@ class ConversationRunner:
                 yield self._done(True)
                 return
 
+            if self._can_batch_tool_calls(response.tool_calls):
+                consecutive_errors, should_stop = yield from self._handle_tool_batch(
+                    response.tool_calls,
+                    request_iterator,
+                    messages,
+                    turn,
+                    total_tokens_in,
+                    total_tokens_out,
+                    total_cost,
+                    consecutive_errors,
+                )
+                if should_stop:
+                    return
+                continue
+
             for call in response.tool_calls:
+                call_id = self._tool_call_id(call)
                 if call.name == "TodoWrite":
                     try:
-                        todo_items = self._decode_todos(call.arguments_json or json.dumps(call.arguments))
+                        todo_items = self._decode_todos(self._call_arguments_json(call))
                     except ValueError as exc:
                         messages.append(
                             ChatMessage(
                                 role="tool",
                                 name=call.name,
-                                tool_call_id=call.id or call.name,
+                                tool_call_id=call_id,
                                 content=f"Invalid TodoWrite payload: {exc}",
+                                is_error=True,
                             )
                         )
                         yield self._text(f"TodoWrite rejected: {exc}")
@@ -119,7 +149,7 @@ class ConversationRunner:
                         ChatMessage(
                             role="tool",
                             name=call.name,
-                            tool_call_id=call.id or call.name,
+                            tool_call_id=call_id,
                             content=json.dumps(
                                 [
                                     {
@@ -131,21 +161,21 @@ class ConversationRunner:
                                 ],
                                 ensure_ascii=False,
                             ),
+                            is_error=False,
                         )
                     )
                     continue
                 if call.name == "PlanWrite":
                     try:
-                        plan_update = self._decode_plan_update(
-                            call.arguments_json or json.dumps(call.arguments)
-                        )
+                        plan_update = self._decode_plan_update(self._call_arguments_json(call))
                     except ValueError as exc:
                         messages.append(
                             ChatMessage(
                                 role="tool",
                                 name=call.name,
-                                tool_call_id=call.id or call.name,
+                                tool_call_id=call_id,
                                 content=f"Invalid PlanWrite payload: {exc}",
+                                is_error=True,
                             )
                         )
                         yield self._text(f"PlanWrite rejected: {exc}")
@@ -161,23 +191,23 @@ class ConversationRunner:
                         ChatMessage(
                             role="tool",
                             name=call.name,
-                            tool_call_id=call.id or call.name,
+                            tool_call_id=call_id,
                             content=json.dumps(plan_update, ensure_ascii=False),
+                            is_error=False,
                         )
                     )
                     continue
                 if call.name == "SpawnAgent":
                     try:
-                        spawn = self._decode_agent_spawn(
-                            call.arguments_json or json.dumps(call.arguments)
-                        )
+                        spawn = self._decode_agent_spawn(self._call_arguments_json(call))
                     except ValueError as exc:
                         messages.append(
                             ChatMessage(
                                 role="tool",
                                 name=call.name,
-                                tool_call_id=call.id or call.name,
+                                tool_call_id=call_id,
                                 content=f"Invalid SpawnAgent payload: {exc}",
+                                is_error=True,
                             )
                         )
                         yield self._text(f"SpawnAgent rejected: {exc}")
@@ -194,20 +224,35 @@ class ConversationRunner:
                         ChatMessage(
                             role="tool",
                             name=call.name,
-                            tool_call_id=call.id or call.name,
+                            tool_call_id=call_id,
                             content=json.dumps(spawn, ensure_ascii=False),
+                            is_error=False,
                         )
                     )
                     continue
-                request = self._tool_request(call.name, call.arguments_json or json.dumps(call.arguments))
+
+                request = self._tool_request(call, self._call_arguments_json(call))
                 yield request
-                result = self._next_tool_result(request_iterator)
-                messages.append(self._tool_result_message(call.id, call.name, result))
+                result = self._next_tool_result(request_iterator, call_id)
                 if result is None:
                     yield self._text("Tool result stream ended before a result was received.")
                     yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
                     yield self._done(False)
                     return
+                messages.append(self._tool_result_message(call_id, call.name, result))
+                if self._tool_result_failed(result):
+                    consecutive_errors += 1
+                    recovery_message = self._recovery_message(consecutive_errors, result.error or result.output)
+                    if recovery_message:
+                        messages.append(
+                            ChatMessage(
+                                role="system",
+                                content=recovery_message,
+                            )
+                        )
+                        yield self._text(recovery_message)
+                else:
+                    consecutive_errors = 0
 
         yield self._text("Tool round limit reached.")
         yield self._session_meta(self.max_tool_rounds, total_tokens_in, total_tokens_out, total_cost)
@@ -215,8 +260,14 @@ class ConversationRunner:
 
     def _fallback_conversation(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         yield self._text("Checking workspace...\n")
-        yield self._tool_request("Glob", json.dumps({"pattern": "**/*"}))
-        tool_result = self._next_tool_result(request_iterator)
+        fallback_call = ToolCall(
+            name="Glob",
+            arguments={"pattern": "**/*"},
+            id="fallback-glob",
+            arguments_json=json.dumps({"pattern": "**/*"}),
+        )
+        yield self._tool_request(fallback_call, self._call_arguments_json(fallback_call))
+        tool_result = self._next_tool_result(request_iterator, self._tool_call_id(fallback_call))
         state = self.graph.run()
         file_count = self._count_lines(tool_result.output) if tool_result else 0
         if tool_result and tool_result.error:
@@ -328,12 +379,29 @@ class ConversationRunner:
             orchestrator_pb2.ALWAYS_ASK: "ALWAYS_ASK",
         }.get(permission, "UNSPECIFIED")
 
-    def _tool_request(self, name: str, parameters_json: str) -> orchestrator_pb2.OrchestratorMessage:
+    def _tool_request(self, call: ToolCall, parameters_json: str) -> orchestrator_pb2.OrchestratorMessage:
         return orchestrator_pb2.OrchestratorMessage(
             tool_request=orchestrator_pb2.ToolRequest(
-                tool_name=name,
+                tool_name=call.name,
                 parameters_json=parameters_json,
-                required_permission=self.tool_registry.permission_for(name),
+                required_permission=self.tool_registry.permission_for(call.name),
+                tool_call_id=self._tool_call_id(call),
+            )
+        )
+
+    def _tool_request_batch(self, calls: list[ToolCall]) -> orchestrator_pb2.OrchestratorMessage:
+        return orchestrator_pb2.OrchestratorMessage(
+            tool_request_batch=orchestrator_pb2.ToolRequestBatch(
+                requests=[
+                    orchestrator_pb2.ToolRequest(
+                        tool_name=call.name,
+                        parameters_json=self._call_arguments_json(call),
+                        required_permission=self.tool_registry.permission_for(call.name),
+                        tool_call_id=self._tool_call_id(call),
+                    )
+                    for call in calls
+                ],
+                parallel=True,
             )
         )
 
@@ -350,19 +418,133 @@ class ConversationRunner:
             name=tool_name,
             tool_call_id=call_id or tool_name,
             content=content,
+            is_error=bool(result.error),
         )
+
+    @staticmethod
+    def _tool_result_failed(result) -> bool:
+        return bool(result.error) or getattr(result, "exit_code", 0) != 0
+
+    def _handle_tool_batch(
+        self,
+        calls: list[ToolCall],
+        request_iterator,
+        messages: list[ChatMessage],
+        turn: int,
+        total_tokens_in: int,
+        total_tokens_out: int,
+        total_cost: float,
+        consecutive_errors: int,
+    ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        request_ids = [self._tool_call_id(call) for call in calls]
+        yield self._tool_request_batch(calls)
+        results = self._next_tool_results(request_iterator, request_ids)
+        if results is None:
+            yield self._text("Tool result stream ended before all batch results were received.")
+            yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+            yield self._done(False)
+            return consecutive_errors, True
+
+        for call in calls:
+            call_id = self._tool_call_id(call)
+            result = results.get(call_id)
+            if result is None:
+                yield self._text(f"Batch result missing for tool call {call_id}.")
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._done(False)
+                return consecutive_errors, True
+            messages.append(self._tool_result_message(call_id, call.name, result))
+            if self._tool_result_failed(result):
+                consecutive_errors += 1
+                recovery_message = self._recovery_message(consecutive_errors, result.error or result.output)
+                if recovery_message:
+                    messages.append(
+                        ChatMessage(
+                            role="system",
+                            content=recovery_message,
+                        )
+                    )
+                    yield self._text(recovery_message)
+            else:
+                consecutive_errors = 0
+        return consecutive_errors, False
+
+    def _can_batch_tool_calls(self, calls: list[ToolCall]) -> bool:
+        if len(calls) <= 1:
+            return False
+        return all(self._is_batchable_tool_call(call) for call in calls)
+
+    def _is_batchable_tool_call(self, call: ToolCall) -> bool:
+        if call.name in {"TodoWrite", "PlanWrite", "SpawnAgent"}:
+            return False
+        return self.tool_registry.permission_for(call.name) == orchestrator_pb2.AUTO_ALLOW
+
+    @staticmethod
+    def _tool_call_id(call: ToolCall) -> str:
+        call_id = str(getattr(call, "id", "") or "").strip()
+        if call_id:
+            return call_id
+        return f"{call.name}-{id(call)}"
+
+    @staticmethod
+    def _call_arguments_json(call: ToolCall) -> str:
+        return call.arguments_json or json.dumps(call.arguments, ensure_ascii=False)
+
+    def _recovery_message(self, error_count: int, last_error: str) -> str:
+        if self.recovery is None:
+            return ""
+        strategy = self.recovery.choose(error_count, last_error)
+        if strategy == RecoveryStrategy.RETRY_SAME:
+            return (
+                "Recovery: tool failed once. Retry only if the next attempt changes the "
+                "inputs or gathers more context first."
+            )
+        if strategy == RecoveryStrategy.SWITCH_MODEL:
+            return (
+                "Recovery: repeated tool failures. Switch strategy now: re-check assumptions, "
+                "use a different tool or smaller edit, and avoid repeating the same failed call."
+            )
+        if strategy == RecoveryStrategy.ASK_USER:
+            return (
+                "Recovery: permission-related failure. Ask the user for approval or a safer "
+                "alternative before continuing."
+            )
+        return ""
 
     def _wrap_untrusted_tool_output(self, content: str) -> str:
         if self.injection_detector is None:
             return content
         return self.injection_detector.wrap_tool_output(content)
 
+    def _next_tool_result(self, request_iterator, expected_id: str):
+        results = self._next_tool_results(request_iterator, [expected_id])
+        if results is None:
+            return None
+        return results.get(expected_id)
+
     @staticmethod
-    def _next_tool_result(request_iterator):
+    def _next_tool_results(request_iterator, expected_ids: list[str]):
+        expected_ids = [tool_call_id for tool_call_id in expected_ids if tool_call_id]
+        if not expected_ids:
+            return None
+        results: dict[str, object] = {}
+        fallback_index = 0
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "tool_result":
-                return message.tool_result
+                tool_result = message.tool_result
+                if tool_result is None:
+                    continue
+                tool_call_id = str(getattr(tool_result, "tool_call_id", "") or "").strip()
+                if not tool_call_id:
+                    if fallback_index < len(expected_ids):
+                        tool_call_id = expected_ids[fallback_index]
+                        fallback_index += 1
+                if not tool_call_id:
+                    continue
+                results[tool_call_id] = tool_result
+                if all(expected_id in results for expected_id in expected_ids):
+                    return results
         return None
 
     @staticmethod

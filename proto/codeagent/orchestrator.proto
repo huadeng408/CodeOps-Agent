@@ -34,6 +34,7 @@ message OrchestratorMessage {
     AgentSpawn agent_spawn = 5;
     SessionMeta session_meta = 6;
     Done done = 7;
+    ToolRequestBatch tool_request_batch = 8;
   }
 }
 
@@ -47,6 +48,7 @@ message ToolResult {
   string error = 3;
   int32 exit_code = 4;
   bool truncated = 5;
+  string tool_call_id = 6;
 }
 
 message PermissionDecision {
@@ -68,6 +70,7 @@ message ToolRequest {
   string tool_name = 1;
   string parameters_json = 2;
   PermissionLevel required_permission = 3;
+  string tool_call_id = 4;
 }
 
 message PlanUpdate {

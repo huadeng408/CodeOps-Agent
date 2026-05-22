@@ -2,6 +2,7 @@ package codeagent_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -24,6 +25,20 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
+	writeAgain, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Write",
+		Arguments: map[string]any{
+			"path":    "notes/demo.txt",
+			"content": "hello updated",
+		},
+	})
+	if err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+	if len(writeAgain.Changes) != 1 || writeAgain.Changes[0].Before != "hello skeleton" || writeAgain.Changes[0].After != "hello updated" {
+		t.Fatalf("unexpected write changes: %#v", writeAgain.Changes)
+	}
+
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{
 		Name: "Read",
 		Arguments: map[string]any{
@@ -33,7 +48,7 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
-	if !strings.Contains(result.Output, "hello skeleton") {
+	if !strings.Contains(result.Output, "hello updated") {
 		t.Fatalf("unexpected read output: %q", result.Output)
 	}
 
@@ -48,6 +63,35 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 	}
 	if !strings.Contains(glob.Output, filepath.ToSlash("notes/demo.txt")) {
 		t.Fatalf("glob output missing file: %q", glob.Output)
+	}
+}
+
+func TestExecutorEditReturnsUndoChange(t *testing.T) {
+	root := t.TempDir()
+	executor := tools.NewExecutor(root)
+	if _, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Write",
+		Arguments: map[string]any{
+			"path":    "notes/demo.txt",
+			"content": "alpha beta",
+		},
+	}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Edit",
+		Arguments: map[string]any{
+			"path": "notes/demo.txt",
+			"old":  "beta",
+			"new":  "gamma",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit failed: %v", err)
+	}
+	if len(result.Changes) != 1 || result.Changes[0].Before != "alpha beta" || result.Changes[0].After != "alpha gamma" {
+		t.Fatalf("unexpected edit changes: %#v", result.Changes)
 	}
 }
 
@@ -86,6 +130,54 @@ func TestExecutorBashBlocksDangerousCommand(t *testing.T) {
 		t.Fatal("expected dangerous command to be blocked")
 	}
 	if !strings.Contains(result.Error, "blocked command") {
+		t.Fatalf("unexpected error: %q", result.Error)
+	}
+}
+
+func TestExecutorBashPersistsWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	if result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Bash",
+		Arguments: map[string]any{"command": "cd nested"},
+	}); err != nil {
+		t.Fatalf("cd failed: %v output=%q", err, result.Output)
+	}
+	if got := executor.WorkingDir(); got != filepath.Join(root, "nested") {
+		t.Fatalf("unexpected working dir: %s", got)
+	}
+
+	command := "pwd"
+	if runtime.GOOS == "windows" {
+		command = "(Get-Location).Path"
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Bash",
+		Arguments: map[string]any{"command": command},
+	})
+	if err != nil {
+		t.Fatalf("pwd failed: %v output=%q", err, result.Output)
+	}
+	if !strings.Contains(filepath.Clean(result.Output), filepath.Join(root, "nested")) {
+		t.Fatalf("bash did not use persisted working dir: %q", result.Output)
+	}
+}
+
+func TestExecutorBashRejectsWorkingDirectoryEscape(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Bash",
+		Arguments: map[string]any{"command": "cd .."},
+	})
+	if err == nil {
+		t.Fatal("expected cd outside workspace to fail")
+	}
+	if !strings.Contains(result.Error, "path escapes workspace") {
 		t.Fatalf("unexpected error: %q", result.Error)
 	}
 }

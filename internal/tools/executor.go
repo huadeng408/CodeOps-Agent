@@ -5,31 +5,50 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"code-agent/internal/mcp"
 )
 
 type ToolRequest struct {
 	Name      string         `json:"name"`
-	Arguments  map[string]any `json:"arguments,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
 type ToolResult struct {
-	Name      string `json:"name"`
-	Output    string `json:"output,omitempty"`
-	Error     string `json:"error,omitempty"`
-	ExitCode  int    `json:"exit_code"`
-	Truncated bool   `json:"truncated"`
+	Name      string   `json:"name"`
+	Output    string   `json:"output,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	ExitCode  int      `json:"exit_code"`
+	Truncated bool     `json:"truncated"`
+	Changes   []Change `json:"changes,omitempty"`
+}
+
+type Change struct {
+	Path   string `json:"path"`
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
 }
 
 type Executor struct {
 	Root           string
 	MaxOutputBytes int
+	mu             sync.Mutex
+	workingDir     string
+	mcp            *mcp.Manager
 }
 
 func NewExecutor(root string) *Executor {
 	return &Executor{
 		Root:           root,
-		MaxOutputBytes:  50_000,
+		MaxOutputBytes: 50_000,
 	}
+}
+
+func (e *Executor) SetMCPManager(manager *mcp.Manager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mcp = manager
 }
 
 func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, error) {
@@ -41,7 +60,7 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 	case "Write":
 		return executeWrite(ctx, e.Root, req.Arguments)
 	case "Bash":
-		return executeBash(ctx, e.Root, req.Arguments)
+		return e.executeBash(ctx, req.Arguments)
 	case "Glob":
 		return executeGlob(ctx, e.Root, req.Arguments)
 	case "Grep":
@@ -51,8 +70,90 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 	case "WebFetch":
 		return executeWebFetch(ctx, e.Root, req.Arguments)
 	default:
+		if result, ok, err := e.executeMCPTool(ctx, req); ok {
+			return result, err
+		}
 		return ToolResult{Name: req.Name, Error: "unknown tool"}, fmt.Errorf("unknown tool %q", req.Name)
 	}
+}
+
+func (e *Executor) executeMCPTool(ctx context.Context, req ToolRequest) (ToolResult, bool, error) {
+	e.mu.Lock()
+	manager := e.mcp
+	e.mu.Unlock()
+	if manager == nil {
+		return ToolResult{}, false, nil
+	}
+	if _, ok := manager.ResolveTool(req.Name); !ok {
+		return ToolResult{}, false, nil
+	}
+	result, err := manager.CallTool(ctx, req.Name, req.Arguments)
+	output := mcpToolOutput(result)
+	if err != nil {
+		return ToolResult{Name: req.Name, Output: output, Error: err.Error(), ExitCode: 1}, true, err
+	}
+	exitCode := 0
+	errorText := ""
+	if result.IsError {
+		exitCode = 1
+		errorText = output
+	}
+	return ToolResult{Name: req.Name, Output: output, Error: errorText, ExitCode: exitCode}, true, nil
+}
+
+func mcpToolOutput(result mcp.ToolCallResult) string {
+	parts := make([]string, 0, len(result.Content))
+	for _, item := range result.Content {
+		if strings.TrimSpace(item.Text) != "" {
+			parts = append(parts, item.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (e *Executor) WorkingDir() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.workingDir == "" {
+		abs, err := workspacePath(e.Root, "")
+		if err != nil {
+			return e.Root
+		}
+		return abs
+	}
+	return e.workingDir
+}
+
+func (e *Executor) SetWorkingDir(path string) error {
+	abs, err := workspacePath(e.Root, path)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.workingDir = abs
+	return nil
+}
+
+func (e *Executor) SetWorkingDirFrom(base, target string) error {
+	if target == "" {
+		target = base
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	return e.SetWorkingDir(target)
+}
+
+func (e *Executor) currentWorkingDir() (string, error) {
+	e.mu.Lock()
+	current := e.workingDir
+	e.mu.Unlock()
+	if current == "" {
+		return workspacePath(e.Root, "")
+	}
+	return workspacePath(e.Root, current)
 }
 
 func stringArg(args map[string]any, keys ...string) (string, bool) {

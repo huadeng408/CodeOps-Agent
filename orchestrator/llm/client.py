@@ -11,6 +11,8 @@ class ChatMessage:
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    is_error: bool = False
 
 
 @dataclass(slots=True)

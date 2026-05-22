@@ -189,6 +189,32 @@ class BudgetToolFakeLLM:
         )
 
 
+class FailingToolFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) <= 2:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id=f"fail-{len(self.requests)}",
+                        name="Read",
+                        arguments={"path": "missing.txt"},
+                        arguments_json='{"path":"missing.txt"}',
+                    )
+                ],
+                usage=Usage(input_tokens=10, output_tokens=5),
+            )
+        return ChatResponse(
+            text="changed strategy",
+            usage=Usage(input_tokens=10, output_tokens=5),
+        )
+
+
 def test_health_and_converse(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
@@ -259,8 +285,11 @@ def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
             assert responses[0].tool_request.parameters_json == '{"pattern":"**/*.py"}'
             assert responses[1].text.text == "found python files"
             assert responses[-1].done.success
-            assert app.llm.requests[1].messages[-1].role == "tool"
-            assert app.llm.requests[1].messages[-1].content == "orchestrator/server.py"
+            history = app.llm.requests[1].messages
+            assistant_messages = [message for message in history if message.role == "assistant"]
+            tool_messages = [message for message in history if message.role == "tool"]
+            assert assistant_messages[0].tool_calls[0].name == "Glob"
+            assert tool_messages[0].content == "orchestrator/server.py"
     finally:
         server.stop(grace=0)
 
@@ -294,7 +323,7 @@ def test_tool_output_prompt_injection_is_wrapped(monkeypatch, tmp_path) -> None:
             )
             list(stub.Converse(messages))
 
-            tool_message = app.llm.requests[1].messages[-1]
+            tool_message = next(message for message in app.llm.requests[1].messages if message.role == "tool")
             assert tool_message.role == "tool"
             assert "[Security warning]" in tool_message.content
             assert "[Untrusted tool output]" in tool_message.content
@@ -637,5 +666,53 @@ def test_token_budget_stops_before_tool_execution(monkeypatch, tmp_path) -> None
             assert responses[-1].done.success is False
             assert all(not response.HasField("tool_request") for response in responses)
             assert app.token_budget.used_tokens == 12
+    finally:
+        server.stop(grace=0)
+
+
+def test_repeated_tool_failures_emit_recovery_guidance(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = FailingToolFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="read missing file")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Read",
+                            error="file not found",
+                            exit_code=1,
+                        )
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Read",
+                            error="file not found",
+                            exit_code=1,
+                        )
+                    ),
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            text = "\n".join(response.text.text for response in responses if response.HasField("text"))
+            assert "tool failed once" in text
+            assert "repeated tool failures" in text
+            assert responses[-1].done.success
+            assert any(
+                message.role == "system" and "Switch strategy now" in message.content
+                for message in app.llm.requests[-1].messages
+            )
     finally:
         server.stop(grace=0)

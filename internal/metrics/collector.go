@@ -53,6 +53,18 @@ func NewCollector() *Collector {
 	}
 }
 
+func (c *Collector) Hydrate(snapshot SessionMetrics) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if snapshot.StartTime.IsZero() {
+		snapshot.StartTime = time.Now()
+	}
+	c.session = snapshot
+	c.current = TurnMetrics{StartTime: time.Now()}
+	c.models = make(map[string]struct{})
+}
+
 func (c *Collector) BeginTurn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

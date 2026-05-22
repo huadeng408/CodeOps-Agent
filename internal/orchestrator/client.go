@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	codeagentpb "code-agent/gen/codeagentpb"
@@ -15,17 +16,19 @@ import (
 )
 
 type ToolCall struct {
+	ID                 string
 	Name               string
 	ParametersJSON     string
 	RequiredPermission codeagentpb.PermissionLevel
 }
 
 type ToolResult struct {
-	ToolName  string
-	Output    string
-	Error     string
-	ExitCode  int32
-	Truncated bool
+	ToolCallID string
+	ToolName   string
+	Output     string
+	Error      string
+	ExitCode   int32
+	Truncated  bool
 }
 
 type ToolHandler func(context.Context, ToolCall) ToolResult
@@ -147,34 +150,25 @@ func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHand
 			if eventHandler != nil {
 				eventHandler(ctx, Event{AgentSpawn: payload.AgentSpawn})
 			}
+		case *codeagentpb.OrchestratorMessage_ToolRequestBatch:
+			if payload.ToolRequestBatch == nil {
+				continue
+			}
+			if err := c.handleToolRequestBatch(ctx, stream, handler, payload.ToolRequestBatch); err != nil {
+				return "", err
+			}
 		case *codeagentpb.OrchestratorMessage_ToolRequest:
 			if payload.ToolRequest == nil {
 				continue
 			}
-			result := ToolResult{
-				ToolName: payload.ToolRequest.ToolName,
-				Error:    "no tool handler configured",
-				ExitCode: 1,
-			}
-			if handler != nil {
-				result = handler(ctx, ToolCall{
-					Name:               payload.ToolRequest.ToolName,
-					ParametersJSON:     payload.ToolRequest.ParametersJson,
-					RequiredPermission: payload.ToolRequest.RequiredPermission,
-				})
-			}
-			if err := stream.Send(&codeagentpb.HarnessMessage{
-				Payload: &codeagentpb.HarnessMessage_ToolResult{
-					ToolResult: &codeagentpb.ToolResult{
-						ToolName:  result.ToolName,
-						Output:    result.Output,
-						Error:     result.Error,
-						ExitCode:  result.ExitCode,
-						Truncated: result.Truncated,
-					},
-				},
-			}); err != nil {
-				return "", fmt.Errorf("send tool result: %w", err)
+			result := invokeToolHandler(ctx, handler, ToolCall{
+				ID:                 payload.ToolRequest.ToolCallId,
+				Name:               payload.ToolRequest.ToolName,
+				ParametersJSON:     payload.ToolRequest.ParametersJson,
+				RequiredPermission: payload.ToolRequest.RequiredPermission,
+			})
+			if err := sendToolResult(stream, result); err != nil {
+				return "", err
 			}
 		case *codeagentpb.OrchestratorMessage_Done:
 			if payload.Done != nil && payload.Done.Message != "" {
@@ -185,4 +179,85 @@ func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHand
 	}
 
 	return strings.TrimSpace(strings.Join(parts, "")), nil
+}
+
+func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.Orchestrator_ConverseClient, handler ToolHandler, batch *codeagentpb.ToolRequestBatch) error {
+	requests := batch.GetRequests()
+	if len(requests) == 0 {
+		return nil
+	}
+
+	results := make([]ToolResult, len(requests))
+	if batch.GetParallel() && len(requests) > 1 {
+		var wg sync.WaitGroup
+		for i, req := range requests {
+			wg.Add(1)
+			go func(idx int, request *codeagentpb.ToolRequest) {
+				defer wg.Done()
+				results[idx] = invokeToolHandler(ctx, handler, ToolCall{
+					ID:                 request.GetToolCallId(),
+					Name:               request.GetToolName(),
+					ParametersJSON:     request.GetParametersJson(),
+					RequiredPermission: request.GetRequiredPermission(),
+				})
+			}(i, req)
+		}
+		wg.Wait()
+	} else {
+		for i, req := range requests {
+			results[i] = invokeToolHandler(ctx, handler, ToolCall{
+				ID:                 req.GetToolCallId(),
+				Name:               req.GetToolName(),
+				ParametersJSON:     req.GetParametersJson(),
+				RequiredPermission: req.GetRequiredPermission(),
+			})
+		}
+	}
+
+	for _, result := range results {
+		if err := sendToolResult(stream, result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func invokeToolHandler(ctx context.Context, handler ToolHandler, call ToolCall) ToolResult {
+	result := ToolResult{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Error:      "no tool handler configured",
+		ExitCode:   1,
+	}
+	if handler != nil {
+		result = handler(ctx, call)
+	}
+	if strings.TrimSpace(result.ToolName) == "" {
+		result.ToolName = call.Name
+	}
+	if strings.TrimSpace(result.ToolCallID) == "" {
+		result.ToolCallID = call.ID
+	}
+	return result
+}
+
+func sendToolResult(stream codeagentpb.Orchestrator_ConverseClient, result ToolResult) error {
+	if result.ToolName == "" {
+		return fmt.Errorf("send tool result: missing tool name")
+	}
+	if err := stream.Send(&codeagentpb.HarnessMessage{
+		Payload: &codeagentpb.HarnessMessage_ToolResult{
+			ToolResult: &codeagentpb.ToolResult{
+				ToolName:   result.ToolName,
+				Output:     result.Output,
+				Error:      result.Error,
+				ExitCode:   result.ExitCode,
+				Truncated:  result.Truncated,
+				ToolCallId: result.ToolCallID,
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("send tool result: %w", err)
+	}
+	return nil
 }

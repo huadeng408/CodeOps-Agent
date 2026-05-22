@@ -3,6 +3,7 @@ package codeagent_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"code-agent/internal/session"
@@ -32,9 +33,47 @@ func TestSQLiteStorePersistsSessions(t *testing.T) {
 
 	store := session.NewSQLiteStore(path)
 	manager := session.NewManager(store)
-	created := manager.NewSession(t.TempDir())
+	workspace := t.TempDir()
+	nested := filepath.Join(workspace, "nested")
+	created := manager.NewSession(workspace)
+	manager.SetWorkingDir(nested)
+	manager.SetMode("plan")
 	manager.Append(session.RoleUser, "persist me")
 	manager.Append(session.RoleAssistant, "persisted")
+	manager.AddLLMUsage(100, 50, 0.00075)
+	manager.AppendToolResult(session.ToolResultRecord{
+		Name:          "Write",
+		Output:        "written",
+		ModifiedFiles: []string{"notes/demo.txt", "notes/demo.txt", "internal/app.go"},
+	})
+	manager.SetTodos([]session.TodoItem{
+		{Content: "Draft plan", ActiveForm: "drafting plan", Status: "in_progress"},
+		{Content: "Run tests", ActiveForm: "running tests", Status: "pending"},
+	})
+	manager.SetPlan(session.PlanState{
+		Steps:        []string{"Inspect repository", "Implement persistence", "Run tests"},
+		CurrentIndex: 1,
+		Mode:         "plan",
+	})
+	manager.AppendAgentSpawn(session.AgentSpawnRecord{
+		Kind:        "general",
+		Task:        "inspect repository",
+		ContextJSON: `{"scope":"repo"}`,
+		Parallel:    true,
+	})
+	manager.SetUndo([]session.UndoEntry{{
+		ID:          "undo-1",
+		Description: "Write",
+		Changes: []session.UndoChange{{
+			Path:   "notes/demo.txt",
+			Before: "before",
+			After:  "after",
+		}},
+	}})
+	manager.SetApprovedTools([]string{"Write", "Write", "Git"})
+	manager.SetWorktrees([]session.WorktreeState{
+		{Name: "agent-a", Path: filepath.Join(workspace, ".worktrees", "agent-a"), BaseRef: "main", Active: true},
+	})
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
@@ -49,11 +88,50 @@ func TestSQLiteStorePersistsSessions(t *testing.T) {
 	if loaded.ID != created.ID {
 		t.Fatalf("loaded wrong session id: %s", loaded.ID)
 	}
-	if len(loaded.Messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(loaded.Messages))
+	if loaded.Mode != "plan" {
+		t.Fatalf("unexpected mode: %q", loaded.Mode)
+	}
+	if loaded.WorkingDir != nested {
+		t.Fatalf("unexpected working dir: %q", loaded.WorkingDir)
+	}
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(loaded.Messages))
 	}
 	if loaded.Messages[0].Content != "persist me" {
 		t.Fatalf("unexpected first message: %+v", loaded.Messages[0])
+	}
+	if loaded.Messages[2].Role != session.RoleTool || loaded.Messages[2].Content == "" {
+		t.Fatalf("expected persisted tool message, got %+v", loaded.Messages[2])
+	}
+	if loaded.Metrics.TotalTokensIn != 100 || loaded.Metrics.TotalTokensOut != 50 {
+		t.Fatalf("unexpected token metrics: %+v", loaded.Metrics)
+	}
+	if loaded.Metrics.TotalCost != 0.00075 {
+		t.Fatalf("unexpected cost metric: %+v", loaded.Metrics)
+	}
+	if loaded.Metrics.ToolCalls != 1 {
+		t.Fatalf("unexpected tool call count: %+v", loaded.Metrics)
+	}
+	if got := loaded.Metrics.FilesModified; len(got) != 2 || got[0] != "notes/demo.txt" || got[1] != "internal/app.go" {
+		t.Fatalf("unexpected modified files: %#v", got)
+	}
+	if got := loaded.Todos; len(got) != 2 || got[0].Content != "Draft plan" || got[0].Status != "in_progress" {
+		t.Fatalf("unexpected persisted todos: %#v", got)
+	}
+	if got := loaded.Plan; len(got.Steps) != 3 || got.Steps[1] != "Implement persistence" || got.CurrentIndex != 1 || got.Mode != "plan" {
+		t.Fatalf("unexpected persisted plan: %#v", got)
+	}
+	if got := loaded.Agents; len(got) != 1 || got[0].Kind != "general" || got[0].Task != "inspect repository" || !got[0].Parallel {
+		t.Fatalf("unexpected persisted agents: %#v", got)
+	}
+	if got := loaded.Undo; len(got) != 1 || got[0].Description != "Write" || got[0].Changes[0].Before != "before" {
+		t.Fatalf("unexpected persisted undo stack: %#v", got)
+	}
+	if got := loaded.ApprovedTools; len(got) != 2 || got[0] != "Write" || got[1] != "Git" {
+		t.Fatalf("unexpected persisted approved tools: %#v", got)
+	}
+	if got := loaded.Worktrees; len(got) != 1 || got[0].Name != "agent-a" || !got[0].Active {
+		t.Fatalf("unexpected persisted worktrees: %#v", got)
 	}
 }
 
@@ -63,6 +141,8 @@ func TestManagerResumeLatest(t *testing.T) {
 	manager := session.NewManager(store)
 
 	first := manager.NewSession("first")
+	manager.SetMode("plan")
+	manager.AppendAgentSpawn(session.AgentSpawnRecord{Kind: "general", Task: "first agent"})
 	manager.Append(session.RoleUser, "first message")
 	second := manager.NewSession("second")
 	manager.Append(session.RoleUser, "second message")
@@ -80,6 +160,202 @@ func TestManagerResumeLatest(t *testing.T) {
 	}
 	if resumed.ID != first.ID {
 		t.Fatalf("expected to resume first session, got %s", resumed.ID)
+	}
+}
+
+func TestManagerResumeByIDAndListRecent(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store)
+
+	first := manager.NewSession("first")
+	manager.SetMode("plan")
+	manager.AppendAgentSpawn(session.AgentSpawnRecord{Kind: "general", Task: "first agent"})
+	manager.Append(session.RoleUser, "first message")
+	second := manager.NewSession("second")
+	manager.Append(session.RoleUser, "second message")
+
+	resumed, err := manager.Resume(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("resume by id: %v", err)
+	}
+	if resumed.ID != first.ID || resumed.WorkingDir != "first" {
+		t.Fatalf("unexpected resumed session: %+v", resumed)
+	}
+
+	recent, err := manager.ListRecent(ctx, 2)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 recent sessions, got %d", len(recent))
+	}
+	if recent[0].ID != first.ID {
+		t.Fatalf("expected resumed session to be most recent, got %+v", recent)
+	}
+	if recent[1].ID != second.ID {
+		t.Fatalf("expected second session in recent list, got %+v", recent)
+	}
+	if recent[0].MessageCount != 2 || recent[0].LastMessage != "user: first message" {
+		t.Fatalf("unexpected summary: %+v", recent[0])
+	}
+	if recent[0].Mode != "plan" || recent[0].AgentCount != 1 {
+		t.Fatalf("unexpected session summary state: %+v", recent[0])
+	}
+}
+
+func TestSessionModeNormalizesAndPersistsInMetadata(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	current := manager.NewSession("workspace")
+	if current.Mode != "" {
+		t.Fatalf("new session should not force mode before explicit set: %q", current.Mode)
+	}
+
+	current = manager.SetMode("plan")
+	if current.Mode != "plan" || current.Metadata["mode"] != "plan" {
+		t.Fatalf("unexpected plan mode state: %+v", current)
+	}
+	current = manager.SetMode("invalid")
+	if current.Mode != "chat" || current.Metadata["mode"] != "chat" {
+		t.Fatalf("unexpected chat mode state: %+v", current)
+	}
+}
+
+func TestSessionMetricsAreCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.RecordToolCall("a.txt")
+	current.Metrics.FilesModified[0] = "mutated.txt"
+
+	again := manager.Current()
+	if got := again.Metrics.FilesModified[0]; got != "a.txt" {
+		t.Fatalf("session metrics leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionTodosAreCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.SetTodos([]session.TodoItem{
+		{Content: "first", ActiveForm: "doing first", Status: "in_progress"},
+	})
+	current.Todos[0].Content = "mutated"
+
+	again := manager.Current()
+	if got := again.Todos[0].Content; got != "first" {
+		t.Fatalf("session todos leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionPlanIsCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.SetPlan(session.PlanState{
+		Steps:        []string{"first"},
+		CurrentIndex: 0,
+		Mode:         "plan",
+	})
+	current.Plan.Steps[0] = "mutated"
+
+	again := manager.Current()
+	if got := again.Plan.Steps[0]; got != "first" {
+		t.Fatalf("session plan leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionAgentsAreCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.AppendAgentSpawn(session.AgentSpawnRecord{
+		Kind: "general",
+		Task: "inspect",
+	})
+	current.Agents[0].Task = "mutated"
+
+	again := manager.Current()
+	if got := again.Agents[0].Task; got != "inspect" {
+		t.Fatalf("session agents leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionUndoIsCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.SetUndo([]session.UndoEntry{{
+		ID:          "undo-1",
+		Description: "Write",
+		Changes: []session.UndoChange{{
+			Path:   "a.txt",
+			Before: "before",
+			After:  "after",
+		}},
+	}})
+	current.Undo[0].Changes[0].Before = "mutated"
+
+	again := manager.Current()
+	if got := again.Undo[0].Changes[0].Before; got != "before" {
+		t.Fatalf("session undo leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionApprovedToolsAreClonedAndDeduped(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.SetApprovedTools([]string{"Write", "Write", "", "Git"})
+	current.ApprovedTools[0] = "mutated"
+
+	again := manager.Current()
+	if got := again.ApprovedTools; len(got) != 2 || got[0] != "Write" || got[1] != "Git" {
+		t.Fatalf("unexpected approved tools: %#v", got)
+	}
+}
+
+func TestSessionWorktreesAreCloned(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	current := manager.SetWorktrees([]session.WorktreeState{{Name: "agent-a", Path: "path-a", Active: true}})
+	current.Worktrees[0].Name = "mutated"
+
+	again := manager.Current()
+	if got := again.Worktrees[0].Name; got != "agent-a" {
+		t.Fatalf("session worktrees leaked mutable slice, got %q", got)
+	}
+}
+
+func TestAppendToolResultStoresBoundedToolHistory(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	longOutput := strings.Repeat("x", 2500)
+
+	current := manager.AppendToolResult(session.ToolResultRecord{
+		Name:          "Edit",
+		ExitCode:      0,
+		Output:        longOutput,
+		ModifiedFiles: []string{"a.txt", "a.txt", "b.txt"},
+	})
+
+	if current.Metrics.ToolCalls != 1 {
+		t.Fatalf("expected 1 tool call, got %d", current.Metrics.ToolCalls)
+	}
+	if got := current.Metrics.FilesModified; len(got) != 2 || got[0] != "a.txt" || got[1] != "b.txt" {
+		t.Fatalf("unexpected modified files: %#v", got)
+	}
+	if len(current.Messages) != 1 || current.Messages[0].Role != session.RoleTool {
+		t.Fatalf("expected one tool message, got %#v", current.Messages)
+	}
+	if !strings.Contains(current.Messages[0].Content, "tool: Edit") {
+		t.Fatalf("tool message missing name: %q", current.Messages[0].Content)
+	}
+	if !strings.Contains(current.Messages[0].Content, "[stored tool output truncated]") {
+		t.Fatalf("tool message was not truncated: %q", current.Messages[0].Content)
+	}
+}
+
+func TestManagerAutoSaveRequiresCurrentSession(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+
+	if err := manager.AutoSave(context.Background()); err != session.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"code-agent/internal/config"
@@ -79,6 +80,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	mcpManager := mcp.NewManager()
 	_ = mcpManager.LoadConfigFile(resolveConfigPath(cfg.ProjectRoot, cfg.MCPConfig))
 	_ = mcpManager.StartAll(context.Background())
+	_ = mcpManager.WriteToolsManifest(filepath.Join(cfg.ProjectRoot, ".agent", "mcp-tools.json"))
 	hookEngine := hooks.NewEngine()
 	for _, hookConfig := range cfg.Hooks {
 		hookEngine.RegisterCommandHook(hooks.CommandHook{
@@ -89,6 +91,10 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			Timeout: hookConfig.Timeout,
 		})
 	}
+
+	executor := tools.NewExecutor(cfg.ProjectRoot)
+	_ = executor.SetWorkingDir(cfg.WorkingDir)
+	executor.SetMCPManager(mcpManager)
 
 	return &App{
 		cfg:          cfg,
@@ -102,7 +108,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
 		orchestrator: orchestratorClient,
 		hooks:        hookEngine,
-		executor:     tools.NewExecutor(cfg.ProjectRoot),
+		executor:     executor,
 		safety:       safety.NewAnalyzer(),
 		mcp:          mcpManager,
 		worktree:     worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
@@ -116,6 +122,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 func (a *App) Run(ctx context.Context) error {
 	a.session.NewSession(a.cfg.WorkingDir)
+	a.session.SetMode("chat")
 	a.renderBootstrap()
 
 	for {
@@ -171,7 +178,7 @@ func (a *App) renderBootstrap() {
 		a.renderer.PrintBlock("loaded AGENT.md", lines)
 	}
 	a.renderer.PrintBlock("available commands", []string{
-		"/help", "/plan", "/compact", "/clear", "/config", "/memory", "/tasks", "/undo", "/diff", "/resume",
+		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume",
 	})
 	a.renderer.Separator()
 }
@@ -200,22 +207,43 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	if strings.TrimSpace(call.ParametersJSON) != "" {
 		if err := json.Unmarshal([]byte(call.ParametersJSON), &params); err != nil {
 			return orchestrator.ToolResult{
-				ToolName: call.Name,
-				Error:    "invalid tool parameters: " + err.Error(),
-				ExitCode: 1,
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Error:      "invalid tool parameters: " + err.Error(),
+				ExitCode:   1,
 			}
 		}
 	}
 
 	if decision := a.permissions.Check(call.Name, params); decision != permission.Approve {
-		reason := "permission required"
 		if decision == permission.Deny {
-			reason = "permission denied by policy"
+			return orchestrator.ToolResult{
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Error:      "permission denied by policy",
+				ExitCode:   1,
+			}
 		}
-		return orchestrator.ToolResult{
-			ToolName: call.Name,
-			Error:    reason,
-			ExitCode: 1,
+		approved, err := a.confirmToolApproval(ctx, call, params)
+		if err != nil {
+			return orchestrator.ToolResult{
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Error:      "permission prompt failed: " + err.Error(),
+				ExitCode:   1,
+			}
+		}
+		if !approved {
+			return orchestrator.ToolResult{
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Error:      "permission denied by user",
+				ExitCode:   1,
+			}
+		}
+		if a.permissions.Level(call.Name) == permission.AskSession {
+			a.permissions.ApproveSession(call.Name)
+			a.session.SetApprovedTools(a.permissions.ApprovedTools())
 		}
 	}
 
@@ -234,10 +262,11 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 			err = errors.New("hook blocked tool execution")
 		}
 		return orchestrator.ToolResult{
-			ToolName: call.Name,
-			Output:   hookMessages(preResults),
-			Error:    err.Error(),
-			ExitCode: 1,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Output:     hookMessages(preResults),
+			Error:      err.Error(),
+			ExitCode:   1,
 		}
 	}
 
@@ -262,21 +291,65 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		result.ExitCode = 1
 		result.Output = strings.TrimSpace(result.Output + "\n" + hookMessages(postResults))
 	}
+	a.recordUndo(call, result)
+	a.recordToolResult(ctx, call, result)
+	a.recordToolWorkingDir(call, result)
 	if err != nil {
 		return orchestrator.ToolResult{
-			ToolName:  call.Name,
-			Output:    result.Output,
-			Error:     result.Error,
-			ExitCode:  int32(result.ExitCode),
-			Truncated: result.Truncated,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Output:     result.Output,
+			Error:      result.Error,
+			ExitCode:   int32(result.ExitCode),
+			Truncated:  result.Truncated,
 		}
 	}
 	return orchestrator.ToolResult{
-		ToolName:  call.Name,
-		Output:    result.Output,
-		Error:     result.Error,
-		ExitCode:  int32(result.ExitCode),
-		Truncated: result.Truncated,
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Output:     result.Output,
+		Error:      result.Error,
+		ExitCode:   int32(result.ExitCode),
+		Truncated:  result.Truncated,
+	}
+}
+
+func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCall, params map[string]any) (bool, error) {
+	if a.input == nil {
+		return false, errors.New("input is not available")
+	}
+
+	lines := []string{
+		"tool: " + call.Name,
+		"required permission: " + fmt.Sprint(call.RequiredPermission),
+	}
+	parametersJSON := strings.TrimSpace(call.ParametersJSON)
+	if parametersJSON == "" && len(params) > 0 {
+		if data, err := json.Marshal(params); err == nil {
+			parametersJSON = string(data)
+		}
+	}
+	if parametersJSON != "" {
+		lines = append(lines, "parameters: "+truncateForMetadata(parametersJSON, 360))
+	}
+	lines = append(lines, "approve this tool call? [y/N]")
+	if a.renderer != nil {
+		a.renderer.PrintBlock("permission required", lines)
+	}
+
+	answer, err := a.input.ReadLine(ctx)
+	if err != nil {
+		return false, err
+	}
+	return isApprovalAnswer(answer), nil
+}
+
+func isApprovalAnswer(answer string) bool {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes", "allow", "approve", "ok":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -308,6 +381,11 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 			int(event.SessionMeta.GetTokensOut()),
 			event.SessionMeta.GetCost(),
 		)
+		a.session.AddLLMUsage(
+			int(event.SessionMeta.GetTokensIn()),
+			int(event.SessionMeta.GetTokensOut()),
+			event.SessionMeta.GetCost(),
+		)
 		a.session.MergeMetadata(map[string]string{
 			"last_turn":       fmt.Sprint(event.SessionMeta.GetTurn()),
 			"last_tokens_in":  fmt.Sprint(event.SessionMeta.GetTokensIn()),
@@ -318,6 +396,12 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	}
 
 	if event.AgentSpawn != nil {
+		a.session.AppendAgentSpawn(session.AgentSpawnRecord{
+			Kind:        event.AgentSpawn.GetKind(),
+			Task:        event.AgentSpawn.GetTask(),
+			ContextJSON: event.AgentSpawn.GetContextJson(),
+			Parallel:    event.AgentSpawn.GetParallel(),
+		})
 		lines := []string{
 			"kind: " + event.AgentSpawn.GetKind(),
 			"task: " + event.AgentSpawn.GetTask(),
@@ -334,18 +418,13 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	}
 
 	if event.PlanUpdate != nil {
-		lines := make([]string, 0, len(event.PlanUpdate.GetSteps())+1)
-		lines = append(lines, fmt.Sprintf("mode: %s | current: %d", event.PlanUpdate.GetMode(), event.PlanUpdate.GetCurrentIndex()))
-		for idx, step := range event.PlanUpdate.GetSteps() {
-			prefix := "[ ]"
-			if idx < int(event.PlanUpdate.GetCurrentIndex()) {
-				prefix = "[x]"
-			} else if idx == int(event.PlanUpdate.GetCurrentIndex()) {
-				prefix = "[~]"
-			}
-			lines = append(lines, fmt.Sprintf("%d. %s %s", idx+1, prefix, step))
+		plan := session.PlanState{
+			Steps:        append([]string(nil), event.PlanUpdate.GetSteps()...),
+			CurrentIndex: int(event.PlanUpdate.GetCurrentIndex()),
+			Mode:         event.PlanUpdate.GetMode(),
 		}
-		a.renderer.PrintBlock("plan", lines)
+		a.session.SetPlan(plan)
+		a.renderer.PrintBlock("plan", formatPlanLines(plan))
 	}
 
 	if event.TodoUpdate == nil {
@@ -353,17 +432,25 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	}
 
 	items := make([]todo.Item, 0, len(event.TodoUpdate.GetTodos()))
+	sessionTodos := make([]session.TodoItem, 0, len(event.TodoUpdate.GetTodos()))
 	for _, item := range event.TodoUpdate.GetTodos() {
 		if item == nil {
 			continue
 		}
-		items = append(items, todo.Item{
+		todoItem := todo.Item{
 			Content:    item.GetContent(),
 			ActiveForm: item.GetActiveForm(),
 			Status:     item.GetStatus(),
+		}
+		items = append(items, todoItem)
+		sessionTodos = append(sessionTodos, session.TodoItem{
+			Content:    todoItem.Content,
+			ActiveForm: todoItem.ActiveForm,
+			Status:     todoItem.Status,
 		})
 	}
 	a.todos.Update(items)
+	a.session.SetTodos(sessionTodos)
 }
 
 func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
@@ -380,11 +467,14 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/compact compress the current session",
 			"/clear reset the current conversation",
 			"/config show loaded configuration",
+			"/budget show token and cost budget usage",
 			"/memory manage persistent memories (add/list/find/show/delete)",
+			"/sessions list recent saved sessions",
 			"/tasks show task status",
 			"/undo revert the last recorded change set",
 			"/diff show the current session diff summary",
-			"/resume resume the last session",
+			"/worktree manage worktree state (list/create/switch/cleanup)",
+			"/resume [session-id] resume a saved session",
 		})
 	case "/plan":
 		a.planMode = !a.planMode
@@ -392,7 +482,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		if a.planMode {
 			mode = "on"
 		}
-		_ = a.session.SetMetadata("mode", map[bool]string{true: "plan", false: "chat"}[a.planMode])
+		a.session.SetMode(map[bool]string{true: "plan", false: "chat"}[a.planMode])
 		a.renderer.PrintLine("planning mode " + mode)
 	case "/compact":
 		compacted, removed, summary := a.session.Compact(12)
@@ -412,7 +502,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"model: " + a.cfg.Model,
 			"fast model: " + a.cfg.ModelFast,
 			"context window: " + fmt.Sprint(a.cfg.ContextWindow),
-			"max cost: " + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession),
+			"max tokens per session: " + fmt.Sprint(a.cfg.MaxTokensPerSession),
+			"max cost per session: $" + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession),
 			"orchestrator: " + a.cfg.OrchestratorAddr,
 			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
@@ -420,16 +511,27 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
 			"planning mode: " + map[bool]string{true: "on", false: "off"}[a.planMode],
 		})
+	case "/budget":
+		a.renderer.PrintBlock("budget", a.budgetLines())
 	case "/memory":
 		a.handleMemoryCommand(raw, fields)
+	case "/sessions":
+		a.handleSessionsCommand(ctx, fields)
 	case "/tasks":
 		a.renderer.PrintBlock("tasks", a.todos.Lines())
 	case "/undo":
-		if entry, ok := a.undo.RevertLast(); ok {
-			a.renderer.PrintLine("reverted: " + entry.Description)
-		} else {
+		entry, ok := a.undo.Latest()
+		if !ok {
 			a.renderer.PrintLine("nothing to undo")
+			return true
 		}
+		if err := undo.ApplyEntry(a.cfg.ProjectRoot, entry); err != nil {
+			a.renderer.PrintLine("undo failed: " + err.Error())
+			return true
+		}
+		a.undo.RevertLast()
+		a.session.SetUndo(sessionUndoEntries(a.undo.List()))
+		a.renderer.PrintLine("reverted: " + entry.Description)
 	case "/diff":
 		lines, err := a.worktree.DiffLines(ctx)
 		if err != nil {
@@ -437,7 +539,27 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			return true
 		}
 		a.renderer.PrintBlock("diff", lines)
+	case "/worktree":
+		a.handleWorktreeCommand(fields)
 	case "/resume":
+		if len(fields) > 1 {
+			resumed, err := a.session.Resume(ctx, fields[1])
+			if err != nil {
+				a.renderer.PrintLine("resume failed: " + err.Error())
+				return true
+			}
+			a.restoreWorkingDir(resumed)
+			a.restoreMetrics(resumed)
+			a.restoreMode(resumed)
+			a.restorePermissions(resumed)
+			a.restoreUndo(resumed)
+			a.restoreWorktrees(resumed)
+			a.restoreTodos(resumed)
+			a.restorePlan(resumed)
+			a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
+			return true
+		}
+
 		resumed, ok, err := a.session.ResumeLatest(ctx)
 		if err != nil {
 			a.renderer.PrintLine("resume failed: " + err.Error())
@@ -447,11 +569,320 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			a.renderer.PrintLine("no previous session found")
 			return true
 		}
+		a.restoreWorkingDir(resumed)
+		a.restoreMetrics(resumed)
+		a.restoreMode(resumed)
+		a.restorePermissions(resumed)
+		a.restoreUndo(resumed)
+		a.restoreWorktrees(resumed)
+		a.restoreTodos(resumed)
+		a.restorePlan(resumed)
 		a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
 	default:
 		return false
 	}
 	return true
+}
+
+func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {
+	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" || len(result.Changes) == 0 {
+		return
+	}
+	changes := make([]undo.Change, 0, len(result.Changes))
+	for _, change := range result.Changes {
+		changes = append(changes, undo.Change{
+			Path:   change.Path,
+			Before: change.Before,
+			After:  change.After,
+		})
+	}
+	a.undo.Record(call.Name, changes)
+	a.session.SetUndo(sessionUndoEntries(a.undo.List()))
+}
+
+func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, result tools.ToolResult) {
+	modifiedFiles := modifiedFilesFromToolCall(call, result)
+	a.session.AppendToolResult(session.ToolResultRecord{
+		Name:          call.Name,
+		ExitCode:      result.ExitCode,
+		Error:         result.Error,
+		Output:        result.Output,
+		Truncated:     result.Truncated,
+		ModifiedFiles: modifiedFiles,
+	})
+
+	values := map[string]string{
+		"last_tool":           call.Name,
+		"last_tool_exit_code": fmt.Sprint(result.ExitCode),
+		"last_tool_truncated": fmt.Sprint(result.Truncated),
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		values["last_tool_error"] = truncateForMetadata(result.Error, 240)
+	}
+	if strings.TrimSpace(result.Output) != "" {
+		values["last_tool_output"] = truncateForMetadata(firstMemoryLine(result.Output), 240)
+	}
+	a.session.MergeMetadata(values)
+	if err := a.session.AutoSave(ctx); err != nil {
+		a.renderer.PrintLine("autosave failed: " + err.Error())
+	}
+}
+
+func (a *App) recordToolWorkingDir(call orchestrator.ToolCall, result tools.ToolResult) {
+	if call.Name != "Bash" || result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
+		return
+	}
+	a.session.SetWorkingDir(a.executor.WorkingDir())
+}
+
+func (a *App) budgetLines() []string {
+	snapshot := a.metrics.Snapshot()
+	usedTokens := snapshot.TotalTokensIn + snapshot.TotalTokensOut
+	maxTokens := a.cfg.MaxTokensPerSession
+	remainingTokens := maxTokens - usedTokens
+	if remainingTokens < 0 {
+		remainingTokens = 0
+	}
+	remainingCost := a.cfg.MaxCostPerSession - snapshot.TotalCost
+	if remainingCost < 0 {
+		remainingCost = 0
+	}
+
+	tokenLimit := "unlimited"
+	tokenRemaining := "unlimited"
+	if maxTokens > 0 {
+		tokenLimit = fmt.Sprint(maxTokens)
+		tokenRemaining = fmt.Sprint(remainingTokens)
+	}
+	costLimit := "unlimited"
+	costRemaining := "unlimited"
+	if a.cfg.MaxCostPerSession > 0 {
+		costLimit = fmt.Sprintf("$%.6f", a.cfg.MaxCostPerSession)
+		costRemaining = fmt.Sprintf("$%.6f", remainingCost)
+	}
+
+	return []string{
+		fmt.Sprintf("tokens: %d used / %s limit / %s remaining", usedTokens, tokenLimit, tokenRemaining),
+		fmt.Sprintf("cost: $%.6f used / %s limit / %s remaining", snapshot.TotalCost, costLimit, costRemaining),
+		fmt.Sprintf("turns: %d | tools: %d | errors: %d", snapshot.Turns, snapshot.ToolCalls, snapshot.Errors),
+	}
+}
+
+func (a *App) handleSessionsCommand(ctx context.Context, fields []string) {
+	limit := 10
+	if len(fields) > 1 {
+		if parsed, err := strconv.Atoi(fields[1]); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	sessions, err := a.session.ListRecent(ctx, limit)
+	if err != nil {
+		a.renderer.PrintLine("list sessions failed: " + err.Error())
+		return
+	}
+	if len(sessions) == 0 {
+		a.renderer.PrintBlock("sessions", []string{"no sessions saved"})
+		return
+	}
+
+	lines := make([]string, 0, len(sessions))
+	for _, item := range sessions {
+		line := fmt.Sprintf("%s | %s | mode: %s | messages: %d | tools: %d | cost: $%.6f | %s",
+			item.ID,
+			item.UpdatedAt.Format("2006-01-02 15:04:05"),
+			item.Mode,
+			item.MessageCount,
+			item.Metrics.ToolCalls,
+			item.Metrics.TotalCost,
+			item.WorkingDir,
+		)
+		if strings.TrimSpace(item.LastMessage) != "" {
+			line += " | " + item.LastMessage
+		}
+		if len(item.Metrics.FilesModified) > 0 {
+			line += fmt.Sprintf(" | files: %d", len(item.Metrics.FilesModified))
+		}
+		if item.TodoCount > 0 {
+			line += fmt.Sprintf(" | todos: %d", item.TodoCount)
+		}
+		if item.PlanSteps > 0 {
+			line += fmt.Sprintf(" | plan: %d", item.PlanSteps)
+		}
+		if item.AgentCount > 0 {
+			line += fmt.Sprintf(" | agents: %d", item.AgentCount)
+		}
+		if item.UndoCount > 0 {
+			line += fmt.Sprintf(" | undo: %d", item.UndoCount)
+		}
+		if item.ApprovedToolCount > 0 {
+			line += fmt.Sprintf(" | approved: %d", item.ApprovedToolCount)
+		}
+		if item.WorktreeCount > 0 {
+			line += fmt.Sprintf(" | worktrees: %d", item.WorktreeCount)
+		}
+		lines = append(lines, line)
+	}
+	a.renderer.PrintBlock("sessions", lines)
+}
+
+func (a *App) handleWorktreeCommand(fields []string) {
+	if len(fields) == 1 || fields[1] == "list" {
+		a.renderer.PrintBlock("worktrees", formatWorktrees(a.worktree.List()))
+		return
+	}
+	if len(fields) < 3 {
+		a.renderer.PrintLine("usage: /worktree <create|switch|cleanup> <name>")
+		return
+	}
+	name := fields[2]
+	switch fields[1] {
+	case "create":
+		tree, err := a.worktree.Create(name)
+		if err != nil {
+			a.renderer.PrintLine("worktree create failed: " + err.Error())
+			return
+		}
+		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.renderer.PrintLine("created worktree: " + tree.Name)
+	case "switch":
+		tree, err := a.worktree.Switch(name)
+		if err != nil {
+			a.renderer.PrintLine("worktree switch failed: " + err.Error())
+			return
+		}
+		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.renderer.PrintLine("switched worktree: " + tree.Name)
+	case "cleanup":
+		if err := a.worktree.Cleanup(name); err != nil {
+			a.renderer.PrintLine("worktree cleanup failed: " + err.Error())
+			return
+		}
+		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.renderer.PrintLine("cleaned worktree: " + name)
+	default:
+		a.renderer.PrintLine("usage: /worktree <list|create|switch|cleanup> [name]")
+	}
+}
+
+func formatWorktrees(trees []worktree.Worktree) []string {
+	if len(trees) == 0 {
+		return []string{"no worktrees"}
+	}
+	lines := make([]string, 0, len(trees))
+	for _, tree := range trees {
+		state := "inactive"
+		if tree.Active {
+			state = "active"
+		}
+		lines = append(lines, fmt.Sprintf("%s | %s | base: %s | %s", tree.Name, state, tree.BaseRef, tree.Path))
+	}
+	return lines
+}
+
+func (a *App) restoreMode(restored session.Session) {
+	a.planMode = restored.Mode == "plan"
+	if restored.Mode == "" && restored.Metadata != nil {
+		a.planMode = restored.Metadata["mode"] == "plan"
+	}
+}
+
+func (a *App) restoreWorkingDir(restored session.Session) {
+	if strings.TrimSpace(restored.WorkingDir) == "" {
+		return
+	}
+	if err := a.executor.SetWorkingDir(restored.WorkingDir); err != nil {
+		a.renderer.PrintLine("restore working dir failed: " + err.Error())
+	}
+}
+
+func (a *App) restoreMetrics(restored session.Session) {
+	a.metrics.Hydrate(metrics.SessionMetrics{
+		StartTime:      restored.CreatedAt,
+		TotalTokensIn:  restored.Metrics.TotalTokensIn,
+		TotalTokensOut: restored.Metrics.TotalTokensOut,
+		TotalCost:      restored.Metrics.TotalCost,
+		ToolCalls:      restored.Metrics.ToolCalls,
+	})
+}
+
+func (a *App) restoreUndo(restored session.Session) {
+	a.undo.Restore(undoEntries(restored.Undo))
+}
+
+func (a *App) restorePermissions(restored session.Session) {
+	a.permissions.RestoreApprovedTools(restored.ApprovedTools)
+}
+
+func (a *App) restoreWorktrees(restored session.Session) {
+	a.worktree.Restore(worktrees(restored.Worktrees))
+}
+
+func (a *App) restoreTodos(restored session.Session) {
+	items := make([]todo.Item, 0, len(restored.Todos))
+	for _, item := range restored.Todos {
+		items = append(items, todo.Item{
+			Content:    item.Content,
+			ActiveForm: item.ActiveForm,
+			Status:     item.Status,
+		})
+	}
+	a.todos.Update(items)
+}
+
+func (a *App) restorePlan(restored session.Session) {
+	if len(restored.Plan.Steps) == 0 {
+		return
+	}
+	a.renderer.PrintBlock("restored plan", formatPlanLines(restored.Plan))
+}
+
+func formatPlanLines(plan session.PlanState) []string {
+	lines := make([]string, 0, len(plan.Steps)+1)
+	mode := strings.TrimSpace(plan.Mode)
+	if mode == "" {
+		mode = "plan"
+	}
+	lines = append(lines, fmt.Sprintf("mode: %s | current: %d", mode, plan.CurrentIndex))
+	for idx, step := range plan.Steps {
+		prefix := "[ ]"
+		if idx < plan.CurrentIndex {
+			prefix = "[x]"
+		} else if idx == plan.CurrentIndex {
+			prefix = "[~]"
+		}
+		lines = append(lines, fmt.Sprintf("%d. %s %s", idx+1, prefix, step))
+	}
+	return lines
+}
+
+func modifiedFilesFromToolCall(call orchestrator.ToolCall, result tools.ToolResult) []string {
+	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
+		return nil
+	}
+	switch call.Name {
+	case "Edit", "Write":
+	default:
+		return nil
+	}
+
+	params := map[string]any{}
+	if strings.TrimSpace(call.ParametersJSON) == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(call.ParametersJSON), &params); err != nil {
+		return nil
+	}
+	for _, key := range []string{"path", "file"} {
+		value, ok := params[key]
+		if !ok {
+			continue
+		}
+		if path, ok := value.(string); ok && strings.TrimSpace(path) != "" {
+			return []string{filepath.ToSlash(strings.TrimSpace(path))}
+		}
+	}
+	return nil
 }
 
 func (a *App) memorySummary() string {
@@ -596,6 +1027,82 @@ func firstMemoryLine(content string) string {
 		}
 	}
 	return ""
+}
+
+func truncateForMetadata(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return strings.TrimSpace(value[:limit-3]) + "..."
+}
+
+func sessionUndoEntries(entries []undo.Entry) []session.UndoEntry {
+	out := make([]session.UndoEntry, 0, len(entries))
+	for _, entry := range entries {
+		changes := make([]session.UndoChange, 0, len(entry.Changes))
+		for _, change := range entry.Changes {
+			changes = append(changes, session.UndoChange{
+				Path:   change.Path,
+				Before: change.Before,
+				After:  change.After,
+			})
+		}
+		out = append(out, session.UndoEntry{
+			ID:          entry.ID,
+			Description: entry.Description,
+			Changes:     changes,
+			CreatedAt:   entry.CreatedAt,
+		})
+	}
+	return out
+}
+
+func undoEntries(entries []session.UndoEntry) []undo.Entry {
+	out := make([]undo.Entry, 0, len(entries))
+	for _, entry := range entries {
+		changes := make([]undo.Change, 0, len(entry.Changes))
+		for _, change := range entry.Changes {
+			changes = append(changes, undo.Change{
+				Path:   change.Path,
+				Before: change.Before,
+				After:  change.After,
+			})
+		}
+		out = append(out, undo.Entry{
+			ID:          entry.ID,
+			Description: entry.Description,
+			Changes:     changes,
+			CreatedAt:   entry.CreatedAt,
+		})
+	}
+	return out
+}
+
+func sessionWorktrees(trees []worktree.Worktree) []session.WorktreeState {
+	out := make([]session.WorktreeState, 0, len(trees))
+	for _, tree := range trees {
+		out = append(out, session.WorktreeState{
+			Name:    tree.Name,
+			Path:    tree.Path,
+			BaseRef: tree.BaseRef,
+			Active:  tree.Active,
+		})
+	}
+	return out
+}
+
+func worktrees(trees []session.WorktreeState) []worktree.Worktree {
+	out := make([]worktree.Worktree, 0, len(trees))
+	for _, tree := range trees {
+		out = append(out, worktree.Worktree{
+			Name:    tree.Name,
+			Path:    tree.Path,
+			BaseRef: tree.BaseRef,
+			Active:  tree.Active,
+		})
+	}
+	return out
 }
 
 func resolveConfigPath(projectRoot, path string) string {

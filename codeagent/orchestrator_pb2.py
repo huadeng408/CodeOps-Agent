@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1c\x63odeagent/orchestrator.proto\x12\x0c\x63odeagent.v1\"\x07\n\x05\x45mpty\"1\n\x0eHealthResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\"\xe4\x01\n\x0eHarnessMessage\x12-\n\nuser_input\x18\x01 \x01(\x0b\x32\x17.codeagent.v1.UserInputH\x00\x12/\n\x0btool_result\x18\x02 \x01(\x0b\x32\x18.codeagent.v1.ToolResultH\x00\x12?\n\x13permission_decision\x18\x03 \x01(\x0b\x32 .codeagent.v1.PermissionDecisionH\x00\x12&\n\x06signal\x18\x04 \x01(\x0b\x32\x14.codeagent.v1.SignalH\x00\x42\t\n\x07payload\"\xe6\x02\n\x13OrchestratorMessage\x12\'\n\x04text\x18\x01 \x01(\x0b\x32\x17.codeagent.v1.TextChunkH\x00\x12\x31\n\x0ctool_request\x18\x02 \x01(\x0b\x32\x19.codeagent.v1.ToolRequestH\x00\x12/\n\x0bplan_update\x18\x03 \x01(\x0b\x32\x18.codeagent.v1.PlanUpdateH\x00\x12/\n\x0btodo_update\x18\x04 \x01(\x0b\x32\x18.codeagent.v1.TodoUpdateH\x00\x12/\n\x0b\x61gent_spawn\x18\x05 \x01(\x0b\x32\x18.codeagent.v1.AgentSpawnH\x00\x12\x31\n\x0csession_meta\x18\x06 \x01(\x0b\x32\x19.codeagent.v1.SessionMetaH\x00\x12\"\n\x04\x64one\x18\x07 \x01(\x0b\x32\x12.codeagent.v1.DoneH\x00\x42\t\n\x07payload\"\x19\n\tUserInput\x12\x0c\n\x04text\x18\x01 \x01(\t\"d\n\nToolResult\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x11\n\texit_code\x18\x04 \x01(\x05\x12\x11\n\ttruncated\x18\x05 \x01(\x08\"h\n\x12PermissionDecision\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12/\n\x08\x64\x65\x63ision\x18\x02 \x01(\x0e\x32\x1d.codeagent.v1.PermissionLevel\x12\x0e\n\x06reason\x18\x03 \x01(\t\"A\n\x06Signal\x12&\n\x04type\x18\x01 \x01(\x0e\x32\x18.codeagent.v1.SignalType\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x19\n\tTextChunk\x12\x0c\n\x04text\x18\x01 \x01(\t\"u\n\x0bToolRequest\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12\x17\n\x0fparameters_json\x18\x02 \x01(\t\x12:\n\x13required_permission\x18\x03 \x01(\x0e\x32\x1d.codeagent.v1.PermissionLevel\"@\n\nPlanUpdate\x12\r\n\x05steps\x18\x01 \x03(\t\x12\x15\n\rcurrent_index\x18\x02 \x01(\x05\x12\x0c\n\x04mode\x18\x03 \x01(\t\"3\n\nTodoUpdate\x12%\n\x05todos\x18\x01 \x03(\x0b\x32\x16.codeagent.v1.TodoItem\"@\n\x08TodoItem\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\x12\x13\n\x0b\x61\x63tive_form\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\"P\n\nAgentSpawn\x12\x0c\n\x04kind\x18\x01 \x01(\t\x12\x0c\n\x04task\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x03 \x01(\t\x12\x10\n\x08parallel\x18\x04 \x01(\x08\"_\n\x0bSessionMeta\x12\x0c\n\x04turn\x18\x01 \x01(\x03\x12\x11\n\ttokens_in\x18\x02 \x01(\x03\x12\x12\n\ntokens_out\x18\x03 \x01(\x03\x12\x0c\n\x04\x63ost\x18\x04 \x01(\x01\x12\r\n\x05model\x18\x05 \x01(\t\"(\n\x04\x44one\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"Q\n\x10ToolRequestBatch\x12+\n\x08requests\x18\x01 \x03(\x0b\x32\x19.codeagent.v1.ToolRequest\x12\x10\n\x08parallel\x18\x02 \x01(\x08\"_\n\x0e\x41skUserRequest\x12\x10\n\x08question\x18\x01 \x01(\t\x12%\n\x07options\x18\x02 \x03(\x0b\x32\x14.codeagent.v1.Option\x12\x14\n\x0cmulti_select\x18\x03 \x01(\x08\"=\n\x06Option\x12\r\n\x05label\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\x0f\n\x07preview\x18\x03 \x01(\t*d\n\x0fPermissionLevel\x12 \n\x1cPERMISSION_LEVEL_UNSPECIFIED\x10\x00\x12\x0e\n\nAUTO_ALLOW\x10\x01\x12\x0f\n\x0b\x41SK_SESSION\x10\x02\x12\x0e\n\nALWAYS_ASK\x10\x03*I\n\nSignalType\x12\x1b\n\x17SIGNAL_TYPE_UNSPECIFIED\x10\x00\x12\n\n\x06\x43TRL_C\x10\x01\x12\x12\n\x0eSESSION_RESUME\x10\x02\x32\x9c\x01\n\x0cOrchestrator\x12O\n\x08\x43onverse\x12\x1c.codeagent.v1.HarnessMessage\x1a!.codeagent.v1.OrchestratorMessage(\x01\x30\x01\x12;\n\x06Health\x12\x13.codeagent.v1.Empty\x1a\x1c.codeagent.v1.HealthResponseB(Z&code-agent/gen/codeagentpb;codeagentpbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1c\x63odeagent/orchestrator.proto\x12\x0c\x63odeagent.v1\"\x07\n\x05\x45mpty\"1\n\x0eHealthResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\"\xe4\x01\n\x0eHarnessMessage\x12-\n\nuser_input\x18\x01 \x01(\x0b\x32\x17.codeagent.v1.UserInputH\x00\x12/\n\x0btool_result\x18\x02 \x01(\x0b\x32\x18.codeagent.v1.ToolResultH\x00\x12?\n\x13permission_decision\x18\x03 \x01(\x0b\x32 .codeagent.v1.PermissionDecisionH\x00\x12&\n\x06signal\x18\x04 \x01(\x0b\x32\x14.codeagent.v1.SignalH\x00\x42\t\n\x07payload\"\xa4\x03\n\x13OrchestratorMessage\x12\'\n\x04text\x18\x01 \x01(\x0b\x32\x17.codeagent.v1.TextChunkH\x00\x12\x31\n\x0ctool_request\x18\x02 \x01(\x0b\x32\x19.codeagent.v1.ToolRequestH\x00\x12/\n\x0bplan_update\x18\x03 \x01(\x0b\x32\x18.codeagent.v1.PlanUpdateH\x00\x12/\n\x0btodo_update\x18\x04 \x01(\x0b\x32\x18.codeagent.v1.TodoUpdateH\x00\x12/\n\x0b\x61gent_spawn\x18\x05 \x01(\x0b\x32\x18.codeagent.v1.AgentSpawnH\x00\x12\x31\n\x0csession_meta\x18\x06 \x01(\x0b\x32\x19.codeagent.v1.SessionMetaH\x00\x12\"\n\x04\x64one\x18\x07 \x01(\x0b\x32\x12.codeagent.v1.DoneH\x00\x12<\n\x12tool_request_batch\x18\x08 \x01(\x0b\x32\x1e.codeagent.v1.ToolRequestBatchH\x00\x42\t\n\x07payload\"\x19\n\tUserInput\x12\x0c\n\x04text\x18\x01 \x01(\t\"z\n\nToolResult\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x11\n\texit_code\x18\x04 \x01(\x05\x12\x11\n\ttruncated\x18\x05 \x01(\x08\x12\x14\n\x0ctool_call_id\x18\x06 \x01(\t\"h\n\x12PermissionDecision\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12/\n\x08\x64\x65\x63ision\x18\x02 \x01(\x0e\x32\x1d.codeagent.v1.PermissionLevel\x12\x0e\n\x06reason\x18\x03 \x01(\t\"A\n\x06Signal\x12&\n\x04type\x18\x01 \x01(\x0e\x32\x18.codeagent.v1.SignalType\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x19\n\tTextChunk\x12\x0c\n\x04text\x18\x01 \x01(\t\"\x8b\x01\n\x0bToolRequest\x12\x11\n\ttool_name\x18\x01 \x01(\t\x12\x17\n\x0fparameters_json\x18\x02 \x01(\t\x12:\n\x13required_permission\x18\x03 \x01(\x0e\x32\x1d.codeagent.v1.PermissionLevel\x12\x14\n\x0ctool_call_id\x18\x04 \x01(\t\"@\n\nPlanUpdate\x12\r\n\x05steps\x18\x01 \x03(\t\x12\x15\n\rcurrent_index\x18\x02 \x01(\x05\x12\x0c\n\x04mode\x18\x03 \x01(\t\"3\n\nTodoUpdate\x12%\n\x05todos\x18\x01 \x03(\x0b\x32\x16.codeagent.v1.TodoItem\"@\n\x08TodoItem\x12\x0f\n\x07\x63ontent\x18\x01 \x01(\t\x12\x13\n\x0b\x61\x63tive_form\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\"P\n\nAgentSpawn\x12\x0c\n\x04kind\x18\x01 \x01(\t\x12\x0c\n\x04task\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x03 \x01(\t\x12\x10\n\x08parallel\x18\x04 \x01(\x08\"_\n\x0bSessionMeta\x12\x0c\n\x04turn\x18\x01 \x01(\x03\x12\x11\n\ttokens_in\x18\x02 \x01(\x03\x12\x12\n\ntokens_out\x18\x03 \x01(\x03\x12\x0c\n\x04\x63ost\x18\x04 \x01(\x01\x12\r\n\x05model\x18\x05 \x01(\t\"(\n\x04\x44one\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"Q\n\x10ToolRequestBatch\x12+\n\x08requests\x18\x01 \x03(\x0b\x32\x19.codeagent.v1.ToolRequest\x12\x10\n\x08parallel\x18\x02 \x01(\x08\"_\n\x0e\x41skUserRequest\x12\x10\n\x08question\x18\x01 \x01(\t\x12%\n\x07options\x18\x02 \x03(\x0b\x32\x14.codeagent.v1.Option\x12\x14\n\x0cmulti_select\x18\x03 \x01(\x08\"=\n\x06Option\x12\r\n\x05label\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\x0f\n\x07preview\x18\x03 \x01(\t*d\n\x0fPermissionLevel\x12 \n\x1cPERMISSION_LEVEL_UNSPECIFIED\x10\x00\x12\x0e\n\nAUTO_ALLOW\x10\x01\x12\x0f\n\x0b\x41SK_SESSION\x10\x02\x12\x0e\n\nALWAYS_ASK\x10\x03*I\n\nSignalType\x12\x1b\n\x17SIGNAL_TYPE_UNSPECIFIED\x10\x00\x12\n\n\x06\x43TRL_C\x10\x01\x12\x12\n\x0eSESSION_RESUME\x10\x02\x32\x9c\x01\n\x0cOrchestrator\x12O\n\x08\x43onverse\x12\x1c.codeagent.v1.HarnessMessage\x1a!.codeagent.v1.OrchestratorMessage(\x01\x30\x01\x12;\n\x06Health\x12\x13.codeagent.v1.Empty\x1a\x1c.codeagent.v1.HealthResponseB(Z&code-agent/gen/codeagentpb;codeagentpbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,10 +32,10 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'codeagent.orchestrator_pb2'
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z&code-agent/gen/codeagentpb;codeagentpb'
-  _globals['_PERMISSIONLEVEL']._serialized_start=1795
-  _globals['_PERMISSIONLEVEL']._serialized_end=1895
-  _globals['_SIGNALTYPE']._serialized_start=1897
-  _globals['_SIGNALTYPE']._serialized_end=1970
+  _globals['_PERMISSIONLEVEL']._serialized_start=1902
+  _globals['_PERMISSIONLEVEL']._serialized_end=2002
+  _globals['_SIGNALTYPE']._serialized_start=2004
+  _globals['_SIGNALTYPE']._serialized_end=2077
   _globals['_EMPTY']._serialized_start=46
   _globals['_EMPTY']._serialized_end=53
   _globals['_HEALTHRESPONSE']._serialized_start=55
@@ -43,37 +43,37 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_HARNESSMESSAGE']._serialized_start=107
   _globals['_HARNESSMESSAGE']._serialized_end=335
   _globals['_ORCHESTRATORMESSAGE']._serialized_start=338
-  _globals['_ORCHESTRATORMESSAGE']._serialized_end=696
-  _globals['_USERINPUT']._serialized_start=698
-  _globals['_USERINPUT']._serialized_end=723
-  _globals['_TOOLRESULT']._serialized_start=725
-  _globals['_TOOLRESULT']._serialized_end=825
-  _globals['_PERMISSIONDECISION']._serialized_start=827
-  _globals['_PERMISSIONDECISION']._serialized_end=931
-  _globals['_SIGNAL']._serialized_start=933
-  _globals['_SIGNAL']._serialized_end=998
-  _globals['_TEXTCHUNK']._serialized_start=1000
-  _globals['_TEXTCHUNK']._serialized_end=1025
-  _globals['_TOOLREQUEST']._serialized_start=1027
-  _globals['_TOOLREQUEST']._serialized_end=1144
-  _globals['_PLANUPDATE']._serialized_start=1146
-  _globals['_PLANUPDATE']._serialized_end=1210
-  _globals['_TODOUPDATE']._serialized_start=1212
-  _globals['_TODOUPDATE']._serialized_end=1263
-  _globals['_TODOITEM']._serialized_start=1265
-  _globals['_TODOITEM']._serialized_end=1329
-  _globals['_AGENTSPAWN']._serialized_start=1331
-  _globals['_AGENTSPAWN']._serialized_end=1411
-  _globals['_SESSIONMETA']._serialized_start=1413
-  _globals['_SESSIONMETA']._serialized_end=1508
-  _globals['_DONE']._serialized_start=1510
-  _globals['_DONE']._serialized_end=1550
-  _globals['_TOOLREQUESTBATCH']._serialized_start=1552
-  _globals['_TOOLREQUESTBATCH']._serialized_end=1633
-  _globals['_ASKUSERREQUEST']._serialized_start=1635
-  _globals['_ASKUSERREQUEST']._serialized_end=1730
-  _globals['_OPTION']._serialized_start=1732
-  _globals['_OPTION']._serialized_end=1793
-  _globals['_ORCHESTRATOR']._serialized_start=1973
-  _globals['_ORCHESTRATOR']._serialized_end=2129
+  _globals['_ORCHESTRATORMESSAGE']._serialized_end=758
+  _globals['_USERINPUT']._serialized_start=760
+  _globals['_USERINPUT']._serialized_end=785
+  _globals['_TOOLRESULT']._serialized_start=787
+  _globals['_TOOLRESULT']._serialized_end=909
+  _globals['_PERMISSIONDECISION']._serialized_start=911
+  _globals['_PERMISSIONDECISION']._serialized_end=1015
+  _globals['_SIGNAL']._serialized_start=1017
+  _globals['_SIGNAL']._serialized_end=1082
+  _globals['_TEXTCHUNK']._serialized_start=1084
+  _globals['_TEXTCHUNK']._serialized_end=1109
+  _globals['_TOOLREQUEST']._serialized_start=1112
+  _globals['_TOOLREQUEST']._serialized_end=1251
+  _globals['_PLANUPDATE']._serialized_start=1253
+  _globals['_PLANUPDATE']._serialized_end=1317
+  _globals['_TODOUPDATE']._serialized_start=1319
+  _globals['_TODOUPDATE']._serialized_end=1370
+  _globals['_TODOITEM']._serialized_start=1372
+  _globals['_TODOITEM']._serialized_end=1436
+  _globals['_AGENTSPAWN']._serialized_start=1438
+  _globals['_AGENTSPAWN']._serialized_end=1518
+  _globals['_SESSIONMETA']._serialized_start=1520
+  _globals['_SESSIONMETA']._serialized_end=1615
+  _globals['_DONE']._serialized_start=1617
+  _globals['_DONE']._serialized_end=1657
+  _globals['_TOOLREQUESTBATCH']._serialized_start=1659
+  _globals['_TOOLREQUESTBATCH']._serialized_end=1740
+  _globals['_ASKUSERREQUEST']._serialized_start=1742
+  _globals['_ASKUSERREQUEST']._serialized_end=1837
+  _globals['_OPTION']._serialized_start=1839
+  _globals['_OPTION']._serialized_end=1900
+  _globals['_ORCHESTRATOR']._serialized_start=2080
+  _globals['_ORCHESTRATOR']._serialized_end=2236
 # @@protoc_insertion_point(module_scope)

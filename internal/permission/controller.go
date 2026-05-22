@@ -1,6 +1,10 @@
 package permission
 
-import "sync"
+import (
+	"sort"
+	"strings"
+	"sync"
+)
 
 type Level int
 
@@ -70,7 +74,7 @@ func (c *Controller) Check(tool string, params map[string]any) Decision {
 		}
 	}
 
-	level := c.levels[tool]
+	level := c.levelLocked(tool)
 	switch level {
 	case AutoAllow:
 		return Approve
@@ -86,9 +90,58 @@ func (c *Controller) Check(tool string, params map[string]any) Decision {
 	}
 }
 
+func (c *Controller) Level(tool string) Level {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.levelLocked(tool)
+}
+
+func (c *Controller) levelLocked(tool string) Level {
+	if c.levels == nil {
+		return AskSession
+	}
+	level, ok := c.levels[tool]
+	if !ok {
+		return AskSession
+	}
+	return level
+}
+
 func (c *Controller) ApproveSession(tool string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		return
+	}
 	c.sessionApproved[tool] = true
+}
+
+func (c *Controller) ApprovedTools() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]string, 0, len(c.sessionApproved))
+	for tool, approved := range c.sessionApproved {
+		if approved {
+			out = append(out, tool)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (c *Controller) RestoreApprovedTools(tools []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.sessionApproved = make(map[string]bool)
+	for _, tool := range tools {
+		tool = strings.TrimSpace(tool)
+		if tool != "" {
+			c.sessionApproved[tool] = true
+		}
+	}
 }

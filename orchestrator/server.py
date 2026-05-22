@@ -11,7 +11,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from .config import load_dotenv
 from .context import TokenBudget
 from .graph.main_graph import build_graph
-from .llm.providers.openai import OpenAIClient
+from .llm.providers import build_default_client
 from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
 from .skills.manager import SkillManager
@@ -36,8 +36,8 @@ class OrchestratorServer:
         self.project_root = str(Path(self.config.project_root).resolve())
         self.working_dir = str(Path(self.config.working_dir).resolve())
         self.graph = build_graph()
-        self.llm = OpenAIClient.from_env()
-        self.tools = ToolRegistry()
+        self.llm = build_default_client()
+        self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
         self.skills = SkillManager()

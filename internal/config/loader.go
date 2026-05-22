@@ -9,19 +9,20 @@ import (
 )
 
 type Config struct {
-	ProjectRoot       string           `json:"-"`
-	WorkingDir        string           `json:"-"`
-	Model             string           `json:"model"`
-	ModelFast         string           `json:"model_fast"`
-	ContextWindow     int              `json:"context_window"`
-	MaxCostPerSession float64          `json:"max_cost_per_session"`
-	OrchestratorAddr  string           `json:"orchestrator_addr"`
-	SessionDBPath     string           `json:"session_db_path"`
-	Permissions       PermissionConfig `json:"permissions"`
-	Hooks             []HookConfig     `json:"hooks"`
-	MCPConfig         string           `json:"mcp_config"`
-	MemoryDir         string           `json:"memory_dir"`
-	WorktreeBaseRef   string           `json:"worktree_base_ref"`
+	ProjectRoot         string           `json:"-"`
+	WorkingDir          string           `json:"-"`
+	Model               string           `json:"model"`
+	ModelFast           string           `json:"model_fast"`
+	ContextWindow       int              `json:"context_window"`
+	MaxTokensPerSession int              `json:"max_tokens_per_session"`
+	MaxCostPerSession   float64          `json:"max_cost_per_session"`
+	OrchestratorAddr    string           `json:"orchestrator_addr"`
+	SessionDBPath       string           `json:"session_db_path"`
+	Permissions         PermissionConfig `json:"permissions"`
+	Hooks               []HookConfig     `json:"hooks"`
+	MCPConfig           string           `json:"mcp_config"`
+	MemoryDir           string           `json:"memory_dir"`
+	WorktreeBaseRef     string           `json:"worktree_base_ref"`
 }
 
 type PermissionConfig struct {
@@ -49,17 +50,18 @@ func Default(projectRoot string) Config {
 	}
 
 	return Config{
-		ProjectRoot:       projectRoot,
-		WorkingDir:        workingDir,
-		Model:             "gpt-4o",
-		ModelFast:         "gpt-4o-mini",
-		ContextWindow:     128000,
-		MaxCostPerSession: 5.0,
-		OrchestratorAddr:  "127.0.0.1:50051",
-		SessionDBPath:     filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
-		MCPConfig:         ".mcp.json",
-		MemoryDir:         filepath.Join(projectRoot, ".agent", "memory"),
-		WorktreeBaseRef:   "fresh",
+		ProjectRoot:         projectRoot,
+		WorkingDir:          workingDir,
+		Model:               "gpt-4o",
+		ModelFast:           "gpt-4o-mini",
+		ContextWindow:       128000,
+		MaxTokensPerSession: 1_000_000,
+		MaxCostPerSession:   5.0,
+		OrchestratorAddr:    "127.0.0.1:50051",
+		SessionDBPath:       filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
+		MCPConfig:           ".mcp.json",
+		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
+		WorktreeBaseRef:     "fresh",
 	}
 }
 
@@ -118,6 +120,9 @@ func mergeConfig(dst *Config, patch Config) {
 	}
 	if patch.ContextWindow != 0 {
 		dst.ContextWindow = patch.ContextWindow
+	}
+	if patch.MaxTokensPerSession != 0 {
+		dst.MaxTokensPerSession = patch.MaxTokensPerSession
 	}
 	if patch.MaxCostPerSession != 0 {
 		dst.MaxCostPerSession = patch.MaxCostPerSession

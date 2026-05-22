@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"code-agent/internal/metrics"
 )
@@ -31,5 +32,38 @@ func TestEstimateCostUsesKnownModelPricing(t *testing.T) {
 
 	if math.Abs(cost-0.0125) > 0.000001 {
 		t.Fatalf("unexpected estimate: %.8f", cost)
+	}
+}
+
+func TestCollectorHydratesPersistedSessionMetrics(t *testing.T) {
+	collector := metrics.NewCollector()
+	started := time.Now().Add(-time.Hour)
+	collector.Hydrate(metrics.SessionMetrics{
+		StartTime:      started,
+		TotalTokensIn:  200,
+		TotalTokensOut: 80,
+		TotalCost:      0.0015,
+		ToolCalls:      3,
+	})
+
+	snapshot := collector.Snapshot()
+	if !snapshot.StartTime.Equal(started) {
+		t.Fatalf("unexpected start time: %v", snapshot.StartTime)
+	}
+	if snapshot.TotalTokensIn != 200 || snapshot.TotalTokensOut != 80 || snapshot.ToolCalls != 3 {
+		t.Fatalf("unexpected hydrated metrics: %+v", snapshot)
+	}
+	if math.Abs(snapshot.TotalCost-0.0015) > 0.000001 {
+		t.Fatalf("unexpected hydrated cost: %.8f", snapshot.TotalCost)
+	}
+
+	collector.BeginTurn()
+	collector.RecordLLMUsage("gpt-4o", 10, 5, 0.0001)
+	collector.RecordToolCall()
+	collector.EndTurn()
+
+	snapshot = collector.Snapshot()
+	if snapshot.TotalTokensIn != 210 || snapshot.TotalTokensOut != 85 || snapshot.ToolCalls != 4 {
+		t.Fatalf("unexpected metrics after hydrate accumulation: %+v", snapshot)
 	}
 }

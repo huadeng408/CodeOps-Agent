@@ -31,5 +31,13 @@ func executeEdit(_ context.Context, root string, args map[string]any) (ToolResul
 	if err := os.WriteFile(abs, []byte(replaced), 0o644); err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
-	return ToolResult{Name: "Edit", Output: "edited"}, nil
+	return ToolResult{
+		Name:   "Edit",
+		Output: "edited",
+		Changes: []Change{{
+			Path:   path,
+			Before: string(data),
+			After:  replaced,
+		}},
+	}, nil
 }

@@ -1,12 +1,16 @@
 package undo
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Change struct {
-	Path  string `json:"path"`
+	Path   string `json:"path"`
 	Before string `json:"before,omitempty"`
 	After  string `json:"after,omitempty"`
 }
@@ -68,8 +72,82 @@ func (m *Manager) List() []Entry {
 	defer m.mu.Unlock()
 
 	out := make([]Entry, len(m.entries))
-	copy(out, m.entries)
+	for i, entry := range m.entries {
+		out[i] = cloneEntry(entry)
+	}
 	return out
+}
+
+func (m *Manager) Restore(entries []Entry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.entries = make([]Entry, len(entries))
+	for i, entry := range entries {
+		m.entries[i] = cloneEntry(entry)
+	}
+}
+
+func ApplyEntry(root string, entry Entry) error {
+	for i := len(entry.Changes) - 1; i >= 0; i-- {
+		change := entry.Changes[i]
+		abs, err := workspacePath(root, change.Path)
+		if err != nil {
+			return err
+		}
+		if change.Before == "" {
+			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove %s: %w", change.Path, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return fmt.Errorf("create parent for %s: %w", change.Path, err)
+		}
+		if err := os.WriteFile(abs, []byte(change.Before), 0o644); err != nil {
+			return fmt.Errorf("restore %s: %w", change.Path, err)
+		}
+	}
+	return nil
+}
+
+func cloneEntry(entry Entry) Entry {
+	out := entry
+	if len(entry.Changes) > 0 {
+		out.Changes = append([]Change(nil), entry.Changes...)
+	}
+	return out
+}
+
+func workspacePath(root, target string) (string, error) {
+	if root == "" {
+		root = "."
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(target) == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	var absTarget string
+	if filepath.IsAbs(target) {
+		absTarget = filepath.Clean(target)
+	} else {
+		absTarget = filepath.Join(absRoot, target)
+	}
+	absTarget, err = filepath.Abs(absTarget)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes workspace: %s", target)
+	}
+	return absTarget, nil
 }
 
 func nextID() string {

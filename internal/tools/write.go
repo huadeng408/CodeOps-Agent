@@ -18,11 +18,20 @@ func executeWrite(_ context.Context, root string, args map[string]any) (ToolResu
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
+	beforeBytes, _ := os.ReadFile(abs)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
 	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
-	return ToolResult{Name: "Write", Output: "written"}, nil
+	return ToolResult{
+		Name:   "Write",
+		Output: "written",
+		Changes: []Change{{
+			Path:   filepath.ToSlash(path),
+			Before: string(beforeBytes),
+			After:  content,
+		}},
+	}, nil
 }

@@ -9,7 +9,7 @@ from typing import Any
 
 from orchestrator.config import read_env
 
-from ..client import ChatRequest, ChatResponse, LLMClient, ToolCall, Usage
+from ..client import ChatMessage, ChatRequest, ChatResponse, LLMClient, ToolCall, Usage
 
 
 @dataclass(slots=True)
@@ -43,13 +43,15 @@ class OpenAIClient(LLMClient):
             payload["tools"] = request.tools
 
         data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key.strip():
+            headers["Authorization"] = f"Bearer {self.api_key}"
         http_request = urllib.request.Request(
             self._chat_completions_url(),
             data=data,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
 
@@ -73,15 +75,32 @@ class OpenAIClient(LLMClient):
         return f"{base}/v1/chat/completions"
 
     @staticmethod
-    def _message_payload(message) -> dict[str, Any]:
-        payload = {
+    def _message_payload(message: ChatMessage) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "role": message.role,
-            "content": message.content,
         }
+        if message.role == "assistant" and message.tool_calls:
+            if message.content:
+                payload["content"] = message.content
+        else:
+            payload["content"] = message.content
         if message.name:
             payload["name"] = message.name
         if message.tool_call_id:
             payload["tool_call_id"] = message.tool_call_id
+        if message.tool_calls:
+            payload["tool_calls"] = [
+                {
+                    "id": call.id or f"{message.role}_tool_call_{index}",
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments_json
+                        or json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")),
+                    },
+                }
+                for index, call in enumerate(message.tool_calls)
+            ]
         return payload
 
     @staticmethod
@@ -107,7 +126,7 @@ class OpenAIClient(LLMClient):
             )
 
         return ChatResponse(
-            text=message.get("content") or "",
+            text=OpenAIClient._message_text(message.get("content")),
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=int(usage_payload.get("prompt_tokens", 0) or 0),
@@ -120,3 +139,21 @@ class OpenAIClient(LLMClient):
                 ),
             ),
         )
+
+    @staticmethod
+    def _message_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+            return "".join(parts)
+        if content is None:
+            return ""
+        return str(content)

@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"code-agent/internal/safety"
 )
 
 func executeBash(ctx context.Context, root string, args map[string]any) (ToolResult, error) {
+	executor := NewExecutor(root)
+	return executor.executeBash(ctx, args)
+}
+
+func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolResult, error) {
 	command, ok := stringArg(args, "command", "cmd")
 	if !ok || command == "" {
 		return ToolResult{Name: "Bash", Error: "command is required", ExitCode: 1}, fmt.Errorf("command is required")
@@ -23,7 +29,24 @@ func executeBash(ctx context.Context, root string, args map[string]any) (ToolRes
 	}
 
 	workingDir, _ := stringArg(args, "cwd", "working_dir")
-	absDir, err := workspacePath(root, workingDir)
+	if cdTarget, ok := cdTarget(command); ok && workingDir == "" {
+		currentDir, err := e.currentWorkingDir()
+		if err != nil {
+			return ToolResult{Name: "Bash", Error: err.Error(), ExitCode: 1}, err
+		}
+		if err := e.SetWorkingDirFrom(currentDir, cdTarget); err != nil {
+			return ToolResult{Name: "Bash", Error: err.Error(), ExitCode: 1}, err
+		}
+		return ToolResult{Name: "Bash", Output: e.WorkingDir()}, nil
+	}
+
+	var absDir string
+	var err error
+	if workingDir != "" {
+		absDir, err = workspacePath(e.Root, workingDir)
+	} else {
+		absDir, err = e.currentWorkingDir()
+	}
 	if err != nil {
 		return ToolResult{Name: "Bash", Error: err.Error(), ExitCode: 1}, err
 	}
@@ -49,7 +72,18 @@ func executeBash(ctx context.Context, root string, args map[string]any) (ToolRes
 		result.ExitCode = exitCodeFromError(err)
 		return result, err
 	}
+	if cdTarget, ok := cdTarget(command); ok {
+		_ = e.SetWorkingDirFrom(absDir, cdTarget)
+	}
 	return result, nil
+}
+
+func cdTarget(command string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) != 2 || strings.ToLower(fields[0]) != "cd" {
+		return "", false
+	}
+	return fields[1], true
 }
 
 func shellCommand(command string) (string, []string) {
