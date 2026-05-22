@@ -33,3 +33,35 @@ func TestConfigLoadMergesTokenBudget(t *testing.T) {
 		t.Fatalf("unexpected max cost budget: %.2f", cfg.MaxCostPerSession)
 	}
 }
+
+func TestConfigLoadMergesOrchestratorLifecycle(t *testing.T) {
+	projectRoot := t.TempDir()
+	agentDir := filepath.Join(projectRoot, ".agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("create agent dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(agentDir, "settings.local.json"),
+		[]byte(`{"orchestrator_auto_start":false,"orchestrator_command":"python3","orchestrator_args":["-m","orchestrator.server"],"orchestrator_startup_timeout_seconds":9}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.OrchestratorAutoStart {
+		t.Fatal("orchestrator_auto_start=false should be preserved")
+	}
+	if cfg.OrchestratorCommand != "python3" {
+		t.Fatalf("unexpected orchestrator command: %q", cfg.OrchestratorCommand)
+	}
+	if len(cfg.OrchestratorArgs) != 2 || cfg.OrchestratorArgs[0] != "-m" || cfg.OrchestratorArgs[1] != "orchestrator.server" {
+		t.Fatalf("unexpected orchestrator args: %#v", cfg.OrchestratorArgs)
+	}
+	if cfg.OrchestratorStartupTimeout != 9 {
+		t.Fatalf("unexpected startup timeout: %d", cfg.OrchestratorStartupTimeout)
+	}
+}

@@ -34,13 +34,15 @@ type ToolResult struct {
 type ToolHandler func(context.Context, ToolCall) ToolResult
 
 type Event struct {
-	TodoUpdate  *codeagentpb.TodoUpdate
-	PlanUpdate  *codeagentpb.PlanUpdate
-	SessionMeta *codeagentpb.SessionMeta
-	AgentSpawn  *codeagentpb.AgentSpawn
+	TodoUpdate     *codeagentpb.TodoUpdate
+	PlanUpdate     *codeagentpb.PlanUpdate
+	SessionMeta    *codeagentpb.SessionMeta
+	AgentSpawn     *codeagentpb.AgentSpawn
+	AskUserRequest *codeagentpb.AskUserRequest
 }
 
 type EventHandler func(context.Context, Event)
+type AskUserHandler func(context.Context, *codeagentpb.AskUserRequest) (ToolResult, error)
 
 type Client struct {
 	target string
@@ -94,6 +96,10 @@ func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHan
 }
 
 func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHandler EventHandler, handlers ...ToolHandler) (string, error) {
+	return c.ConverseWithPrompts(ctx, input, eventHandler, nil, handlers...)
+}
+
+func (c *Client) ConverseWithPrompts(ctx context.Context, input string, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("orchestrator client is nil")
 	}
@@ -149,6 +155,29 @@ func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHand
 		case *codeagentpb.OrchestratorMessage_AgentSpawn:
 			if eventHandler != nil {
 				eventHandler(ctx, Event{AgentSpawn: payload.AgentSpawn})
+			}
+		case *codeagentpb.OrchestratorMessage_AskUserRequest:
+			if eventHandler != nil {
+				eventHandler(ctx, Event{AskUserRequest: payload.AskUserRequest})
+			}
+			if payload.AskUserRequest == nil {
+				continue
+			}
+			if askHandler == nil {
+				return "", errors.New("ask user handler is not configured")
+			}
+			result, err := askHandler(ctx, payload.AskUserRequest)
+			if err != nil {
+				return "", fmt.Errorf("handle ask user request: %w", err)
+			}
+			if strings.TrimSpace(result.ToolName) == "" {
+				result.ToolName = "AskUser"
+			}
+			if strings.TrimSpace(result.ToolCallID) == "" {
+				result.ToolCallID = payload.AskUserRequest.GetAskUserId()
+			}
+			if err := sendToolResult(stream, result); err != nil {
+				return "", err
 			}
 		case *codeagentpb.OrchestratorMessage_ToolRequestBatch:
 			if payload.ToolRequestBatch == nil {

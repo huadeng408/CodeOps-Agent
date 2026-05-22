@@ -9,20 +9,24 @@ import (
 )
 
 type Config struct {
-	ProjectRoot         string           `json:"-"`
-	WorkingDir          string           `json:"-"`
-	Model               string           `json:"model"`
-	ModelFast           string           `json:"model_fast"`
-	ContextWindow       int              `json:"context_window"`
-	MaxTokensPerSession int              `json:"max_tokens_per_session"`
-	MaxCostPerSession   float64          `json:"max_cost_per_session"`
-	OrchestratorAddr    string           `json:"orchestrator_addr"`
-	SessionDBPath       string           `json:"session_db_path"`
-	Permissions         PermissionConfig `json:"permissions"`
-	Hooks               []HookConfig     `json:"hooks"`
-	MCPConfig           string           `json:"mcp_config"`
-	MemoryDir           string           `json:"memory_dir"`
-	WorktreeBaseRef     string           `json:"worktree_base_ref"`
+	ProjectRoot                string           `json:"-"`
+	WorkingDir                 string           `json:"-"`
+	Model                      string           `json:"model"`
+	ModelFast                  string           `json:"model_fast"`
+	ContextWindow              int              `json:"context_window"`
+	MaxTokensPerSession        int              `json:"max_tokens_per_session"`
+	MaxCostPerSession          float64          `json:"max_cost_per_session"`
+	OrchestratorAddr           string           `json:"orchestrator_addr"`
+	OrchestratorAutoStart      bool             `json:"orchestrator_auto_start"`
+	OrchestratorCommand        string           `json:"orchestrator_command"`
+	OrchestratorArgs           []string         `json:"orchestrator_args"`
+	OrchestratorStartupTimeout int              `json:"orchestrator_startup_timeout_seconds"`
+	SessionDBPath              string           `json:"session_db_path"`
+	Permissions                PermissionConfig `json:"permissions"`
+	Hooks                      []HookConfig     `json:"hooks"`
+	MCPConfig                  string           `json:"mcp_config"`
+	MemoryDir                  string           `json:"memory_dir"`
+	WorktreeBaseRef            string           `json:"worktree_base_ref"`
 }
 
 type PermissionConfig struct {
@@ -50,18 +54,22 @@ func Default(projectRoot string) Config {
 	}
 
 	return Config{
-		ProjectRoot:         projectRoot,
-		WorkingDir:          workingDir,
-		Model:               "gpt-4o",
-		ModelFast:           "gpt-4o-mini",
-		ContextWindow:       128000,
-		MaxTokensPerSession: 1_000_000,
-		MaxCostPerSession:   5.0,
-		OrchestratorAddr:    "127.0.0.1:50051",
-		SessionDBPath:       filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
-		MCPConfig:           ".mcp.json",
-		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
-		WorktreeBaseRef:     "fresh",
+		ProjectRoot:                projectRoot,
+		WorkingDir:                 workingDir,
+		Model:                      "gpt-4o",
+		ModelFast:                  "gpt-4o-mini",
+		ContextWindow:              128000,
+		MaxTokensPerSession:        1_000_000,
+		MaxCostPerSession:          5.0,
+		OrchestratorAddr:           "127.0.0.1:50051",
+		OrchestratorAutoStart:      true,
+		OrchestratorCommand:        "python",
+		OrchestratorArgs:           []string{"-m", "orchestrator.server"},
+		OrchestratorStartupTimeout: 5,
+		SessionDBPath:              filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
+		MCPConfig:                  ".mcp.json",
+		MemoryDir:                  filepath.Join(projectRoot, ".agent", "memory"),
+		WorktreeBaseRef:            "fresh",
 	}
 }
 
@@ -102,16 +110,21 @@ func applyJSONPatch(path string, cfg *Config) error {
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
 
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+
 	var patch Config
 	if err := json.Unmarshal(data, &patch); err != nil {
 		return fmt.Errorf("parse config %s: %w", path, err)
 	}
 
-	mergeConfig(cfg, patch)
+	mergeConfig(cfg, patch, raw)
 	return nil
 }
 
-func mergeConfig(dst *Config, patch Config) {
+func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	if patch.Model != "" {
 		dst.Model = patch.Model
 	}
@@ -129,6 +142,18 @@ func mergeConfig(dst *Config, patch Config) {
 	}
 	if patch.OrchestratorAddr != "" {
 		dst.OrchestratorAddr = patch.OrchestratorAddr
+	}
+	if _, ok := raw["orchestrator_auto_start"]; ok {
+		dst.OrchestratorAutoStart = patch.OrchestratorAutoStart
+	}
+	if patch.OrchestratorCommand != "" {
+		dst.OrchestratorCommand = patch.OrchestratorCommand
+	}
+	if len(patch.OrchestratorArgs) > 0 {
+		dst.OrchestratorArgs = patch.OrchestratorArgs
+	}
+	if patch.OrchestratorStartupTimeout != 0 {
+		dst.OrchestratorStartupTimeout = patch.OrchestratorStartupTimeout
 	}
 	if patch.SessionDBPath != "" {
 		dst.SessionDBPath = patch.SessionDBPath

@@ -15,8 +15,9 @@ class MainGraph:
     def run(self, state: GraphState | None = None) -> GraphState:
         state = state or GraphState()
         state = route_node(state)
-        state = execute_node(state)
-        state = verify_node(state)
+        if state.next_node == "execute":
+            state = execute_node(state)
+            state = verify_node(state)
         state = respond_node(state)
         return state
 

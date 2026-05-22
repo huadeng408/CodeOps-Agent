@@ -189,6 +189,34 @@ class BudgetToolFakeLLM:
         )
 
 
+class BatchFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="read-1",
+                        name="Read",
+                        arguments={"path": "orchestrator/server.py"},
+                        arguments_json='{"path":"orchestrator/server.py"}',
+                    ),
+                    ToolCall(
+                        id="glob-1",
+                        name="Glob",
+                        arguments={"pattern": "orchestrator/**/*.py"},
+                        arguments_json='{"pattern":"orchestrator/**/*.py"}',
+                    ),
+                ]
+            )
+        return ChatResponse(text="batch handled", usage=Usage(input_tokens=20, output_tokens=10))
+
+
 class FailingToolFakeLLM:
     model = "gpt-4o"
 
@@ -290,6 +318,55 @@ def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
             tool_messages = [message for message in history if message.role == "tool"]
             assert assistant_messages[0].tool_calls[0].name == "Glob"
             assert tool_messages[0].content == "orchestrator/server.py"
+    finally:
+        server.stop(grace=0)
+
+
+def test_tool_request_batch_roundtrip(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = BatchFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="batch read ops")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="orchestrator/server.py",
+                            tool_call_id="glob-1",
+                        )
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Read",
+                            output="server source",
+                            tool_call_id="read-1",
+                        )
+                    ),
+                ]
+            )
+            responses = list(stub.Converse(messages))
+            assert responses[0].tool_request_batch.parallel is True
+            assert len(responses[0].tool_request_batch.requests) == 2
+            assert responses[0].tool_request_batch.requests[0].tool_call_id == "read-1"
+            assert responses[0].tool_request_batch.requests[1].tool_call_id == "glob-1"
+            assert responses[1].text.text == "batch handled"
+            assert responses[-1].done.success
+            history = app.llm.requests[1].messages
+            tool_messages = [message for message in history if message.role == "tool"]
+            assert [message.tool_call_id for message in tool_messages] == ["read-1", "glob-1"]
     finally:
         server.stop(grace=0)
 
@@ -594,6 +671,10 @@ def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
             assert responses[1].text.text == "spawn requested"
             assert responses[2].session_meta.cost > 0
             assert responses[-1].done.success
+            tool_messages = [message for message in app.llm.requests[1].messages if message.role == "tool"]
+            assert len(tool_messages) == 1
+            assert "review completed: Review current changes" in tool_messages[0].content
+            assert "existing files" in tool_messages[0].content
     finally:
         server.stop(grace=0)
 

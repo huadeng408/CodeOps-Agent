@@ -5,16 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"code-agent/internal/cli"
 	"code-agent/internal/config"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := context.Background()
 
 	cfg, err := config.Load("")
 	if err != nil {

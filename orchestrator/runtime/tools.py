@@ -271,6 +271,37 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="AskUser",
+                description="Ask the user a question when human input is needed.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "Question to present to the user.",
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "preview": {"type": "string"},
+                                },
+                                "required": ["label"],
+                            },
+                        },
+                        "multi_select": {
+                            "type": "boolean",
+                            "description": "Whether more than one option may be selected.",
+                        },
+                    },
+                    "required": ["question"],
+                },
+            ),
+            ToolSpec(
                 name="Git",
                 description="Run a safe git subcommand.",
                 permission=orchestrator_pb2.ASK_SESSION,

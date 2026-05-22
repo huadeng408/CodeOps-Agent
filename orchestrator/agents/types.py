@@ -7,6 +7,10 @@ from typing import Any
 
 class AgentKind(str, Enum):
     DEEP = "deep"
+    EXPLORE = "explore"
+    GENERAL = "general"
+    PLAN = "plan"
+    BACKGROUND = "background"
     REVIEW = "review"
     SECURITY = "security"
 
@@ -21,5 +25,6 @@ class AgentTask:
 @dataclass(slots=True)
 class AgentResult:
     summary: str
+    status: str = "completed"
     artifacts: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)

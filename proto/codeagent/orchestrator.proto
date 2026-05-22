@@ -35,6 +35,7 @@ message OrchestratorMessage {
     SessionMeta session_meta = 6;
     Done done = 7;
     ToolRequestBatch tool_request_batch = 8;
+    AskUserRequest ask_user_request = 9;
   }
 }
 
@@ -118,6 +119,7 @@ message AskUserRequest {
   string question = 1;
   repeated Option options = 2;
   bool multi_select = 3;
+  string ask_user_id = 4;
 }
 
 message Option {

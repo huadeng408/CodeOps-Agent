@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"code-agent/internal/config"
 	"code-agent/internal/hooks"
@@ -36,27 +41,32 @@ type Options struct {
 }
 
 type App struct {
-	cfg          config.Config
-	input        *InputBuffer
-	renderer     *StreamRenderer
-	status       *StatusLine
-	metrics      *metrics.Collector
-	session      *session.Manager
-	memory       *memory.Manager
-	todos        *todo.Manager
-	permissions  *permission.Controller
-	orchestrator *orchestrator.Client
-	hooks        *hooks.Engine
-	executor     *tools.Executor
-	safety       *safety.Analyzer
-	mcp          *mcp.Manager
-	worktree     *worktree.Manager
-	undo         *undo.Manager
-	recovery     *recovery.Engine
-	skills       *skills.Manager
-	prompts      *prompts.Builder
-	planMode     bool
-	instructions []config.InstructionSource
+	cfg            config.Config
+	input          *InputBuffer
+	renderer       *StreamRenderer
+	status         *StatusLine
+	metrics        *metrics.Collector
+	session        *session.Manager
+	memory         *memory.Manager
+	todos          *todo.Manager
+	permissions    *permission.Controller
+	orchestrator   *orchestrator.Client
+	orchestratorPM *orchestrator.ProcessManager
+	hooks          *hooks.Engine
+	executor       *tools.Executor
+	safety         *safety.Analyzer
+	mcp            *mcp.Manager
+	worktree       *worktree.Manager
+	undo           *undo.Manager
+	recovery       *recovery.Engine
+	skills         *skills.Manager
+	prompts        *prompts.Builder
+	planMode       bool
+	instructions   []config.InstructionSource
+	interruptMu    sync.Mutex
+	currentCancel  context.CancelFunc
+	interrupts     int
+	lastInterrupt  time.Time
 }
 
 func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writer) *App {
@@ -76,7 +86,19 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		levels[tool] = level
 	}
 
-	orchestratorClient, _ := orchestrator.NewClient(cfg.OrchestratorAddr)
+	orchestratorManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
+		Address:        cfg.OrchestratorAddr,
+		AutoStart:      cfg.OrchestratorAutoStart,
+		Command:        cfg.OrchestratorCommand,
+		Args:           cfg.OrchestratorArgs,
+		ProjectRoot:    cfg.ProjectRoot,
+		WorkingDir:     cfg.WorkingDir,
+		MemoryDir:      cfg.MemoryDir,
+		MaxTokens:      cfg.MaxTokensPerSession,
+		MaxCost:        cfg.MaxCostPerSession,
+		StartupTimeout: time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
+	})
+	orchestratorClient, _ := orchestratorManager.Client(context.Background())
 	mcpManager := mcp.NewManager()
 	_ = mcpManager.LoadConfigFile(resolveConfigPath(cfg.ProjectRoot, cfg.MCPConfig))
 	_ = mcpManager.StartAll(context.Background())
@@ -97,65 +119,158 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	executor.SetMCPManager(mcpManager)
 
 	return &App{
-		cfg:          cfg,
-		input:        NewInputBuffer(stdin, stdout),
-		renderer:     NewStreamRenderer(stdout),
-		status:       NewStatusLine(),
-		metrics:      metrics.NewCollector(),
-		session:      session.NewManager(session.NewSQLiteStore(cfg.SessionDBPath)),
-		memory:       memory.NewManager(cfg.MemoryDir),
-		todos:        todo.NewManager(),
-		permissions:  permission.NewControllerWithRules(levels, allowlist, denylist),
-		orchestrator: orchestratorClient,
-		hooks:        hookEngine,
-		executor:     executor,
-		safety:       safety.NewAnalyzer(),
-		mcp:          mcpManager,
-		worktree:     worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
-		undo:         undo.NewManager(),
-		recovery:     recovery.NewEngine(),
-		skills:       skills.NewManager(),
-		prompts:      prompts.NewBuilder(),
-		instructions: instructions,
+		cfg:            cfg,
+		input:          NewInputBuffer(stdin, stdout),
+		renderer:       NewStreamRenderer(stdout),
+		status:         NewStatusLine(),
+		metrics:        metrics.NewCollector(),
+		session:        session.NewManager(session.NewSQLiteStore(cfg.SessionDBPath)),
+		memory:         memory.NewManager(cfg.MemoryDir),
+		todos:          todo.NewManager(),
+		permissions:    permission.NewControllerWithRules(levels, allowlist, denylist),
+		orchestrator:   orchestratorClient,
+		orchestratorPM: orchestratorManager,
+		hooks:          hookEngine,
+		executor:       executor,
+		safety:         safety.NewAnalyzer(),
+		mcp:            mcpManager,
+		worktree:       worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
+		undo:           undo.NewManager(),
+		recovery:       recovery.NewEngine(),
+		skills:         skills.NewManager(),
+		prompts:        prompts.NewBuilder(),
+		instructions:   instructions,
 	}
 }
 
 func (a *App) Run(ctx context.Context) error {
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	if a.orchestratorPM != nil {
+		defer a.orchestratorPM.Stop()
+	}
+	cleanupSignals := a.setupSignalHandling(stop)
+	defer cleanupSignals()
+
 	a.session.NewSession(a.cfg.WorkingDir)
 	a.session.SetMode("chat")
 	a.renderBootstrap()
 
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := runCtx.Err(); err != nil {
 			return err
 		}
 
-		line, err := a.input.ReadLine(ctx)
+		turnCtx, turnCancel := context.WithCancel(runCtx)
+		a.setCurrentCancel(turnCancel)
+		line, err := a.input.ReadLine(turnCtx)
 		if err != nil {
+			a.clearCurrentCancel()
+			turnCancel()
 			if errors.Is(err, io.EOF) {
 				return nil
+			}
+			if errors.Is(err, context.Canceled) && runCtx.Err() == nil {
+				continue
+			}
+			if runCtx.Err() != nil {
+				return runCtx.Err()
 			}
 			return err
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
+			a.clearCurrentCancel()
+			turnCancel()
 			continue
 		}
 
 		if strings.HasPrefix(line, "/") {
-			if handled := a.handleSlashCommand(ctx, line); handled {
+			if handled := a.handleSlashCommand(turnCtx, line); handled {
+				a.clearCurrentCancel()
+				turnCancel()
 				continue
 			}
 		}
 
 		a.metrics.BeginTurn()
 		a.session.Append(session.RoleUser, line)
-		reply := a.handleUserInput(ctx, line)
-		a.session.Append(session.RoleAssistant, reply)
+		reply := a.handleUserInput(turnCtx, line)
 		a.metrics.EndTurn()
+		if errors.Is(turnCtx.Err(), context.Canceled) && runCtx.Err() == nil {
+			a.clearCurrentCancel()
+			turnCancel()
+			continue
+		}
+		a.clearCurrentCancel()
+		turnCancel()
+		a.session.Append(session.RoleAssistant, reply)
 		a.renderer.PrintLine(reply)
 		a.renderer.PrintLine(a.status.Format(a.metrics.Snapshot()))
 	}
+}
+
+func (a *App) setupSignalHandling(stop context.CancelFunc) func() {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case sig := <-sigCh:
+				if sig == syscall.SIGTERM {
+					stop()
+					return
+				}
+				if a.handleInterrupt(time.Now(), stop) {
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
+}
+
+func (a *App) setCurrentCancel(cancel context.CancelFunc) {
+	a.interruptMu.Lock()
+	defer a.interruptMu.Unlock()
+	a.currentCancel = cancel
+}
+
+func (a *App) clearCurrentCancel() {
+	a.interruptMu.Lock()
+	defer a.interruptMu.Unlock()
+	a.currentCancel = nil
+}
+
+func (a *App) handleInterrupt(now time.Time, stop context.CancelFunc) bool {
+	a.interruptMu.Lock()
+	if a.lastInterrupt.IsZero() || now.Sub(a.lastInterrupt) > time.Second {
+		a.interrupts = 0
+	}
+	a.interrupts++
+	a.lastInterrupt = now
+	interrupts := a.interrupts
+	cancel := a.currentCancel
+	a.interruptMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if interrupts >= 3 {
+		stop()
+		return true
+	}
+	if a.renderer != nil {
+		a.renderer.PrintLine("")
+		a.renderer.PrintLine("[Interrupted. You can give new instructions.]")
+	}
+	return false
 }
 
 func (a *App) renderBootstrap() {
@@ -166,6 +281,7 @@ func (a *App) renderBootstrap() {
 		"working dir: " + a.cfg.WorkingDir,
 		"model: " + a.cfg.Model,
 		"orchestrator: " + a.cfg.OrchestratorAddr,
+		"orchestrator owned: " + fmt.Sprint(a.orchestratorPM != nil && a.orchestratorPM.Owned()),
 		"session db: " + a.cfg.SessionDBPath,
 		"instructions: " + fmt.Sprint(len(a.instructions)),
 		"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
@@ -178,7 +294,7 @@ func (a *App) renderBootstrap() {
 		a.renderer.PrintBlock("loaded AGENT.md", lines)
 	}
 	a.renderer.PrintBlock("available commands", []string{
-		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume",
+		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review",
 	})
 	a.renderer.Separator()
 }
@@ -193,9 +309,12 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 	}
 
 	if a.orchestrator != nil {
-		reply, err := a.orchestrator.ConverseWithEvents(ctx, input, a.handleOrchestratorEvent, a.handleToolCall)
+		reply, err := a.orchestrator.ConverseWithPrompts(ctx, input, a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall)
 		if err == nil && strings.TrimSpace(reply) != "" {
 			return reply
+		}
+		if err != nil {
+			return "[orchestrator error] " + err.Error()
 		}
 	}
 
@@ -475,6 +594,10 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/diff show the current session diff summary",
 			"/worktree manage worktree state (list/create/switch/cleanup)",
 			"/resume [session-id] resume a saved session",
+			"/skills list available skills",
+			"/init [instructions] run the init skill",
+			"/review [focus] run the review skill",
+			"/security-review [focus] run the security review skill",
 		})
 	case "/plan":
 		a.planMode = !a.planMode
@@ -505,6 +628,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"max tokens per session: " + fmt.Sprint(a.cfg.MaxTokensPerSession),
 			"max cost per session: $" + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession),
 			"orchestrator: " + a.cfg.OrchestratorAddr,
+			"orchestrator auto-start: " + fmt.Sprint(a.cfg.OrchestratorAutoStart),
+			"orchestrator command: " + strings.Join(append([]string{a.cfg.OrchestratorCommand}, a.cfg.OrchestratorArgs...), " "),
 			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
@@ -578,10 +703,80 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.restoreTodos(resumed)
 		a.restorePlan(resumed)
 		a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
+	case "/skills":
+		a.renderer.PrintBlock("skills", a.skillLines())
+	case "/init":
+		a.runSkillCommand(ctx, "/init", "init", slashArgs(raw, 1))
+	case "/review":
+		a.runSkillCommand(ctx, "/review", "review", slashArgs(raw, 1))
+	case "/security-review":
+		a.runSkillCommand(ctx, "/security-review", "security", slashArgs(raw, 1))
 	default:
 		return false
 	}
 	return true
+}
+
+func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
+	if a.skills == nil {
+		a.renderer.PrintLine("skills are not available")
+		return
+	}
+	skill, ok := a.skills.Get(name)
+	if !ok {
+		a.renderer.PrintLine("skill not found: " + name)
+		return
+	}
+	input := buildSkillInput(skill, args)
+	a.metrics.BeginTurn()
+	a.session.Append(session.RoleUser, strings.TrimSpace(command+" "+strings.TrimSpace(args)))
+	reply := a.handleUserInput(ctx, input)
+	a.metrics.EndTurn()
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	a.session.Append(session.RoleAssistant, reply)
+	a.renderer.PrintLine(reply)
+	a.renderer.PrintLine(a.status.Format(a.metrics.Snapshot()))
+}
+
+func buildSkillInput(skill skills.Skill, args string) string {
+	lines := []string{
+		"Run the " + skill.Name + " skill.",
+		"",
+		"Skill instructions:",
+		strings.TrimSpace(skill.Prompt),
+	}
+	if len(skill.Tools) > 0 {
+		lines = append(lines, "", "Preferred tools: "+strings.Join(skill.Tools, ", "))
+	}
+	if strings.TrimSpace(args) != "" {
+		lines = append(lines, "", "User focus:", strings.TrimSpace(args))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func (a *App) skillLines() []string {
+	if a.skills == nil {
+		return []string{"skills are not available"}
+	}
+	registered := a.skills.List()
+	if len(registered) == 0 {
+		return []string{"no skills registered"}
+	}
+	lines := make([]string, 0, len(registered))
+	for _, skill := range registered {
+		command := "/" + skill.Name
+		if skill.Name == "security" {
+			command = "/security-review"
+		}
+		tools := "none"
+		if len(skill.Tools) > 0 {
+			tools = strings.Join(skill.Tools, ", ")
+		}
+		lines = append(lines, fmt.Sprintf("%s | %s | tools: %s", command, skill.Description, tools))
+	}
+	return lines
 }
 
 func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {
