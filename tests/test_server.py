@@ -33,6 +33,17 @@ class FakeLLM:
         return ChatResponse(text="found python files")
 
 
+class HistoryFakeLLM:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(text="history visible")
+
+
 class TodoFakeLLM:
     model = "fake"
 
@@ -318,6 +329,59 @@ def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
             tool_messages = [message for message in history if message.role == "tool"]
             assert assistant_messages[0].tool_calls[0].name == "Glob"
             assert tool_messages[0].content == "orchestrator/server.py"
+    finally:
+        server.stop(grace=0)
+
+
+def test_persisted_harness_history_is_loaded_into_llm_prompt(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = HistoryFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(
+                                    text="continue",
+                                    session_id="session-1",
+                                    history=[
+                                        orchestrator_pb2.ConversationMessage(
+                                            role="user",
+                                            content="previous request",
+                                            created_at="2026-06-02T00:00:00Z",
+                                        ),
+                                        orchestrator_pb2.ConversationMessage(
+                                            role="assistant",
+                                            content="previous answer",
+                                            created_at="2026-06-02T00:00:01Z",
+                                        ),
+                                    ],
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+            assert responses[0].text.text == "history visible"
+            history = app.llm.requests[0].messages
+            assert history[1].role == "user"
+            assert history[1].content == "previous request"
+            assert history[2].role == "assistant"
+            assert history[2].content == "previous answer"
+            assert history[-2].content == "continue"
+            assert history[-1].content == "history visible"
+            assert "Persisted history messages: 2" in history[0].content
     finally:
         server.stop(grace=0)
 

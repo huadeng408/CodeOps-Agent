@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from codeagent import orchestrator_pb2
 from orchestrator.agents.deep_agent import DeepAgentManager
-from orchestrator.context import BudgetStatus, TokenBudget, load_git_diff_context
+from orchestrator.context import BudgetStatus, Compactor, TokenBudget, load_git_diff_context
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient, ToolCall
 from orchestrator.memory.manager import Memory, MemoryManager
@@ -42,21 +42,24 @@ class ConversationRunner:
     injection_detector: InjectionDetector | None = None
     recovery: ErrorRecoveryEngine | None = None
     max_tool_rounds: int = 6
+    compactor: Compactor | None = None
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
             self.token_budget = TokenBudget()
+        if self.compactor is None:
+            self.compactor = Compactor(max_chars=32_000, max_messages=24)
         if self.injection_detector is None:
             self.injection_detector = InjectionDetector()
         if self.recovery is None:
             self.recovery = ErrorRecoveryEngine()
 
-    def run(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+    def run(self, user_text: str, request_iterator, session_id: str = "", history: list[dict[str, str]] | None = None) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         if self.llm is None:
             yield from self._fallback_conversation(user_text, request_iterator)
             return
 
-        messages = self._initial_messages(user_text, turn=1)
+        messages = self._initial_messages(user_text, turn=1, session_id=session_id, history=history or [])
         total_tokens_in = 0
         total_tokens_out = 0
         total_cost = 0.0
@@ -68,7 +71,7 @@ class ConversationRunner:
                 yield self._done(False)
                 return
 
-            response = self._chat(messages)
+            response = self._chat(self._compact_messages(messages))
             total_tokens_in += response.usage.input_tokens
             total_tokens_out += response.usage.output_tokens
             response_cost = self._estimate_cost(
@@ -304,7 +307,8 @@ class ConversationRunner:
         yield self._session_meta(1, 0, 0, 0.0)
         yield self._done(True)
 
-    def _initial_messages(self, user_text: str, turn: int) -> list[ChatMessage]:
+    def _initial_messages(self, user_text: str, turn: int, session_id: str = "", history: list[dict[str, str]] | None = None) -> list[ChatMessage]:
+        history = history or []
         memories = self.memory_manager.load_relevant(user_text)
         system_prompt = build_system_prompt(
             {
@@ -317,16 +321,18 @@ class ConversationRunner:
                 "tools": self._tools_context(),
                 "project": self._project_context(),
                 "memory": self._memory_context(memories) or "_No relevant memories found._",
-                "session": self._session_context(user_text, turn),
+                "session": self._session_context(user_text, turn, session_id=session_id, history=history),
             }
         )
-        return [
+        messages = [
             ChatMessage(
                 role="system",
                 content=system_prompt,
-            ),
-            ChatMessage(role="user", content=user_text),
+            )
         ]
+        messages.extend(self._history_messages(history))
+        messages.append(ChatMessage(role="user", content=user_text))
+        return messages
 
     def _chat(self, messages: list[ChatMessage]) -> ChatResponse:
         return asyncio.run(
@@ -366,7 +372,8 @@ class ConversationRunner:
             lines.append(f"- {tool.name} [{permission}]: {tool.description}")
         return "\n".join(lines) if lines else "_No tools registered._"
 
-    def _session_context(self, user_text: str, turn: int) -> str:
+    def _session_context(self, user_text: str, turn: int, session_id: str = "", history: list[dict[str, str]] | None = None) -> str:
+        history = history or []
         lines = [
             f"- Turn: {turn}",
             f"- Graph: {self.graph.name}",
@@ -375,10 +382,27 @@ class ConversationRunner:
             f"- Current request: {user_text.strip()}",
             f"- Token budget: {self._budget_summary()}",
         ]
+        if session_id.strip():
+            lines.append(f"- Session ID: {session_id.strip()}")
+        if history:
+            lines.append(f"- Persisted history messages: {len(history)} loaded from harness SQLite session store")
         git_context = load_git_diff_context(self.project_root, self.working_dir)
         if git_context:
             lines.extend(["", git_context])
         return "\n".join(lines)
+
+    @staticmethod
+    def _history_messages(history: list[dict[str, str]]) -> list[ChatMessage]:
+        messages: list[ChatMessage] = []
+        for item in history[-40:]:
+            role = str(item.get("role", "")).strip().lower()
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if role not in {"user", "assistant", "system", "tool"}:
+                role = "system"
+            messages.append(ChatMessage(role=role, content=content))
+        return messages
 
     def _session_meta(
         self,
@@ -661,6 +685,26 @@ class ConversationRunner:
             f"{self.token_budget.max_tokens}; used_cost=${self.token_budget.used_cost:.6f}/"
             f"${self.token_budget.max_cost:.6f}"
         )
+
+    def _compact_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        if self.compactor is None or not self.compactor.should_compact(messages):
+            return messages
+        if len(messages) <= 2:
+            return messages
+        system = messages[0]
+        compactable = messages[1:]
+        summary = self.compactor.compact_history([self._message_for_compaction(message) for message in compactable])
+        recent_count = min(max(1, self.compactor.max_messages // 2), len(compactable))
+        recent = compactable[-recent_count:]
+        return [system, ChatMessage(role="system", content=summary), *recent]
+
+    @staticmethod
+    def _message_for_compaction(message: ChatMessage) -> dict[str, object]:
+        return {
+            "role": message.role,
+            "content": message.content,
+            "tool_calls": list(message.tool_calls),
+        }
 
     def _run_sub_agent(self, spawn: dict[str, object]) -> dict[str, object]:
         context_payload = json.loads(str(spawn.get("context_json") or "{}"))

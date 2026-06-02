@@ -74,10 +74,22 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
 
     def Converse(self, request_iterator, context):
         user_text = ""
+        session_id = ""
+        history: list[dict[str, str]] = []
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "user_input":
-                user_text = message.user_input.text
+                user_input = message.user_input
+                user_text = user_input.text
+                session_id = user_input.session_id
+                history = [
+                    {
+                        "role": item.role,
+                        "content": item.content,
+                        "created_at": item.created_at,
+                    }
+                    for item in user_input.history
+                ]
                 break
 
         runner = ConversationRunner(
@@ -91,7 +103,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             working_dir=self.app.working_dir,
             token_budget=self.app.token_budget,
         )
-        yield from runner.run(user_text, request_iterator)
+        yield from runner.run(user_text, request_iterator, session_id=session_id, history=history)
 
 
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:

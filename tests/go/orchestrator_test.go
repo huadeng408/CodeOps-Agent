@@ -71,6 +71,39 @@ func (s *testOrchestratorServer) Converse(stream codeagentpb.Orchestrator_Conver
 	})
 }
 
+type historyOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+	sessionID string
+	history   []*codeagentpb.ConversationMessage
+}
+
+func (s *historyOrchestratorServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
+	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
+}
+
+func (s *historyOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	msg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if input := msg.GetUserInput(); input != nil {
+		s.sessionID = input.GetSessionId()
+		s.history = input.GetHistory()
+	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Text{
+			Text: &codeagentpb.TextChunk{Text: "history received"},
+		},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{
+			Done: &codeagentpb.Done{Success: true},
+		},
+	})
+}
+
 type batchOrchestratorServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
 }
@@ -224,6 +257,43 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	}
 }
 
+func TestOrchestratorClientSendsSessionHistory(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	capturing := &historyOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capturing)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	reply, err := client.ConverseWithHistory(context.Background(), "next", "session-1", []orchestrator.ConversationMessage{
+		{Role: "user", Content: "previous request", CreatedAt: "2026-06-02T00:00:00Z"},
+		{Role: "assistant", Content: "previous answer", CreatedAt: "2026-06-02T00:00:01Z"},
+	})
+	if err != nil {
+		t.Fatalf("converse with history failed: %v", err)
+	}
+	if reply != "history received" {
+		t.Fatalf("unexpected reply: %q", reply)
+	}
+	if capturing.sessionID != "session-1" || len(capturing.history) != 2 {
+		t.Fatalf("history not sent: session=%q history=%#v", capturing.sessionID, capturing.history)
+	}
+	if capturing.history[0].Role != "user" || capturing.history[0].Content != "previous request" {
+		t.Fatalf("unexpected history payload: %#v", capturing.history)
+	}
+}
 func TestOrchestratorClientHandlesToolRequestBatch(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

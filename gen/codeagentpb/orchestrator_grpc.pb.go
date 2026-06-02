@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.20.3
-// source: codeagent/orchestrator.proto
+// source: proto/codeagent/orchestrator.proto
 
 package codeagentpb
 
@@ -150,5 +150,5 @@ var Orchestrator_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "codeagent/orchestrator.proto",
+	Metadata: "proto/codeagent/orchestrator.proto",
 }

@@ -205,6 +205,76 @@ func TestWorktreeManagerRejectsUnsafeNames(t *testing.T) {
 	}
 }
 
+func TestWorktreeManagerRefusesDirtyCleanupWithoutDiscard(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+
+	manager := worktree.NewManager(repo, "HEAD")
+	tree, err := manager.CreateContext(context.Background(), "dirty")
+	if err != nil {
+		t.Fatalf("create git worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tree.Path, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = manager.CleanupContext(context.Background(), "dirty")
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("expected dirty cleanup refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(tree.Path); statErr != nil {
+		t.Fatalf("dirty worktree should remain, stat err: %v", statErr)
+	}
+
+	if err := manager.CleanupContextDiscard(context.Background(), "dirty"); err != nil {
+		t.Fatalf("discard cleanup dirty worktree: %v", err)
+	}
+	if _, statErr := os.Stat(tree.Path); !os.IsNotExist(statErr) {
+		t.Fatalf("expected discard cleanup to remove worktree, stat err: %v", statErr)
+	}
+}
+
+func TestWorktreeManagerRefusesUnmergedCommitCleanupWithoutDiscard(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+
+	manager := worktree.NewManager(repo, "HEAD")
+	tree, err := manager.CreateContext(context.Background(), "commit")
+	if err != nil {
+		t.Fatalf("create git worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tree.Path, "commit.txt"), []byte("commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tree.Path, "add", "commit.txt")
+	runGit(t, tree.Path, "commit", "-m", "worktree commit")
+
+	err = manager.CleanupContext(context.Background(), "commit")
+	if err == nil || !strings.Contains(err.Error(), "commits not merged") {
+		t.Fatalf("expected unmerged commit cleanup refusal, got %v", err)
+	}
+
+	if err := manager.CleanupContextDiscard(context.Background(), "commit"); err != nil {
+		t.Fatalf("discard cleanup unmerged worktree: %v", err)
+	}
+	if branches := runGit(t, repo, "branch", "--list", "agent/commit"); strings.TrimSpace(branches) != "" {
+		t.Fatalf("expected discarded branch removed, got: %s", branches)
+	}
+}
+
+func seedGitRepo(t *testing.T, repo string) {
+	t.Helper()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test User")
+	file := filepath.Join(repo, "tracked.txt")
+	if err := os.WriteFile(file, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatalf("seed tracked file: %v", err)
+	}
+	runGit(t, repo, "add", "tracked.txt")
+	runGit(t, repo, "commit", "-m", "init")
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 

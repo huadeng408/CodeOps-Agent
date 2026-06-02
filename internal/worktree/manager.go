@@ -98,7 +98,19 @@ func (m *Manager) Cleanup(name string) error {
 	return m.CleanupContext(context.Background(), name)
 }
 
+func (m *Manager) CleanupDiscard(name string) error {
+	return m.CleanupContextDiscard(context.Background(), name)
+}
+
 func (m *Manager) CleanupContext(ctx context.Context, name string) error {
+	return m.cleanupContext(ctx, name, false)
+}
+
+func (m *Manager) CleanupContextDiscard(ctx context.Context, name string) error {
+	return m.cleanupContext(ctx, name, true)
+}
+
+func (m *Manager) cleanupContext(ctx context.Context, name string, discard bool) error {
 	name, err := normalizeName(name)
 	if err != nil {
 		return err
@@ -110,7 +122,7 @@ func (m *Manager) CleanupContext(ctx context.Context, name string) error {
 	if !ok {
 		return errors.New("worktree not found")
 	}
-	if err := m.removeGitWorktree(ctx, removed); err != nil {
+	if err := m.removeGitWorktree(ctx, removed, discard); err != nil {
 		return err
 	}
 	delete(m.trees, name)
@@ -199,7 +211,7 @@ func (m *Manager) resolveBaseRef(ctx context.Context) string {
 	return "HEAD"
 }
 
-func (m *Manager) removeGitWorktree(ctx context.Context, tree Worktree) error {
+func (m *Manager) removeGitWorktree(ctx context.Context, tree Worktree, discard bool) error {
 	if !isGitRepository(ctx, m.root) {
 		return nil
 	}
@@ -207,23 +219,70 @@ func (m *Manager) removeGitWorktree(ctx context.Context, tree Worktree) error {
 		return nil
 	}
 	if _, err := os.Stat(tree.Path); errors.Is(err, os.ErrNotExist) {
-		return m.deleteGitBranch(ctx, tree.Name)
+		return m.deleteGitBranch(ctx, tree.Name, discard)
 	}
-	if _, err := gitOutput(ctx, m.root, "worktree", "remove", "--force", tree.Path); err != nil {
+	if err := m.ensureRemovable(ctx, tree, discard); err != nil {
 		return err
 	}
-	if err := m.deleteGitBranch(ctx, tree.Name); err != nil {
+	args := []string{"worktree", "remove"}
+	if discard {
+		args = append(args, "--force")
+	}
+	args = append(args, tree.Path)
+	if _, err := gitOutput(ctx, m.root, args...); err != nil {
+		return err
+	}
+	if err := m.deleteGitBranch(ctx, tree.Name, discard); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *Manager) deleteGitBranch(ctx context.Context, name string) error {
+func (m *Manager) ensureRemovable(ctx context.Context, tree Worktree, discard bool) error {
+	if discard {
+		return nil
+	}
+	status, err := gitOutput(ctx, tree.Path, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("worktree %s has uncommitted changes; use discard cleanup to remove it", tree.Name)
+	}
+	branch := "agent/" + tree.Name
+	baseRef := strings.TrimSpace(tree.BaseRef)
+	if baseRef == "" {
+		baseRef = m.baseRef
+	}
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", branch); err != nil {
+		return nil
+	}
+	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", baseRef+"^{commit}"); err != nil {
+		baseRef = "HEAD"
+	}
+	unmerged, err := gitOutput(ctx, m.root, "log", "--oneline", baseRef+".."+branch)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(unmerged) != "" {
+		return fmt.Errorf("worktree %s has commits not merged into %s; use discard cleanup to remove it", tree.Name, baseRef)
+	}
+	return nil
+}
+
+func (m *Manager) deleteGitBranch(ctx context.Context, name string, discard bool) error {
 	branch := "agent/" + name
 	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", branch); err != nil {
 		return nil
 	}
-	if _, err := gitOutput(ctx, m.root, "branch", "-D", branch); err != nil {
+	deleteFlag := "-d"
+	if discard {
+		deleteFlag = "-D"
+	}
+	if _, err := gitOutput(ctx, m.root, "branch", deleteFlag, branch); err != nil {
 		return err
 	}
 	return nil

@@ -41,6 +41,14 @@ message OrchestratorMessage {
 
 message UserInput {
   string text = 1;
+  string session_id = 2;
+  repeated ConversationMessage history = 3;
+}
+
+message ConversationMessage {
+  string role = 1;
+  string content = 2;
+  string created_at = 3;
 }
 
 message ToolResult {

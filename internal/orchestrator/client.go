@@ -15,6 +15,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+type ConversationMessage struct {
+	Role      string
+	Content   string
+	CreatedAt string
+}
+
 type ToolCall struct {
 	ID                 string
 	Name               string
@@ -95,11 +101,19 @@ func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHan
 	return c.ConverseWithEvents(ctx, input, nil, handlers...)
 }
 
+func (c *Client) ConverseWithHistory(ctx context.Context, input string, sessionID string, history []ConversationMessage, handlers ...ToolHandler) (string, error) {
+	return c.ConverseWithHistoryAndPrompts(ctx, input, sessionID, history, nil, nil, handlers...)
+}
+
 func (c *Client) ConverseWithEvents(ctx context.Context, input string, eventHandler EventHandler, handlers ...ToolHandler) (string, error) {
 	return c.ConverseWithPrompts(ctx, input, eventHandler, nil, handlers...)
 }
 
 func (c *Client) ConverseWithPrompts(ctx context.Context, input string, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
+	return c.ConverseWithHistoryAndPrompts(ctx, input, "", nil, eventHandler, askHandler, handlers...)
+}
+
+func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string, sessionID string, history []ConversationMessage, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("orchestrator client is nil")
 	}
@@ -112,9 +126,27 @@ func (c *Client) ConverseWithPrompts(ctx context.Context, input string, eventHan
 		return "", fmt.Errorf("open conversation stream: %w", err)
 	}
 
+	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
+	for _, item := range history {
+		role := strings.TrimSpace(item.Role)
+		content := strings.TrimSpace(item.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
+			Role:      role,
+			Content:   item.Content,
+			CreatedAt: item.CreatedAt,
+		})
+	}
+
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_UserInput{
-			UserInput: &codeagentpb.UserInput{Text: input},
+			UserInput: &codeagentpb.UserInput{
+				Text:      input,
+				SessionId: strings.TrimSpace(sessionID),
+				History:   historyPayload,
+			},
 		},
 	}); err != nil {
 		return "", fmt.Errorf("send user input: %w", err)

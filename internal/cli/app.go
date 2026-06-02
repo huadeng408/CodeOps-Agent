@@ -309,7 +309,8 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 	}
 
 	if a.orchestrator != nil {
-		reply, err := a.orchestrator.ConverseWithPrompts(ctx, input, a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall)
+		current := a.session.Current()
+		reply, err := a.orchestrator.ConverseWithHistoryAndPrompts(ctx, input, current.ID, orchestratorHistory(current.Messages, input), a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall)
 		if err == nil && strings.TrimSpace(reply) != "" {
 			return reply
 		}
@@ -927,7 +928,7 @@ func (a *App) handleWorktreeCommand(fields []string) {
 		return
 	}
 	if len(fields) < 3 {
-		a.renderer.PrintLine("usage: /worktree <create|switch|cleanup> <name>")
+		a.renderer.PrintLine("usage: /worktree <create|switch|cleanup> <name> [--discard]")
 		return
 	}
 	name := fields[2]
@@ -949,14 +950,21 @@ func (a *App) handleWorktreeCommand(fields []string) {
 		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
 		a.renderer.PrintLine("switched worktree: " + tree.Name)
 	case "cleanup":
-		if err := a.worktree.Cleanup(name); err != nil {
+		force := len(fields) > 3 && (fields[3] == "--discard" || fields[3] == "--force")
+		var err error
+		if force {
+			err = a.worktree.CleanupDiscard(name)
+		} else {
+			err = a.worktree.Cleanup(name)
+		}
+		if err != nil {
 			a.renderer.PrintLine("worktree cleanup failed: " + err.Error())
 			return
 		}
 		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
 		a.renderer.PrintLine("cleaned worktree: " + name)
 	default:
-		a.renderer.PrintLine("usage: /worktree <list|create|switch|cleanup> [name]")
+		a.renderer.PrintLine("usage: /worktree <list|create|switch|cleanup> [name] [--discard]")
 	}
 }
 
@@ -1049,6 +1057,26 @@ func formatPlanLines(plan session.PlanState) []string {
 		lines = append(lines, fmt.Sprintf("%d. %s %s", idx+1, prefix, step))
 	}
 	return lines
+}
+
+func orchestratorHistory(messages []session.Message, currentInput string) []orchestrator.ConversationMessage {
+	currentInput = strings.TrimSpace(currentInput)
+	out := make([]orchestrator.ConversationMessage, 0, len(messages))
+	for idx, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		if idx == len(messages)-1 && message.Role == session.RoleUser && content == currentInput {
+			continue
+		}
+		out = append(out, orchestrator.ConversationMessage{
+			Role:      string(message.Role),
+			Content:   message.Content,
+			CreatedAt: message.CreatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return out
 }
 
 func modifiedFilesFromToolCall(call orchestrator.ToolCall, result tools.ToolResult) []string {

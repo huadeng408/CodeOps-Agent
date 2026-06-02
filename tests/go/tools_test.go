@@ -48,7 +48,7 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
-	if !strings.Contains(result.Output, "hello updated") {
+	if !strings.Contains(result.Output, "1\thello updated") {
 		t.Fatalf("unexpected read output: %q", result.Output)
 	}
 
@@ -63,6 +63,60 @@ func TestExecutorReadWriteAndGlob(t *testing.T) {
 	}
 	if !strings.Contains(glob.Output, filepath.ToSlash("notes/demo.txt")) {
 		t.Fatalf("glob output missing file: %q", glob.Output)
+	}
+}
+
+func TestExecutorReadSupportsLineRanges(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("alpha\nbeta\ngamma\ndelta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Read",
+		Arguments: map[string]any{
+			"path":   "sample.txt",
+			"offset": 1,
+			"limit":  2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if !strings.Contains(result.Output, "[Range read]") {
+		t.Fatalf("range metadata missing: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "2\tbeta") || !strings.Contains(result.Output, "3\tgamma") {
+		t.Fatalf("expected ranged lines with line numbers, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "1\talpha") || strings.Contains(result.Output, "4\tdelta") {
+		t.Fatalf("range included unexpected lines: %q", result.Output)
+	}
+}
+
+func TestExecutorReadRejectsInvalidArguments(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+
+	if _, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "Read", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("expected missing path to fail")
+	}
+
+	if _, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Read",
+		Arguments: map[string]any{"path": "../outside.txt"},
+	}); err == nil || !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("expected workspace escape failure, got %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(executor.Root, "sample.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Read",
+		Arguments: map[string]any{"path": "sample.txt", "limit": 0},
+	}); err == nil || !strings.Contains(err.Error(), "limit must be positive") {
+		t.Fatalf("expected invalid limit failure, got %v", err)
 	}
 }
 

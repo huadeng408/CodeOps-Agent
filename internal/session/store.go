@@ -24,7 +24,7 @@ type Store interface {
 
 type MemoryStore struct {
 	mu       sync.RWMutex
-	sessions  map[string]Session
+	sessions map[string]Session
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -59,6 +59,9 @@ func (s *MemoryStore) List(_ context.Context) ([]Session, error) {
 	for _, session := range s.sessions {
 		out = append(out, cloneSession(session))
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
 	return out, nil
 }
 
