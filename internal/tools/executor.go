@@ -69,6 +69,8 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 		return executeGit(ctx, e.Root, req.Arguments)
 	case "WebFetch":
 		return executeWebFetch(ctx, e.Root, req.Arguments)
+	case "WebSearch":
+		return executeWebSearch(ctx, e.Root, req.Arguments)
 	default:
 		if result, ok, err := e.executeMCPTool(ctx, req); ok {
 			return result, err
@@ -170,6 +172,31 @@ func stringArg(args map[string]any, keys ...string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func boolArg(args map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		value, ok := args[key]
+		if !ok {
+			continue
+		}
+		switch v := value.(type) {
+		case bool:
+			return v
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "y", "on":
+				return true
+			}
+		case int:
+			return v != 0
+		case int64:
+			return v != 0
+		case float64:
+			return v != 0
+		}
+	}
+	return false
 }
 
 func normalizeOutput(output string, maxBytes int) (string, bool) {

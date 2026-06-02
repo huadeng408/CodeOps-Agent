@@ -326,4 +326,16 @@ class ToolRegistry:
                     "required": ["url"],
                 },
             ),
+            ToolSpec(
+                name="WebSearch",
+                description="Search the web for current information.",
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                    "required": ["query"],
+                },
+            ),
         ]

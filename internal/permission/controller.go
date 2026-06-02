@@ -31,14 +31,15 @@ type Controller struct {
 }
 
 var DefaultPermissions = map[string]Level{
-	"Read":     AutoAllow,
-	"Glob":     AutoAllow,
-	"Grep":     AutoAllow,
-	"Edit":     AskSession,
-	"Write":    AskSession,
-	"Bash":     AlwaysAsk,
-	"Git":      AskSession,
-	"WebFetch": AskSession,
+	"Read":      AutoAllow,
+	"Glob":      AutoAllow,
+	"Grep":      AutoAllow,
+	"Edit":      AskSession,
+	"Write":     AskSession,
+	"Bash":      AlwaysAsk,
+	"Git":       AskSession,
+	"WebFetch":  AskSession,
+	"WebSearch": AskSession,
 }
 
 func NewController(levels map[string]Level, allowlist []AllowRule) *Controller {

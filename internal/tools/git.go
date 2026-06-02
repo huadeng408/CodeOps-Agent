@@ -14,22 +14,34 @@ func executeGit(ctx context.Context, root string, args map[string]any) (ToolResu
 	if command == "" {
 		command = "status"
 	}
-	if !safety.IsSafeGitSubcommand(command) {
-		err := fmt.Errorf("unsupported git subcommand %q", command)
+	command = strings.ToLower(strings.TrimSpace(command))
+	extraArgs := stringSliceArg(args, "args", "arguments")
+	analysisArgs := append([]string{command}, lowerArgs(extraArgs)...)
+	analysis := safety.NewAnalyzer().AnalyzeGit(analysisArgs)
+	if !analysis.Allowed {
+		err := fmt.Errorf("blocked git command: %s", analysis.Reason)
 		return ToolResult{Name: "Git", Error: err.Error(), ExitCode: 1}, err
 	}
 
-	extraArgs := stringSliceArg(args, "args", "arguments")
 	cmdArgs := append([]string{"-C", root, command}, extraArgs...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	output, err := cmd.CombinedOutput()
-	result := ToolResult{Name: "Git", Output: string(output)}
+	text, truncated := normalizeOutput(string(output), 50_000)
+	result := ToolResult{Name: "Git", Output: text, Truncated: truncated}
 	if err != nil {
 		result.Error = err.Error()
 		result.ExitCode = exitCodeFromError(err)
 		return result, err
 	}
 	return result, nil
+}
+
+func lowerArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, arg := range args {
+		out[i] = strings.ToLower(strings.TrimSpace(arg))
+	}
+	return out
 }
 
 func stringSliceArg(args map[string]any, keys ...string) []string {

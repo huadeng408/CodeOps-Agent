@@ -2,6 +2,8 @@ package codeagent_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -146,6 +148,146 @@ func TestExecutorEditReturnsUndoChange(t *testing.T) {
 	}
 	if len(result.Changes) != 1 || result.Changes[0].Before != "alpha beta" || result.Changes[0].After != "alpha gamma" {
 		t.Fatalf("unexpected edit changes: %#v", result.Changes)
+	}
+}
+
+func TestExecutorEditRequiresUniqueMatchUnlessReplaceAll(t *testing.T) {
+	root := t.TempDir()
+	executor := tools.NewExecutor(root)
+	if _, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Write",
+		Arguments: map[string]any{"path": "sample.txt", "content": "alpha beta beta"},
+	}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Edit",
+		Arguments: map[string]any{"path": "sample.txt", "old": "beta", "new": "gamma"},
+	})
+	if err == nil || !strings.Contains(result.Error, "not unique") {
+		t.Fatalf("expected non-unique edit failure, got result=%+v err=%v", result, err)
+	}
+
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Edit",
+		Arguments: map[string]any{"path": "sample.txt", "old": "beta", "new": "gamma", "replace_all": true},
+	})
+	if err != nil {
+		t.Fatalf("replace_all edit failed: %v", err)
+	}
+	if !strings.Contains(result.Changes[0].After, "alpha gamma gamma") {
+		t.Fatalf("unexpected replace_all content: %#v", result.Changes)
+	}
+}
+
+func TestExecutorGrepSupportsOutputModesAndContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "sample.txt"), []byte("before\nalpha one\nafter\nalpha two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	content, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep",
+		Arguments: map[string]any{
+			"pattern":     "alpha",
+			"path":        "src",
+			"output_mode": "content",
+			"A":           1,
+			"head_limit":  10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("grep content failed: %v", err)
+	}
+	if !strings.Contains(content.Output, "sample.txt:2:alpha one") || !strings.Contains(content.Output, "sample.txt-3-after") {
+		t.Fatalf("unexpected grep content output: %q", content.Output)
+	}
+
+	count, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep",
+		Arguments: map[string]any{
+			"pattern":     "alpha",
+			"path":        "src",
+			"output_mode": "count",
+		},
+	})
+	if err != nil {
+		t.Fatalf("grep count failed: %v", err)
+	}
+	if strings.TrimSpace(count.Output) != "src/sample.txt:2" {
+		t.Fatalf("unexpected grep count output: %q", count.Output)
+	}
+}
+
+func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "reset",
+			"args":    []any{"--hard", "HEAD"},
+		},
+	})
+	if err == nil || !strings.Contains(result.Error, "blocked git command") {
+		t.Fatalf("expected blocked git reset, got result=%+v err=%v", result, err)
+	}
+}
+
+func TestExecutorReadSupportsImageAndPDFMetadata(t *testing.T) {
+	root := t.TempDir()
+	pngData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if err := os.WriteFile(filepath.Join(root, "image.png"), pngData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	image, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "Read", Arguments: map[string]any{"path": "image.png"}})
+	if err != nil {
+		t.Fatalf("image read failed: %v", err)
+	}
+	if !strings.Contains(image.Output, "[Image image.png: image/png") || !strings.Contains(image.Output, "base64") {
+		t.Fatalf("unexpected image output: %q", image.Output)
+	}
+
+	pdf, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "Read", Arguments: map[string]any{"path": "doc.pdf", "pages": "1"}})
+	if err != nil {
+		t.Fatalf("pdf read failed: %v", err)
+	}
+	if !strings.Contains(pdf.Output, "[PDF doc.pdf") || !strings.Contains(pdf.Output, "pages: 1") {
+		t.Fatalf("unexpected pdf output: %q", pdf.Output)
+	}
+}
+
+func TestExecutorWebSearchWithLocalEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("q") != "local agent" {
+			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"Heading":"Code Agent","AbstractText":"Local agent result","AbstractURL":"https://example.test/agent","RelatedTopics":[{"Text":"Result one","FirstURL":"https://example.test/one"}]}`))
+	}))
+	defer server.Close()
+
+	executor := tools.NewExecutor(t.TempDir())
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "WebSearch",
+		Arguments: map[string]any{
+			"query":    "local agent",
+			"endpoint": server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("web search failed: %v", err)
+	}
+	if !strings.Contains(result.Output, "Code Agent") || !strings.Contains(result.Output, "Result one") {
+		t.Fatalf("unexpected web search output: %q", result.Output)
 	}
 }
 

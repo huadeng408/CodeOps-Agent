@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -12,8 +13,8 @@ func executeEdit(_ context.Context, root string, args map[string]any) (ToolResul
 	if !ok || path == "" {
 		return ToolResult{Name: "Edit", Error: "path is required"}, fmt.Errorf("path is required")
 	}
-	oldText, _ := stringArg(args, "old", "from", "search")
-	newText, _ := stringArg(args, "new", "to", "replace")
+	oldText, _ := stringArg(args, "old", "old_string", "from", "search")
+	newText, _ := stringArg(args, "new", "new_string", "to", "replace")
 	if oldText == "" {
 		return ToolResult{Name: "Edit", Error: "old text is required"}, fmt.Errorf("old text is required")
 	}
@@ -27,17 +28,46 @@ func executeEdit(_ context.Context, root string, args map[string]any) (ToolResul
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
 
-	replaced := strings.ReplaceAll(string(data), oldText, newText)
+	before := string(data)
+	replaceAll := boolArg(args, "replace_all", "replaceAll", "all")
+	count := strings.Count(before, oldText)
+	if count == 0 {
+		err := fmt.Errorf("old text not found in %s", path)
+		return ToolResult{Name: "Edit", Error: err.Error(), ExitCode: 1}, err
+	}
+	if !replaceAll && count > 1 {
+		err := fmt.Errorf("old text is not unique in %s; set replace_all to true to replace all %d occurrences", path, count)
+		return ToolResult{Name: "Edit", Error: err.Error(), ExitCode: 1}, err
+	}
+
+	replaced := strings.Replace(before, oldText, newText, 1)
+	if replaceAll {
+		replaced = strings.ReplaceAll(before, oldText, newText)
+	}
 	if err := os.WriteFile(abs, []byte(replaced), 0o644); err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
 	return ToolResult{
 		Name:   "Edit",
-		Output: "edited",
+		Output: fmt.Sprintf("edited %s (%d replacement%s)", filepath.ToSlash(path), countForOutput(count, replaceAll), pluralSuffix(countForOutput(count, replaceAll))),
 		Changes: []Change{{
-			Path:   path,
-			Before: string(data),
+			Path:   filepath.ToSlash(path),
+			Before: before,
 			After:  replaced,
 		}},
 	}, nil
+}
+
+func countForOutput(count int, replaceAll bool) int {
+	if replaceAll {
+		return count
+	}
+	return 1
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
