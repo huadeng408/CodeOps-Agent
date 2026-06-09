@@ -1,61 +1,304 @@
 # code-agent
 
-Local code agent prototype built around a Go harness and a Python orchestrator.
+`code-agent` 是一个本地运行的 CLI 代码代理原型。项目采用 Go Harness + Python Orchestrator 的双层架构：Go 侧负责终端交互、权限控制、工具执行和本地状态管理，Python 侧负责 LLM 调用、上下文组装、计划管理、记忆检索、子 Agent 编排和错误恢复。
 
-## Architecture
+目标是把“模型决策”和“本地执行”隔离开来：LLM 可以提出工具调用请求，但真正的文件、命令、网络、Git 和 MCP 操作都由 Go Harness 校验后执行。
 
-- Go harness: CLI loop, permission checks, hooks, sessions, tools, undo, worktrees, MCP lifecycle, metrics.
-- Python orchestrator: LLM calls, prompt/context assembly, planning/todos, skills, memory, compaction, recovery, sub-agent coordination.
-- gRPC stream: typed boundary between the harness that executes actions and the orchestrator that decides what to ask for.
+## 核心特点
 
-## Quick start
+- 本地优先：CLI、会话库、记忆文件、工具执行和 MCP 进程都在本机运行。
+- 双语言分层：Go 负责稳定的系统操作面，Python 负责灵活的 LLM 编排面。
+- gRPC 流式协议：Harness 和 Orchestrator 通过双向流传递用户输入、工具请求、工具结果、计划更新、Todo 更新、子 Agent 事件和 token/cost 元数据。
+- 安全执行模型：内置权限分级、allow/deny 规则、命令风险分析、Git 危险操作拦截、工具输出不可信包装和 prompt injection 防护。
+- 可恢复会话：使用 SQLite 持久化会话，支持恢复历史消息、工作目录、预算指标、已批准工具、Todo、计划、Undo 和 worktree 状态。
+- 工具闭环：支持读写编辑文件、Shell、搜索、Git、网络抓取、网络搜索，以及通过 MCP 动态扩展工具。
+- 任务编排：支持 PlanWrite、TodoWrite、AskUser 和 SpawnAgent，适合多步骤代码任务、探索任务和人工确认流程。
+- 成本与上下文控制：跟踪 token 和成本，支持会话预算、历史压缩、上下文裁剪和只读工具结果缓存。
+- 项目指令与记忆：自动加载 AGENT.md 指令，并支持持久化 markdown 记忆。
+- 内置技能：提供初始化、代码审查、安全审查等技能入口。
+
+## 架构概览
+
+```text
+User
+  |
+  v
+Go CLI / Harness
+  |-- slash commands, status line, Ctrl+C handling
+  |-- permissions, hooks, safety analyzer
+  |-- local tools, MCP tools, undo, worktrees
+  |-- SQLite sessions, memory files, metrics
+  |
+  |  gRPC bidirectional stream
+  v
+Python Orchestrator
+  |-- LLM provider adapters
+  |-- prompt/context assembly
+  |-- plan/todo/ask-user/sub-agent events
+  |-- memory, compaction, token budget
+  |-- error recovery and injection protection
+```
+
+主要目录：
+
+| 路径 | 说明 |
+| --- | --- |
+| `cmd/agent` | CLI 程序入口 |
+| `internal/cli` | 终端交互、斜杠命令、渲染、状态行 |
+| `internal/tools` | Go Harness 执行的本地工具 |
+| `internal/permission` | 工具权限和 allow/deny 规则 |
+| `internal/safety` | Shell/Git 风险分析 |
+| `internal/session` | SQLite 会话存储与恢复 |
+| `internal/mcp` | MCP stdio 服务生命周期和工具调用 |
+| `internal/worktree` | Git worktree 管理 |
+| `internal/undo` | 文件变更撤销记录 |
+| `orchestrator` | Python gRPC 服务与 LLM 编排 |
+| `orchestrator/runtime` | 对话循环、工具协议、预算和恢复逻辑 |
+| `orchestrator/llm/providers` | OpenAI-compatible、Anthropic、本地模型适配 |
+| `proto/codeagent` | Harness 与 Orchestrator 的 protobuf 协议 |
+| `gen/codeagentpb` / `codeagent` | Go/Python 生成的 protobuf 绑定 |
+| `tests` | Python 测试和 Go 测试 |
+
+## 功能清单
+
+### CLI 与会话
+
+- 交互式 CLI 对话循环。
+- Ctrl+C 中断当前轮，连续中断退出。
+- 自动启动 Python Orchestrator。
+- 自动加载 `AGENT.md` 项目指令。
+- 状态行展示模型、token、成本、轮次、工具调用等信息。
+- 会话自动保存到 `.agent/sessions/sessions.sqlite`。
+- 支持 `/resume` 恢复最近或指定会话。
+- 支持 `/compact` 压缩当前会话历史。
+
+### 内置工具
+
+| 工具 | 权限级别 | 能力 |
+| --- | --- | --- |
+| `Read` | 自动允许 | 读取工作区文件、行范围、基础图片 data URI、PDF 元信息占位 |
+| `Glob` | 自动允许 | 按 glob 模式查找文件 |
+| `Grep` | 自动允许 | 正则搜索，支持文件列表、内容、计数、上下文、忽略大小写、glob 过滤 |
+| `Write` | 会话确认 | 创建或覆盖工作区文件，并记录 undo |
+| `Edit` | 会话确认 | 精确替换文本，支持唯一性校验和变更记录 |
+| `Bash` | 每次确认 | 执行 shell 命令，支持超时和持久工作目录 |
+| `Git` | 会话确认 | 执行受控 Git 子命令，并阻止危险参数 |
+| `WebFetch` | 会话确认 | 拉取 URL 内容，带输出限制 |
+| `WebSearch` | 会话确认 | 通过 DuckDuckGo-compatible JSON 接口搜索网页 |
+
+编排层还注册了这些控制型工具：
+
+- `TodoWrite`：更新当前任务列表。
+- `PlanWrite`：更新当前计划。
+- `AskUser`：在需要人工输入时向用户提问。
+- `SpawnAgent`：启动子 Agent 执行独立探索或辅助任务。
+
+### 扩展能力
+
+- MCP：读取 `.mcp.json`，启动配置的 MCP stdio server，发现工具后写入 `.agent/mcp-tools.json`，再暴露给 Orchestrator 使用。
+- Hooks：支持 pre/post tool 命令钩子，可用于审计、格式化、阻断或额外校验。
+- Skills：内置 init、review、security review 技能，可通过斜杠命令调用。
+- Memory：持久化项目记忆，支持新增、列表、查找、展示和删除。
+- Worktree：支持创建、切换、清理本地 Git worktree。
+- Undo：对 `Write` 和 `Edit` 产生的文件变更做撤销记录。
+
+## 快速开始
+
+### 环境要求
+
+- Go 1.24+
+- Python 3.11+
+- `pytest`
+- `grpcio` / `grpcio-tools`，仅在运行或重新生成 Python protobuf 时需要
+- `protoc`，仅在重新生成 protobuf 时需要
+
+### 配置模型
+
+复制示例环境文件：
 
 ```bash
-# Run tests
-go test ./...
-pytest -q
+cp .env.example .env.local
+```
 
-# Start CLI
+OpenAI-compatible 配置：
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=<your-api-key>
+OPENAI_BASE_URL=https://api.openai.com
+OPENAI_MODEL=gpt-4o
+```
+
+Anthropic 配置：
+
+```env
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=<your-api-key>
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_MODEL=claude-sonnet-4-6
+```
+
+本地 OpenAI-compatible 服务配置：
+
+```env
+LLM_PROVIDER=local
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_LLM_MODEL=local
+```
+
+如果没有可用模型配置，Orchestrator 会进入 fallback 模式，只做最小工作区检查。
+
+### 运行
+
+```bash
 go run ./cmd/agent
 ```
 
-The CLI auto-starts the Python orchestrator by default using:
+或使用 Makefile：
+
+```bash
+make run
+```
+
+CLI 默认会自动启动：
 
 ```bash
 python -m orchestrator.server
 ```
 
-Configuration is loaded from `.agent/settings.json` and `.agent/settings.local.json`.
+默认 gRPC 地址为 `127.0.0.1:50051`。
 
-## Useful slash commands
+## 配置
 
-- `/help` — show command help.
-- `/plan` — toggle planning mode.
-- `/compact` — compact the current session history.
-- `/resume [session-id]` — resume persisted session state.
-- `/sessions [limit]` — list recent saved sessions.
-- `/memory ...` — manage durable markdown memories.
-- `/tasks` — show current todos.
-- `/undo` — revert the last recorded file change.
-- `/diff` — show current git diff summary.
-- `/worktree <list|create|switch|cleanup>` — manage local worktrees.
-- `/review`, `/security-review`, `/init` — invoke built-in skills.
+配置会按以下顺序合并，后者覆盖前者：
 
-## Implemented tools
+1. 内置默认值
+2. `.env.local` 中的模型名称
+3. `~/.agent/settings.json`
+4. `.agent/settings.json`
+5. `.agent/settings.local.json`
 
-- `Read`: text with line numbers/ranges, basic image data URI output, PDF metadata placeholder.
-- `Write`: create/overwrite workspace files with undo records.
-- `Edit`: exact replacement, uniqueness checks, optional `replace_all`.
-- `Bash`: shell execution with timeout, persisted working directory, safety analysis.
-- `Glob`: workspace glob matching with `**` support.
-- `Grep`: regex search with content/files/count modes, context, only-match, glob filter, head limit.
-- `Git`: safe git subcommand wrapper with destructive argument blocking.
-- `WebFetch`: HTTP fetch with size limits.
-- `WebSearch`: DuckDuckGo-compatible JSON search endpoint.
+常用 JSON 配置项：
 
-## Generated protobufs
+```json
+{
+  "model": "gpt-4o",
+  "model_fast": "gpt-4o-mini",
+  "context_window": 256000,
+  "max_tokens_per_session": 1000000,
+  "max_cost_per_session": 5.0,
+  "orchestrator_addr": "127.0.0.1:50051",
+  "orchestrator_auto_start": true,
+  "orchestrator_command": "python",
+  "orchestrator_args": ["-m", "orchestrator.server"],
+  "orchestrator_conversation_timeout_seconds": 300,
+  "session_db_path": ".agent/sessions/sessions.sqlite",
+  "memory_dir": ".agent/memory",
+  "mcp_config": ".mcp.json",
+  "worktree_base_ref": "fresh",
+  "permissions": {
+    "allow": [
+      {"tool": "Read", "pattern": ".*"}
+    ],
+    "deny": [
+      {"tool": "Bash", "pattern": ".*rm\\s+-rf.*"}
+    ]
+  },
+  "hooks": [
+    {
+      "type": "pre_tool",
+      "matcher": ".*",
+      "command": "echo checking",
+      "timeout": 10
+    }
+  ]
+}
+```
 
-After editing [proto/codeagent/orchestrator.proto](proto/codeagent/orchestrator.proto), regenerate both language bindings:
+## 斜杠命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/help` | 显示命令帮助 |
+| `/plan` | 切换规划模式 |
+| `/compact` | 压缩当前会话历史 |
+| `/clear` | 清空当前会话 |
+| `/config` | 显示已加载配置 |
+| `/budget` | 显示 token 和成本预算 |
+| `/memory` | 查看记忆概览 |
+| `/memory add <content> [#tag...]` | 新增记忆 |
+| `/memory list` | 列出记忆 |
+| `/memory find <query>` | 查找相关记忆 |
+| `/memory show <name>` | 展示记忆详情 |
+| `/memory delete <name>` | 删除记忆 |
+| `/sessions [limit]` | 列出最近会话 |
+| `/tasks` | 展示当前 Todo |
+| `/undo` | 撤销最近一次记录的文件变更 |
+| `/diff` | 显示当前 Git diff 摘要 |
+| `/worktree list` | 列出 worktree |
+| `/worktree create <name>` | 创建 worktree |
+| `/worktree switch <name>` | 切换 worktree |
+| `/worktree cleanup <name> [--discard]` | 清理 worktree |
+| `/resume [session-id]` | 恢复最近或指定会话 |
+| `/skills` | 列出内置技能 |
+| `/init [instructions]` | 运行初始化技能 |
+| `/review [focus]` | 运行代码审查技能 |
+| `/security-review [focus]` | 运行安全审查技能 |
+
+## 安全模型
+
+默认权限分级：
+
+- 自动允许：`Read`、`Glob`、`Grep`。
+- 会话确认：`Edit`、`Write`、`Git`、`WebFetch`、`WebSearch`。
+- 每次确认：`Bash`。
+
+额外安全控制：
+
+- 工具路径限制在工作区内，防止越界读写。
+- Shell 风险分析会阻止 fork bomb、递归删除、磁盘格式化、curl/wget 管道执行、递归权限变更和广泛进程终止等危险模式。
+- Git 安全规则默认允许 `status`、`diff`、`log`、`show`、`branch`、`fetch`、`worktree list` 等低风险操作，并阻止 `push`、危险 `reset`、`clean`、`rebase`、强制参数和删除分支等操作。
+- 工具输出会被编排层视为不可信内容，避免文件内容或命令输出中的提示注入覆盖系统指令。
+- Hooks 可以在工具执行前后做额外检查或阻断。
+
+## 开发与测试
+
+运行全部测试：
+
+```bash
+make test
+```
+
+分别运行 Go 和 Python 测试：
+
+```bash
+go test ./...
+pytest -q
+```
+
+格式化和基础编译检查：
+
+```bash
+make fmt
+```
+
+启动 PostgreSQL 依赖：
+
+```bash
+docker compose up -d
+```
+
+当前仓库主要使用 SQLite 保存会话；`docker-compose.yml` 中的 PostgreSQL 服务用于后续 checkpointer 或外部存储集成。
+
+## Protobuf 生成
+
+修改 `proto/codeagent/orchestrator.proto` 后，需要同时生成 Go 和 Python 绑定：
+
+```bash
+make proto
+```
+
+等价命令：
 
 ```bash
 protoc --go_out=. --go_opt=paths=source_relative \
@@ -66,6 +309,12 @@ mv proto/codeagent/orchestrator_grpc.pb.go gen/codeagentpb/orchestrator_grpc.pb.
 python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/codeagent/orchestrator.proto
 ```
 
-## Safety model
+Windows 环境也可以使用：
 
-The LLM can request tools, but the Go harness owns execution. Permissions combine default levels, allow/deny rules, session approvals, hooks, and command/git safety analysis. Dangerous shell and git operations are blocked before execution.
+```powershell
+.\scripts\generate-proto.ps1
+```
+
+## 当前状态
+
+这是一个本地 Code Agent 原型，已经具备 CLI、工具执行、gRPC 编排、LLM provider、会话持久化、权限模型、MCP、记忆、计划、Todo、子 Agent 和测试覆盖。后续可继续增强真实 TUI 体验、更多工具沙箱策略、长期记忆检索、LangGraph 深度集成、IDE 插件和 PR 自动化流程。

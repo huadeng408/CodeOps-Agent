@@ -78,9 +78,9 @@ func executeGrep(_ context.Context, root string, args map[string]any) (ToolResul
 		return ToolResult{Name: "Grep", Error: err.Error()}, err
 	}
 
-	output := formatGrepOutput(matches, files, fileCounts, options)
-	output, truncated := normalizeOutput(output, 50_000)
-	return ToolResult{Name: "Grep", Output: output, Truncated: truncated}, nil
+	output, headTruncated := formatGrepOutput(matches, files, fileCounts, options)
+	output, byteTruncated := normalizeOutput(output, 50_000)
+	return ToolResult{Name: "Grep", Output: output, Truncated: headTruncated || byteTruncated}, nil
 }
 
 type grepOptions struct {
@@ -209,7 +209,7 @@ func grepFile(path, rel string, expr *regexp.Regexp, options grepOptions) ([]gre
 	return matches, nil
 }
 
-func formatGrepOutput(matches []grepMatch, files map[string]struct{}, counts map[string]int, options grepOptions) string {
+func formatGrepOutput(matches []grepMatch, files map[string]struct{}, counts map[string]int, options grepOptions) (string, bool) {
 	switch options.OutputMode {
 	case "files_with_matches":
 		out := make([]string, 0, len(files))
@@ -246,9 +246,10 @@ func formatGrepOutput(matches []grepMatch, files map[string]struct{}, counts map
 	}
 }
 
-func limitLines(lines []string, limit int) string {
+func limitLines(lines []string, limit int) (string, bool) {
 	if limit > 0 && len(lines) > limit {
 		lines = append(lines[:limit], fmt.Sprintf("[grep output truncated: %d more lines]", len(lines)-limit))
+		return strings.Join(lines, "\n"), true
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), false
 }

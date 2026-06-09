@@ -87,16 +87,17 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 
 	orchestratorManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:        cfg.OrchestratorAddr,
-		AutoStart:      cfg.OrchestratorAutoStart,
-		Command:        cfg.OrchestratorCommand,
-		Args:           cfg.OrchestratorArgs,
-		ProjectRoot:    cfg.ProjectRoot,
-		WorkingDir:     cfg.WorkingDir,
-		MemoryDir:      cfg.MemoryDir,
-		MaxTokens:      cfg.MaxTokensPerSession,
-		MaxCost:        cfg.MaxCostPerSession,
-		StartupTimeout: time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
+		Address:             cfg.OrchestratorAddr,
+		AutoStart:           cfg.OrchestratorAutoStart,
+		Command:             cfg.OrchestratorCommand,
+		Args:                cfg.OrchestratorArgs,
+		ProjectRoot:         cfg.ProjectRoot,
+		WorkingDir:          cfg.WorkingDir,
+		MemoryDir:           cfg.MemoryDir,
+		MaxTokens:           cfg.MaxTokensPerSession,
+		MaxCost:             cfg.MaxCostPerSession,
+		StartupTimeout:      time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
+		ConversationTimeout: time.Duration(cfg.OrchestratorConversationTimeout) * time.Second,
 	})
 	orchestratorClient, _ := orchestratorManager.Client(context.Background())
 	mcpManager := mcp.NewManager()
@@ -205,8 +206,8 @@ func (a *App) Run(ctx context.Context) error {
 		a.clearCurrentCancel()
 		turnCancel()
 		a.session.Append(session.RoleAssistant, reply)
-		a.renderer.PrintLine(reply)
-		a.renderer.PrintLine(a.status.Format(a.metrics.Snapshot()))
+		a.renderer.PrintAssistant(reply)
+		a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
 	}
 }
 
@@ -275,14 +276,11 @@ func (a *App) handleInterrupt(now time.Time, stop context.CancelFunc) bool {
 
 func (a *App) renderBootstrap() {
 	a.renderer.Separator()
-	a.renderer.PrintLine("code-agent skeleton")
-	a.renderer.PrintBlock("workspace", []string{
-		"root: " + a.cfg.ProjectRoot,
-		"working dir: " + a.cfg.WorkingDir,
+	a.renderer.PrintBlock("code-agent", []string{
 		"model: " + a.cfg.Model,
+		"context window: " + fmt.Sprint(a.cfg.ContextWindow),
+		"workspace: " + a.cfg.WorkingDir,
 		"orchestrator: " + a.cfg.OrchestratorAddr,
-		"orchestrator owned: " + fmt.Sprint(a.orchestratorPM != nil && a.orchestratorPM.Owned()),
-		"session db: " + a.cfg.SessionDBPath,
 		"instructions: " + fmt.Sprint(len(a.instructions)),
 		"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
 	})
@@ -293,7 +291,7 @@ func (a *App) renderBootstrap() {
 		}
 		a.renderer.PrintBlock("loaded AGENT.md", lines)
 	}
-	a.renderer.PrintBlock("available commands", []string{
+	a.renderer.PrintBlock("commands", []string{
 		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review",
 	})
 	a.renderer.Separator()
@@ -494,6 +492,10 @@ func hooksCancelled(results []hooks.Result) bool {
 
 func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Event) {
 	_ = ctx
+	if event.ToolProgress != nil {
+		a.renderer.PrintLine(formatToolProgress(event.ToolProgress))
+	}
+
 	if event.SessionMeta != nil {
 		a.metrics.RecordLLMUsage(
 			event.SessionMeta.GetModel(),
@@ -631,6 +633,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"orchestrator: " + a.cfg.OrchestratorAddr,
 			"orchestrator auto-start: " + fmt.Sprint(a.cfg.OrchestratorAutoStart),
 			"orchestrator command: " + strings.Join(append([]string{a.cfg.OrchestratorCommand}, a.cfg.OrchestratorArgs...), " "),
+			"orchestrator conversation timeout: " + fmt.Sprint(a.cfg.OrchestratorConversationTimeout) + "s",
 			"session db: " + a.cfg.SessionDBPath,
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
@@ -737,8 +740,8 @@ func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 		return
 	}
 	a.session.Append(session.RoleAssistant, reply)
-	a.renderer.PrintLine(reply)
-	a.renderer.PrintLine(a.status.Format(a.metrics.Snapshot()))
+	a.renderer.PrintAssistant(reply)
+	a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
 }
 
 func buildSkillInput(skill skills.Skill, args string) string {
@@ -821,6 +824,35 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 	a.session.MergeMetadata(values)
 	if err := a.session.AutoSave(ctx); err != nil {
 		a.renderer.PrintLine("autosave failed: " + err.Error())
+	}
+}
+
+func formatToolProgress(progress *orchestrator.ToolProgress) string {
+	if progress == nil {
+		return ""
+	}
+	name := strings.TrimSpace(progress.ToolName)
+	if name == "" {
+		name = "tool"
+	}
+	position := ""
+	if progress.Total > 1 {
+		position = fmt.Sprintf(" %d/%d", progress.Index, progress.Total)
+	}
+	switch progress.Phase {
+	case "start":
+		return fmt.Sprintf("tool%s %s started", position, name)
+	case "finish":
+		status := fmt.Sprintf("tool%s %s finished exit=%d", position, name, progress.ExitCode)
+		if progress.Truncated {
+			status += " truncated=true"
+		}
+		if strings.TrimSpace(progress.Error) != "" {
+			status += " error=" + truncateForMetadata(progress.Error, 120)
+		}
+		return status
+	default:
+		return fmt.Sprintf("tool%s %s %s", position, name, strings.TrimSpace(progress.Phase))
 	}
 }
 

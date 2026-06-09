@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from orchestrator.llm.client import ChatMessage, ChatRequest, ToolCall
-from orchestrator.llm.providers import AnthropicClient, LocalClient, build_default_client
+from orchestrator.llm.providers import AnthropicClient, LocalClient, OpenAIClient, build_default_client
 
 
 def _json_server(response_payload: dict[str, object]):
@@ -197,6 +198,52 @@ def test_anthropic_client_uses_tool_use_payload() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_openai_compatible_client_retries_transient_url_errors(monkeypatch) -> None:
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "retried"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        assert timeout == 0.5
+        if calls == 1:
+            raise urllib.error.URLError("timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "orchestrator.llm.providers.openai.urllib.request.urlopen",
+        fake_urlopen,
+    )
+
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url="http://127.0.0.1:9",
+        model="gpt-test",
+        timeout=0.5,
+        max_retries=1,
+    )
+    response = asyncio.run(
+        client.chat(
+            ChatRequest(
+                model="gpt-test",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    )
+
+    assert response.text == "retried"
+    assert calls == 2
 
 
 def test_default_client_prefers_explicit_provider(monkeypatch) -> None:

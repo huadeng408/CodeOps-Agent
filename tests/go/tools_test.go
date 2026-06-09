@@ -2,6 +2,7 @@ package codeagent_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -97,6 +98,32 @@ func TestExecutorReadSupportsLineRanges(t *testing.T) {
 	}
 }
 
+func TestExecutorReadSupportsStartLineAlias(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("alpha\nbeta\ngamma\ndelta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Read",
+		Arguments: map[string]any{
+			"path":  "sample.txt",
+			"start": 2,
+			"limit": 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if !strings.Contains(result.Output, "2\tbeta") || !strings.Contains(result.Output, "3\tgamma") {
+		t.Fatalf("expected ranged lines with line numbers, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "1\talpha") || strings.Contains(result.Output, "4\tdelta") {
+		t.Fatalf("range included unexpected lines: %q", result.Output)
+	}
+}
+
 func TestExecutorReadRejectsInvalidArguments(t *testing.T) {
 	executor := tools.NewExecutor(t.TempDir())
 
@@ -119,6 +146,51 @@ func TestExecutorReadRejectsInvalidArguments(t *testing.T) {
 		Arguments: map[string]any{"path": "sample.txt", "limit": 0},
 	}); err == nil || !strings.Contains(err.Error(), "limit must be positive") {
 		t.Fatalf("expected invalid limit failure, got %v", err)
+	}
+}
+
+func TestExecutorGlobLimitsOutput(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("sample-%d.txt", i)), []byte("alpha"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := tools.NewExecutor(root)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Glob",
+		Arguments: map[string]any{
+			"pattern":    "**/*.txt",
+			"head_limit": 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	if !result.Truncated || !strings.Contains(result.Output, "[glob output truncated: 1 more files]") {
+		t.Fatalf("expected truncated glob output, got result=%+v", result)
+	}
+}
+
+func TestExecutorGlobUsesDefaultLimit(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 501; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("sample-%03d.txt", i)), []byte("alpha"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := tools.NewExecutor(root)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Glob",
+		Arguments: map[string]any{"pattern": "**/*.txt"},
+	})
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	if !result.Truncated || !strings.Contains(result.Output, "[glob output truncated: 1 more files]") {
+		t.Fatalf("expected default glob truncation, got result=%+v", result)
 	}
 }
 
@@ -224,6 +296,29 @@ func TestExecutorGrepSupportsOutputModesAndContext(t *testing.T) {
 	}
 }
 
+func TestExecutorGrepHeadLimitMarksResultTruncated(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("alpha one\nalpha two\nalpha three\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep",
+		Arguments: map[string]any{
+			"pattern":     "alpha",
+			"output_mode": "content",
+			"head_limit":  1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("grep failed: %v", err)
+	}
+	if !result.Truncated || !strings.Contains(result.Output, "[grep output truncated: 2 more lines]") {
+		t.Fatalf("expected truncated grep output, got result=%+v", result)
+	}
+}
+
 func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
 	executor := tools.NewExecutor(t.TempDir())
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{
@@ -310,6 +405,26 @@ func TestExecutorBashRunsSafeCommand(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "ok") {
 		t.Fatalf("unexpected bash output: %q", result.Output)
+	}
+}
+
+func TestExecutorBashPreservesUTF8OutputOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell UTF-8 output is Windows-specific")
+	}
+	executor := tools.NewExecutor(t.TempDir())
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Bash",
+		Arguments: map[string]any{
+			"command": "Write-Output '你好 ┌─┐'",
+		},
+	})
+	if err != nil {
+		t.Fatalf("bash failed: %v output=%q", err, result.Output)
+	}
+	if !strings.Contains(result.Output, "你好 ┌─┐") {
+		t.Fatalf("unicode output was not preserved: %q", result.Output)
 	}
 }
 

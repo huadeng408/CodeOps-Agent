@@ -19,7 +19,7 @@ func NewInputBuffer(in io.Reader, out io.Writer) *InputBuffer {
 	return &InputBuffer{
 		reader: bufio.NewReader(in),
 		writer: out,
-		prompt: "> ",
+		prompt: styledPrompt(out),
 	}
 }
 

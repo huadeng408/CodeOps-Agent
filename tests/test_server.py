@@ -8,6 +8,7 @@ import grpc
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.llm.client import ChatResponse, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
+from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 
 
@@ -254,6 +255,62 @@ class FailingToolFakeLLM:
         )
 
 
+class ToolLimitFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if request.tools:
+            index = len(self.requests)
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id=f"limit-{index}",
+                        name="Glob",
+                        arguments={"pattern": "**/*.py"},
+                        arguments_json='{"pattern":"**/*.py"}',
+                    )
+                ],
+                usage=Usage(input_tokens=10, output_tokens=2),
+            )
+        return ChatResponse(
+            text="Partial result: gathered file listings but stopped before completion.",
+            usage=Usage(input_tokens=20, output_tokens=8),
+        )
+
+
+class DuplicateReadBatchFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="read-1",
+                        name="Read",
+                        arguments={"path": "same.txt", "start": 1, "limit": 20},
+                        arguments_json='{"path":"same.txt","start":1,"limit":20}',
+                    ),
+                    ToolCall(
+                        id="read-2",
+                        name="Read",
+                        arguments={"path": "same.txt", "start": 1, "limit": 20},
+                        arguments_json='{"path":"same.txt","start":1,"limit":20}',
+                    ),
+                ],
+                usage=Usage(input_tokens=10, output_tokens=2),
+            )
+        return ChatResponse(text="duplicate read handled", usage=Usage(input_tokens=20, output_tokens=5))
+
+
 def test_health_and_converse(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
@@ -384,6 +441,31 @@ def test_persisted_harness_history_is_loaded_into_llm_prompt(monkeypatch, tmp_pa
             assert "Persisted history messages: 2" in history[0].content
     finally:
         server.stop(grace=0)
+
+
+def test_persisted_harness_history_is_bounded_before_llm_prompt() -> None:
+    long_history = [
+        {
+            "role": "user",
+            "content": f"old message {index}",
+            "created_at": "2026-06-02T00:00:00Z",
+        }
+        for index in range(59)
+    ]
+    long_history.append(
+        {
+            "role": "assistant",
+            "content": "x" * 5000,
+            "created_at": "2026-06-02T00:00:01Z",
+        }
+    )
+
+    history_messages = ConversationRunner._history_messages(long_history)
+
+    assert len(history_messages) <= 40
+    assert history_messages[0].role == "system"
+    assert "History truncated" in history_messages[0].content
+    assert "[history message truncated]" in history_messages[-1].content
 
 
 def test_tool_request_batch_roundtrip(monkeypatch, tmp_path) -> None:
@@ -859,5 +941,96 @@ def test_repeated_tool_failures_emit_recovery_guidance(monkeypatch, tmp_path) ->
                 message.role == "system" and "Switch strategy now" in message.content
                 for message in app.llm.requests[-1].messages
             )
+    finally:
+        server.stop(grace=0)
+
+
+def test_tool_round_limit_gets_final_no_tool_summary(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = ToolLimitFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = [
+                orchestrator_pb2.HarnessMessage(
+                    user_input=orchestrator_pb2.UserInput(text="keep searching")
+                )
+            ]
+            for index in range(1, 7):
+                messages.append(
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output=f"file-{index}.py",
+                            tool_call_id=f"limit-{index}",
+                        )
+                    )
+                )
+            responses = list(stub.Converse(iter(messages)))
+
+            text = "\n".join(response.text.text for response in responses if response.HasField("text"))
+            assert "Tool round limit reached." not in text
+            assert "Partial result: gathered file listings" in text
+            assert responses[-2].session_meta.turn == 7
+            assert responses[-1].done.success is False
+            assert len(app.llm.requests) == 7
+            assert app.llm.requests[-1].tools == []
+            assert "Tool round limit reached" in app.llm.requests[-1].messages[-1].content
+    finally:
+        server.stop(grace=0)
+
+
+def test_duplicate_read_calls_in_batch_are_executed_once(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = DuplicateReadBatchFakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(text="read same file twice")
+                            ),
+                            orchestrator_pb2.HarnessMessage(
+                                tool_result=orchestrator_pb2.ToolResult(
+                                    tool_name="Read",
+                                    output="same file content",
+                                    tool_call_id="read-1",
+                                )
+                            ),
+                        ]
+                    )
+                )
+            )
+
+            assert responses[0].tool_request_batch.parallel is True
+            assert len(responses[0].tool_request_batch.requests) == 1
+            assert responses[0].tool_request_batch.requests[0].tool_call_id == "read-1"
+            assert responses[1].text.text == "duplicate read handled"
+            assert responses[-1].done.success
+            tool_messages = [message for message in app.llm.requests[1].messages if message.role == "tool"]
+            assert [message.tool_call_id for message in tool_messages] == ["read-1", "read-2"]
+            assert [message.content for message in tool_messages] == [
+                "same file content",
+                "same file content",
+            ]
     finally:
         server.stop(grace=0)

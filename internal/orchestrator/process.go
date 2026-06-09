@@ -12,16 +12,17 @@ import (
 )
 
 type ProcessConfig struct {
-	Address        string
-	AutoStart      bool
-	Command        string
-	Args           []string
-	ProjectRoot    string
-	WorkingDir     string
-	MemoryDir      string
-	MaxTokens      int
-	MaxCost        float64
-	StartupTimeout time.Duration
+	Address             string
+	AutoStart           bool
+	Command             string
+	Args                []string
+	ProjectRoot         string
+	WorkingDir          string
+	MemoryDir           string
+	MaxTokens           int
+	MaxCost             float64
+	StartupTimeout      time.Duration
+	ConversationTimeout time.Duration
 }
 
 type ProcessManager struct {
@@ -44,6 +45,9 @@ func NewProcessManager(cfg ProcessConfig) *ProcessManager {
 	if cfg.StartupTimeout <= 0 {
 		cfg.StartupTimeout = 5 * time.Second
 	}
+	if cfg.ConversationTimeout <= 0 {
+		cfg.ConversationTimeout = 5 * time.Minute
+	}
 	return &ProcessManager{cfg: cfg}
 }
 
@@ -56,6 +60,7 @@ func (m *ProcessManager) Client(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	client.SetConversationTimeout(m.cfg.ConversationTimeout)
 	if healthy(ctx, client) {
 		m.client = client
 		return client, nil
@@ -74,6 +79,7 @@ func (m *ProcessManager) Client(ctx context.Context) (*Client, error) {
 		m.Stop()
 		return nil, err
 	}
+	client.SetConversationTimeout(m.cfg.ConversationTimeout)
 	if err := m.waitUntilHealthy(ctx, client); err != nil {
 		_ = client.Close()
 		m.Stop()

@@ -6,27 +6,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
-	ProjectRoot                string           `json:"-"`
-	WorkingDir                 string           `json:"-"`
-	Model                      string           `json:"model"`
-	ModelFast                  string           `json:"model_fast"`
-	ContextWindow              int              `json:"context_window"`
-	MaxTokensPerSession        int              `json:"max_tokens_per_session"`
-	MaxCostPerSession          float64          `json:"max_cost_per_session"`
-	OrchestratorAddr           string           `json:"orchestrator_addr"`
-	OrchestratorAutoStart      bool             `json:"orchestrator_auto_start"`
-	OrchestratorCommand        string           `json:"orchestrator_command"`
-	OrchestratorArgs           []string         `json:"orchestrator_args"`
-	OrchestratorStartupTimeout int              `json:"orchestrator_startup_timeout_seconds"`
-	SessionDBPath              string           `json:"session_db_path"`
-	Permissions                PermissionConfig `json:"permissions"`
-	Hooks                      []HookConfig     `json:"hooks"`
-	MCPConfig                  string           `json:"mcp_config"`
-	MemoryDir                  string           `json:"memory_dir"`
-	WorktreeBaseRef            string           `json:"worktree_base_ref"`
+	ProjectRoot                     string           `json:"-"`
+	WorkingDir                      string           `json:"-"`
+	Model                           string           `json:"model"`
+	ModelFast                       string           `json:"model_fast"`
+	ContextWindow                   int              `json:"context_window"`
+	MaxTokensPerSession             int              `json:"max_tokens_per_session"`
+	MaxCostPerSession               float64          `json:"max_cost_per_session"`
+	OrchestratorAddr                string           `json:"orchestrator_addr"`
+	OrchestratorAutoStart           bool             `json:"orchestrator_auto_start"`
+	OrchestratorCommand             string           `json:"orchestrator_command"`
+	OrchestratorArgs                []string         `json:"orchestrator_args"`
+	OrchestratorStartupTimeout      int              `json:"orchestrator_startup_timeout_seconds"`
+	OrchestratorConversationTimeout int              `json:"orchestrator_conversation_timeout_seconds"`
+	SessionDBPath                   string           `json:"session_db_path"`
+	Permissions                     PermissionConfig `json:"permissions"`
+	Hooks                           []HookConfig     `json:"hooks"`
+	MCPConfig                       string           `json:"mcp_config"`
+	MemoryDir                       string           `json:"memory_dir"`
+	WorktreeBaseRef                 string           `json:"worktree_base_ref"`
 }
 
 type PermissionConfig struct {
@@ -54,27 +56,32 @@ func Default(projectRoot string) Config {
 	}
 
 	return Config{
-		ProjectRoot:                projectRoot,
-		WorkingDir:                 workingDir,
-		Model:                      "gpt-4o",
-		ModelFast:                  "gpt-4o-mini",
-		ContextWindow:              128000,
-		MaxTokensPerSession:        1_000_000,
-		MaxCostPerSession:          5.0,
-		OrchestratorAddr:           "127.0.0.1:50051",
-		OrchestratorAutoStart:      true,
-		OrchestratorCommand:        "python",
-		OrchestratorArgs:           []string{"-m", "orchestrator.server"},
-		OrchestratorStartupTimeout: 5,
-		SessionDBPath:              filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
-		MCPConfig:                  ".mcp.json",
-		MemoryDir:                  filepath.Join(projectRoot, ".agent", "memory"),
-		WorktreeBaseRef:            "fresh",
+		ProjectRoot:                     projectRoot,
+		WorkingDir:                      workingDir,
+		Model:                           "gpt-4o",
+		ModelFast:                       "gpt-4o-mini",
+		ContextWindow:                   256000,
+		MaxTokensPerSession:             1_000_000,
+		MaxCostPerSession:               5.0,
+		OrchestratorAddr:                "127.0.0.1:50051",
+		OrchestratorAutoStart:           true,
+		OrchestratorCommand:             "python",
+		OrchestratorArgs:                []string{"-m", "orchestrator.server"},
+		OrchestratorStartupTimeout:      5,
+		OrchestratorConversationTimeout: 300,
+		SessionDBPath:                   filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
+		MCPConfig:                       ".mcp.json",
+		MemoryDir:                       filepath.Join(projectRoot, ".agent", "memory"),
+		WorktreeBaseRef:                 "fresh",
 	}
 }
 
 func Load(projectRoot string) (Config, error) {
 	cfg := Default(projectRoot)
+
+	if err := applyDotenvModel(filepath.Join(cfg.ProjectRoot, ".env.local"), &cfg); err != nil {
+		return Config{}, err
+	}
 
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" {
@@ -99,6 +106,65 @@ func Load(projectRoot string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyDotenvModel(path string, cfg *Config) error {
+	values, err := readDotenv(path)
+	if err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return nil
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(values["LLM_PROVIDER"]))
+	model := ""
+	switch provider {
+	case "anthropic":
+		model = values["ANTHROPIC_MODEL"]
+	case "local":
+		model = values["LOCAL_LLM_MODEL"]
+	case "openai":
+		model = values["OPENAI_MODEL"]
+	default:
+		for _, key := range []string{"OPENAI_MODEL", "ANTHROPIC_MODEL", "LOCAL_LLM_MODEL"} {
+			if strings.TrimSpace(values[key]) != "" {
+				model = values[key]
+				break
+			}
+		}
+	}
+
+	if strings.TrimSpace(model) != "" {
+		cfg.Model = strings.TrimSpace(model)
+	}
+	return nil
+}
+
+func readDotenv(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read env file %s: %w", path, err)
+	}
+
+	values := map[string]string{}
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimPrefix(rawLine, "\ufeff"))
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		key, value, _ := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		if key != "" {
+			values[key] = value
+		}
+	}
+	return values, nil
 }
 
 func applyJSONPatch(path string, cfg *Config) error {
@@ -154,6 +220,9 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if patch.OrchestratorStartupTimeout != 0 {
 		dst.OrchestratorStartupTimeout = patch.OrchestratorStartupTimeout
+	}
+	if patch.OrchestratorConversationTimeout != 0 {
+		dst.OrchestratorConversationTimeout = patch.OrchestratorConversationTimeout
 	}
 	if patch.SessionDBPath != "" {
 		dst.SessionDBPath = patch.SessionDBPath

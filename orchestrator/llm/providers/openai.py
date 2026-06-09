@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ class OpenAIClient(LLMClient):
     base_url: str = "https://api.openai.com"
     model: str = "gpt-4o"
     timeout: float = 60.0
+    max_retries: int = 1
 
     @classmethod
     def from_env(cls) -> OpenAIClient | None:
@@ -28,6 +30,8 @@ class OpenAIClient(LLMClient):
             api_key=api_key,
             base_url=read_env("OPENAI_BASE_URL", "https://api.openai.com"),
             model=read_env("OPENAI_MODEL", "gpt-4o"),
+            timeout=_read_float("OPENAI_TIMEOUT", 60.0),
+            max_retries=_read_int("OPENAI_MAX_RETRIES", 1),
         )
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
@@ -55,14 +59,24 @@ class OpenAIClient(LLMClient):
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(http_request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI-compatible API error {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"OpenAI-compatible API request failed: {exc}") from exc
+        attempts = max(0, int(self.max_retries)) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(http_request, timeout=self.timeout) as response:
+                    body = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"OpenAI-compatible API error {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    raise RuntimeError(
+                        f"OpenAI-compatible API request failed after {attempts} attempt(s): {exc}"
+                    ) from exc
+        else:
+            raise RuntimeError(f"OpenAI-compatible API request failed: {last_error}")
 
         return self._parse_response(json.loads(body))
 
@@ -157,3 +171,23 @@ class OpenAIClient(LLMClient):
         if content is None:
             return ""
         return str(content)
+
+
+def _read_int(name: str, default: int) -> int:
+    value = read_env(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _read_float(name: str, default: float) -> float:
+    value = read_env(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default

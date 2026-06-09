@@ -112,3 +112,56 @@ func TestClientReceivesTodoUpdates(t *testing.T) {
 		t.Fatalf("unexpected session meta: %+v", meta)
 	}
 }
+
+func TestClientEmitsToolProgressEvents(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &batchOrchestratorServer{})
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var progress []orchestrator.ToolProgress
+	reply, err := client.ConverseWithEvents(context.Background(), "batch", func(ctx context.Context, event orchestrator.Event) {
+		_ = ctx
+		if event.ToolProgress != nil {
+			progress = append(progress, *event.ToolProgress)
+		}
+	}, func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+		_ = ctx
+		switch call.Name {
+		case "Read":
+			return orchestrator.ToolResult{ToolName: call.Name, ToolCallID: call.ID, Output: "read-ok"}
+		case "Glob":
+			return orchestrator.ToolResult{ToolName: call.Name, ToolCallID: call.ID, Output: "glob-ok"}
+		default:
+			return orchestrator.ToolResult{ToolName: call.Name, ToolCallID: call.ID, Error: "unexpected tool", ExitCode: 1}
+		}
+	})
+	if err != nil {
+		t.Fatalf("converse with events failed: %v", err)
+	}
+	if reply != "batch complete" {
+		t.Fatalf("progress leaked into reply: %q", reply)
+	}
+	if len(progress) != 4 {
+		t.Fatalf("expected 4 progress events, got %#v", progress)
+	}
+	if progress[0].Phase != "start" || progress[0].ToolName != "Read" || progress[0].Index != 1 || progress[0].Total != 2 {
+		t.Fatalf("unexpected first progress event: %+v", progress[0])
+	}
+	if progress[3].Phase != "finish" || progress[3].ToolName != "Glob" || progress[3].Index != 2 || progress[3].Total != 2 {
+		t.Fatalf("unexpected final progress event: %+v", progress[3])
+	}
+}

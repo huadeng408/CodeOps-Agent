@@ -104,7 +104,11 @@ func expandCommand(command string, hook Context) string {
 
 func shellCommand(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", powershellUTF8Prefix() + command}
 	}
 	return "sh", []string{"-c", command}
+}
+
+func powershellUTF8Prefix() string {
+	return "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; "
 }

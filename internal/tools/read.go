@@ -54,6 +54,10 @@ func executeRead(_ context.Context, root string, args map[string]any) (ToolResul
 		lines = lines[:len(lines)-1]
 	}
 
+	startLine, hasStart, err := intArg(args, "start")
+	if err != nil {
+		return ToolResult{Name: "Read", Error: err.Error()}, err
+	}
 	offset, hasOffset, err := intArg(args, "offset")
 	if err != nil {
 		return ToolResult{Name: "Read", Error: err.Error()}, err
@@ -62,15 +66,23 @@ func executeRead(_ context.Context, root string, args map[string]any) (ToolResul
 	if err != nil {
 		return ToolResult{Name: "Read", Error: err.Error()}, err
 	}
+	if hasStart && startLine <= 0 {
+		return ToolResult{Name: "Read", Error: "start must be positive"}, fmt.Errorf("start must be positive")
+	}
 	if hasOffset && offset < 0 {
 		return ToolResult{Name: "Read", Error: "offset must be non-negative"}, fmt.Errorf("offset must be non-negative")
+	}
+	if hasStart && hasOffset && offset != startLine-1 {
+		return ToolResult{Name: "Read", Error: "start and offset refer to different lines"}, fmt.Errorf("start and offset refer to different lines")
 	}
 	if hasLimit && limit <= 0 {
 		return ToolResult{Name: "Read", Error: "limit must be positive"}, fmt.Errorf("limit must be positive")
 	}
 
 	start := 0
-	if hasOffset {
+	if hasStart {
+		start = startLine - 1
+	} else if hasOffset {
 		start = offset
 	}
 	if start > len(lines) {
@@ -83,7 +95,7 @@ func executeRead(_ context.Context, root string, args map[string]any) (ToolResul
 
 	output := numberedLines(lines[start:end], start+1)
 	metadata := []string{fmt.Sprintf("[Read %s: lines %d-%d of %d]", path, displayStart(start, end), end, len(lines))}
-	if hasOffset || hasLimit {
+	if hasStart || hasOffset || hasLimit {
 		metadata = append(metadata, "[Range read]")
 	}
 	if output != "" {
@@ -153,32 +165,35 @@ func looksBinary(data []byte) bool {
 	return false
 }
 
-func intArg(args map[string]any, key string) (int, bool, error) {
-	value, ok := args[key]
-	if !ok {
-		return 0, false, nil
-	}
-	switch v := value.(type) {
-	case int:
-		return v, true, nil
-	case int32:
-		return int(v), true, nil
-	case int64:
-		return int(v), true, nil
-	case float64:
-		if v != float64(int(v)) {
+func intArg(args map[string]any, keys ...string) (int, bool, error) {
+	for _, key := range keys {
+		value, ok := args[key]
+		if !ok {
+			continue
+		}
+		switch v := value.(type) {
+		case int:
+			return v, true, nil
+		case int32:
+			return int(v), true, nil
+		case int64:
+			return int(v), true, nil
+		case float64:
+			if v != float64(int(v)) {
+				return 0, true, fmt.Errorf("%s must be an integer", key)
+			}
+			return int(v), true, nil
+		case string:
+			parsed, err := strconv.Atoi(v)
+			if err != nil {
+				return 0, true, fmt.Errorf("%s must be an integer", key)
+			}
+			return parsed, true, nil
+		default:
 			return 0, true, fmt.Errorf("%s must be an integer", key)
 		}
-		return int(v), true, nil
-	case string:
-		parsed, err := strconv.Atoi(v)
-		if err != nil {
-			return 0, true, fmt.Errorf("%s must be an integer", key)
-		}
-		return parsed, true, nil
-	default:
-		return 0, true, fmt.Errorf("%s must be an integer", key)
 	}
+	return 0, false, nil
 }
 
 func numberedLines(lines []string, startLine int) string {

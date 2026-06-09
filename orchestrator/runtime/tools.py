@@ -112,37 +112,89 @@ class ToolRegistry:
         return [
             ToolSpec(
                 name="Read",
-                description="Read a file from the workspace.",
+                description=(
+                    "Read a file or a bounded line range from the workspace. "
+                    "Prefer start and limit for source files instead of reading entire files."
+                ),
                 permission=orchestrator_pb2.AUTO_ALLOW,
                 parameters={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Workspace file path."}
+                        "path": {"type": "string", "description": "Workspace file path."},
+                        "start": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "One-based starting line number for text files.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Zero-based line offset for text files. Prefer start.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 400,
+                            "description": "Maximum number of text lines to return.",
+                        },
+                        "pages": {
+                            "type": "string",
+                            "description": "PDF page range hint, for example '1-3'.",
+                        },
                     },
                     "required": ["path"],
                 },
             ),
             ToolSpec(
                 name="Glob",
-                description="Find files in the workspace by glob pattern.",
+                description="Find files in the workspace by glob pattern, with bounded output.",
                 permission=orchestrator_pb2.AUTO_ALLOW,
                 parameters={
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern."}
+                        "pattern": {"type": "string", "description": "Glob pattern."},
+                        "head_limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000,
+                            "description": "Maximum number of matching file paths to return.",
+                        },
                     },
                     "required": ["pattern"],
                 },
             ),
             ToolSpec(
                 name="Grep",
-                description="Search workspace files for text.",
+                description="Search workspace files for text. Prefer files_with_matches before content output.",
                 permission=orchestrator_pb2.AUTO_ALLOW,
                 parameters={
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string", "description": "Text to search for."},
                         "path": {"type": "string", "description": "Directory to search."},
+                        "output_mode": {
+                            "type": "string",
+                            "enum": ["files_with_matches", "content", "count"],
+                            "description": "Output files, matching lines, or match counts.",
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Only search files matching this workspace glob.",
+                        },
+                        "head_limit": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 500,
+                            "description": "Maximum output rows; 0 means no row limit.",
+                        },
+                        "context": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 5,
+                            "description": "Context lines before and after each match.",
+                        },
+                        "ignore_case": {"type": "boolean"},
+                        "only_matching": {"type": "boolean"},
                     },
                     "required": ["pattern"],
                 },
@@ -182,6 +234,13 @@ class ToolRegistry:
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
+                        "cwd": {"type": "string", "description": "Workspace-relative working directory."},
+                        "timeout_seconds": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 300,
+                            "description": "Command timeout in seconds.",
+                        },
                     },
                     "required": ["command"],
                 },

@@ -23,10 +23,11 @@ func TestProcessManagerUsesExistingHealthyServer(t *testing.T) {
 	defer server.Stop()
 
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:        listener.Addr().String(),
-		AutoStart:      true,
-		Command:        "definitely-not-used",
-		StartupTimeout: 200 * time.Millisecond,
+		Address:             listener.Addr().String(),
+		AutoStart:           true,
+		Command:             "definitely-not-used",
+		StartupTimeout:      200 * time.Millisecond,
+		ConversationTimeout: 2 * time.Minute,
 	})
 	defer manager.Stop()
 
@@ -39,6 +40,9 @@ func TestProcessManagerUsesExistingHealthyServer(t *testing.T) {
 	}
 	if manager.Owned() {
 		t.Fatal("manager should not own an externally healthy server")
+	}
+	if client.ConversationTimeout() != 2*time.Minute {
+		t.Fatalf("unexpected conversation timeout: %s", client.ConversationTimeout())
 	}
 }
 

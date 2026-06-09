@@ -219,6 +219,50 @@ func (s *askOrchestratorServer) Converse(stream codeagentpb.Orchestrator_Convers
 	})
 }
 
+type cancelAskOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+	result *codeagentpb.ToolResult
+}
+
+func (s *cancelAskOrchestratorServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
+	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
+}
+
+func (s *cancelAskOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_AskUserRequest{
+			AskUserRequest: &codeagentpb.AskUserRequest{
+				Question:  "Choose an option",
+				AskUserId: "ask-cancel",
+			},
+		},
+	}); err != nil {
+		return err
+	}
+
+	msg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	s.result = msg.GetToolResult()
+
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Text{
+			Text: &codeagentpb.TextChunk{Text: "ask fallback handled"},
+		},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{
+			Done: &codeagentpb.Done{Success: true},
+		},
+	})
+}
+
 func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -294,6 +338,56 @@ func TestOrchestratorClientSendsSessionHistory(t *testing.T) {
 		t.Fatalf("unexpected history payload: %#v", capturing.history)
 	}
 }
+
+func TestOrchestratorClientTrimsLargeSessionHistory(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	capturing := &historyOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capturing)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	history := make([]orchestrator.ConversationMessage, 0, 60)
+	for idx := 0; idx < 59; idx++ {
+		history = append(history, orchestrator.ConversationMessage{
+			Role:      "user",
+			Content:   fmt.Sprintf("old message %02d", idx),
+			CreatedAt: "2026-06-02T00:00:00Z",
+		})
+	}
+	history = append(history, orchestrator.ConversationMessage{
+		Role:      "assistant",
+		Content:   strings.Repeat("x", 5000),
+		CreatedAt: "2026-06-02T00:00:01Z",
+	})
+
+	if _, err := client.ConverseWithHistory(context.Background(), "next", "session-1", history); err != nil {
+		t.Fatalf("converse with history failed: %v", err)
+	}
+	if len(capturing.history) > 40 {
+		t.Fatalf("history was not capped: %d", len(capturing.history))
+	}
+	if capturing.history[0].Role != "system" || !strings.Contains(capturing.history[0].Content, "History truncated") {
+		t.Fatalf("missing truncation summary: %#v", capturing.history[0])
+	}
+	last := capturing.history[len(capturing.history)-1]
+	if last.Role != "assistant" || !strings.Contains(last.Content, "[history message truncated]") {
+		t.Fatalf("long recent message was not truncated: role=%q len=%d", last.Role, len(last.Content))
+	}
+}
+
 func TestOrchestratorClientHandlesToolRequestBatch(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -408,5 +502,80 @@ func TestOrchestratorClientHandlesAskUserRequest(t *testing.T) {
 	}
 	if !strings.Contains(reply, "ask answered") {
 		t.Fatalf("unexpected reply: %q", reply)
+	}
+}
+
+func TestOrchestratorClientCancelsAskUserWithoutHandler(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	askServer := &cancelAskOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, askServer)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	reply, err := client.ConverseWithPrompts(context.Background(), "choose", nil, nil)
+	if err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if reply != "ask fallback handled" {
+		t.Fatalf("unexpected reply: %q", reply)
+	}
+	if askServer.result == nil || askServer.result.ToolCallId != "ask-cancel" || askServer.result.ExitCode != 1 || !strings.Contains(askServer.result.Error, "not configured") {
+		t.Fatalf("unexpected ask fallback result: %+v", askServer.result)
+	}
+}
+
+func TestOrchestratorClientTimesOutAskUserHandler(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := grpc.NewServer()
+	askServer := &cancelAskOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, askServer)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetAskUserTimeout(10 * time.Millisecond)
+
+	reply, err := client.ConverseWithPrompts(
+		context.Background(),
+		"choose",
+		nil,
+		func(ctx context.Context, request *codeagentpb.AskUserRequest) (orchestrator.ToolResult, error) {
+			_ = ctx
+			_ = request
+			time.Sleep(200 * time.Millisecond)
+			return orchestrator.ToolResult{ToolName: "AskUser", Output: "late"}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if reply != "ask fallback handled" {
+		t.Fatalf("unexpected reply: %q", reply)
+	}
+	if askServer.result == nil || askServer.result.ToolCallId != "ask-cancel" || askServer.result.ExitCode != 1 || !strings.Contains(askServer.result.Error, "timed out") {
+		t.Fatalf("unexpected ask timeout result: %+v", askServer.result)
 	}
 }

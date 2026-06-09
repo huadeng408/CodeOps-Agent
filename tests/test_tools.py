@@ -36,3 +36,22 @@ def test_tool_registry_loads_mcp_manifest(tmp_path) -> None:
     assert spec is not None
     assert spec.permission == orchestrator_pb2.ASK_SESSION
     assert spec.parameters["properties"]["text"]["type"] == "string"
+
+
+def test_builtin_tool_schemas_expose_bounded_file_search_parameters() -> None:
+    registry = ToolRegistry()
+    specs = {tool.name: tool for tool in registry.list()}
+
+    read_props = specs["Read"].parameters["properties"]
+    assert read_props["start"]["minimum"] == 1
+    assert read_props["limit"]["maximum"] == 400
+    assert read_props["offset"]["minimum"] == 0
+
+    glob_props = specs["Glob"].parameters["properties"]
+    assert glob_props["head_limit"]["maximum"] == 1000
+
+    grep_props = specs["Grep"].parameters["properties"]
+    assert grep_props["output_mode"]["enum"] == ["files_with_matches", "content", "count"]
+    assert grep_props["glob"]["type"] == "string"
+    assert grep_props["head_limit"]["maximum"] == 500
+    assert grep_props["context"]["maximum"] == 5

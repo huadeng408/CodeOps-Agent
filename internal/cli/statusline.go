@@ -13,7 +13,7 @@ func NewStatusLine() *StatusLine {
 }
 
 func (s *StatusLine) Format(snapshot metrics.SessionMetrics) string {
-	return fmt.Sprintf("Tokens: %d in / %d out | Cost: $%.4f | Tools: %d | Turns: %d | Errors: %d",
+	return fmt.Sprintf("status  tokens %d in / %d out  cost $%.4f  tools %d  turns %d  errors %d",
 		snapshot.TotalTokensIn,
 		snapshot.TotalTokensOut,
 		snapshot.TotalCost,

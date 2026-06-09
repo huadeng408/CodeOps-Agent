@@ -43,7 +43,23 @@ func executeGlob(_ context.Context, root string, args map[string]any) (ToolResul
 	}
 
 	sort.Strings(matches)
-	return ToolResult{Name: "Glob", Output: strings.Join(matches, "\n")}, nil
+	limit, hasLimit, err := intArg(args, "head_limit", "limit")
+	if err != nil {
+		return ToolResult{Name: "Glob", Error: err.Error(), ExitCode: 1}, err
+	}
+	if hasLimit && limit <= 0 {
+		return ToolResult{Name: "Glob", Error: "head_limit must be positive", ExitCode: 1}, fmt.Errorf("head_limit must be positive")
+	}
+	if !hasLimit {
+		limit = 500
+	}
+	truncated := false
+	if limit > 0 && len(matches) > limit {
+		remaining := len(matches) - limit
+		matches = append(matches[:limit], fmt.Sprintf("[glob output truncated: %d more files]", remaining))
+		truncated = true
+	}
+	return ToolResult{Name: "Glob", Output: strings.Join(matches, "\n"), Truncated: truncated}, nil
 }
 
 func matchGlob(pattern, candidate string) (bool, error) {

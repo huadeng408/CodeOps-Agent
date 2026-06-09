@@ -27,6 +27,16 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (0.015, 0.075),
 }
 
+MAX_HISTORY_MESSAGES = 40
+MAX_HISTORY_CHARS = 32_000
+MAX_HISTORY_MESSAGE_CHARS = 4_000
+
+
+@dataclass(frozen=True, slots=True)
+class CachedToolResult:
+    content: str
+    is_error: bool
+
 
 @dataclass(slots=True)
 class ConversationRunner:
@@ -64,6 +74,7 @@ class ConversationRunner:
         total_tokens_out = 0
         total_cost = 0.0
         consecutive_errors = 0
+        tool_cache: dict[str, CachedToolResult] = {}
         for turn in range(1, self.max_tool_rounds + 1):
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
@@ -109,6 +120,7 @@ class ConversationRunner:
                     response.tool_calls,
                     request_iterator,
                     messages,
+                    tool_cache,
                     turn,
                     total_tokens_in,
                     total_tokens_out,
@@ -261,6 +273,24 @@ class ConversationRunner:
                     continue
 
                 request = self._tool_request(call, self._call_arguments_json(call))
+                cached_message = self._cached_tool_message(tool_cache, call)
+                if cached_message is not None:
+                    messages.append(cached_message)
+                    if cached_message.is_error:
+                        consecutive_errors += 1
+                        recovery_message = self._recovery_message(consecutive_errors, cached_message.content)
+                        if recovery_message:
+                            messages.append(
+                                ChatMessage(
+                                    role="system",
+                                    content=recovery_message,
+                                )
+                            )
+                            yield self._text(recovery_message)
+                    else:
+                        consecutive_errors = 0
+                    continue
+
                 yield request
                 result = self._next_tool_result(request_iterator, call_id)
                 if result is None:
@@ -268,7 +298,10 @@ class ConversationRunner:
                     yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
                     yield self._done(False)
                     return
-                messages.append(self._tool_result_message(call_id, call.name, result))
+                tool_message = self._tool_result_message(call_id, call.name, result)
+                messages.append(tool_message)
+                self._remember_tool_result(tool_cache, call, tool_message)
+                self._invalidate_tool_cache_after(tool_cache, call, result)
                 if self._tool_result_failed(result):
                     consecutive_errors += 1
                     recovery_message = self._recovery_message(consecutive_errors, result.error or result.output)
@@ -283,8 +316,39 @@ class ConversationRunner:
                 else:
                     consecutive_errors = 0
 
-        yield self._text("Tool round limit reached.")
-        yield self._session_meta(self.max_tool_rounds, total_tokens_in, total_tokens_out, total_cost)
+        final_turn = self.max_tool_rounds + 1
+        messages.append(
+            ChatMessage(
+                role="system",
+                content=(
+                    "Tool round limit reached. Do not call tools. Provide a concise final "
+                    "answer using only the information already gathered. Clearly separate "
+                    "confirmed findings from incomplete work and name the next verification "
+                    "step if one is still needed."
+                ),
+            )
+        )
+        response = self._chat(self._compact_messages(messages), allow_tools=False)
+        total_tokens_in += response.usage.input_tokens
+        total_tokens_out += response.usage.output_tokens
+        response_cost = self._estimate_cost(
+            getattr(self.llm, "model", ""),
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        )
+        total_cost += response_cost
+        self._consume_budget(
+            response.usage.input_tokens + response.usage.output_tokens,
+            response_cost,
+        )
+        if response.text:
+            yield self._text(response.text)
+        else:
+            yield self._text(
+                "Tool round limit reached before the task could be completed. "
+                "No final model summary was returned."
+            )
+        yield self._session_meta(final_turn, total_tokens_in, total_tokens_out, total_cost)
         yield self._done(False)
 
     def _fallback_conversation(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
@@ -334,13 +398,14 @@ class ConversationRunner:
         messages.append(ChatMessage(role="user", content=user_text))
         return messages
 
-    def _chat(self, messages: list[ChatMessage]) -> ChatResponse:
+    def _chat(self, messages: list[ChatMessage], allow_tools: bool = True) -> ChatResponse:
+        tools = self.tool_registry.openai_schemas() if allow_tools else []
         return asyncio.run(
             self.llm.chat(
                 ChatRequest(
                     model=getattr(self.llm, "model", ""),
                     messages=messages,
-                    tools=self.tool_registry.openai_schemas(),
+                    tools=tools,
                 )
             )
         )
@@ -393,16 +458,42 @@ class ConversationRunner:
 
     @staticmethod
     def _history_messages(history: list[dict[str, str]]) -> list[ChatMessage]:
-        messages: list[ChatMessage] = []
-        for item in history[-40:]:
+        cleaned: list[ChatMessage] = []
+        for item in history:
             role = str(item.get("role", "")).strip().lower()
             content = str(item.get("content", "")).strip()
             if not content:
                 continue
             if role not in {"user", "assistant", "system", "tool"}:
                 role = "system"
-            messages.append(ChatMessage(role=role, content=content))
-        return messages
+            if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+                content = content[:MAX_HISTORY_MESSAGE_CHARS].rstrip() + "\n[history message truncated]"
+            cleaned.append(ChatMessage(role=role, content=content))
+
+        selected: list[ChatMessage] = []
+        used_chars = 0
+        omitted = 0
+        for index in range(len(cleaned) - 1, -1, -1):
+            message = cleaned[index]
+            message_chars = len(message.role) + len(message.content)
+            if len(selected) >= MAX_HISTORY_MESSAGES or (selected and used_chars + message_chars > MAX_HISTORY_CHARS):
+                omitted = index + 1
+                break
+            selected.append(message)
+            used_chars += message_chars
+        selected.reverse()
+
+        if omitted > 0:
+            if len(selected) >= MAX_HISTORY_MESSAGES:
+                selected = selected[1:]
+            selected.insert(
+                0,
+                ChatMessage(
+                    role="system",
+                    content=f"[History truncated: {omitted} older messages omitted to fit context budget.]",
+                ),
+            )
+        return selected
 
     def _session_meta(
         self,
@@ -481,33 +572,63 @@ class ConversationRunner:
         calls: list[ToolCall],
         request_iterator,
         messages: list[ChatMessage],
+        tool_cache: dict[str, CachedToolResult],
         turn: int,
         total_tokens_in: int,
         total_tokens_out: int,
         total_cost: float,
         consecutive_errors: int,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
-        request_ids = [self._tool_call_id(call) for call in calls]
-        yield self._tool_request_batch(calls)
-        results = self._next_tool_results(request_iterator, request_ids)
-        if results is None:
-            yield self._text("Tool result stream ended before all batch results were received.")
-            yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
-            yield self._done(False)
-            return consecutive_errors, True
+        request_calls: list[ToolCall] = []
+        requested_keys: set[str] = set()
+        for call in calls:
+            key = self._tool_cache_key(call)
+            if key and key in tool_cache:
+                continue
+            if key and key in requested_keys:
+                continue
+            request_calls.append(call)
+            if key:
+                requested_keys.add(key)
+
+        result_messages: dict[str, ChatMessage] = {}
+        if request_calls:
+            request_ids = [self._tool_call_id(call) for call in request_calls]
+            yield self._tool_request_batch(request_calls)
+            results = self._next_tool_results(request_iterator, request_ids)
+            if results is None:
+                yield self._text("Tool result stream ended before all batch results were received.")
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._done(False)
+                return consecutive_errors, True
+
+            for call in request_calls:
+                call_id = self._tool_call_id(call)
+                result = results.get(call_id)
+                if result is None:
+                    yield self._text(f"Batch result missing for tool call {call_id}.")
+                    yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                    yield self._done(False)
+                    return consecutive_errors, True
+                tool_message = self._tool_result_message(call_id, call.name, result)
+                key = self._tool_cache_key(call)
+                if key:
+                    self._remember_tool_result(tool_cache, call, tool_message)
+                else:
+                    result_messages[call_id] = tool_message
 
         for call in calls:
             call_id = self._tool_call_id(call)
-            result = results.get(call_id)
-            if result is None:
+            cached_message = self._cached_tool_message(tool_cache, call) or result_messages.get(call_id)
+            if cached_message is None:
                 yield self._text(f"Batch result missing for tool call {call_id}.")
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
                 yield self._done(False)
                 return consecutive_errors, True
-            messages.append(self._tool_result_message(call_id, call.name, result))
-            if self._tool_result_failed(result):
+            messages.append(cached_message)
+            if cached_message.is_error:
                 consecutive_errors += 1
-                recovery_message = self._recovery_message(consecutive_errors, result.error or result.output)
+                recovery_message = self._recovery_message(consecutive_errors, cached_message.content)
                 if recovery_message:
                     messages.append(
                         ChatMessage(
@@ -519,6 +640,61 @@ class ConversationRunner:
             else:
                 consecutive_errors = 0
         return consecutive_errors, False
+
+    def _cached_tool_message(
+        self,
+        tool_cache: dict[str, CachedToolResult],
+        call: ToolCall,
+    ) -> ChatMessage | None:
+        key = self._tool_cache_key(call)
+        if not key:
+            return None
+        cached = tool_cache.get(key)
+        if cached is None:
+            return None
+        return ChatMessage(
+            role="tool",
+            name=call.name,
+            tool_call_id=self._tool_call_id(call),
+            content=cached.content,
+            is_error=cached.is_error,
+        )
+
+    def _remember_tool_result(
+        self,
+        tool_cache: dict[str, CachedToolResult],
+        call: ToolCall,
+        message: ChatMessage,
+    ) -> None:
+        key = self._tool_cache_key(call)
+        if not key:
+            return
+        tool_cache[key] = CachedToolResult(
+            content=message.content,
+            is_error=message.is_error,
+        )
+
+    def _invalidate_tool_cache_after(self, tool_cache: dict[str, CachedToolResult], call: ToolCall, result) -> None:
+        if self._tool_cache_key(call):
+            return
+        if self._tool_result_failed(result):
+            return
+        tool_cache.clear()
+
+    @staticmethod
+    def _tool_cache_key(call: ToolCall) -> str:
+        if call.name not in {"Read", "Glob", "Grep"}:
+            return ""
+        try:
+            arguments = json.dumps(
+                call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except TypeError:
+            arguments = call.arguments_json or "{}"
+        return f"{call.name}:{arguments}"
 
     def _can_batch_tool_calls(self, calls: list[ToolCall]) -> bool:
         if len(calls) <= 1:
