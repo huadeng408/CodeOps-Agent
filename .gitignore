@@ -19,6 +19,18 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Local design notes and scratch docs
+设计方案.md
+*.draft.md
+notes/
+
+# Claude Code local overrides (settings.json is shared; *.local.json is personal)
+.claude/settings.local.json
+
+# Logs
+*.log
+logs/
+
 # Local agent state
 .agent/settings.local.json
 .agent/memory/*
