@@ -35,6 +35,23 @@ func TestEstimateCostUsesKnownModelPricing(t *testing.T) {
 	}
 }
 
+func TestCollectorAccumulatesCachedTokens(t *testing.T) {
+	collector := metrics.NewCollector()
+	collector.RecordLLMUsage("claude-sonnet-4-6", 1000, 100, 0.0045)
+	collector.RecordCachedTokens(400)
+	collector.RecordCachedTokens(150)
+	collector.RecordCachedTokens(0) // no-op
+
+	snapshot := collector.Snapshot()
+	if snapshot.TotalCachedTokens != 550 {
+		t.Fatalf("expected 550 cached tokens, got %d", snapshot.TotalCachedTokens)
+	}
+	ratio := collector.CacheHitRatio()
+	if math.Abs(ratio-0.55) > 0.0001 {
+		t.Fatalf("expected 0.55 cache hit ratio, got %.4f", ratio)
+	}
+}
+
 func TestCollectorHydratesPersistedSessionMetrics(t *testing.T) {
 	collector := metrics.NewCollector()
 	started := time.Now().Add(-time.Hour)

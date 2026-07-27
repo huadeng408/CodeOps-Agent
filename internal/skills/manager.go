@@ -27,6 +27,7 @@ func NewManager() *Manager {
 		initSkill(),
 		reviewSkill(),
 		securitySkill(),
+		commitSkill(),
 	} {
 		manager.Register(skill)
 	}

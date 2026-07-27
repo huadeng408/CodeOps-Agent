@@ -45,6 +45,51 @@ func TestConfigDefaultContextWindowIs256K(t *testing.T) {
 	}
 }
 
+func TestConfigDefaultModelFastIsGpt4oMini(t *testing.T) {
+	cfg := config.Default(t.TempDir())
+
+	if cfg.ModelFast != "gpt-4o-mini" {
+		t.Fatalf("unexpected default model_fast: %q", cfg.ModelFast)
+	}
+}
+
+func TestConfigLoadPreservesDefaultModelFast(t *testing.T) {
+	// With no settings override, the gpt-4o-mini default round-trips through
+	// a full config load.
+	projectRoot := t.TempDir()
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ModelFast != "gpt-4o-mini" {
+		t.Fatalf("unexpected model_fast after load: %q", cfg.ModelFast)
+	}
+}
+
+func TestConfigLoadRoundTripsModelFastOverride(t *testing.T) {
+	// A settings JSON model_fast value round-trips (JSON -> struct -> merge).
+	projectRoot := t.TempDir()
+	agentDir := filepath.Join(projectRoot, ".agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("create agent dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(agentDir, "settings.local.json"),
+		[]byte(`{"model_fast":"gpt-5-nano"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ModelFast != "gpt-5-nano" {
+		t.Fatalf("unexpected model_fast: %q", cfg.ModelFast)
+	}
+}
+
 func TestConfigLoadReadsDotenvModel(t *testing.T) {
 	projectRoot := t.TempDir()
 	if err := os.WriteFile(

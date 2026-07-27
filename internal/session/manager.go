@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"code-agent/internal/permission"
 )
 
 type Role string
@@ -89,14 +91,18 @@ type Session struct {
 	Undo          []UndoEntry        `json:"undo,omitempty"`
 	ApprovedTools []string           `json:"approved_tools,omitempty"`
 	Worktrees     []WorktreeState    `json:"worktrees,omitempty"`
+	// ApprovalHistory 持久化用户对工具调用的批准记录，用于在会话恢复后继续
+	// 推导允许规则建议。仅作为数据载体，session 包本身不解释其含义。
+	ApprovalHistory []permission.ApprovalRecord `json:"approval_history,omitempty"`
 }
 
 type SessionMetrics struct {
-	TotalTokensIn  int      `json:"total_tokens_in,omitempty"`
-	TotalTokensOut int      `json:"total_tokens_out,omitempty"`
-	TotalCost      float64  `json:"total_cost,omitempty"`
-	ToolCalls      int      `json:"tool_calls,omitempty"`
-	FilesModified  []string `json:"files_modified,omitempty"`
+	TotalTokensIn     int      `json:"total_tokens_in,omitempty"`
+	TotalTokensOut    int      `json:"total_tokens_out,omitempty"`
+	TotalCachedTokens int      `json:"total_cached_tokens,omitempty"`
+	TotalCost         float64  `json:"total_cost,omitempty"`
+	ToolCalls         int      `json:"tool_calls,omitempty"`
+	FilesModified     []string `json:"files_modified,omitempty"`
 }
 
 type Summary struct {
@@ -227,6 +233,21 @@ func (m *Manager) AddLLMUsage(tokensIn, tokensOut int, cost float64) Session {
 	return cloneSession(m.current)
 }
 
+// AddCachedTokens accumulates prompt-cache hit tokens into the session metrics.
+func (m *Manager) AddCachedTokens(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	m.current.Metrics.TotalCachedTokens += tokens
+	m.current.UpdatedAt = now
+	_ = m.store.Save(context.Background(), m.current)
+}
+
 func (m *Manager) RecordToolCall(modifiedFiles ...string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -324,6 +345,19 @@ func (m *Manager) SetApprovedTools(tools []string) Session {
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.ApprovedTools = normalizeToolList(tools)
+	m.current.UpdatedAt = now
+	_ = m.store.Save(context.Background(), m.current)
+	return cloneSession(m.current)
+}
+
+// SetApprovalHistory 持久化批准历史，使其在会话恢复后仍可用于推导允许规则建议。
+func (m *Manager) SetApprovalHistory(records []permission.ApprovalRecord) Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	m.current.ApprovalHistory = cloneApprovalHistory(records)
 	m.current.UpdatedAt = now
 	_ = m.store.Save(context.Background(), m.current)
 	return cloneSession(m.current)
@@ -438,7 +472,16 @@ func (m *Manager) Resume(ctx context.Context, id string) (Session, error) {
 		return Session{}, ErrNotFound
 	}
 	m.current = cloneSession(*loaded)
-	m.current.UpdatedAt = time.Now()
+	// Guarantee a strictly-increasing UpdatedAt so recency ordering stays
+	// deterministic even when the OS clock hasn't advanced between calls
+	// (coarse timer resolution under fast test/prod execution). Otherwise
+	// equal timestamps make the recency sort fall back to nondeterministic
+	// map iteration order.
+	now := time.Now()
+	if !now.After(loaded.UpdatedAt) {
+		now = loaded.UpdatedAt.Add(time.Nanosecond)
+	}
+	m.current.UpdatedAt = now
 	if err := m.store.Save(ctx, m.current); err != nil {
 		return Session{}, err
 	}
@@ -566,6 +609,7 @@ func cloneSession(session Session) Session {
 	out.Undo = cloneUndo(session.Undo)
 	out.ApprovedTools = normalizeToolList(session.ApprovedTools)
 	out.Worktrees = cloneWorktrees(session.Worktrees)
+	out.ApprovalHistory = cloneApprovalHistory(session.ApprovalHistory)
 	return out
 }
 
@@ -574,6 +618,15 @@ func cloneWorktrees(in []WorktreeState) []WorktreeState {
 		return nil
 	}
 	out := make([]WorktreeState, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneApprovalHistory(in []permission.ApprovalRecord) []permission.ApprovalRecord {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]permission.ApprovalRecord, len(in))
 	copy(out, in)
 	return out
 }

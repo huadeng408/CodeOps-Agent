@@ -60,7 +60,17 @@ func (s *MemoryStore) List(_ context.Context) ([]Session, error) {
 		out = append(out, cloneSession(session))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		a, b := out[i], out[j]
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		// Deterministic tiebreakers when timestamps collide (coarse OS clock):
+		// CreatedAt, then ID — avoids falling back to nondeterministic map
+		// iteration order.
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID > b.ID
 	})
 	return out, nil
 }
@@ -147,7 +157,14 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Session, error) {
 		return nil, fmt.Errorf("iterate sessions: %w", err)
 	}
 	sort.SliceStable(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+		a, b := sessions[i], sessions[j]
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID > b.ID
 	})
 	return sessions, nil
 }

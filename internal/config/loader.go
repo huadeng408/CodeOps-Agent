@@ -29,6 +29,7 @@ type Config struct {
 	MCPConfig                       string           `json:"mcp_config"`
 	MemoryDir                       string           `json:"memory_dir"`
 	WorktreeBaseRef                 string           `json:"worktree_base_ref"`
+	ThinkingEnabled                 bool             `json:"thinking_enabled"`
 }
 
 type PermissionConfig struct {
@@ -73,6 +74,7 @@ func Default(projectRoot string) Config {
 		MCPConfig:                       ".mcp.json",
 		MemoryDir:                       filepath.Join(projectRoot, ".agent", "memory"),
 		WorktreeBaseRef:                 "fresh",
+		ThinkingEnabled:                 true,
 	}
 }
 
@@ -82,6 +84,8 @@ func Load(projectRoot string) (Config, error) {
 	if err := applyDotenvModel(filepath.Join(cfg.ProjectRoot, ".env.local"), &cfg); err != nil {
 		return Config{}, err
 	}
+
+	applyThinkingEnv(&cfg)
 
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" {
@@ -139,6 +143,14 @@ func applyDotenvModel(path string, cfg *Config) error {
 		cfg.Model = strings.TrimSpace(model)
 	}
 	return nil
+}
+
+func applyThinkingEnv(cfg *Config) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("THINKING_ENABLED")))
+	if raw == "" {
+		return
+	}
+	cfg.ThinkingEnabled = raw == "1" || raw == "true" || raw == "yes"
 }
 
 func readDotenv(path string) (map[string]string, error) {
@@ -241,6 +253,9 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if patch.WorktreeBaseRef != "" {
 		dst.WorktreeBaseRef = patch.WorktreeBaseRef
+	}
+	if _, ok := raw["thinking_enabled"]; ok {
+		dst.ThinkingEnabled = patch.ThinkingEnabled
 	}
 }
 

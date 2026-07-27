@@ -13,13 +13,14 @@ type Pricing struct {
 }
 
 type SessionMetrics struct {
-	StartTime      time.Time
-	TotalTokensIn  int
-	TotalTokensOut int
-	TotalCost      float64
-	ToolCalls      int
-	Turns          int
-	Errors         int
+	StartTime         time.Time
+	TotalTokensIn     int
+	TotalTokensOut    int
+	TotalCachedTokens int
+	TotalCost         float64
+	ToolCalls         int
+	Turns             int
+	Errors            int
 }
 
 type TurnMetrics struct {
@@ -109,6 +110,17 @@ func (c *Collector) RecordToolCall() {
 	c.current.ToolCalls++
 }
 
+// RecordCachedTokens accumulates prompt-cache hit tokens reported by the
+// orchestrator (Anthropic cache_read_input_tokens / OpenAI cached_tokens).
+func (c *Collector) RecordCachedTokens(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.session.TotalCachedTokens += tokens
+}
+
 func (c *Collector) RecordError() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -150,6 +162,16 @@ func (c *Collector) StatusLine() string {
 	s := c.Snapshot()
 	return fmt.Sprintf("Tokens: %d in / %d out | Cost: $%.4f | Tools: %d | Turns: %d",
 		s.TotalTokensIn, s.TotalTokensOut, s.TotalCost, s.ToolCalls, s.Turns)
+}
+
+// CacheHitRatio returns the fraction of input tokens served from the prompt
+// cache (0 when no input tokens have been recorded).
+func (c *Collector) CacheHitRatio() float64 {
+	s := c.Snapshot()
+	if s.TotalTokensIn <= 0 {
+		return 0
+	}
+	return float64(s.TotalCachedTokens) / float64(s.TotalTokensIn)
 }
 
 func countWords(text string) int {
