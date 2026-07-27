@@ -111,6 +111,7 @@ message SessionMeta {
   int64 tokens_out = 3;
   double cost = 4;
   string model = 5;
+  int64 cached_tokens = 6;  // prompt-cache hit tokens (Anthropic cache_read / OpenAI cached_tokens)
 }
 
 message Done {
