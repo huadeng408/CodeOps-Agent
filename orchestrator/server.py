@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 from dataclasses import dataclass
 from concurrent import futures
 from pathlib import Path
@@ -11,7 +12,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from .config import load_dotenv
 from .context import TokenBudget
 from .graph.main_graph import build_graph
-from .llm.providers import build_default_client
+from .llm.providers import build_default_client, build_fast_client
 from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
 from .skills.manager import SkillManager
@@ -37,6 +38,7 @@ class OrchestratorServer:
         self.working_dir = str(Path(self.config.working_dir).resolve())
         self.graph = build_graph()
         self.llm = build_default_client()
+        self.fast_llm = build_fast_client()
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
@@ -92,6 +94,13 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 ]
                 break
 
+        # Propagate a user interrupt (Ctrl+C) from the Go harness into the
+        # orchestrator (design 22.8). When the harness cancels the gRPC call,
+        # grpc fires the RPC-termination callback, which sets the event. The
+        # runner polls it cooperatively and aborts the in-flight LLM call.
+        cancel_event = threading.Event()
+        context.add_callback(cancel_event.set)
+
         runner = ConversationRunner(
             graph=self.app.graph,
             llm=self.app.llm,
@@ -102,8 +111,16 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             project_root=self.app.project_root,
             working_dir=self.app.working_dir,
             token_budget=self.app.token_budget,
+            fast_llm=self.app.fast_llm,
+            main_llm=self.app.llm,
         )
-        yield from runner.run(user_text, request_iterator, session_id=session_id, history=history)
+        yield from runner.run(
+            user_text,
+            request_iterator,
+            session_id=session_id,
+            history=history,
+            cancel_event=cancel_event,
+        )
 
 
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:

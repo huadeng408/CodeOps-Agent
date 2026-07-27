@@ -227,6 +227,50 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="NotebookEdit",
+                description=(
+                    "Edit a Jupyter notebook (.ipynb) at the cell level: insert, "
+                    "replace, or delete a cell identified by cell_id or cell_index."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace .ipynb file path.",
+                        },
+                        "cell_id": {
+                            "type": "string",
+                            "description": (
+                                "ID of the target cell. For insert, the new cell "
+                                "is inserted after this cell."
+                            ),
+                        },
+                        "cell_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Zero-based fallback when cell_id is absent.",
+                        },
+                        "cell_type": {
+                            "type": "string",
+                            "enum": ["code", "markdown", "raw"],
+                            "description": "Cell type for insert/replace (default code).",
+                        },
+                        "edit_mode": {
+                            "type": "string",
+                            "enum": ["insert", "replace", "delete"],
+                            "description": "Edit mode (default replace).",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "New cell source text for insert/replace.",
+                        },
+                    },
+                    "required": ["path", "edit_mode"],
+                },
+            ),
+            ToolSpec(
                 name="Bash",
                 description="Run a shell command after harness permission checks.",
                 permission=orchestrator_pb2.ALWAYS_ASK,
@@ -395,6 +439,28 @@ class ToolRegistry:
                         "query": {"type": "string"},
                     },
                     "required": ["query"],
+                },
+            ),
+            ToolSpec(
+                name="Skill",
+                description=(
+                    "Invoke a registered skill by name. Returns the skill prompt "
+                    "and instructions to be injected into the conversation."
+                ),
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Exact name of the skill to invoke.",
+                        },
+                        "args": {
+                            "type": "string",
+                            "description": "Optional arguments or focus to pass to the skill.",
+                        },
+                    },
+                    "required": ["name"],
                 },
             ),
         ]

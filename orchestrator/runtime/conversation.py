@@ -2,16 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from codeagent import orchestrator_pb2
 from orchestrator.agents.deep_agent import DeepAgentManager
 from orchestrator.context import BudgetStatus, Compactor, TokenBudget, load_git_diff_context
 from orchestrator.graph.main_graph import MainGraph
-from orchestrator.llm.client import ChatMessage, ChatRequest, ChatResponse, LLMClient, ToolCall
+from orchestrator.llm.client import (
+    COMPLEXITY_FAST_THRESHOLD,
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    LLMClient,
+    RequestInterrupted,
+    ToolCall,
+    Usage,
+    assess_complexity,
+)
+from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.memory.manager import Memory, MemoryManager
-from orchestrator.prompts import build_system_prompt, load_agent_instructions
+from orchestrator.prompts import build_system_prompt, build_with_cache_breaks, load_agent_instructions
 from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
 from orchestrator.security import InjectionDetector
 from orchestrator.skills.manager import SkillManager
@@ -30,6 +44,44 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 MAX_HISTORY_MESSAGES = 40
 MAX_HISTORY_CHARS = 32_000
 MAX_HISTORY_MESSAGE_CHARS = 4_000
+
+THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+THINKING_BUDGET_TOKENS: int = 10000
+THINKING_COMPLEXITY_TURN_THRESHOLD: int = 3
+
+
+def _iter_stream_async(async_gen):
+    """Drive an async generator (``LLMClient.stream``) from synchronous code.
+
+    The conversation runner is a *synchronous* generator (``run`` yields
+    protobuf messages consumed by the gRPC handler thread), but the streaming
+    contract in :class:`LLMClient` is an ``async`` generator. This helper
+    bridges the two by stepping the async generator with
+    ``loop.run_until_complete(__anext__())`` on a dedicated event loop, yielding
+    each :class:`~orchestrator.llm.client.StreamDelta` to the caller.
+
+    Stepping (rather than running the whole stream at once) lets the caller
+    check ``cancel_event`` *between* deltas and yield each text delta
+    immediately so the Go harness ``OnTextDelta`` callback fires per chunk
+    (design 22.6). Exceptions raised inside the provider's ``stream`` -- in
+    particular :class:`RequestInterrupted` from a mid-stream cancel check --
+    propagate unchanged. The async generator is always closed to avoid
+    ``GeneratorExit`` warnings.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            try:
+                delta = loop.run_until_complete(async_gen.__anext__())
+            except StopAsyncIteration:
+                return
+            yield delta
+    finally:
+        try:
+            loop.run_until_complete(async_gen.aclose())
+        except BaseException:
+            pass
+        loop.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +105,8 @@ class ConversationRunner:
     recovery: ErrorRecoveryEngine | None = None
     max_tool_rounds: int = 6
     compactor: Compactor | None = None
+    fast_llm: LLMClient | None = None
+    main_llm: LLMClient | None = None
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -63,28 +117,104 @@ class ConversationRunner:
             self.injection_detector = InjectionDetector()
         if self.recovery is None:
             self.recovery = ErrorRecoveryEngine()
+        if self.main_llm is None:
+            object.__setattr__(self, "main_llm", self.llm)
 
-    def run(self, user_text: str, request_iterator, session_id: str = "", history: list[dict[str, str]] | None = None) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+    def run(
+        self,
+        user_text: str,
+        request_iterator,
+        session_id: str = "",
+        history: list[dict[str, str]] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         if self.llm is None:
             yield from self._fallback_conversation(user_text, request_iterator)
             return
 
+        # ── Model routing: pick fast model for simple queries ─────────
+        complexity = self._score_complexity(user_text)
+        self._elect_llm(complexity=complexity, error_count=0, plan_mode_active=False)
+        using_fast = self.llm is self.fast_llm
+
         messages = self._initial_messages(user_text, turn=1, session_id=session_id, history=history or [])
         total_tokens_in = 0
         total_tokens_out = 0
+        total_cached_tokens = 0
         total_cost = 0.0
         consecutive_errors = 0
+        plan_mode_active = False
         tool_cache: dict[str, CachedToolResult] = {}
+
         for turn in range(1, self.max_tool_rounds + 1):
-            if self._budget_status() == BudgetStatus.EXCEEDED:
-                yield self._text(self._budget_exceeded_message())
-                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+            # ── Cooperative user interrupt (design 22.8) ──────────────
+            # Stop before doing any work this turn when the harness has
+            # cancelled the gRPC call (e.g. the user pressed Ctrl+C).
+            if self._cancelled(cancel_event):
+                yield self._text("[interrupted]")
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
                 yield self._done(False)
                 return
 
-            response = self._chat(self._compact_messages(messages))
+            if self._budget_status() == BudgetStatus.EXCEEDED:
+                yield self._text(self._budget_exceeded_message())
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
+                yield self._done(False)
+                return
+
+            # ── Escalate from fast to main model mid-conversation ──
+            if using_fast and (consecutive_errors >= 2 or plan_mode_active):
+                self._elect_llm(
+                    complexity=10.0,
+                    error_count=consecutive_errors,
+                    plan_mode_active=plan_mode_active,
+                )
+                using_fast = False
+
+            should_think = self._should_enable_thinking(consecutive_errors, plan_mode_active, turn)
+            thinking_kwargs: dict[str, Any] = {}
+            if should_think:
+                provider = self._detect_provider()
+                if provider == "anthropic":
+                    thinking_kwargs["thinking_enabled"] = True
+                    thinking_kwargs["thinking_budget"] = THINKING_BUDGET_TOKENS
+                elif provider == "openai":
+                    thinking_kwargs["thinking_enabled"] = True
+                    thinking_kwargs["reasoning_effort"] = "medium"
+            try:
+                response_box: list[ChatResponse] = []
+                yield from self._stream_chat(
+                    self._compact_messages(messages),
+                    response_box=response_box,
+                    cancel_event=cancel_event,
+                    **thinking_kwargs,
+                )
+            except RequestInterrupted:
+                # The in-flight LLM call was aborted because the user
+                # interrupted. Surface a short notice and end the turn
+                # cooperatively (do not crash the gRPC handler).
+                yield self._text("[interrupted]")
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._done(False)
+                return
+            response = response_box[0]
+            # If the interrupt arrived just as the response came back, stop
+            # before consuming tokens / tool calls for a stale turn. Text (if
+            # any) was already streamed incrementally above, so do not re-emit.
+            if self._cancelled(cancel_event):
+                yield self._text("[interrupted]")
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._done(False)
+                return
             total_tokens_in += response.usage.input_tokens
             total_tokens_out += response.usage.output_tokens
+            total_cached_tokens += response.usage.cached_input_tokens
             response_cost = self._estimate_cost(
                 getattr(self.llm, "model", ""),
                 response.usage.input_tokens,
@@ -95,23 +225,25 @@ class ConversationRunner:
                 response.usage.input_tokens + response.usage.output_tokens,
                 response_cost,
             )
-            if response.text:
-                yield self._text(response.text)
-            if response.text or response.tool_calls:
+            # NOTE: response.text was already streamed incrementally by
+            # _stream_chat (multiple TextChunks for real providers); only the
+            # assistant message is appended here.
+            if response.text or response.tool_calls or response.thinking_blocks:
                 messages.append(
                     ChatMessage(
                         role="assistant",
                         content=response.text,
                         tool_calls=list(response.tool_calls),
+                        thinking_blocks=list(response.thinking_blocks),
                     )
                 )
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
-                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._done(False)
                 return
             if not response.tool_calls:
-                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._done(True)
                 return
 
@@ -126,6 +258,7 @@ class ConversationRunner:
                     total_tokens_out,
                     total_cost,
                     consecutive_errors,
+                    total_cached_tokens,
                 )
                 if should_stop:
                     return
@@ -152,7 +285,7 @@ class ConversationRunner:
                     result = self._next_tool_result(request_iterator, call_id)
                     if result is None:
                         yield self._text("User response stream ended before an answer was received.")
-                        yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                        yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                         yield self._done(False)
                         return
                     messages.append(self._tool_result_message(call_id, call.name, result))
@@ -236,6 +369,7 @@ class ConversationRunner:
                             is_error=False,
                         )
                     )
+                    plan_mode_active = True
                     continue
                 if call.name == "SpawnAgent":
                     try:
@@ -295,7 +429,7 @@ class ConversationRunner:
                 result = self._next_tool_result(request_iterator, call_id)
                 if result is None:
                     yield self._text("Tool result stream ended before a result was received.")
-                    yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                    yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                     yield self._done(False)
                     return
                 tool_message = self._tool_result_message(call_id, call.name, result)
@@ -328,7 +462,22 @@ class ConversationRunner:
                 ),
             )
         )
-        response = self._chat(self._compact_messages(messages), allow_tools=False)
+        try:
+            response_box: list[ChatResponse] = []
+            yield from self._stream_chat(
+                self._compact_messages(messages),
+                allow_tools=False,
+                response_box=response_box,
+                cancel_event=cancel_event,
+            )
+        except RequestInterrupted:
+            yield self._text("[interrupted]")
+            yield self._session_meta(
+                final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+            )
+            yield self._done(False)
+            return
+        response = response_box[0]
         total_tokens_in += response.usage.input_tokens
         total_tokens_out += response.usage.output_tokens
         response_cost = self._estimate_cost(
@@ -341,14 +490,14 @@ class ConversationRunner:
             response.usage.input_tokens + response.usage.output_tokens,
             response_cost,
         )
-        if response.text:
-            yield self._text(response.text)
-        else:
+        # Final-turn text (if any) was already streamed incrementally above;
+        # only emit the fallback notice when the model returned nothing.
+        if not response.text:
             yield self._text(
                 "Tool round limit reached before the task could be completed. "
                 "No final model summary was returned."
             )
-        yield self._session_meta(final_turn, total_tokens_in, total_tokens_out, total_cost)
+        yield self._session_meta(final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
         yield self._done(False)
 
     def _fallback_conversation(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
@@ -374,31 +523,64 @@ class ConversationRunner:
     def _initial_messages(self, user_text: str, turn: int, session_id: str = "", history: list[dict[str, str]] | None = None) -> list[ChatMessage]:
         history = history or []
         memories = self.memory_manager.load_relevant(user_text)
-        system_prompt = build_system_prompt(
-            {
-                "identity": (
-                    "You are the Python orchestrator for a local code agent. "
-                    "Coordinate with the Go harness, use tools when you need "
-                    "workspace facts or file changes, and keep responses concise."
-                ),
-                "capabilities": self._capabilities_context(),
-                "tools": self._tools_context(),
-                "project": self._project_context(),
-                "memory": self._memory_context(memories) or "_No relevant memories found._",
-                "session": self._session_context(user_text, turn, session_id=session_id, history=history),
-            }
-        )
-        messages = [
-            ChatMessage(
-                role="system",
-                content=system_prompt,
-            )
-        ]
+        provider = self._detect_provider()
+        sections = {
+            "identity": (
+                "You are the Python orchestrator for a local code agent. "
+                "Coordinate with the Go harness, use tools when you need "
+                "workspace facts or file changes, and keep responses concise."
+            ),
+            "capabilities": self._capabilities_context(),
+            "tools": self._tools_context(),
+            "project": self._project_context(),
+            "memory": self._memory_context(memories) or "_No relevant memories found._",
+            "session": self._session_context(user_text, turn, session_id=session_id, history=history),
+            "provider": provider,
+        }
+        system_messages = build_with_cache_breaks(sections, provider=provider)
+        if not system_messages:
+            content = build_system_prompt(sections, provider=provider)
+            if not content:
+                system_messages = []
+            elif provider == "anthropic":
+                system_messages = [
+                    ChatMessage(
+                        role="system",
+                        content=content,
+                        cache_control="ephemeral",
+                    )
+                ]
+            else:
+                system_messages = [
+                    ChatMessage(
+                        role="system",
+                        content=content,
+                    )
+                ]
+        messages = list(system_messages)
         messages.extend(self._history_messages(history))
         messages.append(ChatMessage(role="user", content=user_text))
         return messages
 
-    def _chat(self, messages: list[ChatMessage], allow_tools: bool = True) -> ChatResponse:
+    def _detect_provider(self) -> str:
+        if isinstance(self.llm, AnthropicClient):
+            return "anthropic"
+        model = str(getattr(self.llm, "model", "")).lower()
+        if model and "claude" in model:
+            return "anthropic"
+        if model and "gpt" in model:
+            return "openai"
+        return ""
+
+    def _chat(
+        self,
+        messages: list[ChatMessage],
+        allow_tools: bool = True,
+        thinking_enabled: bool = False,
+        thinking_budget: int = THINKING_BUDGET_TOKENS,
+        reasoning_effort: str = "",
+        cancel_event: threading.Event | None = None,
+    ) -> ChatResponse:
         tools = self.tool_registry.openai_schemas() if allow_tools else []
         return asyncio.run(
             self.llm.chat(
@@ -406,9 +588,185 @@ class ConversationRunner:
                     model=getattr(self.llm, "model", ""),
                     messages=messages,
                     tools=tools,
+                    thinking_enabled=thinking_enabled,
+                    thinking_budget=thinking_budget,
+                    reasoning_effort=reasoning_effort,
+                    cancel_event=cancel_event,
                 )
             )
         )
+
+    def _stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        allow_tools: bool = True,
+        thinking_enabled: bool = False,
+        thinking_budget: int = THINKING_BUDGET_TOKENS,
+        reasoning_effort: str = "",
+        cancel_event: threading.Event | None = None,
+        response_box: list[ChatResponse] | None = None,
+    ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        """Streaming variant of :meth:`_chat` (design 22.6).
+
+        Drives ``self.llm.stream(request)`` (an async generator) via
+        :func:`_iter_stream_async`, yielding a ``TextChunk`` OrchestratorMessage
+        for every ``"text"`` delta so the Go harness renders assistant text
+        chunk-by-chunk. Tool calls are collected finalized (their arguments are
+        NOT streamed incrementally in v1 -- noted as a followup), usage and
+        thinking blocks are accumulated, and the assembled :class:`ChatResponse`
+        is appended to ``response_box`` when the stream completes.
+
+        Fallback: when the active LLM has no ``stream`` method (notably the
+        plain test fakes that only implement ``chat``), this delegates to
+        :meth:`_chat` and emits a single ``TextChunk`` -- behaviour identical
+        to the pre-streaming path, so those fakes keep working unchanged.
+
+        Cancellation is cooperative: ``cancel_event`` is checked between deltas
+        (raising :class:`RequestInterrupted`), and providers raise it from
+        inside ``stream`` on their own between-chunk check. Either way the
+        exception propagates to :meth:`run`'s handler.
+        """
+        stream_fn = getattr(self.llm, "stream", None)
+        if stream_fn is None:
+            response = self._chat(
+                messages,
+                allow_tools=allow_tools,
+                thinking_enabled=thinking_enabled,
+                thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort,
+                cancel_event=cancel_event,
+            )
+            if response.text:
+                yield self._text(response.text)
+            if response_box is not None:
+                response_box.append(response)
+            return
+
+        tools = self.tool_registry.openai_schemas() if allow_tools else []
+        request = ChatRequest(
+            model=getattr(self.llm, "model", ""),
+            messages=messages,
+            tools=tools,
+            thinking_enabled=thinking_enabled,
+            thinking_budget=thinking_budget,
+            reasoning_effort=reasoning_effort,
+            cancel_event=cancel_event,
+        )
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        thinking_blocks: list[dict[str, Any]] = []
+        usage = Usage()
+        for delta in _iter_stream_async(stream_fn(request)):
+            # Defense-in-depth cooperative cancel between deltas. Real
+            # providers also raise from inside stream(); this catches the
+            # default-wrapper case where the whole chat() runs at once.
+            if self._cancelled(cancel_event):
+                raise RequestInterrupted("cancelled mid-stream")
+            kind = delta.kind
+            if kind == "text":
+                if delta.text:
+                    yield self._text(delta.text)
+                    text_parts.append(delta.text)
+            elif kind == "tool_calls":
+                tool_calls = list(delta.tool_calls)
+            elif kind == "usage":
+                if delta.usage is not None:
+                    usage = delta.usage
+            elif kind == "thinking":
+                if delta.thinking_blocks:
+                    thinking_blocks.extend(delta.thinking_blocks)
+            elif kind == "done":
+                if delta.thinking_blocks:
+                    thinking_blocks = list(delta.thinking_blocks)
+
+        response = ChatResponse(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            thinking_blocks=thinking_blocks,
+            usage=usage,
+        )
+        if response_box is not None:
+            response_box.append(response)
+
+    @staticmethod
+    def _cancelled(cancel_event: threading.Event | None) -> bool:
+        """Return True when the caller has signalled a user interrupt."""
+        return cancel_event is not None and cancel_event.is_set()
+
+    @staticmethod
+    def _should_enable_thinking(
+        error_count: int,
+        plan_mode_active: bool,
+        turn: int,
+    ) -> bool:
+        """Determine if extended thinking should be enabled.
+
+        Triggers:
+        - error_count >= 2: repeated tool failures indicate a complex recovery scenario
+        - plan_mode_active: structured planning benefits from deeper reasoning
+        - turn >= THINKING_COMPLEXITY_TURN_THRESHOLD: sustained multi-turn tasks
+        """
+        if not THINKING_ENABLED:
+            return False
+        if error_count >= 2:
+            return True
+        if plan_mode_active:
+            return True
+        if turn >= THINKING_COMPLEXITY_TURN_THRESHOLD:
+            return True
+        return False
+
+    @staticmethod
+    def _score_complexity(user_text: str) -> float:
+        """Assess task complexity from user text before the first LLM call.
+
+        Delegates to the shared assess_complexity() in llm/client.py,
+        returning a float where scores <= COMPLEXITY_FAST_THRESHOLD
+        recommend routing to the fast model.
+        """
+        result = assess_complexity(user_text)
+        return result.score
+
+    def _elect_llm(
+        self,
+        complexity: float,
+        error_count: int = 0,
+        plan_mode_active: bool = False,
+    ) -> None:
+        """Select the active LLM client based on complexity signals.
+
+        Falls back to the main model when:
+        - complexity > COMPLEXITY_FAST_THRESHOLD
+        - error_count >= 2 (recovery needs deeper reasoning)
+        - plan_mode_active (structured planning)
+        - fast_llm is unavailable
+
+        Sets self.llm to the elected client so _chat() and
+        _session_meta() pick up the right model transparently.
+        """
+        if self.main_llm is None and self.fast_llm is None:
+            return  # nothing to elect
+
+        main = self.main_llm or self.llm
+        fast = self.fast_llm
+
+        use_fast = (
+            fast is not None
+            and complexity <= COMPLEXITY_FAST_THRESHOLD
+            and error_count < 2
+            and not plan_mode_active
+        )
+
+        elected = fast if use_fast else main
+        if elected is not self.llm:
+            prev = getattr(self.llm, "model", "unknown") if self.llm else "none"
+            nxt = getattr(elected, "model", "unknown")
+            # Use slots-safe attribute assignment
+            object.__setattr__(self, "llm", elected)
+
+    # ── project context helpers ──────────────────────────────────────
 
     def _project_context(self) -> str:
         content = load_agent_instructions(self.project_root, self.working_dir)
@@ -501,6 +859,7 @@ class ConversationRunner:
         tokens_in: int,
         tokens_out: int,
         cost: float,
+        cached_tokens: int = 0,
     ) -> orchestrator_pb2.OrchestratorMessage:
         model = getattr(self.llm, "model", "") or "fallback"
         return orchestrator_pb2.OrchestratorMessage(
@@ -510,6 +869,7 @@ class ConversationRunner:
                 tokens_out=tokens_out,
                 cost=cost,
                 model=model,
+                cached_tokens=cached_tokens,
             )
         )
 
@@ -554,13 +914,20 @@ class ConversationRunner:
             content = f"Tool {tool_name} failed: {result.error}\n{result.output}"
         else:
             content = result.output
+        # 当 Go 侧已按行/字节上限截断输出时，显式提示 LLM 结果被裁剪，便于其主动
+        # 决定是否需要分页或重读。注意：设计方案 22.4 中的“智能摘要”（对超大输出调用
+        # LLM 生成摘要）暂未实现，当前只做截断；后续如需引入再在此处扩展。
+        if result is not None and getattr(result, "truncated", False):
+            content = (
+                f"{content}\n[Output truncated — larger result was capped; ask if you need more.]"
+            )
         content = self._wrap_untrusted_tool_output(content)
         return ChatMessage(
             role="tool",
             name=tool_name,
             tool_call_id=call_id or tool_name,
             content=content,
-            is_error=bool(result.error),
+            is_error=bool(result.error) if result is not None else False,
         )
 
     @staticmethod
@@ -578,6 +945,7 @@ class ConversationRunner:
         total_tokens_out: int,
         total_cost: float,
         consecutive_errors: int,
+        total_cached_tokens: int = 0,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         request_calls: list[ToolCall] = []
         requested_keys: set[str] = set()
@@ -598,7 +966,7 @@ class ConversationRunner:
             results = self._next_tool_results(request_iterator, request_ids)
             if results is None:
                 yield self._text("Tool result stream ended before all batch results were received.")
-                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._done(False)
                 return consecutive_errors, True
 
@@ -607,7 +975,7 @@ class ConversationRunner:
                 result = results.get(call_id)
                 if result is None:
                     yield self._text(f"Batch result missing for tool call {call_id}.")
-                    yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                    yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                     yield self._done(False)
                     return consecutive_errors, True
                 tool_message = self._tool_result_message(call_id, call.name, result)
@@ -622,7 +990,7 @@ class ConversationRunner:
             cached_message = self._cached_tool_message(tool_cache, call) or result_messages.get(call_id)
             if cached_message is None:
                 yield self._text(f"Batch result missing for tool call {call_id}.")
-                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost)
+                yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._done(False)
                 return consecutive_errors, True
             messages.append(cached_message)

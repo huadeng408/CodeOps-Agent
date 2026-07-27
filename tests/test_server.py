@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from concurrent import futures
 import subprocess
+import threading
 
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
-from orchestrator.llm.client import ChatResponse, ToolCall, Usage
+from orchestrator.llm.client import ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
@@ -175,7 +176,7 @@ class UsageFakeLLM:
         self.requests.append(request)
         return ChatResponse(
             text="all done",
-            usage=Usage(input_tokens=100, output_tokens=50),
+            usage=Usage(input_tokens=100, output_tokens=50, cached_input_tokens=30),
         )
 
 
@@ -555,6 +556,80 @@ def test_tool_output_prompt_injection_is_wrapped(monkeypatch, tmp_path) -> None:
         server.stop(grace=0)
 
 
+def test_truncated_tool_result_surfaces_marker_in_tool_message(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = FakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="list python files")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="src/a.py\nsrc/b.py",
+                            truncated=True,
+                        )
+                    ),
+                ]
+            )
+            list(stub.Converse(messages))
+
+            tool_message = next(message for message in app.llm.requests[1].messages if message.role == "tool")
+            assert tool_message.role == "tool"
+            # Go 侧已截断 → tool 消息必须显式带上提示标记，且原始输出仍保留。
+            assert "[Output truncated — larger result was capped; ask if you need more.]" in tool_message.content
+            assert "src/a.py" in tool_message.content
+    finally:
+        server.stop(grace=0)
+
+
+def test_non_truncated_tool_result_omits_marker(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = FakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            messages = iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        user_input=orchestrator_pb2.UserInput(text="list python files")
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob",
+                            output="src/a.py",
+                        )
+                    ),
+                ]
+            )
+            list(stub.Converse(messages))
+
+            tool_message = next(message for message in app.llm.requests[1].messages if message.role == "tool")
+            assert "Output truncated" not in tool_message.content
+    finally:
+        server.stop(grace=0)
+
+
 def test_todo_write_emits_update_and_persists(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
@@ -850,6 +925,7 @@ def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
             assert responses[0].text.text == "all done"
             assert responses[1].session_meta.tokens_in == 100
             assert responses[1].session_meta.tokens_out == 50
+            assert responses[1].session_meta.cached_tokens == 30
             assert responses[1].session_meta.cost > 0
             assert responses[-1].done.success
             assert app.token_budget.used_tokens == 150
@@ -1034,3 +1110,248 @@ def test_duplicate_read_calls_in_batch_are_executed_once(monkeypatch, tmp_path) 
             ]
     finally:
         server.stop(grace=0)
+
+
+class NoCallFakeLLM:
+    """LLM that must never be consulted; used to prove the runner bails out
+    before the first chat when the turn is already cancelled."""
+
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        raise AssertionError("chat must not be called when cancelled before the first turn")
+
+
+class InterruptibleFakeLLM:
+    """LLM whose in-flight call is aborted (simulates the HTTP layer raising
+    RequestInterrupted when the user presses Ctrl+C)."""
+
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        raise RequestInterrupted("simulated in-flight abort")
+
+
+def _runner_from_app(app, llm) -> ConversationRunner:
+    return ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        fast_llm=app.fast_llm,
+        main_llm=app.llm,
+    )
+
+
+def test_runner_stops_when_cancelled_before_first_chat(monkeypatch, tmp_path) -> None:
+    """A cancel event set before the first turn stops the runner cooperatively
+    without ever calling the LLM (design 22.8)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = NoCallFakeLLM()
+    app.llm = llm
+    runner = _runner_from_app(app, llm)
+
+    cancel = threading.Event()
+    cancel.set()
+    responses = list(runner.run("hello", iter([]), cancel_event=cancel))
+
+    assert len(llm.requests) == 0
+    assert any(
+        response.HasField("text") and "[interrupted]" in response.text.text
+        for response in responses
+    )
+    assert responses[-1].done.success is False
+
+
+def test_runner_handles_in_flight_interrupt(monkeypatch, tmp_path) -> None:
+    """When the in-flight LLM call is aborted, the runner surfaces a short
+    notice and ends the turn instead of crashing the gRPC handler."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = InterruptibleFakeLLM()
+    app.llm = llm
+    runner = _runner_from_app(app, llm)
+
+    cancel = threading.Event()  # not pre-set; the LLM aborts itself
+    responses = list(runner.run("hello", iter([]), cancel_event=cancel))
+
+    assert len(llm.requests) == 1
+    texts = "\n".join(
+        response.text.text for response in responses if response.HasField("text")
+    )
+    assert "[interrupted]" in texts
+    assert responses[-1].done.success is False
+
+
+class StreamingFakeLLM:
+    """LLM with a real ``stream()`` override that emits assistant text in
+    multiple chunks. Used to prove the runner emits multiple incremental
+    TextChunk OrchestratorMessages per turn (design 22.6), not one."""
+
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        raise AssertionError("streaming fake must be consumed via stream()")
+
+    async def stream(self, request):
+        self.requests.append(request)
+        for piece in ("Hello", " streaming", " world"):
+            yield StreamDelta(kind="text", text=piece)
+        yield StreamDelta(kind="usage", usage=Usage(input_tokens=4, output_tokens=3))
+        yield StreamDelta(kind="done")
+
+
+def test_runner_emits_incremental_text_chunks(monkeypatch, tmp_path) -> None:
+    """A streaming-capable LLM produces multiple TextChunk messages per turn so
+    the Go harness OnTextDelta fires per chunk (design 22.6)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = StreamingFakeLLM()
+    app.llm = llm
+    runner = _runner_from_app(app, llm)
+
+    responses = list(runner.run("hello", iter([])))
+
+    text_chunks = [r.text.text for r in responses if r.HasField("text")]
+    # Three incremental chunks, not a single one.
+    assert len(text_chunks) == 3
+    assert "".join(text_chunks) == "Hello streaming world"
+    assert responses[-1].done.success is True
+    assert len(llm.requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-model routing (design 22.10): ConversationRunner._elect_llm selects
+# the fast model for simple queries and escalates to the main model on
+# complexity / repeated errors / plan mode.
+# ---------------------------------------------------------------------------
+
+from orchestrator.llm.client import COMPLEXITY_FAST_THRESHOLD  # noqa: E402
+
+
+class _TagFakeLLM:
+    """Minimal stand-in LLM distinguished only by its model name, so a test can
+    tell which client ``_elect_llm`` selected via identity."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.requests = []
+
+    async def chat(self, request):  # noqa: ANN001
+        raise AssertionError("election tests must not call chat()")
+
+
+def _elect_runner(app, fast_llm, main_llm) -> ConversationRunner:
+    """Build a ConversationRunner wired with explicit fast/main clients so
+    ``_elect_llm`` has two real clients to choose between."""
+    return ConversationRunner(
+        graph=app.graph,
+        llm=main_llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        fast_llm=fast_llm,
+        main_llm=main_llm,
+    )
+
+
+def test_elect_llm_picks_fast_for_simple_query(monkeypatch, tmp_path) -> None:
+    """complexity below the threshold + clean state -> fast model."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    fast = _TagFakeLLM("gpt-4o-mini")
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast, main)
+
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=False)
+    assert runner.llm is fast
+
+
+def test_elect_llm_keeps_fast_at_threshold_boundary(monkeypatch, tmp_path) -> None:
+    """complexity == COMPLEXITY_FAST_THRESHOLD is still fast-eligible (<=)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    fast = _TagFakeLLM("gpt-4o-mini")
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast, main)
+
+    runner._elect_llm(
+        complexity=COMPLEXITY_FAST_THRESHOLD,
+        error_count=0,
+        plan_mode_active=False,
+    )
+    assert runner.llm is fast
+
+
+def test_elect_llm_escalates_to_main_above_threshold(monkeypatch, tmp_path) -> None:
+    """Crossing the boundary mid-conversation reverts to the main model."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    fast = _TagFakeLLM("gpt-4o-mini")
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast, main)
+
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=False)
+    assert runner.llm is fast
+    runner._elect_llm(complexity=0.80, error_count=0, plan_mode_active=False)
+    assert runner.llm is main
+
+
+def test_elect_llm_escalates_to_main_on_repeated_errors(monkeypatch, tmp_path) -> None:
+    """error_count >= 2 demands the main model even for a simple query."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    fast = _TagFakeLLM("gpt-4o-mini")
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast, main)
+
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=False)
+    assert runner.llm is fast
+    runner._elect_llm(complexity=0.1, error_count=2, plan_mode_active=False)
+    assert runner.llm is main
+
+
+def test_elect_llm_escalates_to_main_in_plan_mode(monkeypatch, tmp_path) -> None:
+    """plan_mode_active routes to the main model regardless of complexity."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    fast = _TagFakeLLM("gpt-4o-mini")
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast, main)
+
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=False)
+    assert runner.llm is fast
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=True)
+    assert runner.llm is main
+
+
+def test_elect_llm_without_fast_client_stays_on_main(monkeypatch, tmp_path) -> None:
+    """When no fast client is configured, election never leaves the main one."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    main = _TagFakeLLM("gpt-4o")
+    runner = _elect_runner(app, fast_llm=None, main_llm=main)
+
+    runner._elect_llm(complexity=0.1, error_count=0, plan_mode_active=False)
+    assert runner.llm is main
