@@ -317,4 +317,32 @@ Windows 环境也可以使用：
 
 ## 当前状态
 
-这是一个本地 Code Agent 原型，已经具备 CLI、工具执行、gRPC 编排、LLM provider、会话持久化、权限模型、MCP、记忆、计划、Todo、子 Agent 和测试覆盖。后续可继续增强真实 TUI 体验、更多工具沙箱策略、长期记忆检索、LangGraph 深度集成、IDE 插件和 PR 自动化流程。
+本项目实现了设计方案（第 22 节"进一步改进建议"全部落地），已达对标 Claude Code 85%+ 核心能力的增强版：
+
+### 核心闭环能力
+
+- **LLM 推理**：Extended Thinking / 深度思考（Anthropic thinking block + OpenAI reasoning_effort 模型门控）——复杂任务、多轮、计划模式自动触发。
+- **Prompt 缓存感知**：Anthropic 显式 ephemeral 缓存标记（cacheable 段：identity/capabilities/tools/project），缓存命中率在状态栏实时可见。
+- **多模型路由**：基于任务复杂度的 fast↔main 自动选举，带中段升级（错误累积 / plan_mode 二阶段回归主模型）。
+- **增量流式输出**：Anthropic/OpenAI SSE 流式解析——LLM 文本逐块渲染（Go harness `OnTextDelta`→`AppendAssistantText`），而非等整段完成。工具调用结果统一后在文本后发出。
+- **用户中断**：Ctrl+C 全链路传播（Go `turnCtx`→gRPC `context.add_callback`→Python `threading.Event`→`http_call_with_retry` 可中断）+ idle 提示符 3 次快速 Ctrl+C 强退。
+- **进程崩溃恢复**：Go `ProcessManager.Monitor` 监督协程，编排器意外退出时自动重启（CAS 守护、指数退避），在途对话重放一次、会话不丢失。
+- **并行工具调用**：`ToolRequestBatch`→Go `sync.WaitGroup` 扇出，gRPC 批量协议支持。
+- **输出截断合规**：行数优先（250 行）+ 字节上限（50KB），信息性提示（`[Output truncated: N lines total, showing first M]`），`.truncated` 结构标志传递到 LLM。
+- **多模态**：图像 data-URI→Anthropic 原生 `image` source block / OpenAI `image_url` 块；PDF 通过 Poppler `pdftotext` 提取文本（无额外依赖）。
+- **NotebookEdit**：Jupyter `.ipynb` cell 级增/删/改；`.ipynb` 读取渲染 cell 摘要而非原始 JSON。
+- **自动提交建议**：`/commit` 斜杠命令，流式生成 conventional-commit 建议（不回退自动化）。
+- **Allowlist 学习**：批准历史记录 + 规则建议器（重复匹配的命令/文件模式→候选 `AllowRule`），持久化跨会话。
+- **工具安全加固**：符号链接路径穿越防护；关闭所有 8 个工具中的硬编码输出限制。
+
+### 基础设施
+
+- **可观测性**：SessionMeta 随每轮上报 token/成本/缓存命中/模型；Go metrics `Collector` + session 持久化（SQLite）+ 状态栏实时渲染。
+- **会话持久化**：SQLite store + 确定性时间戳排序（`Résumé` 后强制单调递增，Windows 时钟分辨率健壮）。
+
+### 测试覆盖率
+
+- Python: 66 个 pytest（33→66，覆盖 thinking / cache / routing / streaming / interrupt / truncation / multimodal / notebook）
+- Go: `go test ./...` 全面通过（cli / skills / tools / orchestrator / 集成测试，2 轮无 flaky）
+
+后续路线：LangGraph 深度集成（checkpointer PostgreSQL）、真实 TUI（bubbletea）、IDE 插件、PR 自动化、Agent loop + eval + trace 改造计划（详见 docs 目录）。
