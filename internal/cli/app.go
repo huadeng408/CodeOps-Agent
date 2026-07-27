@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -96,6 +97,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		MemoryDir:           cfg.MemoryDir,
 		MaxTokens:           cfg.MaxTokensPerSession,
 		MaxCost:             cfg.MaxCostPerSession,
+		ModelFast:           cfg.ModelFast,
 		StartupTimeout:      time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
 		ConversationTimeout: time.Duration(cfg.OrchestratorConversationTimeout) * time.Second,
 	})
@@ -118,6 +120,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
 	executor.SetMCPManager(mcpManager)
+	skillsManager := skills.NewManager()
+	executor.SetSkillsManager(skillsManager)
 
 	return &App{
 		cfg:            cfg,
@@ -138,7 +142,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		worktree:       worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
 		undo:           undo.NewManager(),
 		recovery:       recovery.NewEngine(),
-		skills:         skills.NewManager(),
+		skills:         skillsManager,
 		prompts:        prompts.NewBuilder(),
 		instructions:   instructions,
 	}
@@ -149,6 +153,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer stop()
 	if a.orchestratorPM != nil {
 		defer a.orchestratorPM.Stop()
+		// Supervise the orchestrator process: auto-restart on crash so the
+		// session survives an unexpected orchestrator exit between turns.
+		go a.orchestratorPM.Monitor(runCtx)
 	}
 	cleanupSignals := a.setupSignalHandling(stop)
 	defer cleanupSignals()
@@ -156,6 +163,14 @@ func (a *App) Run(ctx context.Context) error {
 	a.session.NewSession(a.cfg.WorkingDir)
 	a.session.SetMode("chat")
 	a.renderBootstrap()
+
+	// Wire up streaming text rendering so each orchestrator text delta
+	// is printed incrementally instead of accumulating into a single panel.
+	if a.orchestrator != nil {
+		a.orchestrator.OnTextDelta = func(delta string) {
+			a.renderer.AppendAssistantText(delta)
+		}
+	}
 
 	for {
 		if err := runCtx.Err(); err != nil {
@@ -206,7 +221,13 @@ func (a *App) Run(ctx context.Context) error {
 		a.clearCurrentCancel()
 		turnCancel()
 		a.session.Append(session.RoleAssistant, reply)
-		a.renderer.PrintAssistant(reply)
+		// Streaming text was already rendered via OnTextDelta callbacks
+		// during handleUserInput. Close the panel and fall back to full
+		// panel rendering only when streaming produced no text.
+		a.renderer.EndAssistantPanel()
+		if strings.HasPrefix(reply, "[orchestrator") || strings.HasPrefix(reply, "[blocked") {
+			a.renderer.PrintAssistant(reply)
+		}
 		a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
 	}
 }
@@ -292,7 +313,7 @@ func (a *App) renderBootstrap() {
 		a.renderer.PrintBlock("loaded AGENT.md", lines)
 	}
 	a.renderer.PrintBlock("commands", []string{
-		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review",
+		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review", "/commit",
 	})
 	a.renderer.Separator()
 }
@@ -306,18 +327,62 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 		return "[blocked] " + analysis.Reason
 	}
 
-	if a.orchestrator != nil {
-		current := a.session.Current()
-		reply, err := a.orchestrator.ConverseWithHistoryAndPrompts(ctx, input, current.ID, orchestratorHistory(current.Messages, input), a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall)
-		if err == nil && strings.TrimSpace(reply) != "" {
-			return reply
-		}
-		if err != nil {
-			return "[orchestrator error] " + err.Error()
+	if a.orchestrator == nil {
+		return "[orchestrator stub] " + input
+	}
+
+	reply, err := a.converse(ctx, input)
+	if err == nil && strings.TrimSpace(reply) != "" {
+		return reply
+	}
+	if err == nil {
+		return "[orchestrator stub] " + input
+	}
+
+	// Graceful degradation: on a connection-level failure (the orchestrator
+	// process died or the stream broke mid-turn), restart the process and
+	// retry the turn once. Session state is persisted in SQLite, so the retry
+	// replays the same session id + history without losing context.
+	if orchestrator.IsConnectionError(err) && a.orchestratorPM != nil {
+		a.renderer.PrintLine("[Orchestrator connection lost; restarting...]")
+		if client, rerr := a.restartOrchestrator(); rerr == nil && client != nil {
+			a.orchestrator = client
+			a.orchestrator.OnTextDelta = func(delta string) {
+				a.renderer.AppendAssistantText(delta)
+			}
+			a.renderer.PrintLine("[Orchestrator restarted. Session preserved.]")
+			reply2, err2 := a.converse(ctx, input)
+			if err2 == nil && strings.TrimSpace(reply2) != "" {
+				return reply2
+			}
+			if err2 != nil {
+				// Surface the most recent failure so the user sees why the
+				// retried turn did not succeed.
+				err = err2
+			}
 		}
 	}
 
-	return "[orchestrator stub] " + input
+	return "[orchestrator error] " + err.Error()
+}
+
+// converse runs a single orchestrator turn using the persisted session.
+func (a *App) converse(ctx context.Context, input string) (string, error) {
+	current := a.session.Current()
+	return a.orchestrator.ConverseWithHistoryAndPrompts(
+		ctx, input, current.ID,
+		orchestratorHistory(current.Messages, input),
+		a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall,
+	)
+}
+
+// restartOrchestrator asks the process manager to tear down and relaunch the
+// orchestrator, returning a fresh client. It uses a dedicated context so a
+// cancelled turn cannot abort recovery.
+func (a *App) restartOrchestrator() (*orchestrator.Client, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.orchestrator.ConversationTimeout())
+	defer cancel()
+	return a.orchestratorPM.Restart(ctx)
 }
 
 func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
@@ -497,23 +562,27 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	}
 
 	if event.SessionMeta != nil {
+		cachedTokens := int(event.SessionMeta.GetCachedTokens())
 		a.metrics.RecordLLMUsage(
 			event.SessionMeta.GetModel(),
 			int(event.SessionMeta.GetTokensIn()),
 			int(event.SessionMeta.GetTokensOut()),
 			event.SessionMeta.GetCost(),
 		)
+		a.metrics.RecordCachedTokens(cachedTokens)
 		a.session.AddLLMUsage(
 			int(event.SessionMeta.GetTokensIn()),
 			int(event.SessionMeta.GetTokensOut()),
 			event.SessionMeta.GetCost(),
 		)
+		a.session.AddCachedTokens(cachedTokens)
 		a.session.MergeMetadata(map[string]string{
-			"last_turn":       fmt.Sprint(event.SessionMeta.GetTurn()),
-			"last_tokens_in":  fmt.Sprint(event.SessionMeta.GetTokensIn()),
-			"last_tokens_out": fmt.Sprint(event.SessionMeta.GetTokensOut()),
-			"last_cost":       fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
-			"last_model":      event.SessionMeta.GetModel(),
+			"last_turn":         fmt.Sprint(event.SessionMeta.GetTurn()),
+			"last_tokens_in":    fmt.Sprint(event.SessionMeta.GetTokensIn()),
+			"last_tokens_out":   fmt.Sprint(event.SessionMeta.GetTokensOut()),
+			"last_cost":         fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
+			"last_model":        event.SessionMeta.GetModel(),
+			"last_cached_tokens": fmt.Sprint(event.SessionMeta.GetCachedTokens()),
 		})
 	}
 
@@ -601,6 +670,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/init [instructions] run the init skill",
 			"/review [focus] run the review skill",
 			"/security-review [focus] run the security review skill",
+			"/commit suggest a conventional commit message from the current diff",
 		})
 	case "/plan":
 		a.planMode = !a.planMode
@@ -715,6 +785,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.runSkillCommand(ctx, "/review", "review", slashArgs(raw, 1))
 	case "/security-review":
 		a.runSkillCommand(ctx, "/security-review", "security", slashArgs(raw, 1))
+	case "/commit":
+		a.runCommitCommand(ctx)
 	default:
 		return false
 	}
@@ -740,7 +812,13 @@ func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 		return
 	}
 	a.session.Append(session.RoleAssistant, reply)
-	a.renderer.PrintAssistant(reply)
+	// Streaming text was already rendered via OnTextDelta callbacks
+	// during handleUserInput. Close the panel and fall back to full
+	// panel rendering only when streaming produced no text.
+	a.renderer.EndAssistantPanel()
+	if strings.HasPrefix(reply, "[orchestrator") || strings.HasPrefix(reply, "[blocked") {
+		a.renderer.PrintAssistant(reply)
+	}
 	a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
 }
 
@@ -758,6 +836,150 @@ func buildSkillInput(skill skills.Skill, args string) string {
 		lines = append(lines, "", "User focus:", strings.TrimSpace(args))
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// commitDiffByteLimit 限制发送给模型的完整 diff 体量，避免单条 prompt 过大。
+const commitDiffByteLimit = 8192
+
+// runCommitCommand 实现 /commit：收集当前工作区的暂存+未暂存改动，调用 commit 技能
+// 让模型起草一条 conventional commit 提交信息，并以建议形式呈现给用户复制。它不会
+// 自动执行 git commit。当 orchestrator 不可用时，回退到基于 diff --stat 的启发式提示。
+func (a *App) runCommitCommand(ctx context.Context) {
+	stat, body, fileCount, hasChanges, err := a.gatherCommitDiff(ctx)
+	if err != nil {
+		a.renderer.PrintLine("commit diff failed: " + err.Error())
+		return
+	}
+	if !hasChanges {
+		a.renderer.PrintLine("No uncommitted changes to summarize.")
+		return
+	}
+
+	// 没有可用的 orchestrator（或未注册 commit 技能）时，直接给出本地启发式建议。
+	skill, ok := a.skills.Get("commit")
+	if !ok || a.orchestrator == nil {
+		a.renderCommitSuggestion(heuristicCommitMessage(fileCount), true)
+		return
+	}
+
+	a.renderer.PrintLine("Generating commit message suggestion (not auto-committed)...")
+
+	input := buildCommitInput(skill, stat, body)
+	a.metrics.BeginTurn()
+	a.session.Append(session.RoleUser, "/commit")
+	reply := a.handleUserInput(ctx, input)
+	a.metrics.EndTurn()
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	a.session.Append(session.RoleAssistant, reply)
+	// 流式文本已通过 OnTextDelta 回调在 handleUserInput 期间渲染；这里关闭面板，
+	// 仅在没有产生流式输出（orchestrator 不可用/被阻塞）时回退到启发式建议。
+	a.renderer.EndAssistantPanel()
+	if strings.HasPrefix(reply, "[orchestrator") || strings.HasPrefix(reply, "[blocked") {
+		a.renderCommitSuggestion(heuristicCommitMessage(fileCount), true)
+		return
+	}
+	a.renderer.PrintLine("Suggestion only — review the message and run `git commit` manually.")
+	a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
+}
+
+// gatherCommitDiff 收集提交信息所需的素材：status 用于判定是否存在改动并统计文件数，
+// diff HEAD --stat 与 diff HEAD 同时覆盖暂存与未暂存改动（相对最近一次提交）。
+// 返回 (stat, body, fileCount, hasChanges, err)，body 为送入模型的 diff 正文。
+func (a *App) gatherCommitDiff(ctx context.Context) (stat, body string, fileCount int, hasChanges bool, err error) {
+	root := strings.TrimSpace(a.cfg.ProjectRoot)
+	if root == "" {
+		root = "."
+	}
+
+	// 安全检查：diff 属于只读 git 操作，但仍走一遍 analyzer 与 executeGit 保持一致。
+	if a.safety != nil {
+		if analysis := a.safety.AnalyzeGit([]string{"diff", "HEAD", "--stat"}); !analysis.Allowed {
+			err = fmt.Errorf("commit diff blocked by safety analyzer: %s", analysis.Reason)
+			return
+		}
+	}
+
+	status, err := runGit(ctx, root, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "", "", 0, false, nil
+	}
+	hasChanges = true
+	fileCount = len(strings.Split(status, "\n"))
+
+	stat, err = runGit(ctx, root, "diff", "HEAD", "--stat", "--")
+	if err != nil {
+		return
+	}
+	stat = strings.TrimSpace(stat)
+
+	diff, err := runGit(ctx, root, "diff", "HEAD", "--")
+	if err != nil {
+		return
+	}
+	body = strings.TrimSpace(diff)
+	if len(body) > commitDiffByteLimit {
+		body = body[:commitDiffByteLimit] + fmt.Sprintf("\n[diff truncated at %d bytes]", commitDiffByteLimit)
+	}
+	// 只有未跟踪文件时 diff HEAD 为空，回退到 status 列表让模型仍有上下文可用。
+	if body == "" {
+		body = "No tracked diff (untracked files only):\n" + status
+	}
+	return stat, body, fileCount, hasChanges, nil
+}
+
+// buildCommitInput 组装送入 orchestrator 的 commit 技能 prompt：技能说明 + diff --stat + diff 正文。
+func buildCommitInput(skill skills.Skill, stat, body string) string {
+	lines := []string{
+		"Run the " + skill.Name + " skill.",
+		"",
+		"Skill instructions:",
+		strings.TrimSpace(skill.Prompt),
+		"",
+		"Diff --stat:",
+		strings.TrimSpace(stat),
+		"",
+		"Diff:",
+		strings.TrimSpace(body),
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// heuristicCommitMessage 在 orchestrator 不可用时，依据改动文件数给出兜底的提交信息。
+func heuristicCommitMessage(fileCount int) string {
+	if fileCount > 0 {
+		noun := "files"
+		if fileCount == 1 {
+			noun = "file"
+		}
+		return fmt.Sprintf("chore: update %d %s", fileCount, noun)
+	}
+	return "chore: update working tree"
+}
+
+// renderCommitSuggestion 把建议以面板形式输出；local=true 表示由本地启发式生成。
+func (a *App) renderCommitSuggestion(message string, local bool) {
+	lines := []string{strings.TrimSpace(message)}
+	if local {
+		lines = append(lines, "", "(orchestrator unavailable; generated locally from the diff)")
+	}
+	a.renderer.PrintBlock("commit message suggestion", lines)
+}
+
+// runGit 在 root 目录下执行只读 git 子命令并返回合并后的输出。
+func runGit(ctx context.Context, root string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-C", root}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }
 
 func (a *App) skillLines() []string {
@@ -1033,11 +1255,12 @@ func (a *App) restoreWorkingDir(restored session.Session) {
 
 func (a *App) restoreMetrics(restored session.Session) {
 	a.metrics.Hydrate(metrics.SessionMetrics{
-		StartTime:      restored.CreatedAt,
-		TotalTokensIn:  restored.Metrics.TotalTokensIn,
-		TotalTokensOut: restored.Metrics.TotalTokensOut,
-		TotalCost:      restored.Metrics.TotalCost,
-		ToolCalls:      restored.Metrics.ToolCalls,
+		StartTime:         restored.CreatedAt,
+		TotalTokensIn:     restored.Metrics.TotalTokensIn,
+		TotalTokensOut:    restored.Metrics.TotalTokensOut,
+		TotalCachedTokens: restored.Metrics.TotalCachedTokens,
+		TotalCost:         restored.Metrics.TotalCost,
+		ToolCalls:         restored.Metrics.ToolCalls,
 	})
 }
 

@@ -12,7 +12,9 @@ import (
 	codeagentpb "code-agent/gen/codeagentpb"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type ConversationMessage struct {
@@ -68,6 +70,10 @@ type Client struct {
 	client              codeagentpb.OrchestratorClient
 	conversationTimeout time.Duration
 	askUserTimeout      time.Duration
+	// OnTextDelta is called for each streaming text chunk from the
+	// orchestrator. When nil (default) text deltas are silently
+	// accumulated into the final return value.
+	OnTextDelta func(delta string)
 }
 
 const defaultConversationTimeout = 5 * time.Minute
@@ -147,6 +153,33 @@ func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error
 	return c.client.Health(ctx, &codeagentpb.Empty{})
 }
 
+// IsConnectionError reports whether err looks like a gRPC transport or stream
+// failure (a dead orchestrator, broken connection, deadlined RPC) rather than a
+// normal orchestrator-level result. The harness uses it to decide whether to
+// attempt an orchestrator restart and retry the in-flight turn.
+func IsConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Internal:
+		return true
+	}
+	// Wrapped errors without a gRPC status (status.Code returns Unknown for
+	// those) fall back to substring sniffing so transport failures surfaced as
+	// plain errors are still detected.
+	msg := strings.ToLower(err.Error())
+	for _, hint := range []string{
+		"connection", "transport", "rpc error", "stream", "eof",
+		"reset", "broken pipe", "unavailable", "no such host", "refused",
+	} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHandler) (string, error) {
 	return c.ConverseWithEvents(ctx, input, nil, handlers...)
 }
@@ -216,6 +249,9 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 		case *codeagentpb.OrchestratorMessage_Text:
 			if payload.Text != nil {
 				parts = append(parts, payload.Text.Text)
+			if c.OnTextDelta != nil {
+				c.OnTextDelta(payload.Text.Text)
+			}
 			}
 		case *codeagentpb.OrchestratorMessage_TodoUpdate:
 			if eventHandler != nil {

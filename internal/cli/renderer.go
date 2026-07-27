@@ -20,13 +20,48 @@ const (
 )
 
 type StreamRenderer struct {
-	mu    sync.Mutex
-	out   io.Writer
-	color bool
+	mu            sync.Mutex
+	out           io.Writer
+	color         bool
+	assistantOpen bool
 }
 
 func NewStreamRenderer(out io.Writer) *StreamRenderer {
 	return &StreamRenderer{out: out, color: shouldUseColor(out)}
+}
+
+// StartAssistantPanel opens the streaming assistant panel header.
+func (r *StreamRenderer) StartAssistantPanel() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.assistantOpen {
+		return
+	}
+	r.assistantOpen = true
+	fmt.Fprint(r.out, r.paint(ansiBold, "\n  assistant")+" ")
+}
+
+// AppendAssistantText writes a text delta inside an open streaming panel.
+func (r *StreamRenderer) AppendAssistantText(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.assistantOpen {
+		r.assistantOpen = true
+		fmt.Fprint(r.out, r.paint(ansiBold, "\n  assistant")+" ")
+	}
+	fmt.Fprint(r.out, text)
+}
+
+// EndAssistantPanel closes a streaming assistant panel. No-op when none is open.
+func (r *StreamRenderer) EndAssistantPanel() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.assistantOpen {
+		return
+	}
+	r.assistantOpen = false
+	fmt.Fprintln(r.out)
+	fmt.Fprintln(r.out, r.paint(ansiCyan, "╰"+strings.Repeat("─", 72)+"╯"))
 }
 
 func (r *StreamRenderer) PrintLine(text string) {
