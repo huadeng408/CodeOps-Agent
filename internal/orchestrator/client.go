@@ -11,6 +11,8 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 
+	"code-agent/internal/telemetry/genai"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -74,6 +76,9 @@ type Client struct {
 	// orchestrator. When nil (default) text deltas are silently
 	// accumulated into the final return value.
 	OnTextDelta func(delta string)
+
+	// Tracer provides gen_ai execute_tool spans; when nil tool spans are skipped.
+	tracer genai.Tracer
 }
 
 const defaultConversationTimeout = 5 * time.Minute
@@ -141,6 +146,15 @@ func (c *Client) AskUserTimeout() time.Duration {
 		return defaultAskUserTimeout
 	}
 	return c.askUserTimeout
+}
+
+// SetTracer injects a genai.Tracer for creating execute_tool spans.
+// When nil (the default) tool execution is not traced.
+func (c *Client) SetTracer(t genai.Tracer) {
+	if c == nil {
+		return
+	}
+	c.tracer = t
 }
 
 func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error) {
@@ -300,8 +314,10 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 				ParametersJSON:     payload.ToolRequest.ParametersJson,
 				RequiredPermission: payload.ToolRequest.RequiredPermission,
 			}
+			_, toolSpan := c.startToolSpan(ctx, call)
 			emitToolProgress(ctx, eventHandler, call, "start", 1, 1, ToolResult{})
 			result := invokeToolHandler(ctx, handler, call)
+			finishToolSpan(toolSpan, result)
 			emitToolProgress(ctx, eventHandler, call, "finish", 1, 1, result)
 			if err := sendToolResult(stream, result); err != nil {
 				return "", err
@@ -382,6 +398,29 @@ func minInt(a, b int) int {
 	return b
 }
 
+// startToolSpan creates an execute_tool span as a child of the context's
+// current span. Returns the span (or nil when tracing is disabled).
+func (c *Client) startToolSpan(ctx context.Context, call ToolCall) (context.Context, genai.Span) {
+	if c == nil || c.tracer == nil {
+		return ctx, nil
+	}
+	ctx, sp := c.tracer.StartSpan(ctx, "execute_tool "+call.Name, genai.OperationExecuteTool, genai.SystemGenAI)
+	sp.SetAttributes(genai.ToolNameKV(call.Name), genai.ToolCallIDKV(call.ID))
+	return ctx, sp
+}
+
+// finishToolSpan sets the result attribute and ends the span.
+func finishToolSpan(sp genai.Span, result ToolResult) {
+	if sp == nil {
+		return
+	}
+	sp.SetAttributes(genai.ToolCallResultKV(result.Output))
+	if result.Error != "" || result.ExitCode != 0 {
+		sp.RecordError(fmt.Errorf("%s (exit=%d)", result.Error, result.ExitCode))
+	}
+	sp.End()
+}
+
 func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.Orchestrator_ConverseClient, handler ToolHandler, eventHandler EventHandler, batch *codeagentpb.ToolRequestBatch) error {
 	requests := batch.GetRequests()
 	if len(requests) == 0 {
@@ -390,6 +429,7 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 
 	results := make([]ToolResult, len(requests))
 	calls := make([]ToolCall, len(requests))
+	toolSpans := make([]genai.Span, len(requests))
 	for i, req := range requests {
 		calls[i] = ToolCall{
 			ID:                 req.GetToolCallId(),
@@ -397,6 +437,7 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 			ParametersJSON:     req.GetParametersJson(),
 			RequiredPermission: req.GetRequiredPermission(),
 		}
+		_, toolSpans[i] = c.startToolSpan(ctx, calls[i])
 		emitToolProgress(ctx, eventHandler, calls[i], "start", i+1, len(requests), ToolResult{})
 	}
 	if batch.GetParallel() && len(requests) > 1 {
@@ -416,6 +457,7 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 	}
 
 	for i, result := range results {
+		finishToolSpan(toolSpans[i], result)
 		emitToolProgress(ctx, eventHandler, calls[i], "finish", i+1, len(requests), result)
 		if err := sendToolResult(stream, result); err != nil {
 			return err

@@ -35,6 +35,9 @@ def is_thinking_enabled() -> bool:
 
 MODEL_FAST_DEFAULT: str = "gpt-4o-mini"
 
+_otel_initialised = False
+_otel_shutdown = lambda: None
+
 
 def get_model_fast() -> str:
     """Return the fast/cheap model name for simple tasks.
@@ -45,3 +48,65 @@ def get_model_fast() -> str:
     Returns empty string when explicitly set to empty (disabled).
     """
     return read_env("MODEL_FAST", MODEL_FAST_DEFAULT)
+
+
+def configure_otel():
+    """Initialise the OTel SDK with an OTLP HTTP exporter, returning a shutdown callable.
+
+    Reads OTEL_EXPORTER_OTLP_ENDPOINT (default:
+    ``http://localhost:6006/v1/traces`` -- the Arize Phoenix OTLP endpoint)
+    and OTEL_SERVICE_NAME (default: ``"code-agent-orchestrator"``).
+
+    If any part of initialisation fails (missing packages, unreachable
+    endpoint, ...) the function returns a no-op shutdown and logs a warning.
+    The orchestrator MUST NOT crash when telemetry is unavailable.
+
+    Only the first call performs actual initialisation; subsequent calls
+    return a no-op to avoid the OTel SDK's "Overriding of current
+    TracerProvider is not allowed" warning.
+    """
+    global _otel_initialised, _otel_shutdown
+    if _otel_initialised:
+        return _otel_shutdown
+
+    import logging
+
+    _logger = logging.getLogger(__name__)
+
+    endpoint = read_env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:6006/v1/traces")
+    service_name = read_env("OTEL_SERVICE_NAME", "code-agent-orchestrator")
+
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    except ImportError as exc:
+        _logger.warning("OTel SDK not available -- telemetry disabled: %s", exc)
+        _otel_initialised = True
+        _otel_shutdown = lambda: None
+        return _otel_shutdown
+
+    try:
+        resource = Resource.create({"service.name": service_name})
+        exporter = OTLPSpanExporter(endpoint=endpoint)
+        processor = BatchSpanProcessor(exporter)
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(processor)
+        trace.set_tracer_provider(provider)
+    except Exception as exc:
+        _logger.warning("OTel initialisation failed (endpoint=%s): %s", endpoint, exc)
+        _otel_initialised = True
+        _otel_shutdown = lambda: None
+        return _otel_shutdown
+
+    def _shutdown() -> None:
+        try:
+            provider.shutdown()
+        except Exception:
+            pass
+
+    _otel_initialised = True
+    _otel_shutdown = _shutdown
+    return _otel_shutdown

@@ -28,6 +28,7 @@ import (
 	"code-agent/internal/safety"
 	"code-agent/internal/session"
 	"code-agent/internal/skills"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/todo"
 	"code-agent/internal/tools"
 	"code-agent/internal/undo"
@@ -65,6 +66,7 @@ type App struct {
 	planMode       bool
 	instructions   []config.InstructionSource
 	interruptMu    sync.Mutex
+	telemetry      genai.Tracer
 	currentCancel  context.CancelFunc
 	interrupts     int
 	lastInterrupt  time.Time
@@ -123,6 +125,9 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	skillsManager := skills.NewManager()
 	executor.SetSkillsManager(skillsManager)
 
+	telemetry := genai.NewTelemetry(context.Background())
+	orchestratorClient.SetTracer(telemetry)
+
 	return &App{
 		cfg:            cfg,
 		input:          NewInputBuffer(stdin, stdout),
@@ -145,6 +150,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		skills:         skillsManager,
 		prompts:        prompts.NewBuilder(),
 		instructions:   instructions,
+		telemetry:      telemetry,
 	}
 }
 
@@ -331,7 +337,13 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 		return "[orchestrator stub] " + input
 	}
 
-	reply, err := a.converse(ctx, input)
+	// Root invoke_agent span for the turn so every child span
+	// (tools, inference on the Python side) nests under it.
+	teleCtx, span := a.telemetry.StartSpan(ctx, "invoke_agent code-agent", genai.OperationInvokeAgent, genai.SystemGenAI)
+	span.SetAttributes(genai.AgentNameKV("code-agent"))
+	defer span.End()
+
+	reply, err := a.converse(teleCtx, input)
 	if err == nil && strings.TrimSpace(reply) != "" {
 		return reply
 	}
@@ -350,8 +362,9 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 			a.orchestrator.OnTextDelta = func(delta string) {
 				a.renderer.AppendAssistantText(delta)
 			}
+			a.orchestrator.SetTracer(a.telemetry)
 			a.renderer.PrintLine("[Orchestrator restarted. Session preserved.]")
-			reply2, err2 := a.converse(ctx, input)
+			reply2, err2 := a.converse(teleCtx, input)
 			if err2 == nil && strings.TrimSpace(reply2) != "" {
 				return reply2
 			}
@@ -363,6 +376,7 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 		}
 	}
 
+	span.RecordError(err)
 	return "[orchestrator error] " + err.Error()
 }
 

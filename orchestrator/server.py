@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import threading
 from dataclasses import dataclass
 from concurrent import futures
@@ -9,7 +11,7 @@ from pathlib import Path
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
-from .config import load_dotenv
+from .config import configure_otel, load_dotenv
 from .context import TokenBudget
 from .graph.main_graph import build_graph
 from .llm.providers import build_default_client, build_fast_client
@@ -34,6 +36,7 @@ class OrchestratorServer:
     def __init__(self, config: ServerConfig | None = None) -> None:
         load_dotenv()
         self.config = config or ServerConfig()
+        self._otel_shutdown = configure_otel()
         self.project_root = str(Path(self.config.project_root).resolve())
         self.working_dir = str(Path(self.config.working_dir).resolve())
         self.graph = build_graph()
@@ -62,6 +65,8 @@ class OrchestratorServer:
             server.wait_for_termination()
         except KeyboardInterrupt:
             server.stop(grace=1)
+        finally:
+            self._otel_shutdown()
 
 
 class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
@@ -94,6 +99,24 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 ]
                 break
 
+        # ── W3C TraceContext recovery ─────────────────────────────────
+        # The Go harness injects the active span context via the
+        # TRACEPARENT environment variable.  Parse it into an OTel Context
+        # and attach it so the gen_ai inference spans inside the runner
+        # become correct children of the Go-side invoke_agent span.
+        otel_token = None
+        try:
+            traceparent = os.environ.get("TRACEPARENT", "").strip()
+            if traceparent:
+                from opentelemetry import context as otel_context
+                from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+                propagator = TraceContextTextMapPropagator()
+                parent_ctx = propagator.extract(carrier={"traceparent": traceparent})
+                otel_token = otel_context.attach(parent_ctx)
+        except Exception:
+            pass
+
         # Propagate a user interrupt (Ctrl+C) from the Go harness into the
         # orchestrator (design 22.8). When the harness cancels the gRPC call,
         # grpc fires the RPC-termination callback, which sets the event. The
@@ -114,13 +137,23 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             fast_llm=self.app.fast_llm,
             main_llm=self.app.llm,
         )
-        yield from runner.run(
-            user_text,
-            request_iterator,
-            session_id=session_id,
-            history=history,
-            cancel_event=cancel_event,
-        )
+        try:
+            yield from runner.run(
+                user_text,
+                request_iterator,
+                session_id=session_id,
+                history=history,
+                cancel_event=cancel_event,
+            )
+        finally:
+            # Detach the TraceContext parent so following calls on this
+            # thread do not inherit it.
+            if otel_token is not None:
+                try:
+                    from opentelemetry import context as _otel_context
+                    _otel_context.detach(otel_token)
+                except Exception:
+                    pass
 
 
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:

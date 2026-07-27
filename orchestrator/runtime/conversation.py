@@ -50,6 +50,52 @@ THINKING_BUDGET_TOKENS: int = 10000
 THINKING_COMPLEXITY_TURN_THRESHOLD: int = 3
 
 
+def _try_get_otel_tracer():
+    """Return an OTel tracer or ``None`` when telemetry is unavailable.
+
+    All OTel imports and calls are wrapped in a defensive try/except so the
+    orchestrator continues to work when the SDK is not installed or the
+    exporter failed to initialise.  Callers that receive ``None`` skip span
+    creation without any side-effects.
+    """
+    try:
+        from opentelemetry import trace
+        return trace.get_tracer(__name__)
+    except Exception:
+        return None
+
+
+def _set_gen_ai_attributes(span, runner, response: ChatResponse) -> None:
+    """Populate gen_ai semantic-convention attributes on *span* from *response*.
+
+    The function is designed to be called from a try/except guard so that
+    a broken attribute setter never crashes the orchestrator.
+    """
+    try:
+        provider = runner._detect_provider()
+        provider_name = provider or "unknown"
+        span.set_attribute("gen_ai.provider.name", provider_name)
+        span.set_attribute("gen_ai.system", provider_name)  # legacy dual-emit
+        span.set_attribute("gen_ai.operation.name", "chat")
+        span.set_attribute(
+            "gen_ai.request.model",
+            str(getattr(runner.llm, "model", "")),
+        )
+        usage = response.usage
+        if usage is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+            span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+            if getattr(usage, "cached_input_tokens", 0) > 0:
+                span.set_attribute(
+                    "gen_ai.usage.cache_read.input_tokens",
+                    usage.cached_input_tokens,
+                )
+        finish_reasons = ["tool_calls"] if response.tool_calls else ["stop"]
+        span.set_attribute("gen_ai.response.finish_reasons", finish_reasons)
+    except Exception:
+        pass
+
+
 def _iter_stream_async(async_gen):
     """Drive an async generator (``LLMClient.stream``) from synchronous code.
 
@@ -582,19 +628,37 @@ class ConversationRunner:
         cancel_event: threading.Event | None = None,
     ) -> ChatResponse:
         tools = self.tool_registry.openai_schemas() if allow_tools else []
-        return asyncio.run(
-            self.llm.chat(
-                ChatRequest(
-                    model=getattr(self.llm, "model", ""),
-                    messages=messages,
-                    tools=tools,
-                    thinking_enabled=thinking_enabled,
-                    thinking_budget=thinking_budget,
-                    reasoning_effort=reasoning_effort,
-                    cancel_event=cancel_event,
+        tracer = _try_get_otel_tracer()
+        span = None
+        if tracer is not None:
+            try:
+                from opentelemetry import trace as otel_trace
+                span = tracer.start_span("chat", kind=otel_trace.SpanKind.CLIENT)
+            except Exception:
+                pass
+        try:
+            response = asyncio.run(
+                self.llm.chat(
+                    ChatRequest(
+                        model=getattr(self.llm, "model", ""),
+                        messages=messages,
+                        tools=tools,
+                        thinking_enabled=thinking_enabled,
+                        thinking_budget=thinking_budget,
+                        reasoning_effort=reasoning_effort,
+                        cancel_event=cancel_event,
+                    )
                 )
             )
-        )
+            if span is not None:
+                _set_gen_ai_attributes(span, self, response)
+                span.end()
+            return response
+        except BaseException as exc:
+            if span is not None:
+                span.record_exception(exc)
+                span.end()
+            raise
 
     def _stream_chat(
         self,
@@ -643,52 +707,77 @@ class ConversationRunner:
                 response_box.append(response)
             return
 
-        tools = self.tool_registry.openai_schemas() if allow_tools else []
-        request = ChatRequest(
-            model=getattr(self.llm, "model", ""),
-            messages=messages,
-            tools=tools,
-            thinking_enabled=thinking_enabled,
-            thinking_budget=thinking_budget,
-            reasoning_effort=reasoning_effort,
-            cancel_event=cancel_event,
-        )
+        # ── gen_ai inference span (streaming) ──────────────────────
+        # Only the real streaming path creates an explicit span; the
+        # fallback above delegates to _chat(), which is already
+        # instrumented.  The span wraps the entire LLM streaming call
+        # and is ended in the finally block so it always terminates
+        # regardless of how the generator is consumed.
+        tracer = _try_get_otel_tracer()
+        span = None
+        if tracer is not None:
+            try:
+                from opentelemetry import trace as _otel_trace
+                span = tracer.start_span("chat", kind=_otel_trace.SpanKind.CLIENT)
+            except Exception:
+                pass
 
-        text_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        thinking_blocks: list[dict[str, Any]] = []
-        usage = Usage()
-        for delta in _iter_stream_async(stream_fn(request)):
-            # Defense-in-depth cooperative cancel between deltas. Real
-            # providers also raise from inside stream(); this catches the
-            # default-wrapper case where the whole chat() runs at once.
-            if self._cancelled(cancel_event):
-                raise RequestInterrupted("cancelled mid-stream")
-            kind = delta.kind
-            if kind == "text":
-                if delta.text:
-                    yield self._text(delta.text)
-                    text_parts.append(delta.text)
-            elif kind == "tool_calls":
-                tool_calls = list(delta.tool_calls)
-            elif kind == "usage":
-                if delta.usage is not None:
-                    usage = delta.usage
-            elif kind == "thinking":
-                if delta.thinking_blocks:
-                    thinking_blocks.extend(delta.thinking_blocks)
-            elif kind == "done":
-                if delta.thinking_blocks:
-                    thinking_blocks = list(delta.thinking_blocks)
+        try:
+            tools = self.tool_registry.openai_schemas() if allow_tools else []
+            request = ChatRequest(
+                model=getattr(self.llm, "model", ""),
+                messages=messages,
+                tools=tools,
+                thinking_enabled=thinking_enabled,
+                thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort,
+                cancel_event=cancel_event,
+            )
 
-        response = ChatResponse(
-            text="".join(text_parts),
-            tool_calls=tool_calls,
-            thinking_blocks=thinking_blocks,
-            usage=usage,
-        )
-        if response_box is not None:
-            response_box.append(response)
+            text_parts: list[str] = []
+            tool_calls: list[ToolCall] = []
+            thinking_blocks: list[dict[str, Any]] = []
+            usage = Usage()
+            for delta in _iter_stream_async(stream_fn(request)):
+                # Defense-in-depth cooperative cancel between deltas. Real
+                # providers also raise from inside stream(); this catches the
+                # default-wrapper case where the whole chat() runs at once.
+                if self._cancelled(cancel_event):
+                    raise RequestInterrupted("cancelled mid-stream")
+                kind = delta.kind
+                if kind == "text":
+                    if delta.text:
+                        yield self._text(delta.text)
+                        text_parts.append(delta.text)
+                elif kind == "tool_calls":
+                    tool_calls = list(delta.tool_calls)
+                elif kind == "usage":
+                    if delta.usage is not None:
+                        usage = delta.usage
+                elif kind == "thinking":
+                    if delta.thinking_blocks:
+                        thinking_blocks.extend(delta.thinking_blocks)
+                elif kind == "done":
+                    if delta.thinking_blocks:
+                        thinking_blocks = list(delta.thinking_blocks)
+
+            response = ChatResponse(
+                text="".join(text_parts),
+                tool_calls=tool_calls,
+                thinking_blocks=thinking_blocks,
+                usage=usage,
+            )
+            if response_box is not None:
+                response_box.append(response)
+
+            if span is not None:
+                _set_gen_ai_attributes(span, self, response)
+        finally:
+            if span is not None:
+                try:
+                    span.end()
+                except Exception:
+                    pass
 
     @staticmethod
     def _cancelled(cancel_event: threading.Event | None) -> bool:

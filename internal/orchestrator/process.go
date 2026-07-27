@@ -13,6 +13,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ProcessConfig struct {
@@ -391,11 +394,9 @@ func (m *ProcessManager) Owned() bool {
 // defaultProcessStarter returns the production starter that spawns the Python
 // orchestrator as a subprocess configured from cfg.
 func defaultProcessStarter(cfg ProcessConfig) ProcessStarter {
-	// The starter matches the ProcessStarter signature (ctx is accepted but not
-	// forwarded): the orchestrator process must outlive any single request, so
-	// its lifetime is bound to context.Background() inside buildOrchestratorCmd.
-	return func(_ context.Context) (ManagedProcess, error) {
+	return func(ctx context.Context) (ManagedProcess, error) {
 		cmd := buildOrchestratorCmd(cfg)
+		injectTraceContext(ctx, cmd)
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("start orchestrator: %w", err)
 		}
@@ -473,6 +474,24 @@ func healthy(ctx context.Context, client *Client) bool {
 	return err == nil && response != nil && strings.EqualFold(response.Status, "ok")
 }
 
+
+
+// injectTraceContext reads the W3C TraceContext from ctx and injects it into
+// the child process environment so the Python orchestrator can resume the
+// trace tree. When the context carries no span the call is a no-op.
+func injectTraceContext(ctx context.Context, cmd *exec.Cmd) {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	for _, key := range []string{"traceparent", "tracestate"} {
+		if val := carrier.Get(key); val != "" {
+			cmd.Env = append(cmd.Env, strings.ToUpper(key)+"="+val)
+		}
+	}
+}
 func splitAddress(address string) (string, string) {
 	host, port, err := net.SplitHostPort(address)
 	if err == nil {
