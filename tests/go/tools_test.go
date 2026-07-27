@@ -189,8 +189,14 @@ func TestExecutorGlobUsesDefaultLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}
-	if !result.Truncated || !strings.Contains(result.Output, "[glob output truncated: 1 more files]") {
+	// 501 个文件同时超过默认的 500 文件计数上限与 250 行输出上限，结果必须被截断。
+	if !result.Truncated {
 		t.Fatalf("expected default glob truncation, got result=%+v", result)
+	}
+	// 列表被裁剪：实际显示的文件数必须远少于 501。
+	fileCount := strings.Count(result.Output, "sample-")
+	if fileCount <= 0 || fileCount >= 501 {
+		t.Fatalf("expected glob listing to be capped below 501 files, got %d: %q", fileCount, result.Output)
 	}
 }
 
@@ -491,4 +497,64 @@ func TestExecutorBashRejectsWorkingDirectoryEscape(t *testing.T) {
 	if !strings.Contains(result.Error, "path escapes workspace") {
 		t.Fatalf("unexpected error: %q", result.Error)
 	}
+}
+
+// TestExecutorTruncateOutputHonorsLineAndByteLimits 直接驱动 normalizeOutput 策略
+// （通过导出的 TruncateOutput 方法），覆盖设计方案 22.4 的三类情形：双上限内不截断、
+// 超行数上限按行截断、超字节上限按字节截断。
+func TestExecutorTruncateOutputHonorsLineAndByteLimits(t *testing.T) {
+	t.Run("under both limits is unchanged", func(t *testing.T) {
+		executor := tools.NewExecutor(t.TempDir())
+		executor.MaxOutputLines = 250
+		executor.MaxOutputBytes = 50_000
+
+		small := "alpha\nbeta\n"
+		out, truncated := executor.TruncateOutput(small)
+		if truncated {
+			t.Fatalf("expected small output to be unchanged, got truncated=true out=%q", out)
+		}
+		if out != small {
+			t.Fatalf("expected identical output, got %q", out)
+		}
+	})
+
+	t.Run("exceeds line limit is line-capped", func(t *testing.T) {
+		executor := tools.NewExecutor(t.TempDir())
+		executor.MaxOutputLines = 5
+		executor.MaxOutputBytes = 50_000
+
+		many := strings.Repeat("line\n", 20) // 20 "line" 行 + 末尾空串 = 21 个元素
+		out, truncated := executor.TruncateOutput(many)
+		if !truncated {
+			t.Fatalf("expected line-capped output to be truncated, got %q", out)
+		}
+		if !strings.Contains(out, "[Output truncated: 21 lines total, showing first 5]") {
+			t.Fatalf("expected informative line-truncation notice, got %q", out)
+		}
+		if !strings.HasPrefix(out, "line\nline\nline\nline\nline") {
+			t.Fatalf("expected first 5 lines retained, got %q", out)
+		}
+	})
+
+	t.Run("exceeds byte limit is byte-capped", func(t *testing.T) {
+		executor := tools.NewExecutor(t.TempDir())
+		executor.MaxOutputLines = 0 // 关闭行截断以单独验证字节截断
+		executor.MaxOutputBytes = 100
+
+		big := strings.Repeat("x", 500)
+		out, truncated := executor.TruncateOutput(big)
+		if !truncated {
+			t.Fatalf("expected byte-capped output to be truncated, got %q", out)
+		}
+		if !strings.HasPrefix(out, strings.Repeat("x", 100)) {
+			t.Fatalf("expected first 100 bytes retained, got prefix=%q", out[:min(100, len(out))])
+		}
+		if !strings.Contains(out, "[Output truncated at 100 bytes]") {
+			t.Fatalf("expected byte-truncation notice, got %q", out)
+		}
+		// 截断后内容 = 100 字节前缀 + 短提示，远小于原始 500 字节。
+		if len(out) >= len(big) {
+			t.Fatalf("expected byte-capped output to be smaller than input: %d vs %d", len(out), len(big))
+		}
+	})
 }

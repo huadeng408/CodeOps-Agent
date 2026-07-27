@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-func executeGrep(_ context.Context, root string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeGrep(_ context.Context, args map[string]any) (ToolResult, error) {
 	pattern, ok := stringArg(args, "pattern", "query")
 	if !ok || pattern == "" {
 		return ToolResult{Name: "Grep", Error: "pattern is required"}, fmt.Errorf("pattern is required")
@@ -21,7 +21,7 @@ func executeGrep(_ context.Context, root string, args map[string]any) (ToolResul
 	if searchRoot == "" {
 		searchRoot = "."
 	}
-	absRoot, err := workspacePath(root, searchRoot)
+	absRoot, err := workspacePath(e.Root, searchRoot)
 	if err != nil {
 		return ToolResult{Name: "Grep", Error: err.Error()}, err
 	}
@@ -48,7 +48,7 @@ func executeGrep(_ context.Context, root string, args map[string]any) (ToolResul
 		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(root, p)
+		rel, err := filepath.Rel(e.Root, p)
 		if err != nil {
 			return err
 		}
@@ -79,7 +79,7 @@ func executeGrep(_ context.Context, root string, args map[string]any) (ToolResul
 	}
 
 	output, headTruncated := formatGrepOutput(matches, files, fileCounts, options)
-	output, byteTruncated := normalizeOutput(output, 50_000)
+	output, byteTruncated := e.TruncateOutput(output)
 	return ToolResult{Name: "Grep", Output: output, Truncated: headTruncated || byteTruncated}, nil
 }
 

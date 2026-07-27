@@ -3,11 +3,14 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"code-agent/internal/mcp"
+	"code-agent/internal/skills"
 )
 
 type ToolRequest struct {
@@ -33,15 +36,19 @@ type Change struct {
 type Executor struct {
 	Root           string
 	MaxOutputBytes int
+	// MaxOutputLines 是工具输出的行数上限（先于字节上限施加）。
+	MaxOutputLines int
 	mu             sync.Mutex
 	workingDir     string
 	mcp            *mcp.Manager
+	skills         *skills.Manager
 }
 
 func NewExecutor(root string) *Executor {
 	return &Executor{
 		Root:           root,
 		MaxOutputBytes: 50_000,
+		MaxOutputLines: 250,
 	}
 }
 
@@ -51,26 +58,36 @@ func (e *Executor) SetMCPManager(manager *mcp.Manager) {
 	e.mcp = manager
 }
 
+func (e *Executor) SetSkillsManager(manager *skills.Manager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.skills = manager
+}
+
 func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, error) {
 	switch req.Name {
 	case "Read":
-		return executeRead(ctx, e.Root, req.Arguments)
+		return e.executeRead(ctx, req.Arguments)
 	case "Edit":
-		return executeEdit(ctx, e.Root, req.Arguments)
+		return e.executeEdit(ctx, req.Arguments)
+	case "NotebookEdit":
+		return e.executeNotebookEdit(ctx, req.Arguments)
 	case "Write":
-		return executeWrite(ctx, e.Root, req.Arguments)
+		return e.executeWrite(ctx, req.Arguments)
 	case "Bash":
 		return e.executeBash(ctx, req.Arguments)
 	case "Glob":
-		return executeGlob(ctx, e.Root, req.Arguments)
+		return e.executeGlob(ctx, req.Arguments)
 	case "Grep":
-		return executeGrep(ctx, e.Root, req.Arguments)
+		return e.executeGrep(ctx, req.Arguments)
 	case "Git":
-		return executeGit(ctx, e.Root, req.Arguments)
+		return e.executeGit(ctx, req.Arguments)
 	case "WebFetch":
-		return executeWebFetch(ctx, e.Root, req.Arguments)
+		return e.executeWebFetch(ctx, req.Arguments)
 	case "WebSearch":
-		return executeWebSearch(ctx, e.Root, req.Arguments)
+		return e.executeWebSearch(ctx, req.Arguments)
+	case "Skill":
+		return e.executeSkill(ctx, req.Arguments)
 	default:
 		if result, ok, err := e.executeMCPTool(ctx, req); ok {
 			return result, err
@@ -111,6 +128,38 @@ func mcpToolOutput(result mcp.ToolCallResult) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func (e *Executor) executeSkill(_ context.Context, args map[string]any) (ToolResult, error) {
+	e.mu.Lock()
+	manager := e.skills
+	e.mu.Unlock()
+	if manager == nil {
+		return ToolResult{Name: "Skill", Error: "skills manager not available", ExitCode: 1}, nil
+	}
+	name, ok := stringArg(args, "name")
+	if !ok || strings.TrimSpace(name) == "" {
+		return ToolResult{Name: "Skill", Error: "skill name is required", ExitCode: 1}, nil
+	}
+	name = strings.TrimSpace(name)
+	skill, ok := manager.Get(name)
+	if !ok {
+		return ToolResult{Name: "Skill", Error: "skill not found: " + name, ExitCode: 1}, nil
+	}
+	var parts []string
+	if strings.TrimSpace(skill.Prompt) != "" {
+		parts = append(parts, skill.Prompt)
+	}
+	if len(skill.Tools) > 0 {
+		parts = append(parts, "Preferred tools: "+strings.Join(skill.Tools, ", "))
+	}
+	userArgs, _ := stringArg(args, "args")
+	if strings.TrimSpace(userArgs) != "" {
+		parts = append(parts, "User focus: "+userArgs)
+	}
+	output := strings.Join(parts, "\n\n")
+	output, truncated := e.TruncateOutput(output)
+	return ToolResult{Name: "Skill", Output: output, Truncated: truncated}, nil
 }
 
 func (e *Executor) WorkingDir() string {
@@ -199,11 +248,40 @@ func boolArg(args map[string]any, keys ...string) bool {
 	return false
 }
 
-func normalizeOutput(output string, maxBytes int) (string, bool) {
-	if maxBytes <= 0 || len(output) <= maxBytes {
-		return output, false
+// TruncateOutput 按当前 Executor 配置的行数与字节上限截断工具输出，返回截断后的
+// 文本以及是否发生过截断。导出方法便于调用方与测试直接复用同一套截断策略。
+func (e *Executor) TruncateOutput(output string) (string, bool) {
+	return normalizeOutput(output, e.MaxOutputLines, e.MaxOutputBytes)
+}
+
+// normalizeOutput 对工具原始输出依次施加行数与字节上限：先按行截断（保留前 maxLines
+// 行），再按字节截断（保留前 maxBytes 字节）。任一上限触发都会追加明确的提示信息，
+// 并返回 truncated=true。maxLines 或 maxBytes 为 0 表示不施加对应上限。
+func normalizeOutput(output string, maxLines, maxBytes int) (string, bool) {
+	truncated := false
+	// 1) 行截断优先：超过行数上限时保留前 maxLines 行，并提示总行数。
+	if maxLines > 0 {
+		lines := strings.Split(output, "\n")
+		if len(lines) > maxLines {
+			output = strings.Join(lines[:maxLines], "\n") +
+				fmt.Sprintf("\n\n[Output truncated: %d lines total, showing first %d]", len(lines), maxLines)
+			truncated = true
+		}
 	}
-	return output[:maxBytes] + "\n\n[Output truncated]", true
+	// 2) 字节截断兜底：行截断后仍超字节上限，则按字节硬截断。
+	if maxBytes > 0 && len(output) > maxBytes {
+		output = output[:maxBytes] + fmt.Sprintf("\n\n[Output truncated at %s]", byteCapLabel(maxBytes))
+		truncated = true
+	}
+	return output, truncated
+}
+
+// byteCapLabel 把字节上限渲染为人类可读的提示后缀（>=1000 用 KB，否则用字节）。
+func byteCapLabel(maxBytes int) string {
+	if maxBytes >= 1000 {
+		return fmt.Sprintf("%dKB", maxBytes/1000)
+	}
+	return fmt.Sprintf("%d bytes", maxBytes)
 }
 
 func workspacePath(root, target string) (string, error) {
@@ -214,24 +292,73 @@ func workspacePath(root, target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Resolve symlinks in the workspace root itself so the containment
+	// check uses the real filesystem path.
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("workspace root symlink resolution failed: %w", err)
+	}
 	if target == "" {
-		return absRoot, nil
+		return realRoot, nil
 	}
 	if filepath.IsAbs(target) {
 		target = filepath.Clean(target)
 	} else {
-		target = filepath.Join(absRoot, target)
+		target = filepath.Join(realRoot, target)
 	}
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(absRoot, absTarget)
+	// Resolve all symlinks in the path to prevent symlink-based path
+	// traversal. Falls back to resolving the deepest existing ancestor
+	// when the target does not yet exist (e.g., Write creating a file).
+	realTarget, err := resolveSymlinks(absTarget)
+	if err != nil {
+		return "", err
+	}
+	if realTarget != absTarget {
+		log.Printf("[WARN] workspace path resolved through symlink: %s -> %s", absTarget, realTarget)
+	}
+	rel, err := filepath.Rel(realRoot, realTarget)
 	if err != nil {
 		return "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes workspace: %s", target)
 	}
-	return absTarget, nil
+	return realTarget, nil
+}
+
+// resolveSymlinks resolves all symlinks in path. If path or any of its
+// ancestors do not exist, it walks up to the deepest existing ancestor,
+// resolves symlinks there, and appends the non-existent suffix. This
+// allows tools like Write to validate paths before the file is created.
+func resolveSymlinks(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("symlink resolution failed for %s: %w", path, err)
+	}
+	// Walk up until we find an existing ancestor whose symlinks we can resolve.
+	suffix := filepath.Base(path)
+	for current := filepath.Dir(path); ; {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("symlink resolution failed for %s: %w", current, err)
+		}
+		base := filepath.Base(current)
+		suffix = filepath.Join(base, suffix)
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root; no existing ancestor found.
+			return path, nil
+		}
+		current = parent
+	}
 }

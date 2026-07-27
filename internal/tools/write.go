@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 )
 
-func executeWrite(_ context.Context, root string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolResult, error) {
 	path, ok := stringArg(args, "path", "file")
 	if !ok || path == "" {
 		return ToolResult{Name: "Write", Error: "path is required"}, fmt.Errorf("path is required")
 	}
 	content, _ := stringArg(args, "content", "text", "body")
 
-	abs, err := workspacePath(root, path)
+	abs, err := workspacePath(e.Root, path)
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}

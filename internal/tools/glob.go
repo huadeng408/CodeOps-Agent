@@ -10,21 +10,21 @@ import (
 	"strings"
 )
 
-func executeGlob(_ context.Context, root string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeGlob(_ context.Context, args map[string]any) (ToolResult, error) {
 	pattern, ok := stringArg(args, "pattern")
 	if !ok || pattern == "" {
 		return ToolResult{Name: "Glob", Error: "pattern is required"}, fmt.Errorf("pattern is required")
 	}
 
 	matches := []string{}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(e.Root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(root, p)
+		rel, err := filepath.Rel(e.Root, p)
 		if err != nil {
 			return err
 		}
@@ -59,7 +59,10 @@ func executeGlob(_ context.Context, root string, args map[string]any) (ToolResul
 		matches = append(matches[:limit], fmt.Sprintf("[glob output truncated: %d more files]", remaining))
 		truncated = true
 	}
-	return ToolResult{Name: "Glob", Output: strings.Join(matches, "\n"), Truncated: truncated}, nil
+	// 计数上限（匹配文件数）与输出尺寸上限（行/字节）是两类独立的限制：
+	// 这里在计数截断后再统一走尺寸截断，避免超大的 glob 列表绕过输出上限。
+	output, sizeTruncated := e.TruncateOutput(strings.Join(matches, "\n"))
+	return ToolResult{Name: "Glob", Output: output, Truncated: truncated || sizeTruncated}, nil
 }
 
 func matchGlob(pattern, candidate string) (bool, error) {

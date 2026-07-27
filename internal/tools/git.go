@@ -9,7 +9,7 @@ import (
 	"code-agent/internal/safety"
 )
 
-func executeGit(ctx context.Context, root string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolResult, error) {
 	command, _ := stringArg(args, "command", "subcommand")
 	if command == "" {
 		command = "status"
@@ -23,10 +23,10 @@ func executeGit(ctx context.Context, root string, args map[string]any) (ToolResu
 		return ToolResult{Name: "Git", Error: err.Error(), ExitCode: 1}, err
 	}
 
-	cmdArgs := append([]string{"-C", root, command}, extraArgs...)
+	cmdArgs := append([]string{"-C", e.Root, command}, extraArgs...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	output, err := cmd.CombinedOutput()
-	text, truncated := normalizeOutput(string(output), 50_000)
+	text, truncated := e.TruncateOutput(string(output))
 	result := ToolResult{Name: "Git", Output: text, Truncated: truncated}
 	if err != nil {
 		result.Error = err.Error()

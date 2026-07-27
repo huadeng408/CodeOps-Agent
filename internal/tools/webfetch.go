@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func executeWebFetch(ctx context.Context, _ string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeWebFetch(ctx context.Context, args map[string]any) (ToolResult, error) {
 	url, ok := stringArg(args, "url")
 	if !ok || url == "" {
 		return ToolResult{Name: "WebFetch", Error: "url is required"}, fmt.Errorf("url is required")
@@ -31,7 +31,7 @@ func executeWebFetch(ctx context.Context, _ string, args map[string]any) (ToolRe
 		return ToolResult{Name: "WebFetch", Error: err.Error()}, err
 	}
 
-	output, truncated := normalizeOutput(string(body), 50_000)
+	output, truncated := e.TruncateOutput(string(body))
 	return ToolResult{
 		Name:      "WebFetch",
 		Output:    fmt.Sprintf("status=%d\n%s", resp.StatusCode, output),

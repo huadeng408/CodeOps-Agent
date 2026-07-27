@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func executeEdit(_ context.Context, root string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResult, error) {
 	path, ok := stringArg(args, "path", "file")
 	if !ok || path == "" {
 		return ToolResult{Name: "Edit", Error: "path is required"}, fmt.Errorf("path is required")
@@ -19,7 +19,7 @@ func executeEdit(_ context.Context, root string, args map[string]any) (ToolResul
 		return ToolResult{Name: "Edit", Error: "old text is required"}, fmt.Errorf("old text is required")
 	}
 
-	abs, err := workspacePath(root, path)
+	abs, err := workspacePath(e.Root, path)
 	if err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}

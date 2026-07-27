@@ -11,11 +11,6 @@ import (
 	"code-agent/internal/safety"
 )
 
-func executeBash(ctx context.Context, root string, args map[string]any) (ToolResult, error) {
-	executor := NewExecutor(root)
-	return executor.executeBash(ctx, args)
-}
-
 func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolResult, error) {
 	command, ok := stringArg(args, "command", "cmd")
 	if !ok || command == "" {
@@ -59,7 +54,7 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 	cmd := exec.CommandContext(runCtx, name, shellArgs...)
 	cmd.Dir = absDir
 	output, err := cmd.CombinedOutput()
-	text, truncated := normalizeOutput(string(output), 50_000)
+	text, truncated := e.TruncateOutput(string(output))
 	result := ToolResult{Name: "Bash", Output: text, Truncated: truncated}
 
 	if runCtx.Err() == context.DeadlineExceeded {

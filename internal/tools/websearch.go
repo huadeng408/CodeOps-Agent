@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func executeWebSearch(ctx context.Context, _ string, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeWebSearch(ctx context.Context, args map[string]any) (ToolResult, error) {
 	query, ok := stringArg(args, "query", "q")
 	if !ok || strings.TrimSpace(query) == "" {
 		return ToolResult{Name: "WebSearch", Error: "query is required"}, fmt.Errorf("query is required")
@@ -51,7 +51,7 @@ func executeWebSearch(ctx context.Context, _ string, args map[string]any) (ToolR
 	if strings.TrimSpace(output) == "" {
 		output = "no results"
 	}
-	output, truncated := normalizeOutput(output, 50_000)
+	output, truncated := e.TruncateOutput(output)
 	return ToolResult{Name: "WebSearch", Output: output, Truncated: truncated}, nil
 }
 
