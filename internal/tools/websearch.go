@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 func (e *Executor) executeWebSearch(ctx context.Context, args map[string]any) (ToolResult, error) {
@@ -20,6 +19,10 @@ func (e *Executor) executeWebSearch(ctx context.Context, args map[string]any) (T
 	if strings.TrimSpace(endpoint) == "" {
 		endpoint = "https://api.duckduckgo.com/"
 	}
+	// SSRF defense: validate scheme/host before dial (safe client also re-checks IP).
+	if _, err := validateURL(endpoint); err != nil {
+		return ToolResult{Name: "WebSearch", Error: err.Error(), ExitCode: 1}, err
+	}
 	requestURL, err := webSearchURL(endpoint, query)
 	if err != nil {
 		return ToolResult{Name: "WebSearch", Error: err.Error(), ExitCode: 1}, err
@@ -31,8 +34,7 @@ func (e *Executor) executeWebSearch(ctx context.Context, args map[string]any) (T
 	}
 	req.Header.Set("User-Agent", "code-agent/0.1")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := newSafeClient(e.httpAllowPrivate).Do(req)
 	if err != nil {
 		return ToolResult{Name: "WebSearch", Error: err.Error(), ExitCode: 1}, err
 	}

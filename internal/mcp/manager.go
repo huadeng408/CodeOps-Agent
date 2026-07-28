@@ -34,6 +34,12 @@ type Server struct {
 	stdout    *bufio.Reader
 	nextID    int64
 	requestMu sync.Mutex
+	// poisoned is set when a read timed out (ctx cancelled) and left a
+	// goroutine blocked on the OLD stdout. The next sendRequest sees it and
+	// kills+restarts the process: the resulting EOF reaps the leaked goroutine
+	// and resets the JSON-RPC stream so late responses can't steal lines from
+	// subsequent reads on the new pipe.
+	poisoned bool
 }
 
 type Manager struct {
@@ -379,6 +385,25 @@ func listServerTools(ctx context.Context, server *Server) ([]ToolDefinition, err
 }
 
 func sendRequest(ctx context.Context, server *Server, method string, params any) (json.RawMessage, error) {
+	// Acquire the mutex up front so the poisoned-restart below is serialized
+	// against concurrent callers and touches stdin/stdout/cmd safely.
+	server.requestMu.Lock()
+	defer server.requestMu.Unlock()
+	if server.poisoned {
+		// A prior call timed out and abandoned a goroutine on the old stdout.
+		// Kill+restart: the EOF reaps that goroutine and gives us a clean
+		// JSON-RPC stream so stale/late responses can't corrupt this read.
+		_ = stopServerProcess(server)
+		if err := startServerProcess(ctx, server, server.Config); err != nil {
+			server.poisoned = true
+			return nil, fmt.Errorf("restart poisoned mcp server: %w", err)
+		}
+		if err := initializeServer(ctx, server); err != nil {
+			server.poisoned = true
+			return nil, fmt.Errorf("re-init mcp server: %w", err)
+		}
+		server.poisoned = false
+	}
 	if server.stdin == nil || server.stdout == nil {
 		return nil, errors.New("mcp server stdio is not ready")
 	}
@@ -398,13 +423,11 @@ func sendRequest(ctx context.Context, server *Server, method string, params any)
 		return nil, fmt.Errorf("encode mcp request: %w", err)
 	}
 
-	server.requestMu.Lock()
-	defer server.requestMu.Unlock()
 	if err := writeJSONLine(ctx, server.stdin, data); err != nil {
 		return nil, err
 	}
 	for {
-		line, err := readJSONLine(ctx, server.stdout)
+		line, err := readJSONLine(ctx, server)
 		if err != nil {
 			return nil, err
 		}
@@ -455,18 +478,23 @@ func writeJSONLine(ctx context.Context, writer io.Writer, data []byte) error {
 	return nil
 }
 
-func readJSONLine(ctx context.Context, reader *bufio.Reader) ([]byte, error) {
+func readJSONLine(ctx context.Context, server *Server) ([]byte, error) {
 	type readResult struct {
 		line []byte
 		err  error
 	}
 	ch := make(chan readResult, 1)
 	go func() {
-		line, err := reader.ReadBytes('\n')
+		line, err := server.stdout.ReadBytes('\n')
 		ch <- readResult{line: line, err: err}
 	}()
 	select {
 	case <-ctx.Done():
+		// Mark the stream poisoned: a goroutine is now stranded on server.stdout.
+		// The next sendRequest will restart the process, closing this pipe and
+		// reaping the goroutine via EOF. We must NOT read server.stdout again
+		// until the restart — the stranded goroutine would race us for lines.
+		server.poisoned = true
 		return nil, ctx.Err()
 	case result := <-ch:
 		if result.err != nil {

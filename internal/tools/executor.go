@@ -42,6 +42,9 @@ type Executor struct {
 	workingDir     string
 	mcp            *mcp.Manager
 	skills         *skills.Manager
+	// httpAllowPrivate lifts the SSRF private/loopback block for WebFetch/WebSearch.
+	// Intended only for tests and trusted local providers; production MUST stay false.
+	httpAllowPrivate bool
 }
 
 func NewExecutor(root string) *Executor {
@@ -62,6 +65,14 @@ func (e *Executor) SetSkillsManager(manager *skills.Manager) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.skills = manager
+}
+
+// SetHTTPAllowPrivate enables fetching loopback/private addresses in WebFetch/WebSearch.
+// Tests use this to target a local mock server; production must leave it disabled.
+func (e *Executor) SetHTTPAllowPrivate(allow bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.httpAllowPrivate = allow
 }
 
 func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, error) {

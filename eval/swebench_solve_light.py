@@ -4,6 +4,7 @@ Reads src/flask/blueprints.py, sends the issue + file to V4 Pro, applies the
 fix, captures git diff. RAM-light (no orchestrator stack — just API calls).
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -13,7 +14,10 @@ ROOT = "D:/vscode/localcode"
 WORKDIR = f"{ROOT}/eval/swebench_work/flask"
 BP_PATH = "src/flask/blueprints.py"
 
-API_KEY = "sk-ccdf276c22824536bd97a011dcd27102"
+# Never hardcode keys. Read from env (set via .env.local / export).
+API_KEY = os.environ.get("LOCAL_LLM_API_KEY")
+if not API_KEY:
+    raise SystemExit("LOCAL_LLM_API_KEY is not set; put it in .env.local or export it before running.")
 
 # 1. Read the current file.
 content = open(f"{WORKDIR}/{BP_PATH}", encoding="utf-8").read()

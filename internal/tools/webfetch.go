@@ -5,22 +5,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
 
 func (e *Executor) executeWebFetch(ctx context.Context, args map[string]any) (ToolResult, error) {
-	url, ok := stringArg(args, "url")
-	if !ok || url == "" {
+	urlStr, ok := stringArg(args, "url")
+	if !ok || urlStr == "" {
 		return ToolResult{Name: "WebFetch", Error: "url is required"}, fmt.Errorf("url is required")
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// SSRF defense: reject non-http(s) schemes; the safe client re-checks the
+	// resolved IP at dial time to defeat DNS rebinding.
+	parsed, err := validateURL(urlStr)
 	if err != nil {
 		return ToolResult{Name: "WebFetch", Error: err.Error()}, err
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return ToolResult{Name: "WebFetch", Error: err.Error()}, err
+	}
+
+	resp, err := newSafeClient(e.httpAllowPrivate).Do(req)
 	if err != nil {
 		return ToolResult{Name: "WebFetch", Error: err.Error()}, err
 	}

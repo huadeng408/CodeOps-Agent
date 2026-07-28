@@ -377,6 +377,7 @@ func TestExecutorWebSearchWithLocalEndpoint(t *testing.T) {
 	defer server.Close()
 
 	executor := tools.NewExecutor(t.TempDir())
+	executor.SetHTTPAllowPrivate(true) // local mock server binds 127.0.0.1
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{
 		Name: "WebSearch",
 		Arguments: map[string]any{
