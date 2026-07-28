@@ -1,21 +1,193 @@
-version: "3.9"
+name: localcode
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: codeagent
-      POSTGRES_USER: codeagent
-      POSTGRES_PASSWORD: codeagent
+  mysql:
+    image: mysql:8.4
+    container_name: codeagent-mysql
+    restart: "no"
     ports:
-      - "5432:5432"
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: codeagent
+      MYSQL_DATABASE: codeagent
+      MYSQL_USER: codeagent
+      MYSQL_PASSWORD: codeagent
     volumes:
-      - codeagent-postgres:/var/lib/postgresql/data
+      - codeagent-mysql:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --explicit_defaults_for_timestamp=true --lower_case_table_names=1
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U codeagent -d codeagent"]
+      start_period: 5s
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: codeagent-redis
+    restart: "no"
+    ports:
+      - "6379:6379"
+    volumes:
+      - codeagent-redis:/data
+    command: redis-server --bind 0.0.0.0 --port 6379 --requirepass codeagent --appendonly yes
+    healthcheck:
+      start_period: 5s
+      test: ["CMD", "redis-cli", "-a", "codeagent", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: codeagent-minio
+    restart: "no"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - codeagent-minio:/data
+
+  minio-init:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: codeagent-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/uploads || true
+      "
+    restart: "no"
+
+  tika:
+    image: apache/tika:latest-full
+    container_name: codeagent-tika
+    ports:
+      - "9998:9998"
+    restart: "no"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.2.1
+    container_name: codeagent-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: "no"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.2.1
+    container_name: codeagent-kafka
+    restart: "no"
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.2.1
+    container_name: codeagent-kafka-init
+    depends_on:
+      - kafka
+    entrypoint: >
+      sh -c "
+      sleep 10;
+      kafka-topics --create --if-not-exists --topic file-parse --bootstrap-server kafka:29092 || true;
+      kafka-topics --create --if-not-exists --topic file-chunk --bootstrap-server kafka:29092 || true;
+      kafka-topics --create --if-not-exists --topic file-embed --bootstrap-server kafka:29092 || true;
+      kafka-topics --create --if-not-exists --topic file-index --bootstrap-server kafka:29092 || true;
+      kafka-topics --create --if-not-exists --topic file-dlq --bootstrap-server kafka:29092 || true;
+      "
+    restart: "no"
+
+  es:
+    image: elasticsearch:8.10.4
+    container_name: codeagent-es
+    restart: "no"
+    ports:
+      - "9200:9200"
+    environment:
+      - node.name=codeagent-es01
+      - discovery.type=single-node
+      - xpack.license.self_generated.type=basic
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - cluster.name=codeagent-es-cluster
+      - ES_JAVA_OPTS=-Xms768m -Xmx768m
+    volumes:
+      - codeagent-es:/usr/share/elasticsearch/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    command: >
+      bash -c "
+      if ! elasticsearch-plugin list | grep -q 'analysis-ik'; then
+        echo 'Installing analysis-ik plugin...';
+        elasticsearch-plugin install --batch https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.10.4.zip;
+      else
+        echo 'analysis-ik plugin already installed.';
+      fi;
+      /usr/local/bin/docker-entrypoint.sh
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:9200/_cluster/health?pretty"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  embedding:
+    build:
+      context: .
+      dockerfile: deployments/embedding/Dockerfile
+    container_name: codeagent-embedding
+    restart: "no"
+    ports:
+      - "8009:8009"
+    environment:
+      EMBEDDING_MODEL: "BAAI/bge-small-zh-v1.5"
+      EMBEDDING_THREADS: "2"
+      EMBEDDING_OUTPUT_DIMENSIONS: "512"
+    volumes:
+      - codeagent-embedding-cache:/root/.cache
+
+  reranker:
+    build:
+      context: .
+      dockerfile: deployments/reranker/Dockerfile
+    container_name: codeagent-reranker
+    restart: "no"
+    ports:
+      - "8008:8008"
+    environment:
+      RERANKER_MODEL: "jinaai/jina-reranker-v2-base-multilingual"
+      RERANKER_THREADS: "4"
+    volumes:
+      - codeagent-reranker-cache:/root/.cache
 
 volumes:
-  codeagent-postgres:
+  codeagent-mysql:
+  codeagent-redis:
+  codeagent-minio:
+  codeagent-es:
+  codeagent-embedding-cache:
+  codeagent-reranker-cache:
+
+networks:
+  default:
+    name: codeagent-network

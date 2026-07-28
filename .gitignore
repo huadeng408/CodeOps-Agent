@@ -49,3 +49,24 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Eval intermediate artifacts (final SHA-bound results are tracked)
+eval/swebench_work/flask/
+eval/swebench_work/predictions_*.jsonl
+eval/*.ckpt
+eval/*_output.txt
+eval/eval_final_*_batch*.json
+eval/samples_*.ckpt
+eval/checkpoint_*.json
+eval/results_*.jsonl
+eval/*Plus-v*.jsonl
+eval/eval_results_*.json
+eval/eval_results_*.jsonl
+eval/samples_*_eval_results.json
+eval/samples_*_filtered.jsonl
+eval/swebench_flask5014.json
+results/
+# Stray eval intermediates written to repo root
+/eval_checkpoint_*.json
+/eval_results_*.jsonl
+/eval_results_*.json
