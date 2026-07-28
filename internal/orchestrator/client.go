@@ -16,7 +16,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ConversationMessage struct {
@@ -157,6 +159,33 @@ func (c *Client) SetTracer(t genai.Tracer) {
 	c.tracer = t
 }
 
+// injectTraceMetadata reads the W3C TraceContext from ctx and injects it
+// into gRPC outgoing metadata so the Python orchestrator can parent its
+// gen_ai inference spans under the Go invoke_agent span.
+//
+// Replaces the broken launch-time env-var injection (see process.go) which
+// never had a valid span context because the initial process start used
+// context.Background().
+func (c *Client) injectTraceMetadata(ctx context.Context) context.Context {
+	sc := trace.SpanFromContext(ctx).SpanContext()
+	if !sc.IsValid() {
+		return ctx
+	}
+	if !sc.HasTraceID() || !sc.HasSpanID() {
+		return ctx
+	}
+	tp := fmt.Sprintf("00-%s-%s-%02x",
+		sc.TraceID().String(),
+		sc.SpanID().String(),
+		sc.TraceFlags(),
+	)
+	pairs := []string{"traceparent", tp}
+	if ts := sc.TraceState().String(); ts != "" {
+		pairs = append(pairs, "tracestate", ts)
+	}
+	return metadata.AppendToOutgoingContext(ctx, pairs...)
+}
+
 func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("orchestrator client is nil")
@@ -217,6 +246,11 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 
 	ctx, cancel := context.WithTimeout(ctx, c.ConversationTimeout())
 	defer cancel()
+
+	// Propagate W3C TraceContext per-RPC via gRPC metadata so the Python
+	// orchestrator can attach its gen_ai inference spans as children of the
+	// Go invoke_agent span — replacing the broken launch-time env-var hack.
+	ctx = c.injectTraceMetadata(ctx)
 
 	stream, err := c.client.Converse(ctx)
 	if err != nil {

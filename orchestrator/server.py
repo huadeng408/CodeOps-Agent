@@ -100,13 +100,13 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 break
 
         # ── W3C TraceContext recovery ─────────────────────────────────
-        # The Go harness injects the active span context via the
-        # TRACEPARENT environment variable.  Parse it into an OTel Context
-        # and attach it so the gen_ai inference spans inside the runner
-        # become correct children of the Go-side invoke_agent span.
+        # The Go harness injects the active span context via gRPC metadata
+        # (per-RPC, not per-process) so the gen_ai inference spans inside
+        # the runner become correct children of the Go invoke_agent span.
         otel_token = None
         try:
-            traceparent = os.environ.get("TRACEPARENT", "").strip()
+            md = dict(context.invocation_metadata()) if context.invocation_metadata() else {}
+            traceparent = md.get("traceparent", "").strip()
             if traceparent:
                 from opentelemetry import context as otel_context
                 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
