@@ -1,0 +1,5 @@
+FROM python:3.11-slim
+RUN pip install --no-cache-dir evalplus==0.3.1
+WORKDIR /work
+# samples.jsonl will be mounted/copied in
+ENTRYPOINT ["python", "-m", "evalplus.evaluate"]

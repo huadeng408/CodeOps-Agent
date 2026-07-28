@@ -1,0 +1,6 @@
+{
+  "model": "deepseek-v4-pro",
+  "max_tokens": 32768,
+  "truncated": [],
+  "fallback": []
+}
