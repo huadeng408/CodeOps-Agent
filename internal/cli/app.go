@@ -166,6 +166,20 @@ func (a *App) Run(ctx context.Context) error {
 	cleanupSignals := a.setupSignalHandling(stop)
 	defer cleanupSignals()
 
+	// Flush pending OTel spans on exit so Phoenix receives the
+	// invoke_agent span and all instrumented children. Use a fresh
+	// context.Background() with a timeout — runCtx is already cancelled
+	// by the signal handler on SIGTERM/Ctrl-C exit, and passing a cancelled
+	// context makes the OTel batch processor return context.Canceled
+	// without synchronously flushing, dropping the final spans.
+	if a.telemetry != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = a.telemetry.Shutdown(shutdownCtx)
+		}()
+	}
+
 	a.session.NewSession(a.cfg.WorkingDir)
 	a.session.SetMode("chat")
 	a.renderBootstrap()
