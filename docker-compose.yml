@@ -180,6 +180,22 @@ services:
     volumes:
       - codeagent-reranker-cache:/root/.cache
 
+  phoenix:
+    # Trace visualization backend. The Go agent's OTLP exporter defaults to
+    # http://localhost:6006 (internal/telemetry/genai/tracer.go) and the Python
+    # orchestrator's to http://localhost:6006/v1/traces (orchestrator/config/env.py),
+    # so publishing 6006 here activates trace export with zero env changes.
+    image: arize/phoenix:latest
+    container_name: codeagent-phoenix
+    restart: "no"
+    ports:
+      - "6006:6006"   # UI + OTLP/HTTP
+      - "4317:4317"   # OTLP/gRPC (optional)
+    environment:
+      PHOENIX_WORKING_DIR: /data
+    volumes:
+      - codeagent-phoenix:/data
+
 volumes:
   codeagent-mysql:
   codeagent-redis:
@@ -187,6 +203,7 @@ volumes:
   codeagent-es:
   codeagent-embedding-cache:
   codeagent-reranker-cache:
+  codeagent-phoenix:
 
 networks:
   default:
