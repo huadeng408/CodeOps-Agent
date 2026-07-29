@@ -236,7 +236,7 @@ def test_poll_for_trace_times_out_with_safe_candidates():
 
 
 def test_sanitize_text_removes_exact_api_key():
-    secret = "sk-super-secret-value"
+    secret = "sk-test"
     source = json.dumps({"error": f"bad Authorization Bearer {secret}"})
 
     sanitized = sanitize_text(source, secret)
