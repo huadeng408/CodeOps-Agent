@@ -58,6 +58,13 @@ message ToolResult {
   int32 exit_code = 4;
   bool truncated = 5;
   string tool_call_id = 6;
+  repeated ContentBlock content_blocks = 7;
+}
+
+message ContentBlock {
+  string text = 1;
+  bytes image_blob = 2;
+  string mime = 3;
 }
 
 message PermissionDecision {

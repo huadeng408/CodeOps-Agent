@@ -373,6 +373,12 @@ def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
                         tool_result=orchestrator_pb2.ToolResult(
                             tool_name="Glob",
                             output="orchestrator/server.py",
+                            content_blocks=[
+                                orchestrator_pb2.ContentBlock(
+                                    image_blob=b"png-bytes",
+                                    mime="image/png",
+                                )
+                            ],
                         )
                     ),
                 ]
@@ -386,7 +392,10 @@ def test_llm_tool_call_roundtrip(monkeypatch, tmp_path) -> None:
             assistant_messages = [message for message in history if message.role == "assistant"]
             tool_messages = [message for message in history if message.role == "tool"]
             assert assistant_messages[0].tool_calls[0].name == "Glob"
-            assert tool_messages[0].content == "orchestrator/server.py"
+            assert tool_messages[0].content == [
+                {"type": "text", "text": "orchestrator/server.py"},
+                {"type": "image", "data": b"png-bytes", "mime": "image/png"},
+            ]
     finally:
         server.stop(grace=0)
 

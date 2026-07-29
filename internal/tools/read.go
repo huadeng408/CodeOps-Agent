@@ -1,16 +1,12 @@
 package tools
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -44,7 +40,7 @@ func (e *Executor) executeRead(ctx context.Context, args map[string]any) (ToolRe
 		return e.readImage(path, data)
 	}
 	if strings.EqualFold(filepath.Ext(abs), ".pdf") {
-		return e.readPDF(ctx, path, data, args)
+		return e.readPDF(ctx, path, abs, data, args)
 	}
 	if strings.EqualFold(filepath.Ext(abs), ".ipynb") {
 		return e.readNotebook(path, data)
@@ -116,68 +112,26 @@ func (e *Executor) executeRead(ctx context.Context, args map[string]any) (ToolRe
 
 func (e *Executor) readImage(path string, data []byte) (ToolResult, error) {
 	mime := imageMime(path)
-	encoded := base64.StdEncoding.EncodeToString(data)
-	output, truncated := e.TruncateOutput(fmt.Sprintf("[Image %s: %s, %d bytes]\ndata:%s;base64,%s", path, mime, len(data), mime, encoded))
-	return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
+	if len(data) > maxMultimodalBytes {
+		err := fmt.Errorf("image is too large for multimodal delivery: %s (%d bytes, limit %d)", path, len(data), maxMultimodalBytes)
+		return ToolResult{Name: "Read", Error: err.Error(), ExitCode: 1}, err
+	}
+	output, truncated := e.TruncateOutput(fmt.Sprintf("[Image %s: %s, %d bytes]", path, mime, len(data)))
+	return ToolResult{
+		Name:      "Read",
+		Output:    output,
+		Truncated: truncated,
+		ContentBlocks: []ContentBlock{{
+			ImageBlob: data,
+			MIME:      mime,
+		}},
+	}, nil
 }
 
 // readNotebook 把 .ipynb 渲染成简洁的单元格摘要（而非原始 JSON），保持输出可读、
 // 并受 TruncateOutput 约束。
 func (e *Executor) readNotebook(path string, data []byte) (ToolResult, error) {
 	output, truncated := e.TruncateOutput(renderNotebookSummary(path, data))
-	return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
-}
-
-// readPDF 调用 Poppler 的 pdftotext 抽取文本。pdftotext 不在 PATH 上时优雅回退到
-// 明确的提示信息（本项目依 AGENT.md 不引入第三方 Go PDF 依赖）。pages 形如 "1-3"
-// 或 "1"，"all"/空表示全部页。
-func (e *Executor) readPDF(ctx context.Context, path string, data []byte, args map[string]any) (ToolResult, error) {
-	pages, _ := stringArg(args, "pages", "page")
-	pages = strings.TrimSpace(pages)
-	if pages == "" {
-		pages = "all"
-	}
-	if !bytes.HasPrefix(data, []byte("%PDF-")) {
-		err := fmt.Errorf("not a valid PDF file: %s", path)
-		return ToolResult{Name: "Read", Error: err.Error(), ExitCode: 1}, err
-	}
-
-	exe, lookErr := exec.LookPath("pdftotext")
-	if lookErr != nil {
-		notice := fmt.Sprintf(
-			"[PDF %s: %d bytes]\npages: %s\nPDF text extraction requires an external tool. "+
-				"Install Poppler (pdftotext) on PATH and retry, or attach pre-extracted text / convert the page to an image.",
-			path, len(data), pages,
-		)
-		output, truncated := e.TruncateOutput(notice)
-		return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
-	}
-
-	cmdArgs := []string{}
-	if first, last, ok := parsePDFPageRange(pages); ok {
-		cmdArgs = append(cmdArgs, "-f", strconv.Itoa(first), "-l", strconv.Itoa(last))
-	}
-	cmdArgs = append(cmdArgs, path, "-") // 末尾 "-" 让 pdftotext 输出到 stdout
-
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	out, runErr := exec.CommandContext(runCtx, exe, cmdArgs...).Output()
-
-	header := fmt.Sprintf("[PDF %s: %d bytes, pages: %s]\n", path, len(data), pages)
-	if runErr != nil {
-		notice := fmt.Sprintf(
-			"%sPDF text extraction failed via pdftotext: %v\n"+
-				"The file may be corrupted or scanned; install/verify Poppler or attach extracted text.",
-			header, runErr,
-		)
-		output, truncated := e.TruncateOutput(notice)
-		return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
-	}
-	text := string(out)
-	if strings.TrimSpace(text) == "" {
-		text = "(no extractable text; the PDF may be scanned images — try OCR or export the page as an image)"
-	}
-	output, truncated := e.TruncateOutput(header + text)
 	return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
 }
 

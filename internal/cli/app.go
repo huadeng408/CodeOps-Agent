@@ -507,22 +507,36 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	a.recordToolWorkingDir(call, result)
 	if err != nil {
 		return orchestrator.ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   call.Name,
-			Output:     result.Output,
-			Error:      result.Error,
-			ExitCode:   int32(result.ExitCode),
-			Truncated:  result.Truncated,
+			ToolCallID:    call.ID,
+			ToolName:      call.Name,
+			Output:        result.Output,
+			Error:         result.Error,
+			ExitCode:      int32(result.ExitCode),
+			Truncated:     result.Truncated,
+			ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 		}
 	}
 	return orchestrator.ToolResult{
-		ToolCallID: call.ID,
-		ToolName:   call.Name,
-		Output:     result.Output,
-		Error:      result.Error,
-		ExitCode:   int32(result.ExitCode),
-		Truncated:  result.Truncated,
+		ToolCallID:    call.ID,
+		ToolName:      call.Name,
+		Output:        result.Output,
+		Error:         result.Error,
+		ExitCode:      int32(result.ExitCode),
+		Truncated:     result.Truncated,
+		ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 	}
+}
+
+func orchestratorContentBlocks(blocks []tools.ContentBlock) []orchestrator.ContentBlock {
+	converted := make([]orchestrator.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		converted = append(converted, orchestrator.ContentBlock{
+			Text:      block.Text,
+			ImageBlob: block.ImageBlob,
+			MIME:      block.MIME,
+		})
+	}
+	return converted
 }
 
 func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCall, params map[string]any) (bool, error) {
@@ -605,11 +619,11 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 		)
 		a.session.AddCachedTokens(cachedTokens)
 		a.session.MergeMetadata(map[string]string{
-			"last_turn":         fmt.Sprint(event.SessionMeta.GetTurn()),
-			"last_tokens_in":    fmt.Sprint(event.SessionMeta.GetTokensIn()),
-			"last_tokens_out":   fmt.Sprint(event.SessionMeta.GetTokensOut()),
-			"last_cost":         fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
-			"last_model":        event.SessionMeta.GetModel(),
+			"last_turn":          fmt.Sprint(event.SessionMeta.GetTurn()),
+			"last_tokens_in":     fmt.Sprint(event.SessionMeta.GetTokensIn()),
+			"last_tokens_out":    fmt.Sprint(event.SessionMeta.GetTokensOut()),
+			"last_cost":          fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
+			"last_model":         event.SessionMeta.GetModel(),
 			"last_cached_tokens": fmt.Sprint(event.SessionMeta.GetCachedTokens()),
 		})
 	}

@@ -19,7 +19,7 @@ from ..client import (
     ToolCall,
     Usage,
     http_call_with_retry,
-    split_image_segments,
+    split_content_segments,
 )
 
 # Reasoning models that accept the "reasoning_effort" parameter.
@@ -57,7 +57,7 @@ class OpenAIClient(LLMClient):
     def _chat_sync(self, request: ChatRequest) -> ChatResponse:
         payload = {
             "model": request.model or self.model,
-            "messages": [self._message_payload(message) for message in request.messages],
+            "messages": self._request_messages(request.messages),
             "temperature": request.temperature,
         }
         if request.tools:
@@ -192,7 +192,7 @@ class OpenAIClient(LLMClient):
         """
         payload: dict[str, Any] = {
             "model": request.model or self.model,
-            "messages": [self._message_payload(message) for message in request.messages],
+            "messages": self._request_messages(request.messages),
             "temperature": request.temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -253,14 +253,16 @@ class OpenAIClient(LLMClient):
         payload: dict[str, Any] = {
             "role": message.role,
         }
-        # Image data-URIs in user/assistant content become native image_url
-        # blocks (design 22.10). Tool results stay plain text. When there is no
-        # image the original string content path is preserved exactly.
+        # Chat Completions tool messages accept text only. _request_messages
+        # emits their image blocks as a following user message.
         content: Any = message.content
-        if message.role in ("user", "assistant"):
-            segments = split_image_segments(message.content)
-            if any(kind == "image" for kind, _ in segments):
-                content = OpenAIClient._image_content_blocks(segments)
+        segments = split_content_segments(message.content)
+        if message.role == "tool":
+            content = "".join(value for kind, value in segments if kind == "text").strip()
+            if not content:
+                content = f"Tool {message.name or 'result'} returned image content."
+        elif any(kind == "image" for kind, _ in segments):
+            content = OpenAIClient._image_content_blocks(segments)
         if message.role == "assistant" and message.tool_calls:
             if message.content:
                 payload["content"] = content
@@ -284,6 +286,38 @@ class OpenAIClient(LLMClient):
                 for index, call in enumerate(message.tool_calls)
             ]
         return payload
+
+    @staticmethod
+    def _request_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        pending_visual_content: list[dict[str, Any]] = []
+
+        def flush_visual_content() -> None:
+            if pending_visual_content:
+                payloads.append({"role": "user", "content": list(pending_visual_content)})
+                pending_visual_content.clear()
+
+        for message in messages:
+            if message.role == "tool":
+                payloads.append(OpenAIClient._message_payload(message))
+                image_segments = [
+                    (kind, value)
+                    for kind, value in split_content_segments(message.content)
+                    if kind == "image"
+                ]
+                if image_segments:
+                    pending_visual_content.append(
+                        {
+                            "type": "text",
+                            "text": f"Visual content returned by tool {message.name or 'tool'}:",
+                        }
+                    )
+                    pending_visual_content.extend(OpenAIClient._image_content_blocks(image_segments))
+                continue
+            flush_visual_content()
+            payloads.append(OpenAIClient._message_payload(message))
+        flush_visual_content()
+        return payloads
 
     @staticmethod
     def _image_content_blocks(

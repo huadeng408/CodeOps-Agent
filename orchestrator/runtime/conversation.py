@@ -18,10 +18,12 @@ from orchestrator.llm.client import (
     ChatRequest,
     ChatResponse,
     LLMClient,
+    MessageContent,
     RequestInterrupted,
     ToolCall,
     Usage,
     assess_complexity,
+    message_content_text,
 )
 from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.memory.manager import Memory, MemoryManager
@@ -132,7 +134,7 @@ def _iter_stream_async(async_gen):
 
 @dataclass(frozen=True, slots=True)
 class CachedToolResult:
-    content: str
+    content: MessageContent
     is_error: bool
 
 
@@ -458,7 +460,10 @@ class ConversationRunner:
                     messages.append(cached_message)
                     if cached_message.is_error:
                         consecutive_errors += 1
-                        recovery_message = self._recovery_message(consecutive_errors, cached_message.content)
+                        recovery_message = self._recovery_message(
+                            consecutive_errors,
+                            message_content_text(cached_message.content),
+                        )
                         if recovery_message:
                             messages.append(
                                 ChatMessage(
@@ -1011,11 +1016,34 @@ class ConversationRunner:
                 f"{content}\n[Output truncated — larger result was capped; ask if you need more.]"
             )
         content = self._wrap_untrusted_tool_output(content)
+        content_blocks: list[dict[str, Any]] = []
+        if content:
+            content_blocks.append({"type": "text", "text": content})
+        has_structured_content = False
+        if result is not None:
+            for block in getattr(result, "content_blocks", ()):
+                has_structured_content = True
+                if block.text:
+                    content_blocks.append(
+                        {
+                            "type": "text",
+                            "text": self._wrap_untrusted_tool_output(block.text),
+                        }
+                    )
+                if block.image_blob and str(block.mime).startswith("image/"):
+                    content_blocks.append(
+                        {
+                            "type": "image",
+                            "data": bytes(block.image_blob),
+                            "mime": str(block.mime),
+                        }
+                    )
+        message_content: MessageContent = content_blocks if has_structured_content else content
         return ChatMessage(
             role="tool",
             name=tool_name,
             tool_call_id=call_id or tool_name,
-            content=content,
+            content=message_content,
             is_error=bool(result.error) if result is not None else False,
         )
 
@@ -1085,7 +1113,10 @@ class ConversationRunner:
             messages.append(cached_message)
             if cached_message.is_error:
                 consecutive_errors += 1
-                recovery_message = self._recovery_message(consecutive_errors, cached_message.content)
+                recovery_message = self._recovery_message(
+                    consecutive_errors,
+                    message_content_text(cached_message.content),
+                )
                 if recovery_message:
                     messages.append(
                         ChatMessage(
@@ -1335,7 +1366,7 @@ class ConversationRunner:
     def _message_for_compaction(message: ChatMessage) -> dict[str, object]:
         return {
             "role": message.role,
-            "content": message.content,
+            "content": message_content_text(message.content),
             "tool_calls": list(message.tool_calls),
         }
 

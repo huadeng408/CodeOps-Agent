@@ -21,6 +21,9 @@ from .skills.manager import SkillManager
 from .todo.manager import TodoManager
 
 
+MAX_GRPC_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
 @dataclass(slots=True)
 class ServerConfig:
     host: str = "127.0.0.1"
@@ -157,7 +160,13 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
 
 
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ("grpc.max_receive_message_length", MAX_GRPC_MESSAGE_BYTES),
+            ("grpc.max_send_message_length", MAX_GRPC_MESSAGE_BYTES),
+        ],
+    )
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
         OrchestratorService(app or OrchestratorServer()),
         server,

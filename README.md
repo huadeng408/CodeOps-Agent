@@ -76,7 +76,7 @@ Python Orchestrator
 
 | 工具 | 权限级别 | 能力 |
 | --- | --- | --- |
-| `Read` | 自动允许 | 读取工作区文件、行范围、基础图片 data URI、PDF 元信息占位 |
+| `Read` | 自动允许 | 读取工作区文件与行范围；图片和 MinerU OCR 解析后的 PDF 通过原生多模态内容块送达模型 |
 | `Glob` | 自动允许 | 按 glob 模式查找文件 |
 | `Grep` | 自动允许 | 正则搜索，支持文件列表、内容、计数、上下文、忽略大小写、glob 过滤 |
 | `Write` | 会话确认 | 创建或覆盖工作区文件，并记录 undo |
@@ -111,6 +111,7 @@ Python Orchestrator
 - `pytest`
 - `grpcio` / `grpcio-tools`，仅在运行或重新生成 Python protobuf 时需要
 - `protoc`，仅在重新生成 protobuf 时需要
+- MinerU CLI（命令名默认 `mineru`），读取 PDF 时必需；PDF 默认使用 MinerU `pipeline` 后端的 OCR 模式，不使用 Tika 或 `pdftotext`。可通过 `CODE_AGENT_MINERU_COMMAND` 和 `CODE_AGENT_MINERU_BACKEND` 覆盖命令与后端
 
 ### 配置模型
 
@@ -329,7 +330,7 @@ Windows 环境也可以使用：
 - **进程崩溃恢复**：Go `ProcessManager.Monitor` 监督协程，编排器意外退出时自动重启（CAS 守护、指数退避），在途对话重放一次、会话不丢失。
 - **并行工具调用**：`ToolRequestBatch`→Go `sync.WaitGroup` 扇出，gRPC 批量协议支持。
 - **输出截断合规**：行数优先（250 行）+ 字节上限（50KB），信息性提示（`[Output truncated: N lines total, showing first M]`），`.truncated` 结构标志传递到 LLM。
-- **多模态**：图像 data-URI→Anthropic 原生 `image` source block / OpenAI `image_url` 块；PDF 通过 Poppler `pdftotext` 提取文本（无额外依赖）。
+- **多模态**：图片二进制经 protobuf 内容块传递，不受文本输出 50KB 上限截断；PDF 由 MinerU OCR 提取 Markdown 与图像资产，再转换为 Anthropic 原生 `image` / OpenAI `image_url` 内容。该链路不使用 Tika 或 `pdftotext`。
 - **NotebookEdit**：Jupyter `.ipynb` cell 级增/删/改；`.ipynb` 读取渲染 cell 摘要而非原始 JSON。
 - **自动提交建议**：`/commit` 斜杠命令，流式生成 conventional-commit 建议（不回退自动化）。
 - **Allowlist 学习**：批准历史记录 + 规则建议器（重复匹配的命令/文件模式→候选 `AllowRule`），持久化跨会话。

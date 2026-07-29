@@ -13,18 +13,27 @@ import (
 	"code-agent/internal/skills"
 )
 
+const maxMultimodalBytes = 20 << 20
+
 type ToolRequest struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
 type ToolResult struct {
-	Name      string   `json:"name"`
-	Output    string   `json:"output,omitempty"`
-	Error     string   `json:"error,omitempty"`
-	ExitCode  int      `json:"exit_code"`
-	Truncated bool     `json:"truncated"`
-	Changes   []Change `json:"changes,omitempty"`
+	Name          string         `json:"name"`
+	Output        string         `json:"output,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	ExitCode      int            `json:"exit_code"`
+	Truncated     bool           `json:"truncated"`
+	Changes       []Change       `json:"changes,omitempty"`
+	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
+}
+
+type ContentBlock struct {
+	Text      string `json:"text,omitempty"`
+	ImageBlob []byte `json:"image_blob,omitempty"`
+	MIME      string `json:"mime,omitempty"`
 }
 
 type Change struct {

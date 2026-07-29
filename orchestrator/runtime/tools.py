@@ -141,6 +141,10 @@ class ToolRegistry:
                             "type": "string",
                             "description": "PDF page range hint, for example '1-3'.",
                         },
+                        "ocr": {
+                            "type": "boolean",
+                            "description": "Use MinerU OCR mode for PDF files (default: true).",
+                        },
                     },
                     "required": ["path"],
                 },

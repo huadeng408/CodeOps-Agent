@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import random
@@ -63,6 +64,54 @@ def split_image_segments(text: str) -> list[tuple[str, str]]:
     if pos < len(text):
         segments.append(("text", text[pos:]))
     return segments
+
+
+MessageContent = str | list[dict[str, Any]]
+
+
+def split_content_segments(content: MessageContent) -> list[tuple[str, str]]:
+    """Normalize text or structured content into ordered text/image segments."""
+    if isinstance(content, str):
+        return split_image_segments(content)
+
+    segments: list[tuple[str, str]] = []
+    for block in content:
+        block_type = str(block.get("type", "")).strip().lower()
+        if block_type == "text":
+            text = str(block.get("text", ""))
+            if text:
+                segments.append(("text", text))
+            continue
+        if block_type != "image":
+            continue
+        mime = str(block.get("mime", block.get("mime_type", ""))).strip()
+        blob = block.get("data", block.get("image_blob", b""))
+        if isinstance(blob, str):
+            payload = blob
+        elif isinstance(blob, (bytes, bytearray, memoryview)):
+            payload = base64.b64encode(bytes(blob)).decode("ascii")
+        else:
+            payload = ""
+        if mime.startswith("image/") and payload:
+            segments.append(("image", f"data:{mime};base64,{payload}"))
+    return segments
+
+
+def message_content_text(content: MessageContent) -> str:
+    """Return a log/recovery-safe textual view without embedding image bytes."""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        block_type = str(block.get("type", "")).strip().lower()
+        if block_type == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        elif block_type == "image":
+            mime = str(block.get("mime", block.get("mime_type", "image/*")))
+            parts.append(f"[image content: {mime}]")
+    return "\n".join(parts)
 
 
 # Polling interval (seconds) for the abortable HTTP path. While an in-flight
@@ -168,7 +217,7 @@ def assess_complexity(user_text: str) -> ComplexityScore:
 @dataclass(slots=True)
 class ChatMessage:
     role: str
-    content: str
+    content: MessageContent
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)

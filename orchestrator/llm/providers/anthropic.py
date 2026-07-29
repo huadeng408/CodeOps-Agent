@@ -18,8 +18,9 @@ from ..client import (
     ToolCall,
     Usage,
     http_call_with_retry,
+    message_content_text,
+    split_content_segments,
     split_data_uri,
-    split_image_segments,
 )
 
 
@@ -310,9 +311,10 @@ class AnthropicClient(LLMClient):
         converted: list[dict[str, Any]] = []
         for message in messages:
             if message.role == "system":
-                if not message.content.strip():
+                system_text = message_content_text(message.content).strip()
+                if not system_text:
                     continue
-                block: dict[str, Any] = {"type": "text", "text": message.content}
+                block: dict[str, Any] = {"type": "text", "text": system_text}
                 if message.cache_control == "ephemeral":
                     block["cache_control"] = {"type": "ephemeral"}
                 system_blocks.append(block)
@@ -321,6 +323,13 @@ class AnthropicClient(LLMClient):
                 converted.append(AnthropicClient._assistant_payload(message))
                 continue
             if message.role == "tool":
+                segments = split_content_segments(message.content)
+                has_image = any(kind == "image" for kind, _ in segments)
+                tool_content: Any = (
+                    AnthropicClient._image_content_blocks(segments)
+                    if has_image
+                    else message_content_text(message.content)
+                )
                 converted.append(
                     {
                         "role": "user",
@@ -328,7 +337,7 @@ class AnthropicClient(LLMClient):
                             {
                                 "type": "tool_result",
                                 "tool_use_id": message.tool_call_id or message.name or "tool_call",
-                                "content": message.content,
+                                "content": tool_content,
                                 **({"is_error": True} if message.is_error else {}),
                             }
                         ],
@@ -353,9 +362,9 @@ class AnthropicClient(LLMClient):
         content is passed through unchanged. Image conversion applies only to
         user/assistant roles -- tool results remain plain text.
         """
-        segments = split_image_segments(message.content)
+        segments = split_content_segments(message.content)
         if not any(kind == "image" for kind, _ in segments):
-            return {"role": message.role, "content": message.content}
+            return {"role": message.role, "content": message_content_text(message.content)}
         return {"role": message.role, "content": AnthropicClient._image_content_blocks(segments)}
 
     @staticmethod
@@ -403,12 +412,13 @@ class AnthropicClient(LLMClient):
                         "signature": str(block.get("signature", "")),
                     }
                 )
-        if message.content.strip():
-            segments = split_image_segments(message.content)
+        assistant_text = message_content_text(message.content)
+        if assistant_text.strip():
+            segments = split_content_segments(message.content)
             if any(kind == "image" for kind, _ in segments):
                 content.extend(AnthropicClient._image_content_blocks(segments))
             else:
-                content.append({"type": "text", "text": message.content})
+                content.append({"type": "text", "text": assistant_text})
         for index, call in enumerate(message.tool_calls):
             content.append(
                 {

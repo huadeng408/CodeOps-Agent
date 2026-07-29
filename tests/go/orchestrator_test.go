@@ -55,6 +55,10 @@ func (s *testOrchestratorServer) Converse(stream codeagentpb.Orchestrator_Conver
 	toolOutput := ""
 	if payload := toolMessage.GetToolResult(); payload != nil {
 		toolOutput = payload.Output
+		if len(payload.ContentBlocks) == 1 {
+			block := payload.ContentBlocks[0]
+			toolOutput += fmt.Sprintf(" %s:%s", block.Mime, block.ImageBlob)
+		}
 	}
 
 	if err := stream.Send(&codeagentpb.OrchestratorMessage{
@@ -291,12 +295,19 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	}
 
 	reply, err := client.Converse(context.Background(), "agent", func(context.Context, orchestrator.ToolCall) orchestrator.ToolResult {
-		return orchestrator.ToolResult{ToolName: "Echo", Output: "tool-ok"}
+		return orchestrator.ToolResult{
+			ToolName: "Echo",
+			Output:   "tool-ok",
+			ContentBlocks: []orchestrator.ContentBlock{{
+				ImageBlob: []byte("png"),
+				MIME:      "image/png",
+			}},
+		}
 	})
 	if err != nil {
 		t.Fatalf("converse failed: %v", err)
 	}
-	if !strings.Contains(reply, "hello agent tool-ok") {
+	if !strings.Contains(reply, "hello agent tool-ok image/png:png") {
 		t.Fatalf("unexpected reply: %q", reply)
 	}
 }

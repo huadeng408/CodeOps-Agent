@@ -339,13 +339,10 @@ func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
 	}
 }
 
-func TestExecutorReadSupportsImageAndPDFMetadata(t *testing.T) {
+func TestExecutorReadSupportsImageContentBlock(t *testing.T) {
 	root := t.TempDir()
 	pngData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
 	if err := os.WriteFile(filepath.Join(root, "image.png"), pngData, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	executor := tools.NewExecutor(root)
@@ -354,16 +351,14 @@ func TestExecutorReadSupportsImageAndPDFMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("image read failed: %v", err)
 	}
-	if !strings.Contains(image.Output, "[Image image.png: image/png") || !strings.Contains(image.Output, "base64") {
+	if !strings.Contains(image.Output, "[Image image.png: image/png") {
 		t.Fatalf("unexpected image output: %q", image.Output)
 	}
-
-	pdf, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "Read", Arguments: map[string]any{"path": "doc.pdf", "pages": "1"}})
-	if err != nil {
-		t.Fatalf("pdf read failed: %v", err)
+	if len(image.ContentBlocks) != 1 {
+		t.Fatalf("expected one image content block, got %+v", image.ContentBlocks)
 	}
-	if !strings.Contains(pdf.Output, "[PDF doc.pdf") || !strings.Contains(pdf.Output, "pages: 1") {
-		t.Fatalf("unexpected pdf output: %q", pdf.Output)
+	if got := image.ContentBlocks[0]; got.MIME != "image/png" || string(got.ImageBlob) != string(pngData) {
+		t.Fatalf("unexpected image content block: %+v", got)
 	}
 }
 

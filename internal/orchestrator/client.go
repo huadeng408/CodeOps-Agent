@@ -13,12 +13,12 @@ import (
 
 	"code-agent/internal/telemetry/genai"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type ConversationMessage struct {
@@ -35,12 +35,19 @@ type ToolCall struct {
 }
 
 type ToolResult struct {
-	ToolCallID string
-	ToolName   string
-	Output     string
-	Error      string
-	ExitCode   int32
-	Truncated  bool
+	ToolCallID    string
+	ToolName      string
+	Output        string
+	Error         string
+	ExitCode      int32
+	Truncated     bool
+	ContentBlocks []ContentBlock
+}
+
+type ContentBlock struct {
+	Text      string
+	ImageBlob []byte
+	MIME      string
 }
 
 type ToolHandler func(context.Context, ToolCall) ToolResult
@@ -85,6 +92,7 @@ type Client struct {
 
 const defaultConversationTimeout = 5 * time.Minute
 const defaultAskUserTimeout = 2 * time.Minute
+const maxGRPCMessageBytes = 32 << 20
 const maxHistoryMessages = 40
 const maxHistoryChars = 32_000
 const maxHistoryMessageChars = 4_000
@@ -94,7 +102,14 @@ func NewClient(target string) (*Client, error) {
 		target = "127.0.0.1:50051"
 	}
 
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxGRPCMessageBytes),
+			grpc.MaxCallSendMsgSize(maxGRPCMessageBytes),
+		),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create orchestrator client: %w", err)
 	}
@@ -297,9 +312,9 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 		case *codeagentpb.OrchestratorMessage_Text:
 			if payload.Text != nil {
 				parts = append(parts, payload.Text.Text)
-			if c.OnTextDelta != nil {
-				c.OnTextDelta(payload.Text.Text)
-			}
+				if c.OnTextDelta != nil {
+					c.OnTextDelta(payload.Text.Text)
+				}
 			}
 		case *codeagentpb.OrchestratorMessage_TodoUpdate:
 			if eventHandler != nil {
@@ -595,15 +610,24 @@ func sendToolResult(stream codeagentpb.Orchestrator_ConverseClient, result ToolR
 	if result.ToolName == "" {
 		return fmt.Errorf("send tool result: missing tool name")
 	}
+	contentBlocks := make([]*codeagentpb.ContentBlock, 0, len(result.ContentBlocks))
+	for _, block := range result.ContentBlocks {
+		contentBlocks = append(contentBlocks, &codeagentpb.ContentBlock{
+			Text:      block.Text,
+			ImageBlob: block.ImageBlob,
+			Mime:      block.MIME,
+		})
+	}
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_ToolResult{
 			ToolResult: &codeagentpb.ToolResult{
-				ToolName:   result.ToolName,
-				Output:     result.Output,
-				Error:      result.Error,
-				ExitCode:   result.ExitCode,
-				Truncated:  result.Truncated,
-				ToolCallId: result.ToolCallID,
+				ToolName:      result.ToolName,
+				Output:        result.Output,
+				Error:         result.Error,
+				ExitCode:      result.ExitCode,
+				Truncated:     result.Truncated,
+				ToolCallId:    result.ToolCallID,
+				ContentBlocks: contentBlocks,
 			},
 		},
 	}); err != nil {

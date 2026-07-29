@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 import time
@@ -971,8 +972,7 @@ def test_openai_converts_user_image_data_uri_to_image_url_block() -> None:
         server.server_close()
 
 
-def test_tool_result_image_data_uri_stays_plain_text_openai() -> None:
-    """A data-URI in a tool result must NOT be converted (tool results stay text)."""
+def test_openai_delivers_structured_tool_image_as_followup_user_message() -> None:
     server, captured = _json_server(
         {"choices": [{"message": {"role": "assistant", "content": "ok"}}],
          "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
@@ -994,7 +994,14 @@ def test_tool_result_image_data_uri_stays_plain_text_openai() -> None:
                             role="tool",
                             tool_call_id="c1",
                             name="Read",
-                            content=f"[Image a.png]\n{_PNG_DATA_URI}",
+                            content=[
+                                {"type": "text", "text": "[Image a.png]"},
+                                {
+                                    "type": "image",
+                                    "mime": "image/png",
+                                    "data": base64.b64decode(_PNG_B64),
+                                },
+                            ],
                         ),
                     ],
                 )
@@ -1002,11 +1009,97 @@ def test_tool_result_image_data_uri_stays_plain_text_openai() -> None:
         )
         body = json.loads(captured["body"])
         tool_msg = body["messages"][1]
-        # Tool content stays a plain string carrying the data-URI verbatim.
         assert tool_msg["role"] == "tool"
-        assert isinstance(tool_msg["content"], str)
-        assert _PNG_DATA_URI in tool_msg["content"]
+        assert tool_msg["content"] == "[Image a.png]"
+        visual_msg = body["messages"][2]
+        assert visual_msg["role"] == "user"
+        image_blocks = [b for b in visual_msg["content"] if b.get("type") == "image_url"]
+        assert image_blocks == [{"type": "image_url", "image_url": {"url": _PNG_DATA_URI}}]
     finally:
         server.shutdown()
         server.server_close()
 
+
+def test_anthropic_delivers_structured_image_inside_tool_result() -> None:
+    server, captured = _json_server(
+        {"content": [{"type": "text", "text": "ok"}], "usage": {"input_tokens": 1, "output_tokens": 1}}
+    )
+    try:
+        client = AnthropicClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="claude-test",
+            timeout=5.0,
+            max_tokens=1024,
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="claude-test",
+                    messages=[
+                        ChatMessage(role="user", content="look"),
+                        ChatMessage(
+                            role="tool",
+                            tool_call_id="c1",
+                            name="Read",
+                            content=[
+                                {"type": "text", "text": "[Image a.png]"},
+                                {
+                                    "type": "image",
+                                    "mime": "image/png",
+                                    "data": base64.b64decode(_PNG_B64),
+                                },
+                            ],
+                        ),
+                    ],
+                )
+            )
+        )
+        body = json.loads(captured["body"])
+        tool_result = body["messages"][1]["content"][0]
+        assert tool_result["type"] == "tool_result"
+        assert tool_result["tool_use_id"] == "c1"
+        assert tool_result["content"] == [
+            {"type": "text", "text": "[Image a.png]"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": _PNG_B64,
+                },
+            },
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_openai_places_all_parallel_tool_results_before_visual_followup() -> None:
+    messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(name="Read", id="c1"),
+                ToolCall(name="Read", id="c2"),
+            ],
+        ),
+        ChatMessage(
+            role="tool",
+            tool_call_id="c1",
+            name="Read",
+            content=[
+                {"type": "text", "text": "first"},
+                {"type": "image", "mime": "image/png", "data": base64.b64decode(_PNG_B64)},
+            ],
+        ),
+        ChatMessage(role="tool", tool_call_id="c2", name="Read", content="second"),
+    ]
+
+    payloads = OpenAIClient._request_messages(messages)
+
+    assert [payload["role"] for payload in payloads] == ["assistant", "tool", "tool", "user"]
+    assert payloads[1]["tool_call_id"] == "c1"
+    assert payloads[2]["tool_call_id"] == "c2"
+    assert any(block.get("type") == "image_url" for block in payloads[3]["content"])
