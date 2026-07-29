@@ -32,6 +32,7 @@ notes/
 logs/
 
 # Local agent state
+.worktrees/
 .agent/settings.local.json
 .agent/memory/*
 !.agent/memory/.gitkeep
