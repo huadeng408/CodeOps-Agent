@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/database"
+	"code-agent/pkg/documentparser"
 	"code-agent/pkg/es"
 	"code-agent/pkg/objectpath"
 	"code-agent/pkg/storage"
-	"code-agent/pkg/tika"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -58,7 +58,7 @@ type documentService struct {
 	pipelineTaskRepo repository.PipelineTaskRepository
 	minioCfg         serverconfig.MinIOConfig
 	esIndexName      string
-	tikaClient       *tika.Client
+	documentParser   *documentparser.Client
 }
 
 // NewDocumentService creates a DocumentService.
@@ -70,7 +70,7 @@ func NewDocumentService(
 	pipelineTaskRepo repository.PipelineTaskRepository,
 	minioCfg serverconfig.MinIOConfig,
 	esIndexName string,
-	tikaClient *tika.Client,
+	documentParser *documentparser.Client,
 ) DocumentService {
 	return &documentService{
 		uploadRepo:       uploadRepo,
@@ -80,7 +80,7 @@ func NewDocumentService(
 		pipelineTaskRepo: pipelineTaskRepo,
 		minioCfg:         minioCfg,
 		esIndexName:      esIndexName,
-		tikaClient:       tikaClient,
+		documentParser:   documentParser,
 	}
 }
 
@@ -202,7 +202,7 @@ func (s *documentService) GetFilePreviewContent(fileName string, user *model.Use
 	}
 	defer object.Close()
 
-	content, err := s.tikaClient.ExtractText(object, fileName)
+	content, err := s.documentParser.ExtractText(context.Background(), object, fileName)
 	if err != nil {
 		return nil, err
 	}

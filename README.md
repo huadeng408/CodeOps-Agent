@@ -111,7 +111,7 @@ Python Orchestrator
 - `pytest`
 - `grpcio` / `grpcio-tools`，仅在运行或重新生成 Python protobuf 时需要
 - `protoc`，仅在重新生成 protobuf 时需要
-- MinerU CLI（命令名默认 `mineru`），读取 PDF 时必需；PDF 默认使用 MinerU `pipeline` 后端的 OCR 模式，不使用 Tika 或 `pdftotext`。可通过 `CODE_AGENT_MINERU_COMMAND` 和 `CODE_AGENT_MINERU_BACKEND` 覆盖命令与后端
+- MinerU CLI（命令名默认 `mineru`），读取和入库 PDF 时必需；所有 PDF 入口默认使用 MinerU `pipeline` 后端的 OCR 模式，不使用 Tika 或 `pdftotext`。Tika 仅处理 DOCX、PPTX、XLSX 等非 PDF 文档。可通过 `CODE_AGENT_MINERU_COMMAND`、`CODE_AGENT_MINERU_BACKEND` 和 `CODE_AGENT_MINERU_TIMEOUT_SECONDS` 覆盖命令、后端与超时
 
 ### 配置模型
 

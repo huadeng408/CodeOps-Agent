@@ -10,6 +10,8 @@ import (
 )
 
 func TestReadPDFUsesMinerUOCRAndReturnsImages(t *testing.T) {
+	t.Setenv("CODE_AGENT_MINERU_COMMAND", "mineru")
+	t.Setenv("CODE_AGENT_MINERU_BACKEND", "pipeline")
 	originalFind := findPDFParser
 	originalRun := runPDFParser
 	t.Cleanup(func() {
@@ -70,6 +72,7 @@ func TestReadPDFUsesMinerUOCRAndReturnsImages(t *testing.T) {
 }
 
 func TestReadPDFRequiresMinerU(t *testing.T) {
+	t.Setenv("CODE_AGENT_MINERU_COMMAND", "mineru")
 	originalFind := findPDFParser
 	t.Cleanup(func() { findPDFParser = originalFind })
 	findPDFParser = func(string) (string, error) {

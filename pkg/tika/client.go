@@ -7,8 +7,10 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"code-agent/internal/serverconfig"
 	"path/filepath"
+	"strings"
+
+	"code-agent/internal/serverconfig"
 )
 
 // Client 是 Tika 服务器的客户端。
@@ -23,6 +25,9 @@ func NewClient(cfg serverconfig.TikaConfig) *Client {
 
 // ExtractText 自动根据文件后缀推断 MIME 类型，并调用 Tika 提取文本。
 func (c *Client) ExtractText(fileReader io.Reader, fileName string) (string, error) {
+	if strings.EqualFold(filepath.Ext(fileName), ".pdf") {
+		return "", fmt.Errorf("PDF files must be parsed by MinerU OCR, not Tika")
+	}
 	// 自动根据文件名推断 MIME 类型
 	contentType := detectMimeType(fileName)
 

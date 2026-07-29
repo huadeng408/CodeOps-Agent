@@ -47,6 +47,9 @@ class Settings:
     embedding: ModelSettings
     embedding_dimensions: int
     tika_url: str
+    mineru_command: str
+    mineru_backend: str
+    mineru_timeout_seconds: int
     es_url: str
     es_username: str
     es_password: str
@@ -93,6 +96,9 @@ def load_settings() -> Settings:
         embedding=embedding,
         embedding_dimensions=_get_int("PAISMART_EMBEDDING_DIMENSIONS", 512),
         tika_url=os.getenv("PAISMART_TIKA_URL", "http://127.0.0.1:9998").strip(),
+        mineru_command=os.getenv("CODE_AGENT_MINERU_COMMAND", "mineru").strip(),
+        mineru_backend=os.getenv("CODE_AGENT_MINERU_BACKEND", "pipeline").strip(),
+        mineru_timeout_seconds=_get_int("CODE_AGENT_MINERU_TIMEOUT_SECONDS", 600),
         es_url=os.getenv("PAISMART_ES_URL", "http://127.0.0.1:9200").strip(),
         es_username=os.getenv("PAISMART_ES_USERNAME", "").strip(),
         es_password=os.getenv("PAISMART_ES_PASSWORD", "").strip(),

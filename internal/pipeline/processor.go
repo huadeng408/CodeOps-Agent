@@ -13,10 +13,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/database"
+	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/es"
 	"code-agent/pkg/kafka"
@@ -25,7 +26,6 @@ import (
 	orchestratorclient "code-agent/pkg/orchestrator"
 	"code-agent/pkg/storage"
 	"code-agent/pkg/tasks"
-	"code-agent/pkg/tika"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -38,7 +38,7 @@ const (
 
 // Processor represents a processor.
 type Processor struct {
-	tikaClient      *tika.Client
+	documentParser  *documentparser.Client
 	embeddingClient embedding.Client
 	esCfg           serverconfig.ElasticsearchConfig
 	minioCfg        serverconfig.MinIOConfig
@@ -51,7 +51,7 @@ type Processor struct {
 
 // NewProcessor creates a processor.
 func NewProcessor(
-	tikaClient *tika.Client,
+	documentParser *documentparser.Client,
 	embeddingClient embedding.Client,
 	esCfg serverconfig.ElasticsearchConfig,
 	minioCfg serverconfig.MinIOConfig,
@@ -62,7 +62,7 @@ func NewProcessor(
 	ingestionClient orchestratorclient.IngestionClient,
 ) *Processor {
 	return &Processor{
-		tikaClient:      tikaClient,
+		documentParser:  documentParser,
 		embeddingClient: embeddingClient,
 		esCfg:           esCfg,
 		minioCfg:        minioCfg,
@@ -114,9 +114,9 @@ func (p *Processor) processParse(ctx context.Context, task tasks.FileProcessingT
 		return errors.New("parse: empty file content")
 	}
 
-	textContent, err := p.tikaClient.ExtractText(bytes.NewReader(buf.Bytes()), task.FileName)
+	textContent, err := p.documentParser.ExtractText(ctx, bytes.NewReader(buf.Bytes()), task.FileName)
 	if err != nil {
-		return fmt.Errorf("parse: tika extract failed: %w", err)
+		return fmt.Errorf("parse: document extraction failed: %w", err)
 	}
 	if textContent == "" {
 		return errors.New("parse: extracted text is empty")

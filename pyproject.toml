@@ -25,3 +25,6 @@ orchestrator = ["prompts/templates/*.txt"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: explicit tests that require local external runtimes",
+]

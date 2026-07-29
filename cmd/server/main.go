@@ -16,18 +16,20 @@ import (
 	"syscall"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/handler"
 	"code-agent/internal/middleware"
 	"code-agent/internal/model"
 	"code-agent/internal/pipeline"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
 	"code-agent/pkg/database"
+	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/es"
 	"code-agent/pkg/kafka"
 	"code-agent/pkg/log"
+	"code-agent/pkg/mineru"
 	"code-agent/pkg/orchestrator"
 	"code-agent/pkg/reranker"
 	"code-agent/pkg/storage"
@@ -108,6 +110,7 @@ func main() {
 
 	jwtManager := token.NewJWTManager(cfg.JWT.Secret, cfg.JWT.AccessTokenExpireHours, cfg.JWT.RefreshTokenExpireDays)
 	tikaClient := tika.NewClient(cfg.Tika)
+	documentParser := documentparser.New(tikaClient, mineru.NewClient())
 	embeddingClient := embedding.NewClient(cfg.Embedding)
 	orchestratorClient := orchestrator.NewClient(cfg.AI.Orchestrator)
 	orchestratorMemoryClient := orchestrator.NewMemoryClient(cfg.AI.Orchestrator)
@@ -117,7 +120,7 @@ func main() {
 	userService := service.NewUserService(userRepository, orgTagRepo, jwtManager)
 	adminService := service.NewAdminService(orgTagRepo, userRepository, conversationRepo, pipelineTaskRepo, uploadRepo)
 	uploadService := service.NewUploadService(uploadRepo, userRepository, cfg.MinIO)
-	documentService := service.NewDocumentService(uploadRepo, userRepository, orgTagRepo, docVectorRepo, pipelineTaskRepo, cfg.MinIO, cfg.Elasticsearch.IndexName, tikaClient)
+	documentService := service.NewDocumentService(uploadRepo, userRepository, orgTagRepo, docVectorRepo, pipelineTaskRepo, cfg.MinIO, cfg.Elasticsearch.IndexName, documentParser)
 	searchService := service.NewSearchService(
 		embeddingClient,
 		rerankerClient,
@@ -133,7 +136,7 @@ func main() {
 	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient)
 
 	processor := pipeline.NewProcessor(
-		tikaClient,
+		documentParser,
 		embeddingClient,
 		cfg.Elasticsearch,
 		cfg.MinIO,

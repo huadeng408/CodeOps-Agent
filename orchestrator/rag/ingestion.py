@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
 import re
+import tempfile
 import time
 from collections import Counter
 from functools import lru_cache
+from pathlib import Path
 
 import httpx
 from langchain_core.documents import Document
@@ -57,16 +60,24 @@ class IngestionService:
         source_resp = await self._http.get(payload.objectUrl)
         source_resp.raise_for_status()
 
-        tika_resp = await self._http.put(
-            f"{self._settings.tika_url.rstrip('/')}/tika",
-            content=source_resp.content,
-            headers={
-                "Accept": "text/plain",
-                "Content-Type": _detect_mime_type(payload.task.file_name),
-            },
-        )
-        tika_resp.raise_for_status()
-        parsed_text = _clean_parsed_text(tika_resp.text, payload.task.file_name)
+        if _detect_file_type(payload.task.file_name) == "pdf" or source_resp.content.startswith(b"%PDF-"):
+            parsed = await _parse_pdf_with_mineru(
+                source_resp.content,
+                payload.task.file_name,
+                self._settings,
+            )
+        else:
+            tika_resp = await self._http.put(
+                f"{self._settings.tika_url.rstrip('/')}/tika",
+                content=source_resp.content,
+                headers={
+                    "Accept": "text/plain",
+                    "Content-Type": _detect_mime_type(payload.task.file_name),
+                },
+            )
+            tika_resp.raise_for_status()
+            parsed = tika_resp.text
+        parsed_text = _clean_parsed_text(parsed, payload.task.file_name)
         log_request(
             "ingestion_parse",
             latency_ms=elapsed_ms(start),
@@ -209,6 +220,73 @@ class IngestionService:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("embedding http retry failed without exception")
+
+
+async def _parse_pdf_with_mineru(content: bytes, file_name: str, settings: Settings) -> str:
+    if not content.startswith(b"%PDF-"):
+        raise ValueError(f"invalid PDF file: {file_name}")
+
+    with tempfile.TemporaryDirectory(prefix="code-agent-mineru-") as temp_dir:
+        work_dir = Path(temp_dir)
+        input_path = work_dir / "document.pdf"
+        output_dir = work_dir / "output"
+        input_path.write_bytes(content)
+        await _run_mineru(
+            settings.mineru_command,
+            "-p",
+            str(input_path),
+            "-o",
+            str(output_dir),
+            "-m",
+            "ocr",
+            "-b",
+            settings.mineru_backend,
+            timeout_seconds=settings.mineru_timeout_seconds,
+        )
+
+        parts: list[str] = []
+        for path in sorted(output_dir.rglob("*.md")):
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(text)
+        if not parts:
+            raise RuntimeError("MinerU PDF parsing produced no Markdown")
+        return "\n\n".join(parts)
+
+
+async def _run_mineru(
+    command: str,
+    *args: str,
+    timeout_seconds: int,
+) -> tuple[bytes, bytes]:
+    env = os.environ.copy()
+    bypass = [value.strip() for value in env.get("NO_PROXY", "").split(",") if value.strip()]
+    for required in ("127.0.0.1", "localhost", "::1"):
+        if required not in bypass:
+            bypass.append(required)
+    env["NO_PROXY"] = ",".join(bypass)
+    env["no_proxy"] = env["NO_PROXY"]
+
+    process = await asyncio.create_subprocess_exec(
+        command,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=max(1, timeout_seconds),
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise TimeoutError(f"MinerU PDF parsing timed out after {timeout_seconds}s") from None
+    if process.returncode != 0:
+        detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MinerU PDF parsing failed ({process.returncode}): {detail}")
+    return stdout, stderr
 
 
 def _detect_mime_type(file_name: str) -> str:
