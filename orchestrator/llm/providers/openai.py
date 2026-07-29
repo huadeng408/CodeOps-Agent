@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -130,8 +131,22 @@ class OpenAIClient(LLMClient):
         )
 
         tool_accum: dict[int, dict[str, Any]] = {}
+        reasoning_parts: list[str] = []
         usage = Usage()
-        with urllib.request.urlopen(http_request, timeout=self.timeout) as resp:
+        try:
+            response = urllib.request.urlopen(http_request, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            raw_detail = exc.read(4001)
+            detail = raw_detail.decode("utf-8", errors="replace")
+            if self.api_key:
+                detail = detail.replace(self.api_key, "<redacted>")
+            if len(detail) > 4000:
+                detail = detail[:4000] + "[truncated]"
+            raise RuntimeError(
+                f"OpenAI HTTP {exc.code}: {detail or exc.reason}"
+            ) from exc
+
+        with response as resp:
             for raw_line in resp:
                 if cancel_event is not None and cancel_event.is_set():
                     raise RequestInterrupted("OpenAI stream cancelled mid-stream")
@@ -161,6 +176,9 @@ class OpenAIClient(LLMClient):
                 if not choices:
                     continue
                 delta = choices[0].get("delta") or {}
+                reasoning_content = delta.get("reasoning_content")
+                if isinstance(reasoning_content, str) and reasoning_content:
+                    reasoning_parts.append(reasoning_content)
                 content = delta.get("content")
                 if isinstance(content, str) and content:
                     yield StreamDelta(kind="text", text=content)
@@ -181,7 +199,12 @@ class OpenAIClient(LLMClient):
         if tool_calls:
             yield StreamDelta(kind="tool_calls", tool_calls=tool_calls)
         yield StreamDelta(kind="usage", usage=usage)
-        yield StreamDelta(kind="done")
+        thinking_blocks = []
+        if reasoning_parts:
+            thinking_blocks.append(
+                {"type": "thinking", "thinking": "".join(reasoning_parts)}
+            )
+        yield StreamDelta(kind="done", thinking_blocks=thinking_blocks)
 
     def _stream_payload(self, request: ChatRequest) -> dict[str, Any]:
         """Build the chat-completions payload for SSE streaming.
@@ -285,6 +308,14 @@ class OpenAIClient(LLMClient):
                 }
                 for index, call in enumerate(message.tool_calls)
             ]
+        if message.role == "assistant" and message.thinking_blocks:
+            reasoning_content = "".join(
+                str(block.get("thinking", ""))
+                for block in message.thinking_blocks
+                if block.get("type") == "thinking"
+            )
+            if reasoning_content:
+                payload["reasoning_content"] = reasoning_content
         return payload
 
     @staticmethod

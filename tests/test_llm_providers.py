@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import threading
 import time
@@ -646,6 +647,122 @@ def test_openai_stream_emits_incremental_text_and_tool_calls() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_openai_stream_preserves_reasoning_content_for_tool_followup() -> None:
+    frames = [
+        _openai_frame(
+            {"choices": [{"delta": {"reasoning_content": "inspect "}}]}
+        ),
+        _openai_frame(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "fixture",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-reasoning",
+                                    "function": {
+                                        "name": "Read",
+                                        "arguments": '{"file_path":"fixture.txt"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    server, _ = _sse_server(frames)
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="deepseek-v4-pro",
+            timeout=5.0,
+        )
+
+        deltas = asyncio.run(
+            _collect(
+                client.stream(
+                    ChatRequest(
+                        model="deepseek-v4-pro",
+                        messages=[ChatMessage(role="user", content="read fixture")],
+                    )
+                )
+            )
+        )
+
+        done_delta = next(delta for delta in deltas if delta.kind == "done")
+        assert done_delta.thinking_blocks == [
+            {"type": "thinking", "thinking": "inspect fixture"}
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_openai_stream_http_error_includes_redacted_response_body(monkeypatch) -> None:
+    def reject_request(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise urllib.error.HTTPError(
+            url="https://example.test/v1/chat/completions",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":{"message":"bad test-key"}}'),
+        )
+
+    monkeypatch.setattr(
+        "orchestrator.llm.providers.openai.urllib.request.urlopen",
+        reject_request,
+    )
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url="https://example.test",
+        model="deepseek-v4-pro",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            _collect(
+                client.stream(
+                    ChatRequest(
+                        model="deepseek-v4-pro",
+                        messages=[ChatMessage(role="user", content="hello")],
+                    )
+                )
+            )
+        )
+
+    message = str(exc_info.value)
+    assert "OpenAI HTTP 400" in message
+    assert "<redacted>" in message
+    assert "test-key" not in message
+
+
+def test_openai_assistant_message_returns_reasoning_content_with_tool_call() -> None:
+    payload = OpenAIClient._message_payload(
+        ChatMessage(
+            role="assistant",
+            content="",
+            thinking_blocks=[
+                {"type": "thinking", "thinking": "inspect fixture"}
+            ],
+            tool_calls=[
+                ToolCall(
+                    id="call-reasoning",
+                    name="Read",
+                    arguments={"file_path": "fixture.txt"},
+                )
+            ],
+        )
+    )
+
+    assert payload["reasoning_content"] == "inspect fixture"
 
 
 def test_anthropic_stream_emits_incremental_text_and_tool_use() -> None:
