@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
-from tests.integration.trace_e2e import SpanRecord, select_run_trace
+from tests.integration.trace_e2e import (
+    SpanRecord,
+    build_model_url,
+    build_spans_url,
+    parse_model_ids,
+    parse_spans_page,
+    poll_for_trace,
+    sanitize_text,
+    select_run_trace,
+)
 
 
 RUN_ID = "run-123"
@@ -112,3 +124,122 @@ def test_select_run_trace_rejects_detached_chat_parent():
 
     with pytest.raises(AssertionError, match="do not reach invoke_agent"):
         select_run_trace(spans, RUN_ID)
+
+
+def test_build_model_url_normalizes_deepseek_base_url():
+    assert (
+        build_model_url("https://api.deepseek.com")
+        == "https://api.deepseek.com/v1/models"
+    )
+    assert (
+        build_model_url("https://api.deepseek.com/v1")
+        == "https://api.deepseek.com/v1/models"
+    )
+
+
+def test_build_spans_url_encodes_time_project_and_cursor():
+    url = build_spans_url(
+        "http://127.0.0.1:6006",
+        "default project",
+        "2026-07-29T01:02:03+00:00",
+        "cursor/2",
+    )
+    parsed = urlparse(url)
+
+    assert parsed.path == "/v1/projects/default%20project/spans"
+    assert parse_qs(parsed.query) == {
+        "start_time": ["2026-07-29T01:02:03+00:00"],
+        "limit": ["100"],
+        "cursor": ["cursor/2"],
+    }
+
+
+def test_parse_model_ids_reads_openai_compatible_payload():
+    assert parse_model_ids({"data": [{"id": "deepseek-v4-pro"}]}) == {
+        "deepseek-v4-pro"
+    }
+
+
+def test_parse_model_ids_rejects_missing_data_list():
+    with pytest.raises(ValueError, match="data list"):
+        parse_model_ids({"models": []})
+
+
+def test_parse_spans_page_reads_full_phoenix_span_shape():
+    payload = {
+        "data": [
+            {
+                "name": "chat",
+                "context": {"trace_id": TRACE_ID, "span_id": "2" * 16},
+                "parent_id": ROOT_ID,
+                "status_code": "OK",
+                "attributes": {"gen_ai": {"system": "openai"}},
+                "span_kind": "CLIENT",
+                "start_time": "2026-07-29T01:02:03Z",
+                "end_time": "2026-07-29T01:02:04Z",
+            }
+        ],
+        "next_cursor": "cursor-2",
+    }
+
+    spans, cursor = parse_spans_page(payload)
+
+    assert spans == [
+        SpanRecord(
+            trace_id=TRACE_ID,
+            span_id="2" * 16,
+            parent_id=ROOT_ID,
+            name="chat",
+            status_code="OK",
+            attributes={"gen_ai": {"system": "openai"}},
+        )
+    ]
+    assert cursor == "cursor-2"
+
+
+def test_parse_spans_page_rejects_malformed_context():
+    with pytest.raises(ValueError, match="malformed span"):
+        parse_spans_page({"data": [{"name": "chat"}]})
+
+
+def test_poll_for_trace_returns_immediate_match():
+    result = poll_for_trace(
+        lambda: valid_spans(),
+        RUN_ID,
+        timeout=1,
+        monotonic=lambda: 0.0,
+        sleep=lambda _: None,
+    )
+
+    assert result.trace_id == TRACE_ID
+
+
+def test_poll_for_trace_times_out_with_safe_candidates():
+    now = [0.0]
+
+    def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    with pytest.raises(TimeoutError) as exc_info:
+        poll_for_trace(
+            lambda: [span("chat", "2" * 16, ROOT_ID)],
+            RUN_ID,
+            timeout=1,
+            monotonic=lambda: now[0],
+            sleep=advance,
+        )
+
+    message = str(exc_info.value)
+    assert "chat" in message
+    assert TRACE_ID in message
+    assert "attributes" not in message
+
+
+def test_sanitize_text_removes_exact_api_key():
+    secret = "sk-super-secret-value"
+    source = json.dumps({"error": f"bad Authorization Bearer {secret}"})
+
+    sanitized = sanitize_text(source, secret)
+
+    assert secret not in sanitized
+    assert "<redacted>" in sanitized
