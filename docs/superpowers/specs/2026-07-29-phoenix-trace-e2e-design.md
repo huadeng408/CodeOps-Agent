@@ -214,11 +214,12 @@ second real model response consumed the tool result and completed the turn.
 Each stage has a bounded deadline:
 
 - Phoenix readiness: 60 seconds.
+- First Phoenix image pull and Compose startup: 300 seconds.
 - DeepSeek model preflight: 30 seconds.
 - Go build: 120 seconds.
 - Orchestrator startup and model turn: 120 seconds.
 - Phoenix trace visibility: 45 seconds after the final assistant marker.
-- Overall runner deadline: approximately 5 minutes.
+- Overall runner deadline: approximately 8 minutes on a first image pull.
 
 Provider retries are disabled or limited to one retry for transient failures
 so a failing run cannot create uncontrolled API usage. Authentication errors,

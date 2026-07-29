@@ -290,3 +290,12 @@ def test_compose_uses_official_phoenix_image():
 
     assert "image: arizephoenix/phoenix:latest" in compose
     assert "image: arize/phoenix:latest" not in compose
+
+
+def test_runner_allows_slow_first_phoenix_pull():
+    script = (Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[int]$PhoenixStartupTimeoutSeconds = 300" in script
+    assert "-TimeoutSeconds $PhoenixStartupTimeoutSeconds" in script

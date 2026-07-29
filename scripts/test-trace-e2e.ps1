@@ -27,6 +27,7 @@ param(
     [string]$PhoenixProject = 'default',
     [int]$TurnTimeoutSeconds = 120,
     [int]$TraceTimeoutSeconds = 45,
+    [int]$PhoenixStartupTimeoutSeconds = 300,
     [switch]$ValidateApiKeyOnly
 )
 
@@ -43,6 +44,19 @@ function Get-ScrubbedText {
         return $Text
     }
     return $Text.Replace($Secret, '<redacted>')
+}
+
+function Get-BoundedText {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [int]$MaxCharacters = 20000
+    )
+
+    if ($Text.Length -le $MaxCharacters) {
+        return $Text
+    }
+    return "[earlier output truncated]`n" +
+        $Text.Substring($Text.Length - $MaxCharacters)
 }
 
 function Get-DeepSeekApiKey {
@@ -206,14 +220,14 @@ function Invoke-CapturedProcess {
             Stop-ProcessTree $process
             $stdout = $stdoutTask.GetAwaiter().GetResult()
             $stderr = $stderrTask.GetAwaiter().GetResult()
-            $detail = Get-ScrubbedText "$stdout`n$stderr" $Secret
+            $detail = Get-BoundedText (Get-ScrubbedText "$stdout`n$stderr" $Secret)
             throw "process timed out after ${TimeoutSeconds}s: $FilePath`n$detail"
         }
 
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) {
-            $detail = Get-ScrubbedText "$stdout`n$stderr" $Secret
+            $detail = Get-BoundedText (Get-ScrubbedText "$stdout`n$stderr" $Secret)
             throw "process exited $($process.ExitCode): $FilePath`n$detail"
         }
         return [pscustomobject]@{
@@ -359,7 +373,7 @@ try {
             -FilePath $dockerPath `
             -ArgumentList @('compose', 'up', '-d', 'phoenix') `
             -WorkingDirectory $repositoryRoot `
-            -TimeoutSeconds 120
+            -TimeoutSeconds $PhoenixStartupTimeoutSeconds
         $phoenixStarted = $true
     }
     Wait-Phoenix -BaseUrl $PhoenixUrl -TimeoutSeconds 60

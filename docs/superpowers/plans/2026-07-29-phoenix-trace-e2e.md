@@ -256,7 +256,7 @@ Before starting Docker, invoke the helper's `check-model` command through `Invok
 
 - [ ] **Step 3: Implement owned Phoenix and workspace setup**
 
-Record whether `docker compose ps --status running --services` includes `phoenix`. Start only `docker compose up -d phoenix` when absent, bound the Compose command to 120 seconds, and poll `$PhoenixUrl/v1/projects?limit=1` for 60 seconds.
+Record whether `docker compose ps --status running --services` includes `phoenix`. Start only `docker compose up -d phoenix` when absent, bound the Compose command to 300 seconds for a first image pull, and poll `$PhoenixUrl/v1/projects?limit=1` for 60 seconds.
 
 Create one GUID temp directory containing:
 
