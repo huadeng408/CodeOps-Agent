@@ -26,7 +26,8 @@ param(
     [string]$PhoenixUrl = 'http://127.0.0.1:6006',
     [string]$PhoenixProject = 'default',
     [int]$TurnTimeoutSeconds = 120,
-    [int]$TraceTimeoutSeconds = 45
+    [int]$TraceTimeoutSeconds = 45,
+    [switch]$ValidateApiKeyOnly
 )
 
 Set-StrictMode -Version Latest
@@ -58,10 +59,25 @@ function Get-DeepSeekApiKey {
         throw "API key file does not exist: $Path"
     }
 
-    $deepSeekLines = @(
-        Get-Content -LiteralPath $Path -Encoding utf8 |
-            Where-Object { $_ -match '(?i)deepseek' }
+    $lines = @(Get-Content -LiteralPath $Path -Encoding utf8)
+    $labelIndexes = @(
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match '(?i)deepseek') {
+                $index
+            }
+        }
     )
+    if ($labelIndexes.Count -ne 1) {
+        throw "expected exactly one DeepSeek label in $Path; found $($labelIndexes.Count)"
+    }
+
+    $deepSeekLines = [System.Collections.Generic.List[string]]::new()
+    for ($index = $labelIndexes[0]; $index -lt $lines.Count; $index++) {
+        if ($index -gt $labelIndexes[0] -and [string]::IsNullOrWhiteSpace($lines[$index])) {
+            break
+        }
+        $deepSeekLines.Add($lines[$index])
+    }
     $tokens = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $deepSeekLines) {
         foreach ($match in [regex]::Matches($line, 'sk-[A-Za-z0-9_-]+')) {
@@ -287,9 +303,9 @@ $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..')
 )
 $helperPath = Join-Path $repositoryRoot 'tests\integration\trace_e2e.py'
-$pythonPath = Assert-Command 'python'
-$goPath = Assert-Command 'go'
-$dockerPath = Assert-Command 'docker'
+$pythonPath = ''
+$goPath = ''
+$dockerPath = ''
 
 $stage = 'preflight'
 $apiKey = ''
@@ -306,6 +322,13 @@ $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
     $apiKey = Get-DeepSeekApiKey $ApiKeyFile
+    if ($ValidateApiKeyOnly) {
+        Write-Output 'api_key=valid'
+        return
+    }
+    $pythonPath = Assert-Command 'python'
+    $goPath = Assert-Command 'go'
+    $dockerPath = Assert-Command 'docker'
     $modelCheck = Invoke-PythonHelper `
         -PythonPath $pythonPath `
         -HelperPath $helperPath `

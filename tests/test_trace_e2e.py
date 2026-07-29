@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -243,3 +247,37 @@ def test_sanitize_text_removes_exact_api_key():
 
     assert secret not in sanitized
     assert "<redacted>" in sanitized
+
+
+def test_runner_accepts_key_on_line_after_deepseek_label(tmp_path: Path):
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is unavailable")
+    key_file = tmp_path / "api-key.md"
+    key_file.write_text("DeepSeek official:\nsk-test\n", encoding="utf-8")
+    script = Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1"
+    environment = os.environ.copy()
+    environment.pop("OPENAI_API_KEY", None)
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-ApiKeyFile",
+            str(key_file),
+            "-ValidateApiKeyOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "api_key=valid" in result.stdout
+    assert "sk-test" not in result.stdout + result.stderr
