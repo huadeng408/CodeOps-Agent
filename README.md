@@ -281,6 +281,12 @@ pytest -q
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。
 
+先安装该显式测试所需的 gRPC 与 OpenTelemetry 依赖：
+
+```powershell
+python -m pip install -e ".[trace-e2e]"
+```
+
 ```powershell
 $env:OPENAI_API_KEY = '<从安全存储加载>'
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro

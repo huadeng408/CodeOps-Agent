@@ -81,6 +81,12 @@ The implementation has two entry points:
   checking model availability and querying/asserting full Phoenix span data.
   It is not collected by the default pytest suite as a test module.
 
+The Python runtime dependencies required to create and export orchestrator
+spans are declared in the `trace-e2e` optional dependency group. The runner
+preflights those imports and reports the explicit installation command instead
+of allowing OpenTelemetry's runtime no-op fallback to become a late missing-span
+failure.
+
 The explicit invocation is:
 
 ```powershell

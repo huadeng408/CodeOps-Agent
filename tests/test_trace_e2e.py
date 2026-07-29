@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -299,3 +300,42 @@ def test_runner_allows_slow_first_phoenix_pull():
 
     assert "[int]$PhoenixStartupTimeoutSeconds = 300" in script
     assert "-TimeoutSeconds $PhoenixStartupTimeoutSeconds" in script
+
+
+def test_runner_uses_basic_parsing_for_windows_powershell_readiness_probe():
+    script = (Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Invoke-WebRequest -UseBasicParsing -Uri $uri" in script
+
+
+def test_runner_disables_fast_model_routing():
+    script = (Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "model_fast = 'disabled'" in script
+    assert "MODEL_FAST = 'disabled'" in script
+
+
+def test_trace_e2e_extra_declares_python_telemetry_dependencies():
+    pyproject_path = Path(__file__).parents[1] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["optional-dependencies"]["trace-e2e"]
+
+    assert any(dependency.startswith("grpcio") for dependency in dependencies)
+    assert any(dependency.startswith("opentelemetry-sdk") for dependency in dependencies)
+    assert any(
+        dependency.startswith("opentelemetry-exporter-otlp-proto-http")
+        for dependency in dependencies
+    )
+
+
+def test_runner_preflights_python_telemetry_dependencies():
+    script = (Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Assert-PythonTraceDependencies" in script
+    assert '.[trace-e2e]' in script

@@ -8,6 +8,9 @@
 
 **Tech Stack:** Windows PowerShell 5.1+, Python 3.11 standard library, pytest, Go, gRPC, OpenTelemetry OTLP/HTTP, Docker Compose, Phoenix REST v1, DeepSeek OpenAI-compatible API.
 
+The explicit runner preflights the `trace-e2e` Python optional dependencies;
+install them with `python -m pip install -e ".[trace-e2e]"` before execution.
+
 ---
 
 ## File Map

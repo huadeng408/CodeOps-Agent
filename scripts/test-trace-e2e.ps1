@@ -263,6 +263,31 @@ function Invoke-PythonHelper {
         -Secret $Secret
 }
 
+function Assert-PythonTraceDependencies {
+    param(
+        [Parameter(Mandatory)][string]$PythonPath,
+        [Parameter(Mandatory)][string]$RepositoryRoot
+    )
+
+    $probe = @'
+import grpc
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+'@
+    try {
+        $null = Invoke-CapturedProcess `
+            -FilePath $PythonPath `
+            -ArgumentList @('-c', $probe) `
+            -WorkingDirectory $RepositoryRoot `
+            -TimeoutSeconds 15
+    }
+    catch {
+        throw 'Python trace dependencies are unavailable. Install them with: ' +
+            'python -m pip install -e ".[trace-e2e]"'
+    }
+}
+
 function Wait-Phoenix {
     param(
         [string]$BaseUrl,
@@ -273,7 +298,7 @@ function Wait-Phoenix {
     $uri = "$($BaseUrl.TrimEnd('/'))/v1/projects?limit=1"
     do {
         try {
-            $response = Invoke-WebRequest -Uri $uri -Method Get -TimeoutSec 5
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -TimeoutSec 5
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
                 return
             }
@@ -341,6 +366,9 @@ try {
         return
     }
     $pythonPath = Assert-Command 'python'
+    Assert-PythonTraceDependencies `
+        -PythonPath $pythonPath `
+        -RepositoryRoot $repositoryRoot
     $goPath = Assert-Command 'go'
     $dockerPath = Assert-Command 'docker'
     $modelCheck = Invoke-PythonHelper `
@@ -388,7 +416,7 @@ try {
     $orchestratorPort = Get-FreeTcpPort
     $settings = @{
         model = $Model
-        model_fast = ''
+        model_fast = 'disabled'
         orchestrator_addr = "127.0.0.1:$orchestratorPort"
         orchestrator_auto_start = $true
         orchestrator_command = $pythonPath
@@ -439,7 +467,7 @@ try {
         OPENAI_MAX_RETRIES = '1'
         OPENAI_TIMEOUT = '90'
         THINKING_ENABLED = 'false'
-        MODEL_FAST = ''
+        MODEL_FAST = 'disabled'
         OTEL_SERVICE_NAME = 'code-agent-orchestrator'
         PYTHONPATH = $repositoryRoot
     }
