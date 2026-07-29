@@ -78,8 +78,8 @@ The implementation has two entry points:
   owns preflight checks, temporary workspace creation, environment isolation,
   process lifecycle, timeouts, and cleanup.
 - `tests/integration/trace_e2e.py` is a standard-library-only helper for
-  checking model availability and querying/asserting Phoenix trace data. It is
-  not collected by the default pytest suite as a test module.
+  checking model availability and querying/asserting full Phoenix span data.
+  It is not collected by the default pytest suite as a test module.
 
 The explicit invocation is:
 
@@ -153,8 +153,9 @@ defaults already point to the same Phoenix instance correctly.
    and then include `TRACE_E2E_OK:<run_id>` in its final response. The real
    streaming OpenAI-compatible path must produce the tool call.
 9. When the success marker appears in agent output, the runner keeps both
-   runtimes alive and polls Phoenix. This allows the Go and Python batch span
-   processors to export ended spans before the orchestrator is stopped.
+   runtimes alive and polls the Phoenix full-span endpoint. This allows the Go
+   and Python batch span processors to export ended spans before the
+   orchestrator is stopped.
 10. After trace verification succeeds, the runner closes agent stdin. The CLI
     exits normally and flushes its tracer. Abnormal paths terminate only the
     process tree created by this test.
@@ -164,10 +165,12 @@ defaults already point to the same Phoenix instance correctly.
 Historical Phoenix data must not create a false positive. Immediately before
 the agent turn, the runner records a UTC lower bound. The verifier queries:
 
-`GET /v1/projects/default/traces`
+`GET /v1/projects/default/spans`
 
-with `include_spans=true`, the recorded `start_time`, a bounded result limit,
-and polling for eventual persistence.
+with the recorded `start_time`, a bounded result limit, pagination when
+needed, and polling for eventual persistence. The trace-list endpoint is not
+used because its `include_spans=true` representation intentionally omits span
+attributes, including the tool result required for per-run isolation.
 
 A candidate trace must contain an `execute_tool Read` span whose tool result
 attribute includes the exact `TRACE_E2E_FIXTURE:<run_id>` value. Because the
@@ -181,12 +184,10 @@ Once identified, all remaining assertions are applied to that exact trace ID.
 
 The selected trace must contain:
 
-- exactly one relevant root span named `invoke_agent code-agent` from resource
-  `service.name=code-agent`;
-- at least one `execute_tool Read` span from `service.name=code-agent`;
-- at least two `chat` spans from
-  `service.name=code-agent-orchestrator`, covering the model call before the
-  tool request and the model call after the tool result;
+- exactly one relevant root span named `invoke_agent code-agent`;
+- at least one `execute_tool Read` span;
+- at least two `chat` spans, covering the Python model call before the tool
+  request and the model call after the tool result;
 - the unique fixture marker in the successful `Read` tool result;
 - no error status on the required tool span.
 
@@ -195,6 +196,15 @@ and the relevant `execute_tool Read` span must have a parent chain that reaches
 the selected `invoke_agent code-agent` span. This verifies W3C context
 propagation across the gRPC boundary rather than merely matching service and
 span names.
+
+The Go runtime is identified by its `invoke_agent code-agent` and
+`execute_tool Read` instrumentation, while the Python runtime is identified by
+its `chat` instrumentation. Phoenix currently uses
+`openinference.project.name` to route OTLP data and does not persist arbitrary
+OTLP resource attributes in its REST span representation. Consequently,
+`service.name` remains a resource-level unit-test assertion and is not an E2E
+REST assertion. The test does not add duplicate production span attributes
+solely to expose that resource value through Phoenix.
 
 The CLI output must also contain `TRACE_E2E_OK:<run_id>`, proving that the
 second real model response consumed the tool result and completed the turn.
@@ -260,7 +270,8 @@ data:
 - run ID;
 - selected Phoenix trace ID;
 - requested model;
-- a compact table of required span name, service name, span ID, and parent ID;
+- a compact table of required span name, inferred runtime, span ID, and parent
+  ID;
 - total elapsed time.
 
 ## Acceptance Criteria
