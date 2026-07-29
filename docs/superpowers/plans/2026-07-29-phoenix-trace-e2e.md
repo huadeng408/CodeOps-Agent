@@ -6,7 +6,7 @@
 
 **Architecture:** A standard-library Python helper owns model discovery plus Phoenix REST parsing, polling, and assertions. A PowerShell runner owns credentials, Docker lifecycle, a temporary agent workspace, the live agent process, timeouts, diagnostics, and cleanup. Default pytest and Go suites remain network-free; only `scripts/test-trace-e2e.ps1` performs the real integration.
 
-**Tech Stack:** PowerShell 7, Python 3.11 standard library, pytest, Go, gRPC, OpenTelemetry OTLP/HTTP, Docker Compose, Phoenix REST v1, DeepSeek OpenAI-compatible API.
+**Tech Stack:** Windows PowerShell 5.1+, Python 3.11 standard library, pytest, Go, gRPC, OpenTelemetry OTLP/HTTP, Docker Compose, Phoenix REST v1, DeepSeek OpenAI-compatible API.
 
 ---
 
@@ -229,7 +229,7 @@ Expected: both pytest commands pass without network access.
 Start with:
 
 ```powershell
-#Requires -Version 7.0
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]$ApiKeyFile,
@@ -323,7 +323,7 @@ Add a Chinese subsection under development/testing stating that the test uses Do
 
 ```powershell
 $env:OPENAI_API_KEY = '<从安全存储加载>'
-pwsh scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
 ```
 
 Document `-ApiKeyFile` for an external Markdown file and state that the key is never printed or written.

@@ -84,7 +84,7 @@ The implementation has two entry points:
 The explicit invocation is:
 
 ```powershell
-pwsh scripts/test-trace-e2e.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 `
   -ApiKeyFile '<path-to-private-api-key-markdown>' `
   -Model deepseek-v4-pro
 ```
@@ -251,7 +251,7 @@ The test is intentionally excluded from default test discovery. It runs only
 through:
 
 ```powershell
-pwsh scripts/test-trace-e2e.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1
 ```
 
 with credentials supplied by environment or `-ApiKeyFile`. `go test ./...`
