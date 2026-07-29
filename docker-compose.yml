@@ -185,7 +185,7 @@ services:
     # http://localhost:6006 (internal/telemetry/genai/tracer.go) and the Python
     # orchestrator's to http://localhost:6006/v1/traces (orchestrator/config/env.py),
     # so publishing 6006 here activates trace export with zero env changes.
-    image: arize/phoenix:latest
+    image: arizephoenix/phoenix:latest
     container_name: codeagent-phoenix
     restart: "no"
     ports:

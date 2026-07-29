@@ -189,10 +189,10 @@ func (c *Client) injectTraceMetadata(ctx context.Context) context.Context {
 	if !sc.HasTraceID() || !sc.HasSpanID() {
 		return ctx
 	}
-	tp := fmt.Sprintf("00-%s-%s-%02x",
+	tp := fmt.Sprintf("00-%s-%s-%s",
 		sc.TraceID().String(),
 		sc.SpanID().String(),
-		sc.TraceFlags(),
+		sc.TraceFlags().String(),
 	)
 	pairs := []string{"traceparent", tp}
 	if ts := sc.TraceState().String(); ts != "" {

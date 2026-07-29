@@ -6,7 +6,10 @@
 
 **Architecture:** A standard-library Python helper owns model discovery plus Phoenix REST parsing, polling, and assertions. A PowerShell runner owns credentials, Docker lifecycle, a temporary agent workspace, the live agent process, timeouts, diagnostics, and cleanup. Default pytest and Go suites remain network-free; only `scripts/test-trace-e2e.ps1` performs the real integration.
 
-**Tech Stack:** PowerShell 7, Python 3.11 standard library, pytest, Go, gRPC, OpenTelemetry OTLP/HTTP, Docker Compose, Phoenix REST v1, DeepSeek OpenAI-compatible API.
+**Tech Stack:** Windows PowerShell 5.1+, Python 3.11 standard library, pytest, Go, gRPC, OpenTelemetry OTLP/HTTP, Docker Compose, Phoenix REST v1, DeepSeek OpenAI-compatible API.
+
+The explicit runner preflights the `trace-e2e` Python optional dependencies;
+install them with `python -m pip install -e ".[trace-e2e]"` before execution.
 
 ---
 
@@ -229,7 +232,7 @@ Expected: both pytest commands pass without network access.
 Start with:
 
 ```powershell
-#Requires -Version 7.0
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]$ApiKeyFile,
@@ -256,7 +259,7 @@ Before starting Docker, invoke the helper's `check-model` command through `Invok
 
 - [ ] **Step 3: Implement owned Phoenix and workspace setup**
 
-Record whether `docker compose ps --status running --services` includes `phoenix`. Start only `docker compose up -d phoenix` when absent, bound the Compose command to 120 seconds, and poll `$PhoenixUrl/v1/projects?limit=1` for 60 seconds.
+Record whether `docker compose ps --status running --services` includes `phoenix`. Start only `docker compose up -d phoenix` when absent, bound the Compose command to 300 seconds for a first image pull, and poll `$PhoenixUrl/v1/projects?limit=1` for 60 seconds.
 
 Create one GUID temp directory containing:
 
@@ -323,7 +326,7 @@ Add a Chinese subsection under development/testing stating that the test uses Do
 
 ```powershell
 $env:OPENAI_API_KEY = '<从安全存储加载>'
-pwsh scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
 ```
 
 Document `-ApiKeyFile` for an external Markdown file and state that the key is never printed or written.

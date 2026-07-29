@@ -81,10 +81,16 @@ The implementation has two entry points:
   checking model availability and querying/asserting full Phoenix span data.
   It is not collected by the default pytest suite as a test module.
 
+The Python runtime dependencies required to create and export orchestrator
+spans are declared in the `trace-e2e` optional dependency group. The runner
+preflights those imports and reports the explicit installation command instead
+of allowing OpenTelemetry's runtime no-op fallback to become a late missing-span
+failure.
+
 The explicit invocation is:
 
 ```powershell
-pwsh scripts/test-trace-e2e.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 `
   -ApiKeyFile '<path-to-private-api-key-markdown>' `
   -Model deepseek-v4-pro
 ```
@@ -214,11 +220,12 @@ second real model response consumed the tool result and completed the turn.
 Each stage has a bounded deadline:
 
 - Phoenix readiness: 60 seconds.
+- First Phoenix image pull and Compose startup: 300 seconds.
 - DeepSeek model preflight: 30 seconds.
 - Go build: 120 seconds.
 - Orchestrator startup and model turn: 120 seconds.
 - Phoenix trace visibility: 45 seconds after the final assistant marker.
-- Overall runner deadline: approximately 5 minutes.
+- Overall runner deadline: approximately 8 minutes on a first image pull.
 
 Provider retries are disabled or limited to one retry for transient failures
 so a failing run cannot create uncontrolled API usage. Authentication errors,
@@ -251,7 +258,7 @@ The test is intentionally excluded from default test discovery. It runs only
 through:
 
 ```powershell
-pwsh scripts/test-trace-e2e.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1
 ```
 
 with credentials supplied by environment or `-ApiKeyFile`. `go test ./...`
