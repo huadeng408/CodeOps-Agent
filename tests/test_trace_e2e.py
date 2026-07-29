@@ -281,3 +281,12 @@ def test_runner_accepts_key_on_line_after_deepseek_label(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "api_key=valid" in result.stdout
     assert "sk-test" not in result.stdout + result.stderr
+
+
+def test_compose_uses_official_phoenix_image():
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "image: arizephoenix/phoenix:latest" in compose
+    assert "image: arize/phoenix:latest" not in compose
