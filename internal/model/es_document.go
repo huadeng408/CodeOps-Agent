@@ -16,13 +16,29 @@ type SearchResponseDTO struct {
 // EsDocument 代表存储在 Elasticsearch 中的文档结构。
 // EsDocument 定义了存储在 Elasticsearch 中的文档结构。
 type EsDocument struct {
-	VectorID     string    `json:"vector_id"` // 唯一标识，例如 fileMd5 + chunkId
-	FileMD5      string    `json:"file_md5"`
-	ChunkID      int       `json:"chunk_id"`
-	TextContent  string    `json:"text_content"`
-	Vector       []float32 `json:"vector"` // 文本内容的向量表示
-	ModelVersion string    `json:"model_version"`
-	UserID       uint      `json:"user_id"`
-	OrgTag       string    `json:"org_tag"`
-	IsPublic     bool      `json:"is_public"`
+	VectorID         string    `json:"vector_id"` // 唯一标识，例如 fileMd5 + chunkId
+	FileMD5          string    `json:"file_md5"`
+	ChunkID          int       `json:"chunk_id"`
+	TextContent      string    `json:"text_content"`
+	Vector           []float32 `json:"vector"` // 文本内容的向量表示
+	ModelVersion     string    `json:"model_version"`
+	DocumentID       string    `json:"document_id,omitempty"`
+	ParentChunkID    string    `json:"parent_chunk_id,omitempty"`
+	EmbeddingText    string    `json:"embedding_text,omitempty"`
+	SectionPath      []string  `json:"section_path,omitempty"`
+	PageID           string    `json:"page_id,omitempty"`
+	PageSpan         []int     `json:"page_span,omitempty"`
+	ElementIDs       []string  `json:"element_ids,omitempty"`
+	ElementTypes     []string  `json:"element_types,omitempty"`
+	BBoxRefs         []string  `json:"bbox_refs,omitempty"`
+	AssetRefs        []string  `json:"asset_refs,omitempty"`
+	TokenCount       int       `json:"token_count,omitempty"`
+	TokenizerID      string    `json:"tokenizer_id,omitempty"`
+	ParserName       string    `json:"parser_name,omitempty"`
+	ParserVersion    string    `json:"parser_version,omitempty"`
+	CorpusGeneration string    `json:"corpus_generation,omitempty"`
+	TargetIndex      string    `json:"target_index,omitempty"`
+	UserID           uint      `json:"user_id"`
+	OrgTag           string    `json:"org_tag"`
+	IsPublic         bool      `json:"is_public"`
 }
