@@ -25,3 +25,10 @@
 - 严格区分 `DESIGNED`、`IMPLEMENTED`、`VERIFIED` 和 `BLOCKED`：存在规格或测试代码不等于实现或真实验收通过，不得把计划写成完成。
 - 在提交或交接前检查从上一份 Obsidian 记录到当前 HEAD 的提交，补录所有尚未沉淀的有意义进展。若当前环境暂时不能写 Obsidian，先在仓库 `docs/` 生成同名待同步文档，并在获得写入权限后完成同步。
 - **需要模型调用来测试 agent 或其他效果时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 API key，模型用 `deepseek-v4`；注意 key 只用于本地测试，不要硬编码或提交进代码仓库。
+
+## RAG continuation memory
+
+- Record every meaningful RAG milestone in both `docs/PROGRESS-YYYY-MM-DD.md` and `D:\Obsidian\code-autogrowth\私人\localcode\PROGRESS-YYYY-MM-DD.md` before handoff or push.
+- State `DESIGNED`, `IMPLEMENTED`, `VERIFIED`, and `BLOCKED` precisely, including commands, current MySQL/ES/MinIO counts, unfinished plans, and rollback boundaries.
+- All PDF entry points use MinerU in explicit OCR mode. Tika is limited to non-PDF office documents such as DOCX, PPTX, and XLSX.
+- Do not claim the multimodal corpus complete until Plans 2-7, human qrels, index gates, and explicit integration tests pass.
