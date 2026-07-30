@@ -26,6 +26,31 @@ type Config struct {
 	Reranker      RerankerConfig      `mapstructure:"reranker"`
 	Memory        MemoryConfig        `mapstructure:"memory"`
 	AI            AIConfig            `mapstructure:"ai"`
+	Corpus        CorpusConfig        `mapstructure:"corpus"`
+}
+
+// CorpusConfig controls versioned corpus writes without switching read aliases by default.
+type CorpusConfig struct {
+	Generation        string `mapstructure:"generation"`
+	TextIndex         string `mapstructure:"text_index"`
+	ReadAlias         string `mapstructure:"read_alias"`
+	VisualPilotPrefix string `mapstructure:"visual_pilot_prefix"`
+	VisualAlias       string `mapstructure:"visual_alias"`
+	LoaderUser        uint   `mapstructure:"loader_user"`
+	AllowAliasSwitch  bool   `mapstructure:"allow_alias_switch"`
+}
+
+// DefaultCorpusConfig returns the safe, non-cutover corpus configuration.
+func DefaultCorpusConfig() CorpusConfig {
+	return CorpusConfig{
+		Generation:        "techdocs-2026-07-30-v1",
+		TextIndex:         "knowledge_base_v2_bge_m3",
+		ReadAlias:         "knowledge_base_current",
+		VisualPilotPrefix: "knowledge_page_visual_pilot",
+		VisualAlias:       "knowledge_page_visual_current",
+		LoaderUser:        1,
+		AllowAliasSwitch:  false,
+	}
 }
 
 // ServerConfig 存储服务器相关的配置。
@@ -209,6 +234,7 @@ type AIPromptConfig struct {
 // Init 初始化配置加载，从指定的路径读取 YAML 文件并解析到 Conf 变量中。
 func Init(configPath string) {
 	viper.SetConfigFile(configPath)
+	Conf = Config{Corpus: DefaultCorpusConfig()}
 	viper.SetConfigType("yaml")
 
 	if err := viper.ReadInConfig(); err != nil {

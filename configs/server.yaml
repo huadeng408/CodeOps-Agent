@@ -52,6 +52,15 @@ elasticsearch:
   password: ""
   index_name: "knowledge_base"
 
+corpus:
+  generation: "techdocs-2026-07-30-v1"
+  text_index: "knowledge_base_v2_bge_m3"
+  read_alias: "knowledge_base_current"
+  visual_pilot_prefix: "knowledge_page_visual_pilot"
+  visual_alias: "knowledge_page_visual_current"
+  loader_user: 1
+  allow_alias_switch: false
+
 # Embedding model config
 embedding:
   model: "BAAI/bge-small-zh-v1.5"
