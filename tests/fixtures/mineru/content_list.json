@@ -1,0 +1,7 @@
+[
+  {"type": "text", "text": "Chapter 1", "text_level": 1, "bbox": [0, 0, 100, 20], "page_idx": 0},
+  {"type": "text", "text": "Body text", "bbox": [10, 20, 110, 60], "page_idx": 0},
+  {"type": "table", "table_body": "<table><tr><th>A</th></tr></table>", "bbox": [10, 20, 110, 220], "page_idx": 0},
+  {"type": "image", "img_path": "images/figure-1.png", "caption": ["Figure 1"], "bbox": [10, 20, 110, 220], "page_idx": 0},
+  {"type": "equation", "latex": "E=mc^2", "bbox": [10, 20, 110, 220], "page_idx": 0}
+]
