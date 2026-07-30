@@ -55,9 +55,12 @@ async def test_pdf_parse_uses_mineru_ocr_and_never_tika(monkeypatch: pytest.Monk
         output_dir = Path(args[args.index("-o") + 1])
         markdown_dir = output_dir / "document" / "ocr"
         markdown_dir.mkdir(parents=True)
-        (markdown_dir / "document.md").write_text(
-            "MINERU_REAL_OCR_20260729\n所有 PDF 入口统一使用 MinerU OCR",
+        (markdown_dir / "document_content_list.json").write_text(
+            '[{"type":"text","text":"MINERU_REAL_OCR_20260729","bbox":[0,0,100,20],"page_idx":0}]',
             encoding="utf-8",
+        )
+        (markdown_dir / "document_middle.json").write_text(
+            '{"version":"3.4.4","backend":"pipeline"}', encoding="utf-8"
         )
         return b"ok", b""
 
@@ -79,7 +82,9 @@ async def test_pdf_parse_uses_mineru_ocr_and_never_tika(monkeypatch: pytest.Monk
     result = await service.parse(payload)
 
     assert "MINERU_REAL_OCR_20260729" in result.parsedText
-    assert "所有 PDF 入口统一使用 MinerU OCR" in result.parsedText
+    assert result.parserName == "mineru"
+    assert result.parserVersion == "3.4.4"
+    assert result.elements[0].type == "text"
     assert http.put_calls == 0
     assert len(calls) == 1
     assert calls[0][0] == "mineru-test"

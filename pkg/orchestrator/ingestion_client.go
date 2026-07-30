@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/log"
 	"code-agent/pkg/tasks"
 )
@@ -19,7 +19,7 @@ import (
 // IngestionClient defines the external ingestion worker client.
 type IngestionClient interface {
 	Enabled() bool
-	Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (string, error)
+	Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (ParsedArtifact, error)
 	Chunk(ctx context.Context, task tasks.FileProcessingTask, text string, chunkSize, chunkOverlap int) ([]string, error)
 	Embed(ctx context.Context, task tasks.FileProcessingTask, texts []string) ([][]float32, error)
 	Index(ctx context.Context, task tasks.FileProcessingTask, indexName string, docs []model.EsDocument) (int, error)
@@ -31,8 +31,8 @@ type noopIngestionClient struct{}
 func (noopIngestionClient) Enabled() bool { return false }
 
 // Parse implements the disabled ingestion client behavior.
-func (noopIngestionClient) Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (string, error) {
-	return "", fmt.Errorf("external ingestion is disabled")
+func (noopIngestionClient) Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (ParsedArtifact, error) {
+	return ParsedArtifact{}, fmt.Errorf("external ingestion is disabled")
 }
 
 // Chunk implements the disabled ingestion client behavior.
@@ -60,8 +60,16 @@ type parseRequest struct {
 	ObjectURL string                   `json:"objectUrl"`
 }
 
-type parseResponse struct {
-	ParsedText string `json:"parsedText"`
+// ParsedArtifact is the structured parse contract returned by the Python worker.
+type ParsedArtifact struct {
+	ParsedText    string            `json:"parsedText"`
+	DocumentID    string            `json:"documentId"`
+	ParserName    string            `json:"parserName"`
+	ParserVersion string            `json:"parserVersion"`
+	SourceSHA256  string            `json:"sourceSha256"`
+	Elements      []json.RawMessage `json:"elements"`
+	Assets        []json.RawMessage `json:"assets"`
+	RenderedPages []json.RawMessage `json:"renderedPages"`
 }
 
 type chunkRequest struct {
@@ -115,19 +123,19 @@ func NewIngestionClient(cfg serverconfig.AIOrchestratorConfig) IngestionClient {
 func (c *httpIngestionClient) Enabled() bool { return true }
 
 // Parse delegates parse-stage execution to the external ingestion worker.
-func (c *httpIngestionClient) Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (string, error) {
+func (c *httpIngestionClient) Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (ParsedArtifact, error) {
 	resp, err := c.doJSON(ctx, "/v1/ingestion/parse", parseRequest{
 		Task:      task,
 		ObjectURL: objectURL,
 	})
 	if err != nil {
-		return "", err
+		return ParsedArtifact{}, err
 	}
-	var parsed parseResponse
+	var parsed ParsedArtifact
 	if err := json.Unmarshal(resp, &parsed); err != nil {
-		return "", err
+		return ParsedArtifact{}, err
 	}
-	return parsed.ParsedText, nil
+	return parsed, nil
 }
 
 // Chunk delegates chunk-stage execution to the external ingestion worker.

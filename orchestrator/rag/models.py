@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .elements import Element
+
 
 class UserPayload(BaseModel):
     id: int
@@ -192,6 +194,13 @@ class ParseRequestPayload(BaseModel):
 
 class ParseResponsePayload(BaseModel):
     parsedText: str
+    documentId: str = ""
+    parserName: str = ""
+    parserVersion: str = ""
+    sourceSha256: str = ""
+    elements: list[Element] = Field(default_factory=list)
+    assets: list[dict[str, Any]] = Field(default_factory=list)
+    renderedPages: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChunkRequestPayload(BaseModel):

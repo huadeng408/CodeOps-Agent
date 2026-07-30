@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -421,23 +422,32 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 		objectURL = url
 	}
 
-	textContent, err := p.ingestionClient.Parse(ctx, task, objectURL)
+	artifact, err := p.ingestionClient.Parse(ctx, task, objectURL)
 	if err != nil {
 		return fmt.Errorf("parse: external worker failed: %w", err)
 	}
-	if textContent == "" {
+	if strings.TrimSpace(artifact.ParsedText) == "" {
 		return errors.New("parse: extracted text is empty")
 	}
+	if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") {
+		if strings.TrimSpace(artifact.DocumentID) == "" || strings.TrimSpace(artifact.ParserName) == "" || strings.TrimSpace(artifact.ParserVersion) == "" || len(artifact.Elements) == 0 {
+			return errors.New("parse: structured MinerU PDF provenance is incomplete")
+		}
+	}
 
-	parsedObject := p.parsedObjectName(task.FileMD5)
-	reader := bytes.NewReader([]byte(textContent))
+	artifactBytes, err := json.Marshal(artifact)
+	if err != nil {
+		return fmt.Errorf("parse: encode structured artifact failed: %w", err)
+	}
+	parsedObject := p.parsedArtifactObjectName(task.FileMD5)
+	reader := bytes.NewReader(artifactBytes)
 	if _, err := storage.MinioClient.PutObject(
 		ctx,
 		p.minioCfg.BucketName,
 		parsedObject,
 		reader,
 		reader.Size(),
-		minio.PutObjectOptions{ContentType: "text/plain; charset=utf-8"},
+		minio.PutObjectOptions{ContentType: "application/json"},
 	); err != nil {
 		return fmt.Errorf("parse: persist parsed text failed: %w", err)
 	}
@@ -448,7 +458,7 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	if err := kafka.ProduceTask(next); err != nil {
 		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
 	}
-	log.Infof("[Processor][parse] done file=%s text_len=%d worker=external", task.FileMD5, utf8.RuneCountInString(textContent))
+	log.Infof("[Processor][parse] done file=%s text_len=%d worker=external", task.FileMD5, utf8.RuneCountInString(artifact.ParsedText))
 	return nil
 }
 
@@ -458,7 +468,7 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 
 	parsedObject := task.ParsedObject
 	if parsedObject == "" {
-		parsedObject = p.parsedObjectName(task.FileMD5)
+		parsedObject = p.parsedArtifactObjectName(task.FileMD5)
 	}
 
 	object, err := storage.MinioClient.GetObject(ctx, p.minioCfg.BucketName, parsedObject, minio.GetObjectOptions{})
@@ -471,9 +481,16 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if err != nil {
 		return fmt.Errorf("chunk: read parsed stream failed: %w", err)
 	}
-	textContent := string(textBytes)
-	if textContent == "" {
-		return errors.New("chunk: parsed text is empty")
+	var artifact orchestratorclient.ParsedArtifact
+	if err := json.Unmarshal(textBytes, &artifact); err != nil {
+		return fmt.Errorf("chunk: decode structured artifact failed: %w", err)
+	}
+	textContent := artifact.ParsedText
+	if strings.TrimSpace(textContent) == "" {
+		return errors.New("chunk: structured artifact text is empty")
+	}
+	if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") && len(artifact.Elements) == 0 {
+		return errors.New("chunk: structured PDF artifact has no elements")
 	}
 
 	chunks, err := p.ingestionClient.Chunk(ctx, task, textContent, 1000, 100)
@@ -686,7 +703,7 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 	}
 
 	_ = database.RDB.Del(ctx, cacheKey).Err()
-	_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5), minio.RemoveObjectOptions{})
+	_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5), minio.RemoveObjectOptions{})
 	log.Infof("[Processor][index] done file=%s docs=%d worker=external", task.FileMD5, len(docs))
 	return nil
 }
@@ -785,6 +802,10 @@ func (p *Processor) embeddingCacheKey(fileMD5 string) string {
 // parsedObjectName handles parsed object name.
 func (p *Processor) parsedObjectName(fileMD5 string) string {
 	return "parsed/" + fileMD5 + ".txt"
+}
+
+func (p *Processor) parsedArtifactObjectName(fileMD5 string) string {
+	return "parsed/" + fileMD5 + ".json"
 }
 
 // embedWindowChunks handles embed window chunks.

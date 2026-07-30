@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -17,6 +18,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from .config import Settings
+from .elements import Element, map_mineru_output
 from .models import (
     ChunkRequestPayload,
     ChunkResponsePayload,
@@ -61,11 +63,13 @@ class IngestionService:
         source_resp.raise_for_status()
 
         if _detect_file_type(payload.task.file_name) == "pdf" or source_resp.content.startswith(b"%PDF-"):
-            parsed = await _parse_pdf_with_mineru(
+            parsed_artifact = await _parse_pdf_with_mineru(
                 source_resp.content,
                 payload.task.file_name,
+                payload.task.file_md5,
                 self._settings,
             )
+            parsed = parsed_artifact.parsedText
         else:
             tika_resp = await self._http.put(
                 f"{self._settings.tika_url.rstrip('/')}/tika",
@@ -84,6 +88,8 @@ class IngestionService:
             file_md5=payload.task.file_md5,
             file_type=_detect_file_type(payload.task.file_name),
         )
+        if _detect_file_type(payload.task.file_name) == "pdf":
+            return parsed_artifact.model_copy(update={"parsedText": parsed_text})
         return ParseResponsePayload(parsedText=parsed_text)
 
     async def chunk(self, payload: ChunkRequestPayload) -> ChunkResponsePayload:
@@ -222,7 +228,12 @@ class IngestionService:
         raise RuntimeError("embedding http retry failed without exception")
 
 
-async def _parse_pdf_with_mineru(content: bytes, file_name: str, settings: Settings) -> str:
+async def _parse_pdf_with_mineru(
+    content: bytes,
+    file_name: str,
+    document_id: str,
+    settings: Settings,
+) -> ParseResponsePayload:
     if not content.startswith(b"%PDF-"):
         raise ValueError(f"invalid PDF file: {file_name}")
 
@@ -244,14 +255,47 @@ async def _parse_pdf_with_mineru(content: bytes, file_name: str, settings: Setti
             timeout_seconds=settings.mineru_timeout_seconds,
         )
 
-        parts: list[str] = []
-        for path in sorted(output_dir.rglob("*.md")):
-            text = path.read_text(encoding="utf-8").strip()
-            if text:
-                parts.append(text)
-        if not parts:
-            raise RuntimeError("MinerU PDF parsing produced no Markdown")
-        return "\n\n".join(parts)
+        content_candidates = sorted(output_dir.rglob("*_content_list.json")) + sorted(output_dir.rglob("content_list.json"))
+        middle_candidates = sorted(output_dir.rglob("*_middle.json")) + sorted(output_dir.rglob("middle.json"))
+        if not content_candidates or not middle_candidates:
+            raise RuntimeError("MinerU PDF parsing produced no stable content_list.json/middle.json")
+        content_list_path = content_candidates[0]
+        middle_path = middle_candidates[0]
+        elements = map_mineru_output(content_list_path, middle_path, document_id=document_id or file_name)
+        if not elements:
+            raise RuntimeError("MinerU PDF parsing produced no typed elements")
+        parser_versions = {item.parser_version for item in elements if item.parser_version.strip()}
+        if not parser_versions:
+            raise RuntimeError("MinerU PDF parsing produced no parser version")
+        parsed_text = _elements_to_text(elements)
+        assets = [
+            {"element_id": item.element_id, "path": item.image_path, "caption": item.caption, "page_index": item.page_index}
+            for item in elements
+            if item.type == "image" and item.image_path
+        ]
+        rendered_pages = [
+            {"page_index": page_index, "document_id": document_id or file_name}
+            for page_index in sorted({item.page_index for item in elements})
+        ]
+        return ParseResponsePayload(
+            parsedText=parsed_text,
+            documentId=document_id or file_name,
+            parserName="mineru",
+            parserVersion=sorted(parser_versions)[0],
+            sourceSha256=hashlib.sha256(content).hexdigest(),
+            elements=elements,
+            assets=assets,
+            renderedPages=rendered_pages,
+        )
+
+
+def _elements_to_text(elements: list[Element]) -> str:
+    parts: list[str] = []
+    for element in elements:
+        value = element.text or element.latex or element.caption or element.html
+        if value.strip():
+            parts.append(value.strip())
+    return "\n\n".join(parts)
 
 
 async def _run_mineru(
