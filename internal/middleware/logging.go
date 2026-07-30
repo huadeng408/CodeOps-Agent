@@ -3,11 +3,17 @@ package middleware
 
 import (
 	"bytes"
-	"github.com/gin-gonic/gin"
-	"io/ioutil"
-	"code-agent/pkg/log"
+	"encoding/json"
+	"io"
+	"strings"
 	"time"
+
+	"code-agent/pkg/log"
+
+	"github.com/gin-gonic/gin"
 )
+
+const redactedLogValue = "[REDACTED]"
 
 // bodyLogWriter 用于捕获响应体
 type bodyLogWriter struct {
@@ -30,10 +36,10 @@ func RequestLogger() gin.HandlerFunc {
 		// 读取并重新缓存请求体
 		var requestBody []byte
 		if c.Request.Body != nil {
-			requestBody, _ = ioutil.ReadAll(c.Request.Body)
+			requestBody, _ = io.ReadAll(c.Request.Body)
 		}
 		// 将读取的请求体重新设置回 c.Request.Body，以便后续处理函数可以正常读取
-		c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(requestBody))
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
 
 		// 使用自定义的 ResponseWriter 捕获响应
 		blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
@@ -56,8 +62,48 @@ func RequestLogger() gin.HandlerFunc {
 			"clientIP", clientIP,
 			"method", method,
 			"path", path,
-			"requestBody", string(requestBody),
-			"responseBody", blw.body.String(),
+			"requestBody", redactJSONLogBody(requestBody),
+			"responseBody", redactJSONLogBody(blw.body.Bytes()),
 		)
 	}
+}
+
+func redactJSONLogBody(body []byte) string {
+	var value any
+	if len(body) == 0 || json.Unmarshal(body, &value) != nil {
+		return string(body)
+	}
+	redactSensitiveJSONFields(value)
+	redacted, err := json.Marshal(value)
+	if err != nil {
+		return string(body)
+	}
+	return string(redacted)
+}
+
+func redactSensitiveJSONFields(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if isSensitiveLogKey(key) {
+				typed[key] = redactedLogValue
+				continue
+			}
+			redactSensitiveJSONFields(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactSensitiveJSONFields(child)
+		}
+	}
+}
+
+func isSensitiveLogKey(key string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(strings.ToLower(key))
+	for _, suffix := range []string{"password", "token", "secret", "apikey", "authorization", "cookie"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
 }

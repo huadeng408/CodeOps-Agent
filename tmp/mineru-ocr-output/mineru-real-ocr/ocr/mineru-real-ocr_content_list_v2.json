@@ -1,0 +1,73 @@
+[
+    [
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "MINERU REAL OCR TEST"
+                    }
+                ]
+            },
+            "bbox": [
+                83,
+                117,
+                645,
+                162
+            ]
+        },
+        {
+            "type": "title",
+            "content": {
+                "title_content": [
+                    {
+                        "type": "text",
+                        "content": "MINERU REAL OCR 20260729"
+                    }
+                ],
+                "level": 2
+            },
+            "bbox": [
+                82,
+                218,
+                776,
+                264
+            ]
+        },
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "所有 PDF 入口统一使用 MinerU OCR"
+                    }
+                ]
+            },
+            "bbox": [
+                80,
+                312,
+                639,
+                347
+            ]
+        },
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "Tika 仅用于非 PDF 文档"
+                    }
+                ]
+            },
+            "bbox": [
+                82,
+                379,
+                444,
+                415
+            ]
+        }
+    ]
+]

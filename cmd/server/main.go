@@ -255,6 +255,7 @@ func main() {
 		internalGroup.Use(middleware.InternalAuthMiddleware())
 		{
 			orchHandler := handler.NewOrchestratorHandler(orchestratorSupportService)
+			knowledgeIngestHandler := handler.NewKnowledgeIngestHandler(uploadService)
 			internalGroup.POST("/orchestrator/session", orchHandler.LoadSession)
 			internalGroup.POST("/orchestrator/retrieve", orchHandler.RetrieveContext)
 			internalGroup.POST("/orchestrator/prompt-context", orchHandler.PreparePromptContext)
@@ -262,6 +263,7 @@ func main() {
 			internalGroup.POST("/orchestrator/memory-search", orchHandler.SearchMemory)
 			internalGroup.POST("/orchestrator/rerank-context", orchHandler.RerankContext)
 			internalGroup.POST("/orchestrator/persist", orchHandler.PersistTurn)
+			internalGroup.POST("/orchestrator/knowledge-ingest", knowledgeIngestHandler.Ingest)
 		}
 	}
 

@@ -24,6 +24,7 @@ import (
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
 	"code-agent/internal/prompts"
+	"code-agent/internal/rag"
 	"code-agent/internal/recovery"
 	"code-agent/internal/safety"
 	"code-agent/internal/session"
@@ -56,6 +57,8 @@ type App struct {
 	orchestratorPM *orchestrator.ProcessManager
 	hooks          *hooks.Engine
 	executor       *tools.Executor
+	ragClient      *rag.Client
+	ragIngester    rag.OpenFileIngester
 	safety         *safety.Analyzer
 	mcp            *mcp.Manager
 	worktree       *worktree.Manager
@@ -122,6 +125,15 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
 	executor.SetMCPManager(mcpManager)
+	ragClient := rag.NewClient(rag.Config{
+		Enabled:       cfg.RAGEnabled,
+		BaseURL:       cfg.RAGServerURL,
+		InternalToken: cfg.RAGInternalSecret,
+		UserID:        cfg.RAGUserID,
+		OrgTag:        cfg.RAGOrgTag,
+		IngestPublic:  cfg.RAGIngestPublic,
+	})
+	executor.SetRAGSearcher(ragClient)
 	skillsManager := skills.NewManager()
 	executor.SetSkillsManager(skillsManager)
 
@@ -142,6 +154,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		orchestratorPM: orchestratorManager,
 		hooks:          hookEngine,
 		executor:       executor,
+		ragClient:      ragClient,
+		ragIngester:    ragClient,
 		safety:         safety.NewAnalyzer(),
 		mcp:            mcpManager,
 		worktree:       worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
@@ -333,7 +347,7 @@ func (a *App) renderBootstrap() {
 		a.renderer.PrintBlock("loaded AGENT.md", lines)
 	}
 	a.renderer.PrintBlock("commands", []string{
-		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review", "/commit",
+		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review", "/commit", "/ingest",
 	})
 	a.renderer.Separator()
 }
@@ -713,6 +727,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/review [focus] run the review skill",
 			"/security-review [focus] run the security review skill",
 			"/commit suggest a conventional commit message from the current diff",
+			"/ingest <path> ingest a workspace file into RAG knowledge",
 		})
 	case "/plan":
 		a.planMode = !a.planMode
@@ -750,6 +765,11 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"memory dir: " + a.cfg.MemoryDir,
 			"mcp config: " + a.cfg.MCPConfig,
 			"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
+			"rag enabled: " + fmt.Sprint(a.cfg.RAGEnabled),
+			"rag server: " + a.cfg.RAGServerURL,
+			"rag user: " + fmt.Sprint(a.cfg.RAGUserID),
+			"rag org: " + a.cfg.RAGOrgTag,
+			"rag ingest public: " + fmt.Sprint(a.cfg.RAGIngestPublic),
 			"planning mode: " + map[bool]string{true: "on", false: "off"}[a.planMode],
 		})
 	case "/budget":
@@ -829,6 +849,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.runSkillCommand(ctx, "/security-review", "security", slashArgs(raw, 1))
 	case "/commit":
 		a.runCommitCommand(ctx)
+	case "/ingest":
+		a.handleIngestCommand(ctx, raw)
 	default:
 		return false
 	}

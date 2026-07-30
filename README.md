@@ -85,6 +85,7 @@ Python Orchestrator
 | `Git` | 会话确认 | 执行受控 Git 子命令，并阻止危险参数 |
 | `WebFetch` | 会话确认 | 拉取 URL 内容，带输出限制 |
 | `WebSearch` | 会话确认 | 通过 DuckDuckGo-compatible JSON 接口搜索网页 |
+| `SearchKnowledge` | 自动允许 | 通过内部 RAG 服务检索当前用户和组织可见的知识片段 |
 
 编排层还注册了这些控制型工具：
 
@@ -197,6 +198,12 @@ python -m orchestrator.server
   "memory_dir": ".agent/memory",
   "mcp_config": ".mcp.json",
   "worktree_base_ref": "fresh",
+  "rag_enabled": true,
+  "rag_server_url": "http://127.0.0.1:8081",
+  "rag_internal_secret": "replace-with-internal-secret",
+  "rag_user_id": 1,
+  "rag_org_tag": "engineering",
+  "rag_ingest_public": false,
   "permissions": {
     "allow": [
       {"tool": "Read", "pattern": ".*"}
@@ -215,6 +222,8 @@ python -m orchestrator.server
   ]
 }
 ```
+
+`rag_org_tag` 只接受一个组织标签，不支持逗号分隔的多值。`/ingest` 仅接受工作区内的普通文件；PDF 入库统一使用 MinerU OCR，Tika 只处理 DOCX、PPTX、XLSX 等非 PDF 文档。
 
 ## 斜杠命令
 
@@ -245,6 +254,7 @@ python -m orchestrator.server
 | `/init [instructions]` | 运行初始化技能 |
 | `/review [focus]` | 运行代码审查技能 |
 | `/security-review [focus]` | 运行安全审查技能 |
+| `/ingest <path>` | 将工作区内的文件提交到 RAG 入库 |
 
 ## 安全模型
 

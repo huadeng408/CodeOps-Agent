@@ -55,3 +55,18 @@ def test_builtin_tool_schemas_expose_bounded_file_search_parameters() -> None:
     assert grep_props["glob"]["type"] == "string"
     assert grep_props["head_limit"]["maximum"] == 500
     assert grep_props["context"]["maximum"] == 5
+
+
+def test_search_knowledge_schema_is_bounded_and_auto_allowed() -> None:
+    registry = ToolRegistry()
+    spec = registry.get("SearchKnowledge")
+
+    assert spec is not None
+    assert spec.permission == orchestrator_pb2.AUTO_ALLOW
+    assert spec.parameters["required"] == ["query"]
+
+    props = spec.parameters["properties"]
+    assert props["query"]["type"] == "string"
+    assert props["top_k"] == {"type": "integer", "minimum": 1, "maximum": 50}
+    assert props["mode"]["enum"] == ["hybrid", "bm25", "vector"]
+    assert props["disable_rerank"]["type"] == "boolean"

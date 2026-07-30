@@ -204,6 +204,24 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="SearchKnowledge",
+                description="Search the configured internal RAG knowledge base.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["hybrid", "bm25", "vector"],
+                        },
+                        "disable_rerank": {"type": "boolean"},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            ToolSpec(
                 name="Write",
                 description="Write a file in the workspace.",
                 permission=orchestrator_pb2.ASK_SESSION,

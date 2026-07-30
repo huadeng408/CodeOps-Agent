@@ -20,3 +20,6 @@
 - 涉及多文件修改时，先用 EnterPlanMode 出方案，用户确认后再写代码。
 - 能用专用工具（Read/Glob/Grep/Edit/Write）就不用 Shell 命令。
 - 提交代码前跑一下 `git diff --stat` 确认改动范围符合预期。
+- **有意义的进展需要写入 `D:\Obsidian\code-autogrowth\私人\localcode`**（如架构决策、阶段性成果、踩坑记录等，便于沉淀到 Obsidian 知识库）。
+- **需要模型调用来测试 agent 或其他效果时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 API key，模型用 `deepseek-v4`；注意 key 只用于本地测试，不要硬编码或提交进代码仓库。
+

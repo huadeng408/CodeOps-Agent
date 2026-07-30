@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"code-agent/internal/mcp"
+	"code-agent/internal/rag"
 	"code-agent/internal/skills"
 )
 
@@ -50,6 +51,7 @@ type Executor struct {
 	mu             sync.Mutex
 	workingDir     string
 	mcp            *mcp.Manager
+	rag            rag.Searcher
 	skills         *skills.Manager
 	// httpAllowPrivate lifts the SSRF private/loopback block for WebFetch/WebSearch.
 	// Intended only for tests and trusted local providers; production MUST stay false.
@@ -68,6 +70,26 @@ func (e *Executor) SetMCPManager(manager *mcp.Manager) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.mcp = manager
+}
+
+// SetRAGSearcher configures the knowledge search backend used by SearchKnowledge.
+func (e *Executor) SetRAGSearcher(searcher rag.Searcher) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rag = searcher
+}
+
+// UsesRAGSearcher reports whether the executor is configured with this RAG client instance.
+// The concrete client check avoids relying on interface comparability for arbitrary implementations.
+func (e *Executor) UsesRAGSearcher(searcher rag.Searcher) bool {
+	wanted, ok := searcher.(*rag.Client)
+	if !ok || wanted == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	configured, ok := e.rag.(*rag.Client)
+	return ok && configured != nil && configured == wanted
 }
 
 func (e *Executor) SetSkillsManager(manager *skills.Manager) {
@@ -106,6 +128,8 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 		return e.executeWebFetch(ctx, req.Arguments)
 	case "WebSearch":
 		return e.executeWebSearch(ctx, req.Arguments)
+	case "SearchKnowledge":
+		return e.executeSearchKnowledge(ctx, req.Arguments)
 	case "Skill":
 		return e.executeSkill(ctx, req.Arguments)
 	default:

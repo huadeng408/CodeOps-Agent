@@ -29,6 +29,12 @@ type Config struct {
 	MCPConfig                       string           `json:"mcp_config"`
 	MemoryDir                       string           `json:"memory_dir"`
 	WorktreeBaseRef                 string           `json:"worktree_base_ref"`
+	RAGEnabled                      bool             `json:"rag_enabled"`
+	RAGServerURL                    string           `json:"rag_server_url"`
+	RAGInternalSecret               string           `json:"rag_internal_secret"`
+	RAGUserID                       uint             `json:"rag_user_id"`
+	RAGOrgTag                       string           `json:"rag_org_tag"`
+	RAGIngestPublic                 bool             `json:"rag_ingest_public"`
 	ThinkingEnabled                 bool             `json:"thinking_enabled"`
 }
 
@@ -74,6 +80,7 @@ func Default(projectRoot string) Config {
 		MCPConfig:                       ".mcp.json",
 		MemoryDir:                       filepath.Join(projectRoot, ".agent", "memory"),
 		WorktreeBaseRef:                 "fresh",
+		RAGServerURL:                    "http://127.0.0.1:8081",
 		ThinkingEnabled:                 true,
 	}
 }
@@ -253,6 +260,24 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if patch.WorktreeBaseRef != "" {
 		dst.WorktreeBaseRef = patch.WorktreeBaseRef
+	}
+	if _, ok := raw["rag_enabled"]; ok {
+		dst.RAGEnabled = patch.RAGEnabled
+	}
+	if patch.RAGServerURL != "" {
+		dst.RAGServerURL = patch.RAGServerURL
+	}
+	if patch.RAGInternalSecret != "" {
+		dst.RAGInternalSecret = patch.RAGInternalSecret
+	}
+	if patch.RAGUserID != 0 {
+		dst.RAGUserID = patch.RAGUserID
+	}
+	if patch.RAGOrgTag != "" {
+		dst.RAGOrgTag = patch.RAGOrgTag
+	}
+	if _, ok := raw["rag_ingest_public"]; ok {
+		dst.RAGIngestPublic = patch.RAGIngestPublic
 	}
 	if _, ok := raw["thinking_enabled"]; ok {
 		dst.ThinkingEnabled = patch.ThinkingEnabled

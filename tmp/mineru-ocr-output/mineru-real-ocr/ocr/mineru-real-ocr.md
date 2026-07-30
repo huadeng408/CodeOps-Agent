@@ -1,0 +1,7 @@
+MINERU REAL OCR TEST
+
+## MINERU REAL OCR 20260729
+
+所有 PDF 入口统一使用 MinerU OCR
+
+Tika 仅用于非 PDF 文档
