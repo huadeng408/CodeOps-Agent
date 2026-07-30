@@ -59,7 +59,7 @@ func (c *Client) ExtractText(ctx context.Context, data []byte, fileName string) 
 
 	runCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, executable, "-p", inputPath, "-o", outputDir, "-m", "ocr", "-b", c.backend)
+	cmd := exec.CommandContext(runCtx, executable, commandArgs(inputPath, outputDir, c.backend)...)
 	cmd.Env = withLoopbackBypass(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -76,6 +76,10 @@ func (c *Client) ExtractText(ctx context.Context, data []byte, fileName string) 
 		return "", fmt.Errorf("MinerU PDF parsing produced no Markdown")
 	}
 	return markdown, nil
+}
+
+func commandArgs(inputPath, outputDir, backend string) []string {
+	return []string{"-p", inputPath, "-o", outputDir, "-m", "ocr", "-b", backend}
 }
 
 func collectMarkdown(root string) (string, error) {
