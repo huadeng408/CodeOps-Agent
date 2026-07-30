@@ -245,15 +245,22 @@ try {
 }
 finally {
 	try {
-		if ($serverStartedHere -and $null -ne $serverProcess -and -not $serverProcess.HasExited) {
-			Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+		if ($serverStartedHere -and $null -ne $serverProcess) {
+			if (-not $serverProcess.HasExited) {
+				Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+			}
 			try { $serverProcess.WaitForExit() } catch { }
+			$serverProcess.Dispose()
 		}
 		if (Test-Path -LiteralPath $serverExecutable -PathType Leaf) {
             Remove-Item -LiteralPath $serverExecutable -Force -ErrorAction SilentlyContinue
 		}
 		if ($completed) {
 			Remove-Item -LiteralPath $serverStdout, $serverStderr -Force -ErrorAction SilentlyContinue
+			$remainingLogs = @(@($serverStdout, $serverStderr) | Where-Object { Test-Path -LiteralPath $_ })
+			if ($remainingLogs.Count -ne 0) {
+				throw "E2E passed, but temporary server logs could not be removed: $($remainingLogs -join ', ')"
+			}
 		}
 		if (-not $completed) {
             Write-Host "E2E failed. Server logs were retained at:"

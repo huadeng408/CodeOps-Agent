@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,12 +49,28 @@ func TestRedactJSONLogBodyPreservesNonJSON(t *testing.T) {
 
 func TestRequestLoggerDoesNotPersistSensitiveJSONOrHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	logDir, err := os.MkdirTemp("", "codeagent-middleware-log-")
+	readLog, writeLog, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.Init("info", "json", logDir)
-	t.Cleanup(log.Sync)
+	originalStdout := os.Stdout
+	os.Stdout = writeLog
+	log.Init("info", "json", "")
+	type captureResult struct {
+		body []byte
+		err  error
+	}
+	captured := make(chan captureResult, 1)
+	go func() {
+		body, readErr := io.ReadAll(readLog)
+		captured <- captureResult{body: body, err: readErr}
+	}()
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		log.Init("info", "json", "")
+		_ = writeLog.Close()
+		_ = readLog.Close()
+	})
 
 	router := gin.New()
 	router.Use(RequestLogger())
@@ -75,10 +90,16 @@ func TestRequestLoggerDoesNotPersistSensitiveJSONOrHeaders(t *testing.T) {
 	request.Header.Set("X-Internal-Token", "header-internal-token-secret")
 	router.ServeHTTP(httptest.NewRecorder(), request)
 	log.Sync()
-	logged, err := os.ReadFile(filepath.Join(logDir, "app.log"))
-	if err != nil {
+	if err := writeLog.Close(); err != nil {
 		t.Fatal(err)
 	}
+	os.Stdout = originalStdout
+	result := <-captured
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	logged := result.body
+	log.Init("info", "json", "")
 	text := string(logged)
 	for _, secret := range []string{
 		"request-password-secret",
