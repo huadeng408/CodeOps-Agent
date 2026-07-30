@@ -61,9 +61,31 @@ func (c *Client) ExtractText(ctx context.Context, data []byte, fileName string) 
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, executable, commandArgs(inputPath, outputDir, c.backend)...)
 	cmd.Env = withLoopbackBypass(os.Environ())
-	output, err := cmd.CombinedOutput()
+	logPath := filepath.Join(workDir, "mineru.log")
+	logFile, err := os.Create(logPath)
 	if err != nil {
-		if detail := strings.TrimSpace(string(output)); detail != "" {
+		return "", fmt.Errorf("create MinerU log: %w", err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	err = cmd.Run()
+	closeErr := logFile.Close()
+	if err == nil && closeErr != nil {
+		return "", fmt.Errorf("close MinerU log: %w", closeErr)
+	}
+	if err != nil {
+		output, readErr := os.ReadFile(logPath)
+		detail := ""
+		if readErr == nil {
+			detail = strings.TrimSpace(string(output))
+		}
+		if runCtx.Err() != nil {
+			if detail != "" {
+				err = fmt.Errorf("%w: %s (%v)", err, detail, runCtx.Err())
+			} else {
+				err = fmt.Errorf("%w: %v", err, runCtx.Err())
+			}
+		} else if detail != "" {
 			err = fmt.Errorf("%w: %s", err, detail)
 		}
 		return "", fmt.Errorf("MinerU PDF parsing failed: %w", err)
