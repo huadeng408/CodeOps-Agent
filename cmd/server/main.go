@@ -74,6 +74,8 @@ func main() {
 		&model.FileUpload{},
 		&model.ChunkInfo{},
 		&model.DocumentVector{},
+		&model.KnowledgeSource{},
+		&model.KnowledgeDocument{},
 		&model.PipelineTask{},
 		&model.WorkingMemorySnapshot{},
 		&model.UserProfileSlot{},
