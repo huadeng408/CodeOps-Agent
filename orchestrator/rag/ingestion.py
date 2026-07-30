@@ -18,6 +18,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from .config import Settings
+from .chunking import chunk_elements
 from .elements import Element, map_mineru_output
 from .models import (
     ChunkRequestPayload,
@@ -96,6 +97,20 @@ class IngestionService:
         start = time.perf_counter()
         file_name = payload.task.file_name
         file_type = _detect_file_type(file_name)
+        if payload.elements:
+            structured = chunk_elements(payload.elements, child_tokens=payload.chunkSize, corpus_generation="techdocs-2026-07-30-v1")
+            chunks = [item.text for item in structured if item.text.strip()]
+            log_request(
+                "ingestion_chunk_structured",
+                latency_ms=elapsed_ms(start),
+                file_md5=payload.task.file_md5,
+                file_type=file_type,
+                chunks=len(chunks),
+            )
+            return ChunkResponsePayload(
+                chunks=chunks,
+                structuredChunks=[item.__dict__ for item in structured],
+            )
         cleaned_text = _clean_parsed_text(payload.text, file_name)
         documents = _split_documents_by_type(cleaned_text, payload.task.file_md5, file_name, file_type)
         chunks = [doc.page_content for doc in documents if doc.page_content.strip()]

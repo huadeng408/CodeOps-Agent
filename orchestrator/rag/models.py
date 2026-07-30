@@ -208,10 +208,12 @@ class ChunkRequestPayload(BaseModel):
     text: str
     chunkSize: int = 500
     chunkOverlap: int = 50
+    elements: list[Element] = Field(default_factory=list)
 
 
 class ChunkResponsePayload(BaseModel):
     chunks: list[str] = Field(default_factory=list)
+    structuredChunks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EmbedRequestPayload(BaseModel):
