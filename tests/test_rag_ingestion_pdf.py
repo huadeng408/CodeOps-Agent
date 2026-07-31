@@ -119,3 +119,42 @@ async def test_non_pdf_parse_keeps_tika_and_never_runs_mineru(monkeypatch: pytes
 
     assert result.parsedText == "Text extracted by Tika"
     assert http.put_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_magic_bytes_use_structured_mineru_even_when_extension_is_docx(monkeypatch: pytest.MonkeyPatch) -> None:
+    http = _SourceOnlyHTTP(b"%PDF-1.7\nrenamed-scanned-pdf")
+    service = IngestionService.__new__(IngestionService)
+    service._http = http
+    service._settings = SimpleNamespace(
+        tika_url="http://tika.invalid",
+        mineru_command="mineru-test",
+        mineru_backend="pipeline",
+        mineru_timeout_seconds=30,
+    )
+
+    async def fake_run(_command: str, *args: str, **_kwargs) -> tuple[bytes, bytes]:
+        output_dir = Path(args[args.index("-o") + 1]) / "document" / "ocr"
+        output_dir.mkdir(parents=True)
+        (output_dir / "document_content_list.json").write_text(
+            '[{"type":"text","text":"RENAMED_PDF_OCR","bbox":[0,0,100,20],"page_idx":0}]',
+            encoding="utf-8",
+        )
+        (output_dir / "document_middle.json").write_text(
+            '{"version":"3.4.4","backend":"pipeline"}', encoding="utf-8"
+        )
+        return b"ok", b""
+
+    monkeypatch.setattr("orchestrator.rag.ingestion._run_mineru", fake_run)
+    payload = ParseRequestPayload.model_validate(
+        {
+            "task": {"file_md5": "renamed", "file_name": "scan.docx", "user_id": 1, "stage": "parse"},
+            "objectUrl": "http://objects.invalid/scan.docx",
+        }
+    )
+
+    result = await service.parse(payload)
+
+    assert result.parserName == "mineru"
+    assert result.elements[0].text == "RENAMED_PDF_OCR"
+    assert http.put_calls == 0

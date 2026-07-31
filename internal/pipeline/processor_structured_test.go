@@ -1,9 +1,11 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"testing"
 
 	"code-agent/internal/model"
+	orchestratorclient "code-agent/pkg/orchestrator"
 	"code-agent/pkg/tasks"
 )
 
@@ -63,5 +65,13 @@ func TestDocumentVectorFromStructuredChunkDoesNotTrustWorkerACLFields(t *testing
 	vector := documentVectorFromStructuredChunk(task, 0, chunk, "model")
 	if vector.FileMD5 != task.FileMD5 || vector.UserID != task.UserID || vector.OrgTag != task.OrgTag || vector.IsPublic != task.IsPublic {
 		t.Fatalf("worker fields crossed authority boundary: %+v", vector)
+	}
+}
+
+func TestStructuredArtifactUsesMineruProvenanceBeyondFileExtension(t *testing.T) {
+	task := tasks.FileProcessingTask{FileName: "renamed.docx"}
+	artifact := orchestratorclient.ParsedArtifact{ParserName: "mineru", Elements: []json.RawMessage{json.RawMessage(`{"type":"text"}`)}}
+	if !structuredArtifact(task, artifact) {
+		t.Fatal("MinerU artifact with a renamed PDF extension must remain structured")
 	}
 }

@@ -63,7 +63,8 @@ class IngestionService:
         source_resp = await self._http.get(payload.objectUrl)
         source_resp.raise_for_status()
 
-        if _detect_file_type(payload.task.file_name) == "pdf" or source_resp.content.startswith(b"%PDF-"):
+        is_pdf = _detect_file_type(payload.task.file_name) == "pdf" or source_resp.content.startswith(b"%PDF-")
+        if is_pdf:
             parsed_artifact = await _parse_pdf_with_mineru(
                 source_resp.content,
                 payload.task.file_name,
@@ -89,7 +90,7 @@ class IngestionService:
             file_md5=payload.task.file_md5,
             file_type=_detect_file_type(payload.task.file_name),
         )
-        if _detect_file_type(payload.task.file_name) == "pdf":
+        if is_pdf:
             return parsed_artifact.model_copy(update={"parsedText": parsed_text})
         return ParseResponsePayload(parsedText=parsed_text)
 

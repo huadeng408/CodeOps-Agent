@@ -429,7 +429,7 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	if strings.TrimSpace(artifact.ParsedText) == "" {
 		return errors.New("parse: extracted text is empty")
 	}
-	if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") {
+	if structuredArtifact(task, artifact) {
 		if strings.TrimSpace(artifact.DocumentID) == "" || strings.TrimSpace(artifact.ParserName) == "" || strings.TrimSpace(artifact.ParserVersion) == "" || len(artifact.Elements) == 0 {
 			return errors.New("parse: structured MinerU PDF provenance is incomplete")
 		}
@@ -497,7 +497,7 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if err != nil {
 		return fmt.Errorf("chunk: external worker failed: %w", err)
 	}
-	structuredPath := strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || len(artifact.Elements) > 0
+	structuredPath := structuredArtifact(task, artifact)
 	if structuredPath && len(chunkResult.StructuredChunks) == 0 {
 		return errors.New("chunk: structured artifact returned no structured chunks")
 	}
@@ -550,6 +550,10 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	}
 	log.Infof("[Processor][chunk] done file=%s chunks=%d worker=external", task.FileMD5, len(dbVectors))
 	return nil
+}
+
+func structuredArtifact(task tasks.FileProcessingTask, artifact orchestratorclient.ParsedArtifact) bool {
+	return strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || len(artifact.Elements) > 0 || strings.EqualFold(artifact.ParserName, "mineru")
 }
 
 func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int, chunk model.StructuredChunk, modelVersion string) *model.DocumentVector {
