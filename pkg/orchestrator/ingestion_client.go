@@ -20,7 +20,7 @@ import (
 type IngestionClient interface {
 	Enabled() bool
 	Parse(ctx context.Context, task tasks.FileProcessingTask, objectURL string) (ParsedArtifact, error)
-	Chunk(ctx context.Context, task tasks.FileProcessingTask, text string, chunkSize, chunkOverlap int) ([]string, error)
+	Chunk(ctx context.Context, task tasks.FileProcessingTask, artifact ParsedArtifact, chunkSize, chunkOverlap int) (ChunkResult, error)
 	Embed(ctx context.Context, task tasks.FileProcessingTask, texts []string) ([][]float32, error)
 	Index(ctx context.Context, task tasks.FileProcessingTask, indexName string, docs []model.EsDocument) (int, error)
 }
@@ -36,8 +36,8 @@ func (noopIngestionClient) Parse(ctx context.Context, task tasks.FileProcessingT
 }
 
 // Chunk implements the disabled ingestion client behavior.
-func (noopIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessingTask, text string, chunkSize, chunkOverlap int) ([]string, error) {
-	return nil, fmt.Errorf("external ingestion is disabled")
+func (noopIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessingTask, artifact ParsedArtifact, chunkSize, chunkOverlap int) (ChunkResult, error) {
+	return ChunkResult{}, fmt.Errorf("external ingestion is disabled")
 }
 
 // Embed implements the disabled ingestion client behavior.
@@ -75,12 +75,17 @@ type ParsedArtifact struct {
 type chunkRequest struct {
 	Task         tasks.FileProcessingTask `json:"task"`
 	Text         string                   `json:"text"`
+	Elements     []json.RawMessage        `json:"elements,omitempty"`
 	ChunkSize    int                      `json:"chunkSize"`
 	ChunkOverlap int                      `json:"chunkOverlap"`
 }
 
-type chunkResponse struct {
-	Chunks []string `json:"chunks"`
+// ChunkResult contains both the structured contract and the legacy text list.
+// Legacy chunks remain available for non-PDF documents while structured paths
+// persist the typed provenance returned by the worker.
+type ChunkResult struct {
+	Chunks           []string                `json:"chunks"`
+	StructuredChunks []model.StructuredChunk `json:"structuredChunks"`
 }
 
 type embedRequest struct {
@@ -139,21 +144,30 @@ func (c *httpIngestionClient) Parse(ctx context.Context, task tasks.FileProcessi
 }
 
 // Chunk delegates chunk-stage execution to the external ingestion worker.
-func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessingTask, text string, chunkSize, chunkOverlap int) ([]string, error) {
+func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessingTask, artifact ParsedArtifact, chunkSize, chunkOverlap int) (ChunkResult, error) {
 	resp, err := c.doJSON(ctx, "/v1/ingestion/chunk", chunkRequest{
 		Task:         task,
-		Text:         text,
+		Text:         artifact.ParsedText,
+		Elements:     artifact.Elements,
 		ChunkSize:    chunkSize,
 		ChunkOverlap: chunkOverlap,
 	})
 	if err != nil {
-		return nil, err
+		return ChunkResult{}, err
 	}
-	var parsed chunkResponse
+	var parsed ChunkResult
 	if err := json.Unmarshal(resp, &parsed); err != nil {
-		return nil, err
+		return ChunkResult{}, err
 	}
-	return parsed.Chunks, nil
+	if len(artifact.Elements) > 0 && len(parsed.StructuredChunks) == 0 {
+		return ChunkResult{}, fmt.Errorf("structured chunk response is empty")
+	}
+	for index, chunk := range parsed.StructuredChunks {
+		if err := chunk.Validate(); err != nil {
+			return ChunkResult{}, fmt.Errorf("structured chunk %d is invalid: %w", index, err)
+		}
+	}
+	return parsed, nil
 }
 
 // Embed delegates embedding-stage execution to the external ingestion worker.

@@ -493,11 +493,20 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 		return errors.New("chunk: structured PDF artifact has no elements")
 	}
 
-	chunks, err := p.ingestionClient.Chunk(ctx, task, textContent, 1000, 100)
+	chunkResult, err := p.ingestionClient.Chunk(ctx, task, artifact, 1000, 100)
 	if err != nil {
 		return fmt.Errorf("chunk: external worker failed: %w", err)
 	}
-	if len(chunks) == 0 {
+	structuredPath := strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || len(artifact.Elements) > 0
+	if structuredPath && len(chunkResult.StructuredChunks) == 0 {
+		return errors.New("chunk: structured artifact returned no structured chunks")
+	}
+	for index, chunk := range chunkResult.StructuredChunks {
+		if err := chunk.Validate(); err != nil {
+			return fmt.Errorf("chunk: structured chunk %d is invalid: %w", index, err)
+		}
+	}
+	if !structuredPath && len(chunkResult.StructuredChunks) == 0 && len(chunkResult.Chunks) == 0 {
 		return errors.New("chunk: no chunks generated")
 	}
 
@@ -506,17 +515,25 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	}
 	_ = database.RDB.Del(ctx, p.embeddingCacheKey(task.FileMD5)).Err()
 
-	dbVectors := make([]*model.DocumentVector, 0, len(chunks))
-	for i, chunk := range chunks {
-		dbVectors = append(dbVectors, &model.DocumentVector{
-			FileMD5:      task.FileMD5,
-			ChunkID:      i,
-			TextContent:  chunk,
-			ModelVersion: p.embeddingCfg.Model,
-			UserID:       task.UserID,
-			OrgTag:       task.OrgTag,
-			IsPublic:     task.IsPublic,
-		})
+	var dbVectors []*model.DocumentVector
+	if len(chunkResult.StructuredChunks) > 0 {
+		dbVectors = make([]*model.DocumentVector, 0, len(chunkResult.StructuredChunks))
+		for i, chunk := range chunkResult.StructuredChunks {
+			dbVectors = append(dbVectors, documentVectorFromStructuredChunk(task, i, chunk, p.embeddingCfg.Model))
+		}
+	} else {
+		dbVectors = make([]*model.DocumentVector, 0, len(chunkResult.Chunks))
+		for i, chunk := range chunkResult.Chunks {
+			dbVectors = append(dbVectors, &model.DocumentVector{
+				FileMD5:      task.FileMD5,
+				ChunkID:      i,
+				TextContent:  chunk,
+				ModelVersion: p.embeddingCfg.Model,
+				UserID:       task.UserID,
+				OrgTag:       task.OrgTag,
+				IsPublic:     task.IsPublic,
+			})
+		}
 	}
 	if err := p.docVectorRepo.BatchCreate(dbVectors); err != nil {
 		return fmt.Errorf("chunk: persist chunks failed: %w", err)
@@ -527,12 +544,41 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	next.ParsedObject = parsedObject
 	next.TaskChunkID = 1
 	next.ChunkStart = 0
-	next.TotalChunks = len(chunks)
+	next.TotalChunks = len(dbVectors)
 	if err := kafka.ProduceTask(next); err != nil {
 		return fmt.Errorf("chunk: enqueue embed task failed: %w", err)
 	}
-	log.Infof("[Processor][chunk] done file=%s chunks=%d worker=external", task.FileMD5, len(chunks))
+	log.Infof("[Processor][chunk] done file=%s chunks=%d worker=external", task.FileMD5, len(dbVectors))
 	return nil
+}
+
+func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int, chunk model.StructuredChunk, modelVersion string) *model.DocumentVector {
+	textContent := chunk.EmbeddingText
+	if textContent == "" {
+		textContent = chunk.Text
+	}
+	return &model.DocumentVector{
+		FileMD5:          task.FileMD5,
+		ChunkID:          index,
+		TextContent:      textContent,
+		ModelVersion:     modelVersion,
+		DocumentID:       chunk.DocumentID,
+		PageID:           chunk.PageID,
+		ParentChunkID:    chunk.ParentChunkID,
+		SectionPath:      chunk.SectionPath,
+		PageSpan:         chunk.PageSpan,
+		ElementIDs:       chunk.ElementIDs,
+		ElementTypes:     chunk.ElementTypes,
+		BBoxRefs:         chunk.BBoxRefs,
+		AssetRefs:        chunk.AssetRefs,
+		TokenizerID:      chunk.TokenizerID,
+		ParserName:       chunk.ParserName,
+		ParserVersion:    chunk.ParserVersion,
+		CorpusGeneration: chunk.CorpusGeneration,
+		UserID:           task.UserID,
+		OrgTag:           task.OrgTag,
+		IsPublic:         task.IsPublic,
+	}
 }
 
 // processEmbedExternal delegates embedding-stage execution to the external ingestion worker.

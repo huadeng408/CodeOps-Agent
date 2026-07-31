@@ -38,12 +38,14 @@ def chunk_elements(
         raise ValueError("chunk token limits must be positive")
     result: list[StructuredChunk] = []
     parent_number = 0
+    chunk_number = 0
     for section, section_elements in _sections(elements):
         if not section_elements:
             continue
         parent_number += 1
         parent_id = f"{section_elements[0].document_id}:parent:{parent_number}"
-        children = _chunk_section(section_elements, parent_id, child_tokens, corpus_generation)
+        children = _chunk_section(section_elements, parent_id, child_tokens, corpus_generation, chunk_number)
+        chunk_number += len(children)
         # Keep parent context bounded without changing child text or provenance.
         parent_context = " ".join(item.text for item in children)
         if _token_count(parent_context) > parent_tokens:
@@ -68,7 +70,13 @@ def _sections(elements: list[Element]):
         yield current_path or (), current
 
 
-def _chunk_section(elements: list[Element], parent_id: str, child_tokens: int, generation: str) -> list[StructuredChunk]:
+def _chunk_section(
+    elements: list[Element],
+    parent_id: str,
+    child_tokens: int,
+    generation: str,
+    sequence_offset: int = 0,
+) -> list[StructuredChunk]:
     chunks: list[StructuredChunk] = []
     sequence = 0
     for element in elements:
@@ -82,7 +90,7 @@ def _chunk_section(elements: list[Element], parent_id: str, child_tokens: int, g
             if not piece.strip():
                 continue
             sequence += 1
-            chunks.append(_make_chunk(element, piece, parent_id, sequence, generation))
+            chunks.append(_make_chunk(element, piece, parent_id, sequence + sequence_offset, generation))
     return chunks
 
 
@@ -149,4 +157,3 @@ def _contextual_text(chunk: StructuredChunk, section: tuple[str, ...], parent_co
 
 def _token_count(text: str) -> int:
     return len(text.split())
-
