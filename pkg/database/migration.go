@@ -20,6 +20,7 @@ func EnsureRuntimeSchema() error {
 	statements := []string{
 		"ALTER TABLE document_vectors MODIFY COLUMN model_version VARCHAR(128) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN document_id VARCHAR(512) NULL",
+		"ALTER TABLE document_vectors ADD COLUMN embedding_text TEXT NULL",
 		"ALTER TABLE document_vectors ADD COLUMN page_id VARCHAR(255) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN parent_chunk_id VARCHAR(255) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN section_path JSON NULL",
@@ -28,6 +29,7 @@ func EnsureRuntimeSchema() error {
 		"ALTER TABLE document_vectors ADD COLUMN element_types JSON NULL",
 		"ALTER TABLE document_vectors ADD COLUMN bbox_refs JSON NULL",
 		"ALTER TABLE document_vectors ADD COLUMN asset_refs JSON NULL",
+		"ALTER TABLE document_vectors ADD COLUMN token_count INT NULL",
 		"ALTER TABLE document_vectors ADD COLUMN tokenizer_id VARCHAR(255) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN parser_name VARCHAR(128) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN parser_version VARCHAR(128) NULL",

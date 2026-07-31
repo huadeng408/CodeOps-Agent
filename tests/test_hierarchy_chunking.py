@@ -43,3 +43,65 @@ def test_chunk_ids_are_unique_across_heading_sections() -> None:
     chunks = chunk_elements(elements, child_tokens=6, parent_tokens=20)
     ids = [item.chunk_id for item in chunks]
     assert len(ids) == len(set(ids))
+
+
+def test_small_text_elements_merge_with_provenance() -> None:
+    elements = [
+        Element(
+            document_id="doc-1", element_id="text-1", type="text", text="alpha beta",
+            heading_path=["Guide"], page_index=0, bbox=[0, 0, 10, 10],
+        ),
+        Element(
+            document_id="doc-1", element_id="text-2", type="text", text="gamma delta",
+            heading_path=["Guide"], page_index=0, bbox=[0, 10, 10, 20],
+        ),
+    ]
+    chunks = chunk_elements(elements, child_tokens=8, parent_tokens=20)
+    assert len(chunks) == 1
+    assert chunks[0].text == "alpha beta\n\ngamma delta"
+    assert chunks[0].element_ids == ["text-1", "text-2"]
+
+
+def test_overlap_applies_only_to_one_oversized_text_element() -> None:
+    elements = [
+        Element(
+            document_id="doc-1", element_id="long", type="text",
+            text="one two three four five six seven eight",
+            heading_path=["Guide"], page_index=0, bbox=[0, 0, 10, 10],
+        ),
+        Element(
+            document_id="doc-1", element_id="equation", type="equation", latex="E=mc^2",
+            heading_path=["Guide"], page_index=0, bbox=[0, 10, 10, 20],
+        ),
+    ]
+    chunks = chunk_elements(elements, child_tokens=4, parent_tokens=20, overlap_tokens=1)
+    text_chunks = [item for item in chunks if item.element_types == ["text"]]
+    equation = next(item for item in chunks if item.element_types == ["equation"])
+    assert [item.text for item in text_chunks] == ["one two three four", "four five six seven", "seven eight"]
+    assert [item.overlap_tokens for item in text_chunks] == [0, 1, 1]
+    assert equation.text == "E=mc^2"
+    assert equation.overlap_tokens == 0
+
+
+def test_code_splits_on_complete_lines_and_image_caption_enters_embedding_text() -> None:
+    elements = [
+        Element(
+            document_id="doc-1", element_id="code", type="code",
+            text="alpha = 1\nbeta = 2\ngamma = 3",
+            heading_path=["Guide"], page_index=0, bbox=[0, 0, 10, 20],
+        ),
+        Element(
+            document_id="doc-1", element_id="image", type="image", text="OCR labels",
+            caption="Architecture diagram", image_path="images/diagram.png",
+            heading_path=["Guide"], page_index=1, bbox=[0, 0, 20, 20],
+        ),
+    ]
+    chunks = chunk_elements(elements, child_tokens=4, parent_tokens=20)
+    code_chunks = [item for item in chunks if item.element_types == ["code"]]
+    image = next(item for item in chunks if item.element_types == ["image"])
+    assert [item.text for item in code_chunks] == ["alpha = 1", "beta = 2", "gamma = 3"]
+    assert image.text == "OCR labels"
+    assert "Guide" in image.embedding_text
+    assert "Architecture diagram" in image.embedding_text
+    assert "OCR labels" in image.embedding_text
+    assert image.asset_refs == ["images/diagram.png"]

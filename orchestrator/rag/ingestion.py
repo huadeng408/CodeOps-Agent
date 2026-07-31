@@ -99,7 +99,12 @@ class IngestionService:
         file_name = payload.task.file_name
         file_type = _detect_file_type(file_name)
         if payload.elements:
-            structured = chunk_elements(payload.elements, child_tokens=payload.chunkSize, corpus_generation="techdocs-2026-07-30-v1")
+            structured = chunk_elements(
+                payload.elements,
+                child_tokens=payload.chunkSize,
+                overlap_tokens=payload.chunkOverlap,
+                corpus_generation="techdocs-2026-07-30-v1",
+            )
             chunks = [item.text for item in structured if item.text.strip()]
             log_request(
                 "ingestion_chunk_structured",

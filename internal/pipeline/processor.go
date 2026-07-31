@@ -286,7 +286,7 @@ func (p *Processor) processEmbed(ctx context.Context, task tasks.FileProcessingT
 
 		texts := make([]string, 0, end-i)
 		for _, item := range savedVectors[i:end] {
-			texts = append(texts, item.TextContent)
+			texts = append(texts, embeddingInput(item))
 		}
 		vectors, err := p.embeddingClient.CreateEmbeddings(ctx, texts)
 		if err != nil {
@@ -377,17 +377,7 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		if !ok || len(vector) == 0 {
 			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
 		}
-		docs = append(docs, model.EsDocument{
-			VectorID:     task.FileMD5 + "_" + strconv.Itoa(item.ChunkID),
-			FileMD5:      item.FileMD5,
-			ChunkID:      item.ChunkID,
-			TextContent:  item.TextContent,
-			Vector:       vector,
-			ModelVersion: p.embeddingCfg.Model,
-			UserID:       item.UserID,
-			OrgTag:       item.OrgTag,
-			IsPublic:     item.IsPublic,
-		})
+		docs = append(docs, esDocumentFromVector(*item, vector, p.embeddingCfg.Model))
 	}
 
 	bulkSize := p.kafkaCfg.ESBulkBatchSize
@@ -557,14 +547,19 @@ func structuredArtifact(task tasks.FileProcessingTask, artifact orchestratorclie
 }
 
 func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int, chunk model.StructuredChunk, modelVersion string) *model.DocumentVector {
-	textContent := chunk.EmbeddingText
-	if textContent == "" {
-		textContent = chunk.Text
+	sourceText := chunk.Text
+	if sourceText == "" {
+		sourceText = chunk.EmbeddingText
+	}
+	embeddingText := chunk.EmbeddingText
+	if embeddingText == "" {
+		embeddingText = sourceText
 	}
 	return &model.DocumentVector{
 		FileMD5:          task.FileMD5,
 		ChunkID:          index,
-		TextContent:      textContent,
+		TextContent:      sourceText,
+		EmbeddingText:    embeddingText,
 		ModelVersion:     modelVersion,
 		DocumentID:       chunk.DocumentID,
 		PageID:           chunk.PageID,
@@ -575,6 +570,7 @@ func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int,
 		ElementTypes:     chunk.ElementTypes,
 		BBoxRefs:         chunk.BBoxRefs,
 		AssetRefs:        chunk.AssetRefs,
+		TokenCount:       chunk.TokenCount,
 		TokenizerID:      chunk.TokenizerID,
 		ParserName:       chunk.ParserName,
 		ParserVersion:    chunk.ParserVersion,
@@ -582,6 +578,43 @@ func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int,
 		UserID:           task.UserID,
 		OrgTag:           task.OrgTag,
 		IsPublic:         task.IsPublic,
+	}
+}
+
+func embeddingInput(item *model.DocumentVector) string {
+	if strings.TrimSpace(item.EmbeddingText) != "" {
+		return item.EmbeddingText
+	}
+	return item.TextContent
+}
+
+func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVersion string) model.EsDocument {
+	return model.EsDocument{
+		VectorID:         item.FileMD5 + "_" + strconv.Itoa(item.ChunkID),
+		FileMD5:          item.FileMD5,
+		ChunkID:          item.ChunkID,
+		TextContent:      item.TextContent,
+		EmbeddingText:    item.EmbeddingText,
+		Vector:           vector,
+		ModelVersion:     modelVersion,
+		DocumentID:       item.DocumentID,
+		ParentChunkID:    item.ParentChunkID,
+		SectionPath:      item.SectionPath,
+		PageID:           item.PageID,
+		PageSpan:         item.PageSpan,
+		ElementIDs:       item.ElementIDs,
+		ElementTypes:     item.ElementTypes,
+		BBoxRefs:         item.BBoxRefs,
+		AssetRefs:        item.AssetRefs,
+		TokenCount:       item.TokenCount,
+		TokenizerID:      item.TokenizerID,
+		ParserName:       item.ParserName,
+		ParserVersion:    item.ParserVersion,
+		CorpusGeneration: item.CorpusGeneration,
+		TargetIndex:      item.TargetIndex,
+		UserID:           item.UserID,
+		OrgTag:           item.OrgTag,
+		IsPublic:         item.IsPublic,
 	}
 }
 
@@ -648,7 +681,7 @@ func (p *Processor) processEmbedExternal(ctx context.Context, task tasks.FilePro
 
 		texts := make([]string, 0, end-i)
 		for _, item := range savedVectors[i:end] {
-			texts = append(texts, item.TextContent)
+			texts = append(texts, embeddingInput(item))
 		}
 		vectors, err := p.ingestionClient.Embed(ctx, task, texts)
 		if err != nil {
@@ -735,17 +768,7 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 		if !ok || len(vector) == 0 {
 			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
 		}
-		docs = append(docs, model.EsDocument{
-			VectorID:     task.FileMD5 + "_" + strconv.Itoa(item.ChunkID),
-			FileMD5:      item.FileMD5,
-			ChunkID:      item.ChunkID,
-			TextContent:  item.TextContent,
-			Vector:       vector,
-			ModelVersion: p.embeddingCfg.Model,
-			UserID:       item.UserID,
-			OrgTag:       item.OrgTag,
-			IsPublic:     item.IsPublic,
-		})
+		docs = append(docs, esDocumentFromVector(*item, vector, p.embeddingCfg.Model))
 	}
 
 	if _, err := p.ingestionClient.Index(ctx, task, p.esCfg.IndexName, docs); err != nil {

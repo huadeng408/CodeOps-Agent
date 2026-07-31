@@ -32,8 +32,11 @@ func TestDocumentVectorFromStructuredChunkPreservesProvenance(t *testing.T) {
 	}
 
 	vector := documentVectorFromStructuredChunk(task, 3, chunk, "text-embedding-3-small")
-	if vector.FileMD5 != task.FileMD5 || vector.ChunkID != 3 || vector.TextContent != chunk.EmbeddingText {
+	if vector.FileMD5 != task.FileMD5 || vector.ChunkID != 3 || vector.TextContent != chunk.Text {
 		t.Fatalf("vector identity/text = %+v", vector)
+	}
+	if vector.EmbeddingText != chunk.EmbeddingText || vector.TokenCount != chunk.TokenCount {
+		t.Fatalf("vector embedding metadata = %+v", vector)
 	}
 	if vector.DocumentID != chunk.DocumentID || vector.PageID != chunk.PageID || vector.ParentChunkID != chunk.ParentChunkID {
 		t.Fatalf("vector document provenance = %+v", vector)
@@ -46,6 +49,26 @@ func TestDocumentVectorFromStructuredChunkPreservesProvenance(t *testing.T) {
 	}
 	if len(vector.SectionPath) != 2 || len(vector.PageSpan) != 2 || len(vector.ElementIDs) != 1 || len(vector.ElementTypes) != 1 || len(vector.BBoxRefs) != 1 || len(vector.AssetRefs) != 1 {
 		t.Fatalf("vector arrays = %+v", vector)
+	}
+}
+
+func TestStructuredEmbeddingAndIndexPreserveSeparateTextFields(t *testing.T) {
+	item := &model.DocumentVector{
+		FileMD5: "file", ChunkID: 2, TextContent: "exact source", EmbeddingText: "Guide\nexact source",
+		DocumentID: "doc-1", ParentChunkID: "parent-1", PageID: "doc-1:p0", PageSpan: []int{0, 0},
+		ElementIDs: []string{"e1"}, ElementTypes: []string{"text"}, BBoxRefs: []string{"e1:0,0,1,1"},
+		AssetRefs: []string{"asset"}, TokenCount: 2, TokenizerID: "whitespace-v1", ParserName: "mineru",
+		ParserVersion: "3.4.4", CorpusGeneration: "techdocs-2026-07-30-v1", UserID: 7, OrgTag: "org",
+	}
+	if got := embeddingInput(item); got != item.EmbeddingText {
+		t.Fatalf("embedding input = %q, want %q", got, item.EmbeddingText)
+	}
+	doc := esDocumentFromVector(*item, []float32{1, 2}, "BAAI/bge-m3@rev")
+	if doc.TextContent != item.TextContent || doc.EmbeddingText != item.EmbeddingText || doc.TokenCount != item.TokenCount {
+		t.Fatalf("text fields were not preserved: %+v", doc)
+	}
+	if doc.DocumentID != item.DocumentID || doc.PageID != item.PageID || len(doc.ElementIDs) != 1 {
+		t.Fatalf("provenance was not preserved: %+v", doc)
 	}
 }
 

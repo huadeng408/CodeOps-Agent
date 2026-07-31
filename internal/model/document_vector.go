@@ -8,6 +8,7 @@ type DocumentVector struct {
 	FileMD5          string   `gorm:"type:varchar(32);not null;index;column:file_md5"`
 	ChunkID          int      `gorm:"not null;column:chunk_id"`
 	TextContent      string   `gorm:"type:text;column:text_content"`
+	EmbeddingText    string   `gorm:"type:text;column:embedding_text"`
 	ModelVersion     string   `gorm:"type:varchar(128);column:model_version"`
 	DocumentID       string   `gorm:"type:varchar(512);column:document_id"`
 	PageID           string   `gorm:"type:varchar(255);column:page_id"`
@@ -18,6 +19,7 @@ type DocumentVector struct {
 	ElementTypes     []string `gorm:"type:json;serializer:json;column:element_types"`
 	BBoxRefs         []string `gorm:"type:json;serializer:json;column:bbox_refs"`
 	AssetRefs        []string `gorm:"type:json;serializer:json;column:asset_refs"`
+	TokenCount       int      `gorm:"column:token_count"`
 	TokenizerID      string   `gorm:"type:varchar(255);column:tokenizer_id"`
 	ParserName       string   `gorm:"type:varchar(128);column:parser_name"`
 	ParserVersion    string   `gorm:"type:varchar(128);column:parser_version"`
