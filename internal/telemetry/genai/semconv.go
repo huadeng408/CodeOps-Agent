@@ -24,6 +24,10 @@ const (
 	OperationInference   = "inference"
 	OperationExecuteTool = "execute_tool"
 	OperationPlan        = "plan"
+	OperationRetrieve    = "retrieve"
+	OperationEmbedding   = "embedding"
+	OperationRerank      = "rerank"
+	OperationScorer      = "scorer"
 )
 
 // ---------------------------------------------------------------------------
@@ -63,6 +67,31 @@ const (
 	AttrAgentName     = "gen_ai.agent.name"
 	AttrResponseID    = "gen_ai.response.id"
 	AttrFinishReasons = "gen_ai.response.finish_reasons"
+)
+
+// ---------------------------------------------------------------------------
+// RAG / retrieval attribute keys (design spec §6.2)
+// ---------------------------------------------------------------------------
+
+const (
+	// Corpus / index identity
+	AttrCorpusGeneration = "rag.corpus_generation"
+	AttrIndexAlias       = "rag.index_alias"
+	AttrIndexPhysical    = "rag.index_physical"
+	AttrMappingVersion   = "rag.mapping_version"
+
+	// Query
+	AttrQueryHash     = "rag.query_hash"
+	AttrTopN          = "rag.top_n"
+	AttrRetrievalMode = "rag.retrieval_mode"
+
+	// Rerank / visual
+	AttrRerankerApplied = "rag.reranker_applied"
+	AttrVisualPath      = "rag.visual_path"
+
+	// Privacy-safe content (hash/length only; never raw documents)
+	AttrDocumentHash   = "rag.document_hash"
+	AttrDocumentLength = "rag.document_length"
 )
 
 // ---------------------------------------------------------------------------
@@ -143,6 +172,94 @@ func UsageCachedInputTokensKV(n int64) attribute.KeyValue {
 
 func FinishReasonsKV(reasons string) attribute.KeyValue {
 	return attribute.String(AttrFinishReasons, reasons)
+}
+
+// ---------------------------------------------------------------------------
+// RAG attribute constructors
+// ---------------------------------------------------------------------------
+
+func CorpusGenerationKV(generation string) attribute.KeyValue {
+	return attribute.String(AttrCorpusGeneration, generation)
+}
+
+func IndexAliasKV(alias string) attribute.KeyValue {
+	return attribute.String(AttrIndexAlias, alias)
+}
+
+func IndexPhysicalKV(index string) attribute.KeyValue {
+	return attribute.String(AttrIndexPhysical, index)
+}
+
+func MappingVersionKV(version string) attribute.KeyValue {
+	return attribute.String(AttrMappingVersion, version)
+}
+
+func QueryHashKV(hash string) attribute.KeyValue {
+	return attribute.String(AttrQueryHash, hash)
+}
+
+func TopNKV(n int) attribute.KeyValue {
+	return attribute.Int(AttrTopN, n)
+}
+
+func RetrievalModeKV(mode string) attribute.KeyValue {
+	return attribute.String(AttrRetrievalMode, mode)
+}
+
+func RerankerAppliedKV(applied bool) attribute.KeyValue {
+	return attribute.Bool(AttrRerankerApplied, applied)
+}
+
+func VisualPathKV(path string) attribute.KeyValue {
+	return attribute.String(AttrVisualPath, path)
+}
+
+// Privacy-safe document attributes: hash + length only, never the raw
+// document content (design spec §6.2: "默认不捕获完整 prompt/document；
+// 只存 hash、长度和脱敏摘要").
+func DocumentHashKV(hash string) attribute.KeyValue {
+	return attribute.String(AttrDocumentHash, hash)
+}
+
+func DocumentLengthKV(n int) attribute.KeyValue {
+	return attribute.Int(AttrDocumentLength, n)
+}
+
+// HashQuery returns a privacy-safe hash of a query (sha256 hex, truncated).
+func HashQuery(query string) string {
+	if query == "" {
+		return ""
+	}
+	// Fast non-cryptographic stable hash for telemetry only; not used for
+	// security.
+	sum := fnv64(query)
+	return strings.ToUpper(itoa64(sum))
+}
+
+func fnv64(s string) uint64 {
+	const (
+		offset = 14695981039346656037
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime
+	}
+	return h
+}
+
+func itoa64(n uint64) string {
+	if n == 0 {
+		return "0"
+	}
+	const hexDigits = "0123456789abcdef"
+	digits := make([]byte, 0, 16)
+	for n > 0 {
+		digits = append([]byte{hexDigits[n&0xf]}, digits...)
+		n >>= 4
+	}
+	return string(digits)
 }
 
 // ---------------------------------------------------------------------------
