@@ -15,7 +15,8 @@ func TestStructuredChunkRejectsMissingProvenance(t *testing.T) {
 
 func TestStructuredChunkValidatesProvenanceAndRoundTripsArrays(t *testing.T) {
 	chunk := StructuredChunk{
-		DocumentID: "doc-1", ChunkID: "c1", Text: "body", EmbeddingText: "title body",
+		DocumentID: "doc-1", SourceSHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		ChunkID: "c1", Text: "body", EmbeddingText: "title body",
 		PageID: "doc-1:p1", ElementIDs: []string{"e1"}, ElementTypes: []string{"text"},
 		PageSpan: []int{1, 1}, BBoxRefs: []string{"p1:e1"}, AssetRefs: []string{"asset://e1"},
 		TokenCount: 10, TokenizerID: "bge-m3", ParserName: "mineru", ParserVersion: "3.4.4",

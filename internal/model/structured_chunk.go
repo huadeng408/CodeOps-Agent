@@ -8,6 +8,7 @@ import (
 // StructuredChunk is the durable, traceable unit produced by structured ingestion.
 type StructuredChunk struct {
 	DocumentID       string   `json:"document_id"`
+	SourceSHA256     string   `json:"source_sha256,omitempty"`
 	ChunkID          string   `json:"chunk_id"`
 	ParentChunkID    string   `json:"parent_chunk_id,omitempty"`
 	Text             string   `json:"text"`
@@ -34,6 +35,9 @@ type StructuredChunk struct {
 func (c StructuredChunk) Validate() error {
 	if strings.TrimSpace(c.DocumentID) == "" {
 		return fmt.Errorf("document_id is required")
+	}
+	if strings.TrimSpace(c.SourceSHA256) == "" {
+		return fmt.Errorf("source_sha256 is required")
 	}
 	if strings.TrimSpace(c.ChunkID) == "" {
 		return fmt.Errorf("chunk_id is required")

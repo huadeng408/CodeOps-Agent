@@ -1,0 +1,12 @@
+{
+  "document_id": "python@0123456789abcdef0123456789abcdef01234567:Doc/library.rst",
+  "source_id": "python",
+  "source_uri": "https://docs.python.org/3/library/index.html",
+  "source_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "mime": "text/x-rst",
+  "parser_name": "mineru",
+  "parser_version": "3.4.4",
+  "parser_backend": "pipeline",
+  "license_id": "PSF-2.0",
+  "corpus_generation": "techdocs-2026-07-30-v1"
+}

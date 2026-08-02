@@ -12,6 +12,7 @@ class StructuredChunk:
     parent_chunk_id: str
     text: str
     embedding_text: str
+    source_sha256: str = ""
     section_path: list[str] = field(default_factory=list)
     page_id: str = ""
     page_span: list[int] = field(default_factory=list)
@@ -161,6 +162,7 @@ def _make_chunk(
     page_id = f"{first.document_id}:p{pages[0]}"
     return StructuredChunk(
         document_id=first.document_id,
+        source_sha256=first.source_sha256,
         chunk_id=f"{first.document_id}:chunk:{sequence}",
         parent_chunk_id="",
         text=text,
