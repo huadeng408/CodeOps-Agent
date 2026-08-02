@@ -1,0 +1,45 @@
+# Eval dataset manifest (plan Task 7.1).
+#
+# Every dataset must pin: official URL, immutable revision, sha256, license
+# evidence, split and scorer. The eval manifest validator (eval/manifest.py)
+# rejects floating revisions, missing hashes and disallowed licenses.
+#
+# NOTE: revisions below are PLACEHOLDERS — pin the real commit/hash of each
+# dataset snapshot before running any public benchmark
+# (CODE_AGENT_RUN_PUBLIC_BENCHMARKS=1).
+datasets:
+  - name: "beir-nfcorpus"
+    source_url: "https://github.com/beir-cellar/beir"
+    revision: "0000000000000000000000000000000000000000"
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_spdx: "CC-BY-4.0"
+    scorer: "official-beir"
+    split: "test"
+    allowed_use: "zero-shot retrieval baseline"
+
+  - name: "miracl-zh"
+    source_url: "https://github.com/project-miracl/miracl"
+    revision: "0000000000000000000000000000000000000000"
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_spdx: "CC-BY-4.0"
+    scorer: "official-miracl"
+    split: "dev"
+    allowed_use: "multilingual retrieval (Chinese queries)"
+
+  - name: "bright"
+    source_url: "https://github.com/xlang-ai/BRIGHT"
+    revision: "0000000000000000000000000000000000000000"
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_spdx: "CC-BY-4.0"
+    scorer: "official-bright"
+    split: "test"
+    allowed_use: "reasoning-intensive retrieval"
+
+  - name: "vidore"
+    source_url: "https://huggingface.co/datasets/illuin-tech/vidore-benchmark-500k"
+    revision: "0000000000000000000000000000000000000000"
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_spdx: "CC-BY-4.0"
+    scorer: "official-vidore"
+    split: "test"
+    allowed_use: "visual document retrieval (visual pilot only, never production corpus)"
