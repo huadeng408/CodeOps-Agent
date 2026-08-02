@@ -49,6 +49,7 @@ class Element(BaseModel):
     backend: str = ""
     source_payload_ref: str = ""
     source_sha256: str = ""
+    source_url: str = ""
 
     @field_validator("bbox")
     @classmethod

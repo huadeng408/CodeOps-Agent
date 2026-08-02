@@ -9,6 +9,7 @@ import (
 type StructuredChunk struct {
 	DocumentID       string   `json:"document_id"`
 	SourceSHA256     string   `json:"source_sha256,omitempty"`
+	SourceURL        string   `json:"source_url,omitempty"`
 	ChunkID          string   `json:"chunk_id"`
 	ParentChunkID    string   `json:"parent_chunk_id,omitempty"`
 	Text             string   `json:"text"`

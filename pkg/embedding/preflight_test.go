@@ -29,7 +29,7 @@ func nativeVector(dim int) []float32 {
 
 // embeddingServer returns an httptest server that mirrors a local
 // OpenAI-compatible embedding service.
-func embeddingServer(t *testing.T, model, revision string, dim int, count int, nonFinite bool, requestRecorder *embeddingRequest) *httptest.Server {
+func embeddingServer(t *testing.T, model, revision string, dim int, count int, requestRecorder *embeddingRequest) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -46,13 +46,6 @@ func embeddingServer(t *testing.T, model, revision string, dim int, count int, n
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		*requestRecorder = req
 		w.Header().Set("Content-Type", "application/json")
-		if nonFinite {
-			// 1e40 overflows float32 (max ≈3.4e38) and decodes to +Inf,
-			// which must trip the finite-value guard. A NaN literal is
-			// rejected by encoding/json, so +Inf is the provable case.
-			_, _ = w.Write([]byte(`{"object":"list","model":"` + model + `","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,1e40,0.4]},{"object":"embedding","index":1,"embedding":[0.5,0.6,0.7,0.8]}]}`))
-			return
-		}
 		items := make([]map[string]any, 0, count)
 		for i := 0; i < count; i++ {
 			items = append(items, map[string]any{"object": "embedding", "index": i, "embedding": nativeVector(dim)})
@@ -76,7 +69,7 @@ func preflightCfg(baseURL, model, revision string, expectedDim int) serverconfig
 
 func TestPreflightSucceedsWithNative1024Vectors(t *testing.T) {
 	var recorded embeddingRequest
-	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 1024, 2, false, &recorded)
+	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 1024, 2, &recorded)
 	defer srv.Close()
 
 	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
@@ -92,7 +85,7 @@ func TestPreflightSucceedsWithNative1024Vectors(t *testing.T) {
 }
 
 func TestPreflightRejectsModelMismatch(t *testing.T) {
-	srv := embeddingServer(t, "BAAI/bge-small-zh-v1.5", pinnedRevision, 1024, 2, false, &embeddingRequest{})
+	srv := embeddingServer(t, "BAAI/bge-small-zh-v1.5", pinnedRevision, 1024, 2, &embeddingRequest{})
 	defer srv.Close()
 
 	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
@@ -102,7 +95,7 @@ func TestPreflightRejectsModelMismatch(t *testing.T) {
 }
 
 func TestPreflightRejectsRevisionMismatch(t *testing.T) {
-	srv := embeddingServer(t, "BAAI/bge-m3", "BAAI/bge-m3@deadbeef", 1024, 2, false, &embeddingRequest{})
+	srv := embeddingServer(t, "BAAI/bge-m3", "BAAI/bge-m3@deadbeef", 1024, 2, &embeddingRequest{})
 	defer srv.Close()
 
 	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
@@ -112,7 +105,7 @@ func TestPreflightRejectsRevisionMismatch(t *testing.T) {
 }
 
 func TestPreflightRejectsNonNativeDimensions(t *testing.T) {
-	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 512, 2, false, &embeddingRequest{})
+	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 512, 2, &embeddingRequest{})
 	defer srv.Close()
 
 	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
@@ -139,7 +132,7 @@ func TestPreflightRejectsNonFiniteVector(t *testing.T) {
 }
 
 func TestPreflightRejectsMissingVectorCount(t *testing.T) {
-	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 1024, 1, false, &embeddingRequest{})
+	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 1024, 1, &embeddingRequest{})
 	defer srv.Close()
 
 	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))

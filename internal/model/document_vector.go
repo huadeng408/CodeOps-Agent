@@ -11,6 +11,8 @@ type DocumentVector struct {
 	EmbeddingText    string   `gorm:"type:text;column:embedding_text"`
 	ModelVersion     string   `gorm:"type:varchar(128);column:model_version"`
 	DocumentID       string   `gorm:"type:varchar(512);column:document_id"`
+	SourceSHA256     string   `gorm:"type:varchar(64);column:source_sha256" json:"source_sha256,omitempty"`
+	SourceURL        string   `gorm:"type:varchar(1024);column:source_url" json:"source_url,omitempty"`
 	PageID           string   `gorm:"type:varchar(255);column:page_id"`
 	ParentChunkID    string   `gorm:"type:varchar(255);column:parent_chunk_id"`
 	SectionPath      []string `gorm:"type:json;serializer:json;column:section_path"`

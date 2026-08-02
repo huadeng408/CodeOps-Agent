@@ -49,6 +49,13 @@ type Processor struct {
 	uploadRepo      repository.UploadRepository
 	docVectorRepo   repository.DocumentVectorRepository
 	ingestionClient orchestratorclient.IngestionClient
+
+	// esWriter is the ES bulk writer; defaulted to es.BulkIndexDocuments.
+	// Injectable so tests can assert zero writes on validation failure.
+	esWriter func(ctx context.Context, index string, docs []model.EsDocument) error
+	// vectorCache loads cached embeddings; defaulted to loadCachedEmbeddingMap.
+	// Injectable so tests avoid the Redis global.
+	vectorCache func(ctx context.Context, cacheKey string) (map[int][]float32, error)
 }
 
 // NewProcessor creates a processor.
@@ -75,6 +82,7 @@ func NewProcessor(
 		uploadRepo:      uploadRepo,
 		docVectorRepo:   docVectorRepo,
 		ingestionClient: ingestionClient,
+		esWriter:        es.BulkIndexDocuments,
 	}
 }
 
@@ -366,7 +374,11 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 	}
 
 	cacheKey := p.embeddingCacheKey(task.FileMD5)
-	vectorMap, err := p.loadCachedEmbeddingMap(ctx, cacheKey)
+	loadCache := p.vectorCache
+	if loadCache == nil {
+		loadCache = p.loadCachedEmbeddingMap
+	}
+	vectorMap, err := loadCache(ctx, cacheKey)
 	if err != nil {
 		return fmt.Errorf("index: read cached vectors failed: %w", err)
 	}
@@ -394,6 +406,10 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 	if strings.TrimSpace(indexName) == "" {
 		return errors.New("index: corpus text index is not configured for structured chunks")
 	}
+	writer := p.esWriter
+	if writer == nil {
+		writer = es.BulkIndexDocuments
+	}
 	bulkSize := p.kafkaCfg.ESBulkBatchSize
 	if bulkSize <= 0 {
 		bulkSize = 100
@@ -403,13 +419,17 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		if end > len(docs) {
 			end = len(docs)
 		}
-		if err := es.BulkIndexDocuments(ctx, indexName, docs[i:end]); err != nil {
+		if err := writer(ctx, indexName, docs[i:end]); err != nil {
 			return fmt.Errorf("index: bulk index failed batch_start=%d: %w", i, err)
 		}
 	}
 
-	_ = database.RDB.Del(ctx, cacheKey).Err()
-	_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5), minio.RemoveObjectOptions{})
+	if database.RDB != nil {
+		_ = database.RDB.Del(ctx, cacheKey).Err()
+	}
+	if storage.MinioClient != nil {
+		_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5), minio.RemoveObjectOptions{})
+	}
 	log.Infof("[Processor][index] done file=%s docs=%d", task.FileMD5, len(docs))
 	return nil
 }
@@ -576,6 +596,8 @@ func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int,
 		EmbeddingText:    embeddingText,
 		ModelVersion:     modelVersion,
 		DocumentID:       chunk.DocumentID,
+		SourceSHA256:     chunk.SourceSHA256,
+		SourceURL:        chunk.SourceURL,
 		PageID:           chunk.PageID,
 		ParentChunkID:    chunk.ParentChunkID,
 		SectionPath:      chunk.SectionPath,
@@ -612,6 +634,8 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 		Vector:           vector,
 		ModelVersion:     modelVersion,
 		DocumentID:       item.DocumentID,
+		SourceSHA256:     item.SourceSHA256,
+		SourceURL:        item.SourceURL,
 		ParentChunkID:    item.ParentChunkID,
 		SectionPath:      item.SectionPath,
 		PageID:           item.PageID,
@@ -792,7 +816,11 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 	}
 
 	cacheKey := p.embeddingCacheKey(task.FileMD5)
-	vectorMap, err := p.loadCachedEmbeddingMap(ctx, cacheKey)
+	loadCache := p.vectorCache
+	if loadCache == nil {
+		loadCache = p.loadCachedEmbeddingMap
+	}
+	vectorMap, err := loadCache(ctx, cacheKey)
 	if err != nil {
 		return fmt.Errorf("index: read cached vectors failed: %w", err)
 	}

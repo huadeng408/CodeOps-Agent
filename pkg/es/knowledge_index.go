@@ -41,6 +41,7 @@ func KnowledgeV2Mapping(dimensions int) map[string]any {
 		"chunk_id": map[string]any{"type": "integer"}, "text_content": map[string]any{"type": "text"},
 		"embedding_text": map[string]any{"type": "text"}, "vector": map[string]any{"type": "dense_vector", "dims": dimensions, "index": true, "similarity": "cosine"},
 		"model_version": map[string]any{"type": "keyword"}, "document_id": map[string]any{"type": "keyword"},
+		"source_sha256": map[string]any{"type": "keyword"}, "source_url": map[string]any{"type": "keyword"},
 		"parent_chunk_id": map[string]any{"type": "keyword"}, "section_path": map[string]any{"type": "keyword"},
 		"page_id": map[string]any{"type": "keyword"}, "page_span": map[string]any{"type": "integer"},
 		"element_ids": map[string]any{"type": "keyword"}, "element_types": map[string]any{"type": "keyword"},
@@ -184,7 +185,7 @@ func (m *KnowledgeIndexManager) performAliasActions(ctx context.Context, actions
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
 		b, _ := io.ReadAll(res.Body)
-		return fmt.Errorf("switch alias: %s", strings.TrimSpace(string(b)))
+		return fmt.Errorf("alias operation failed: %s", strings.TrimSpace(string(b)))
 	}
 	return nil
 }
