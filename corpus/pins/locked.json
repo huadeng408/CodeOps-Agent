@@ -1,0 +1,32 @@
+{
+  "go": {
+    "commit": "5d29d80b6c9960c3fc39e14e3e8b9a0f52041fed",
+    "license": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "license_path": "LICENSE"
+  },
+  "python": {
+    "commit": "96ebb20fc2f0542d9387091e49626f9a1132de82",
+    "license": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231",
+    "license_path": "LICENSE"
+  },
+  "git": {
+    "commit": "a97fcc37c2bc6340a8d7ce78dedf227aac4e9aa7",
+    "license": "5b2198d1645f767585e8a88ac0499b04472164c0d2da22e75ecf97ef443ab32e",
+    "license_path": "COPYING"
+  },
+  "docker": {
+    "commit": "bb6ca1cb679394b4e9f7f44cc84a1288f8966247",
+    "license": "089009c932d3cc296355e429fa9d6faf80ac89597da866e2424b4ea09add64b1",
+    "license_path": "LICENSE"
+  },
+  "postgresql": {
+    "commit": "7a0299a1348b563c72a57a2a40462e90af9dfbac",
+    "license": "3d6af92ff8a4c2cdf69afb1cf44edea727922f5cd0cf8b5f72b11cdecac8fdfd",
+    "license_path": "COPYRIGHT"
+  },
+  "kubernetes": {
+    "commit": "b035ea80a2f666e0a60923560984458806788104",
+    "license": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+    "license_path": "LICENSE"
+  }
+}

@@ -120,15 +120,15 @@ def test_placeholder_license_hash_blocks_import() -> None:
     assert any("all-zero placeholder" in issue for issue in issues)
 
 
-def test_shipped_manifest_is_shape_valid_but_blocked_on_placeholders(tmp_path: Path) -> None:
+def test_shipped_manifest_is_shape_valid_and_pinned() -> None:
+    """The shipped manifest now carries REAL pinned commits and license
+    hashes (verified 2026-08-02 from upstream repos); it must pass the
+    validator with zero blocking issues."""
     shipped = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
     assert shipped["schema_version"] == "1"
     assert len(shipped["sources"]) >= 6
     issues = validate_manifest_path(MANIFEST.read_text(encoding="utf-8"))
-    # The shipped manifest is schema-valid (no schema violations) but every
-    # placeholder commit/hash must be reported as blocking import.
-    assert not any("schema violation" in issue for issue in issues)
-    assert any("placeholder" in issue for issue in issues)
+    assert issues == [], f"shipped manifest must be fully pinned: {issues}"
 
 
 def test_unreadable_manifest_raises(tmp_path: Path) -> None:

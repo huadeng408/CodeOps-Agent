@@ -12,12 +12,12 @@ generation: "techdocs-2026-07-30-v1"
 sources:
   - source_id: "go"
     repository_url: "https://github.com/golang/go"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "5d29d80b6c9960c3fc39e14e3e8b9a0f52041fed"
     include_paths: ["doc/"]
     exclude_paths: ["doc/contribute*", "doc/articles", "doc/gopher", "doc/tos.html"]
     license_spdx: "BSD-3-Clause"
     license_path: "LICENSE"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
     allowed_formats: ["md", "html"]
     expected_documents: 50
     loader_user: 1
@@ -25,12 +25,12 @@ sources:
 
   - source_id: "python"
     repository_url: "https://github.com/python/cpython"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "96ebb20fc2f0542d9387091e49626f9a1132de82"
     include_paths: ["Doc/"]
     exclude_paths: ["Doc/includes", "Doc/tools", "Doc/howto/*.txt"]
     license_spdx: "PSF-2.0"
     license_path: "LICENSE"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
     allowed_formats: ["rst"]
     expected_documents: 100
     loader_user: 1
@@ -38,12 +38,12 @@ sources:
 
   - source_id: "git"
     repository_url: "https://github.com/git/git"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "a97fcc37c2bc6340a8d7ce78dedf227aac4e9aa7"
     include_paths: ["Documentation/"]
     exclude_paths: ["Documentation/technical", "Documentation/howto/*.txt"]
     license_spdx: "GPL-2.0-only"
     license_path: "COPYING"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "5b2198d1645f767585e8a88ac0499b04472164c0d2da22e75ecf97ef443ab32e"
     allowed_formats: ["adoc", "txt"]
     expected_documents: 60
     loader_user: 1
@@ -51,12 +51,12 @@ sources:
 
   - source_id: "docker"
     repository_url: "https://github.com/docker/docs"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "bb6ca1cb679394b4e9f7f44cc84a1288f8966247"
     include_paths: ["content/"]
     exclude_paths: ["content/reference", "content/contribute"]
     license_spdx: "Apache-2.0"
     license_path: "LICENSE"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "089009c932d3cc296355e429fa9d6faf80ac89597da866e2424b4ea09add64b1"
     allowed_formats: ["md"]
     expected_documents: 80
     loader_user: 1
@@ -64,12 +64,12 @@ sources:
 
   - source_id: "kubernetes"
     repository_url: "https://github.com/kubernetes/website"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "b035ea80a2f666e0a60923560984458806788104"
     include_paths: ["content/en/docs/"]
     exclude_paths: ["content/en/docs/reference", "content/en/docs/contribute", "content/en/blog"]
     license_spdx: "CC-BY-4.0"
     license_path: "LICENSE"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
     allowed_formats: ["md"]
     expected_documents: 150
     loader_user: 1
@@ -77,12 +77,12 @@ sources:
 
   - source_id: "postgresql"
     repository_url: "https://github.com/postgres/postgres"
-    source_commit: "0000000000000000000000000000000000000000"
+    source_commit: "7a0299a1348b563c72a57a2a40462e90af9dfbac"
     include_paths: ["doc/src/sgml/"]
     exclude_paths: ["doc/src/sgml/ref"]
     license_spdx: "PostgreSQL"
     license_path: "COPYRIGHT"
-    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    license_sha256: "3d6af92ff8a4c2cdf69afb1cf44edea727922f5cd0cf8b5f72b11cdecac8fdfd"
     allowed_formats: ["sgml", "xml"]
     expected_documents: 40
     loader_user: 1
