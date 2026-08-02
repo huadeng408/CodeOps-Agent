@@ -77,6 +77,34 @@ func TestFuseAndExpandDoesNotDropDifferentPages(t *testing.T) {
 	}
 }
 
+func TestFuseAndExpandKeepsSamePageAcrossDifferentDocuments(t *testing.T) {
+	// PageIDs are document-local: two documents both on page 3 must BOTH
+	// survive dedup.
+	hits := []retrievalHit{
+		{Source: model.EsDocument{DocumentID: "doc-a", PageID: "3", ChunkID: 1}},
+		{Source: model.EsDocument{DocumentID: "doc-a", PageID: "3", ChunkID: 2}},
+		{Source: model.EsDocument{DocumentID: "doc-b", PageID: "3", ChunkID: 3}},
+	}
+	result := fuseAndExpand(hits, 5)
+	if len(result) != 2 {
+		t.Fatalf("expected doc-a and doc-b both kept, got %d: %#v", len(result), result)
+	}
+	if result[0].Source.DocumentID != "doc-a" || result[1].Source.DocumentID != "doc-b" {
+		t.Fatalf("expected one hit per document, got %#v", result)
+	}
+}
+
+func TestFuseAndExpandKeepsSameParentAcrossDifferentDocuments(t *testing.T) {
+	hits := []retrievalHit{
+		{Source: model.EsDocument{DocumentID: "doc-a", ParentChunkID: "parent-1", ChunkID: 1}},
+		{Source: model.EsDocument{DocumentID: "doc-b", ParentChunkID: "parent-1", ChunkID: 2}},
+	}
+	result := fuseAndExpand(hits, 5)
+	if len(result) != 2 {
+		t.Fatalf("same parent in different documents must both survive, got %d: %#v", len(result), result)
+	}
+}
+
 func TestIsVectorDimensionMismatchError(t *testing.T) {
 	cases := []struct {
 		err  error

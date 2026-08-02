@@ -59,6 +59,16 @@ func main() {
 	}
 	defer store.Close()
 
+	// fail flushes the checkpoint store (so already-marked documents survive
+	// an interrupted import) before exiting non-zero.
+	fail := func(format string, args ...any) {
+		if closeErr := store.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: flush checkpoint failed: %v\n", closeErr)
+		}
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+		os.Exit(1)
+	}
+
 	selector := corpus.PilotSelector{PerSource: *pilot}
 	stager := &corpus.Stager{}
 	totalSelected, totalSkipped := 0, 0
@@ -70,15 +80,13 @@ func main() {
 		fmt.Printf("source %s (commit %s): staging...\n", source.SourceID, source.SourceCommit)
 		result, err := stager.Stage(ctx, source, *stagingDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "source %s stage FAILED: %v\n", source.SourceID, err)
-			os.Exit(1)
+			fail("source %s stage FAILED: %v", source.SourceID, err)
 		}
 		fmt.Printf("source %s: HEAD=%s license=%s\n", source.SourceID, result.HeadCommit, result.LicensePath)
 
 		docs, err := corpus.ListDocuments(ctx, source, filepath.Join(*stagingDir, source.SourceID))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "source %s list FAILED: %v\n", source.SourceID, err)
-			os.Exit(1)
+			fail("source %s list FAILED: %v", source.SourceID, err)
 		}
 		keys := make([]string, 0, len(docs))
 		for _, doc := range docs {
@@ -106,10 +114,12 @@ func main() {
 			}
 			// Hand off to the RAG server upload pipeline.
 			if err := corpus.IngestDocument(ctx, source, doc, *stagingDir); err != nil {
-				fmt.Fprintf(os.Stderr, "source %s document %s ingest FAILED: %v\n", source.SourceID, doc.SourcePath, err)
-				os.Exit(1)
+				fail("source %s document %s ingest FAILED: %v", source.SourceID, doc.SourcePath, err)
 			}
 			if err := store.Mark(doc.Checkpoint.Key()); err != nil {
+				if closeErr := store.Close(); closeErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: flush checkpoint failed: %v\n", closeErr)
+				}
 				log.Fatalf("checkpoint mark: %v", err)
 			}
 			selected++

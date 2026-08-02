@@ -264,7 +264,14 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 		return []model.SearchResponseDTO{}, nil
 	}
 
-	fusedHits = fuseAndExpand(fusedHits, maxInt(returnTopK, s.retrievalCfg.FinalTopK))
+	// Diversity cap feeds the reranker (RerankTopN) or the final topK when
+	// reranking is disabled; truncation to returnTopK happens AFTER rerank so
+	// the reranker sees a real candidate pool, not an already-truncated one.
+	diversityCap := returnTopK
+	if rerankerEnabled {
+		diversityCap = maxInt(s.retrievalCfg.RerankTopN, returnTopK)
+	}
+	fusedHits = fuseAndExpand(fusedHits, diversityCap)
 	finalHits := truncateHits(fusedHits, returnTopK)
 	rerankApplied := false
 	rerankTimeout := false
@@ -649,7 +656,10 @@ func buildSourceFields() []string {
 	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url"}
 }
 
-// fuseAndExpand keeps evidence diverse by allowing only one hit per page or parent group.
+// fuseAndExpand keeps evidence diverse by allowing only one hit per
+// document+page (or document+parent) group. PageIDs are document-local, so
+// the dedup key must include the document ID — two different documents with
+// the same page number must both survive.
 func fuseAndExpand(hits []retrievalHit, topK int) []retrievalHit {
 	if topK <= 0 {
 		return []retrievalHit{}
@@ -657,11 +667,11 @@ func fuseAndExpand(hits []retrievalHit, topK int) []retrievalHit {
 	out := make([]retrievalHit, 0, minInt(len(hits), topK))
 	seen := make(map[string]struct{}, len(hits))
 	for _, hit := range hits {
-		key := hit.Source.PageID
-		if key == "" {
-			key = hit.Source.ParentChunkID
+		key := hit.Source.DocumentID + "/" + hit.Source.PageID
+		if hit.Source.PageID == "" {
+			key = hit.Source.DocumentID + "/" + hit.Source.ParentChunkID
 		}
-		if key == "" {
+		if key == "/" {
 			key = candidateKey(hit.Source, hit.ID)
 		}
 		if _, ok := seen[key]; ok {
