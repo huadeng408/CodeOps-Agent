@@ -1,15 +1,21 @@
-"""Serve a lightweight OpenAI-compatible embedding API for local development."""
+"""Serve a lightweight OpenAI-compatible embedding API for local development.
+
+Two backends:
+- fastembed (default) for models it supports (bge-small/large, jina, etc.)
+- FlagEmbedding BGEM3FlagModel for BAAI/bge-m3 (1024-dim native, not
+  supported by fastembed). Selected automatically when the model name
+  contains "bge-m3"; the model is downloaded from the configured source
+  (ModelScope via MODELSCOPE_CACHE, or HuggingFace via HF_ENDPOINT).
+"""
 
 import os
 import time
 import logging
 import threading
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-
-from fastembed import TextEmbedding
 
 
 class EmbeddingRequest(BaseModel):
@@ -47,7 +53,7 @@ OUTPUT_DIMENSIONS = int(os.getenv("EMBEDDING_OUTPUT_DIMENSIONS", "0"))
 
 app = FastAPI(title="PaiSmart Embedding", version="1.0.0")
 _model_name = DEFAULT_MODEL
-_model: TextEmbedding | None = None
+_model = None  # TextEmbedding | BGEM3FlagModel
 _model_lock = threading.RLock()
 _ready = False
 _last_error: str | None = None
@@ -56,7 +62,36 @@ logging.basicConfig(level=os.getenv("EMBEDDING_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("paismart.embedding")
 
 
-def load_model(model_name: str) -> TextEmbedding:
+def _is_bge_m3(model_name: str) -> bool:
+    return "bge-m3" in model_name.lower()
+
+
+def _load_bge_m3(model_name: str):
+    """Load BAAI/bge-m3 via sentence-transformers (native 1024-dim dense)."""
+    from sentence_transformers import SentenceTransformer
+
+    device = "cuda" if os.getenv("EMBEDDING_DEVICE", "cuda") == "cuda" else "cpu"
+    if device == "cuda":
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                device = "cpu"
+        except Exception:
+            device = "cpu"
+    return SentenceTransformer(model_name, device=device)
+
+
+def _load_fastembed(model_name: str):
+    from fastembed import TextEmbedding
+
+    init_kwargs = {}
+    if DEFAULT_THREADS > 0:
+        init_kwargs["threads"] = DEFAULT_THREADS
+    return TextEmbedding(model_name=model_name, **init_kwargs)
+
+
+def load_model(model_name: str):
     """Load the requested embedding model once and reuse it across requests."""
     global _model
     global _model_name
@@ -67,17 +102,24 @@ def load_model(model_name: str) -> TextEmbedding:
         if _model is not None and _model_name == model_name:
             return _model
 
-        init_kwargs = {}
-        if DEFAULT_THREADS > 0:
-            init_kwargs["threads"] = DEFAULT_THREADS
-
         started = time.perf_counter()
-        _model = TextEmbedding(model_name=model_name, **init_kwargs)
+        if _is_bge_m3(model_name):
+            _model = _load_bge_m3(model_name)
+        else:
+            _model = _load_fastembed(model_name)
         _model_name = model_name
         _ready = True
         _last_error = None
         logger.info("loaded embedding model=%s in %.2fs", model_name, time.perf_counter() - started)
         return _model
+
+
+def _embed(model, texts: List[str]) -> List[List[float]]:
+    """Run the model-specific embedding call."""
+    if _is_bge_m3(_model_name):
+        vecs = model.encode(texts, normalize_embeddings=False)
+        return [list(v) for v in vecs]
+    return list(model.embed(texts))
 
 
 def run_embedding(model_name: str, texts: List[str]):
@@ -89,9 +131,9 @@ def run_embedding(model_name: str, texts: List[str]):
         if SERIALIZE_REQUESTS:
             with _model_lock:
                 model = load_model(model_name)
-                return list(model.embed(texts))
+                return _embed(model, texts)
         model = load_model(model_name)
-        return list(model.embed(texts))
+        return _embed(model, texts)
     except Exception as exc:
         _ready = False
         _last_error = str(exc)
@@ -132,7 +174,7 @@ def preload_model():
     try:
         model = load_model(DEFAULT_MODEL)
         # Warm up the model once to avoid first-request timeout during host integration.
-        list(model.embed([WARMUP_TEXT]))
+        _embed(model, [WARMUP_TEXT])
         _ready = True
         _last_error = None
         logger.info("embedding model warmup completed for model=%s", DEFAULT_MODEL)
