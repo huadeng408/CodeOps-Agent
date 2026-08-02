@@ -44,6 +44,7 @@ type Processor struct {
 	esCfg           serverconfig.ElasticsearchConfig
 	minioCfg        serverconfig.MinIOConfig
 	embeddingCfg    serverconfig.EmbeddingConfig
+	corpusCfg       serverconfig.CorpusConfig
 	kafkaCfg        serverconfig.KafkaConfig
 	uploadRepo      repository.UploadRepository
 	docVectorRepo   repository.DocumentVectorRepository
@@ -57,6 +58,7 @@ func NewProcessor(
 	esCfg serverconfig.ElasticsearchConfig,
 	minioCfg serverconfig.MinIOConfig,
 	embeddingCfg serverconfig.EmbeddingConfig,
+	corpusCfg serverconfig.CorpusConfig,
 	kafkaCfg serverconfig.KafkaConfig,
 	uploadRepo repository.UploadRepository,
 	docVectorRepo repository.DocumentVectorRepository,
@@ -68,6 +70,7 @@ func NewProcessor(
 		esCfg:           esCfg,
 		minioCfg:        minioCfg,
 		embeddingCfg:    embeddingCfg,
+		corpusCfg:       corpusCfg,
 		kafkaCfg:        kafkaCfg,
 		uploadRepo:      uploadRepo,
 		docVectorRepo:   docVectorRepo,
@@ -377,9 +380,20 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		if !ok || len(vector) == 0 {
 			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
 		}
-		docs = append(docs, esDocumentFromVector(*item, vector, p.embeddingCfg.Model))
+		if err := p.validateStructuredVector(*item, vector); err != nil {
+			return fmt.Errorf("index: structured vector validation failed for chunk=%d: %w", item.ChunkID, err)
+		}
+		modelVersion := p.embeddingCfg.Model
+		if p.embeddingCfg.ModelRevision != "" {
+			modelVersion = p.embeddingCfg.ModelRevision
+		}
+		docs = append(docs, esDocumentFromVector(*item, vector, modelVersion))
 	}
 
+	indexName := p.indexNameFor(*savedVectors[0])
+	if strings.TrimSpace(indexName) == "" {
+		return errors.New("index: corpus text index is not configured for structured chunks")
+	}
 	bulkSize := p.kafkaCfg.ESBulkBatchSize
 	if bulkSize <= 0 {
 		bulkSize = 100
@@ -389,7 +403,7 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		if end > len(docs) {
 			end = len(docs)
 		}
-		if err := es.BulkIndexDocuments(ctx, p.esCfg.IndexName, docs[i:end]); err != nil {
+		if err := es.BulkIndexDocuments(ctx, indexName, docs[i:end]); err != nil {
 			return fmt.Errorf("index: bulk index failed batch_start=%d: %w", i, err)
 		}
 	}
@@ -618,6 +632,30 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 	}
 }
 
+// indexNameFor resolves the ES index for a document vector. Structured
+// chunks with a corpus generation must land in the corpus text index — never
+// a hardcoded name; legacy vectors keep the legacy index. An empty result is
+// a configuration error and must fail the write.
+func (p *Processor) indexNameFor(item model.DocumentVector) string {
+	if item.CorpusGeneration != "" {
+		return p.corpusCfg.TextIndex
+	}
+	return p.esCfg.IndexName
+}
+
+// validateStructuredVector enforces the native embedding contract for any
+// structured chunk on BOTH the local and external processing paths.
+func (p *Processor) validateStructuredVector(item model.DocumentVector, vector []float32) error {
+	if item.CorpusGeneration == "" {
+		return nil // legacy path is not subject to the native-dimension contract
+	}
+	expected := p.embeddingCfg.ExpectedDimensions
+	if expected <= 0 {
+		expected = p.embeddingCfg.Dimensions
+	}
+	return embedding.ValidateEmbeddingContract(p.embeddingCfg.ModelRevision, expected, vector)
+}
+
 // processEmbedExternal delegates embedding-stage execution to the external ingestion worker.
 func (p *Processor) processEmbedExternal(ctx context.Context, task tasks.FileProcessingTask) error {
 	cacheKey := p.embeddingCacheKey(task.FileMD5)
@@ -768,10 +806,21 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 		if !ok || len(vector) == 0 {
 			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
 		}
-		docs = append(docs, esDocumentFromVector(*item, vector, p.embeddingCfg.Model))
+		if err := p.validateStructuredVector(*item, vector); err != nil {
+			return fmt.Errorf("index: structured vector validation failed for chunk=%d: %w", item.ChunkID, err)
+		}
+		modelVersion := p.embeddingCfg.Model
+		if p.embeddingCfg.ModelRevision != "" {
+			modelVersion = p.embeddingCfg.ModelRevision
+		}
+		docs = append(docs, esDocumentFromVector(*item, vector, modelVersion))
 	}
 
-	if _, err := p.ingestionClient.Index(ctx, task, p.esCfg.IndexName, docs); err != nil {
+	indexName := p.indexNameFor(*savedVectors[0])
+	if strings.TrimSpace(indexName) == "" {
+		return errors.New("index: corpus text index is not configured for structured chunks")
+	}
+	if _, err := p.ingestionClient.Index(ctx, task, indexName, docs); err != nil {
 		return fmt.Errorf("index: external worker failed: %w", err)
 	}
 

@@ -143,6 +143,7 @@ func main() {
 		cfg.Elasticsearch,
 		cfg.MinIO,
 		cfg.Embedding,
+		cfg.Corpus,
 		cfg.Kafka,
 		uploadRepo,
 		docVectorRepo,
