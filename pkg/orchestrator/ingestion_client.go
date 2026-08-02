@@ -171,13 +171,17 @@ func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessi
 	if len(artifact.Elements) > 0 && len(parsed.StructuredChunks) == 0 {
 		return ChunkResult{}, fmt.Errorf("structured chunk response is empty")
 	}
-	// Native-parser documents (md/rst/html) have no MinerU payload hash;
-	// fill source_sha256 from the parsed text so validation passes and the
-	// v2 contract keeps source provenance.
+	// Native-parser documents (md/rst/html) have no MinerU payload hash and
+	// no parser version; fill the provenance fields the v2 contract requires
+	// so validation passes and the chunk stays traceable.
 	sourceHash := hashSHA256([]byte(artifact.ParsedText))
-	for index, chunk := range parsed.StructuredChunks {
+	for index := range parsed.StructuredChunks {
+		chunk := &parsed.StructuredChunks[index]
 		if strings.TrimSpace(chunk.SourceSHA256) == "" {
 			chunk.SourceSHA256 = sourceHash
+		}
+		if strings.TrimSpace(chunk.ParserVersion) == "" {
+			chunk.ParserVersion = "native-text-v1"
 		}
 		if err := chunk.Validate(); err != nil {
 			return ChunkResult{}, fmt.Errorf("structured chunk %d is invalid: %w", index, err)
