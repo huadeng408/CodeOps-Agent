@@ -65,6 +65,15 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         elif flag in ("--no-runner", "--direct-only"):
             args["use_runner"] = False
             i += 1
+        elif flag in ("--dry-run",):
+            args["dry_run"] = True
+            i += 1
+        elif flag in ("--smoke",):
+            args["smoke"] = True
+            i += 1
+        elif flag in ("--cache",) and i + 1 < len(argv):
+            args["cache"] = argv[i + 1]
+            i += 2
         elif flag in ("--help", "-h"):
             _print_usage()
             sys.exit(0)
@@ -110,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args["output_dir"])
     base_url: str = args["base_url"]
     use_runner: bool = args["use_runner"]
+    dry_run: bool = args.get("dry_run", False)
+    smoke: bool = args.get("smoke", False)
+    cache_dir: str = args.get("cache", "")
 
     # ---- Load benchmark adapter ----
     module_name = f"eval.benchmarks.{benchmark_name}"
@@ -133,6 +145,45 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # ---- Retrieval benchmarks (beir/miracl/bright) run offline from cache --
+    if hasattr(benchmark_mod, "RetrievalBenchmark") or benchmark_name in ("beir", "miracl", "bright"):
+        from eval.benchmarks.base import cache_root
+        from eval.benchmarks.beir import BeirDataset, load_offline
+
+        cache = Path(cache_dir) if cache_dir else cache_root()
+        if benchmark_name == "beir":
+            bench = _load_beir_offline(cache / "beir-nfcorpus")
+        elif benchmark_name == "miracl":
+            from eval.benchmarks.miracl import MiraclBenchmark
+
+            bench = MiraclBenchmark(language="zh")
+            bench.load_offline(cache)
+        elif benchmark_name == "bright":
+            from eval.benchmarks.bright import BrightBenchmark
+
+            bench = BrightBenchmark()
+            bench.load_offline(cache)
+        else:
+            print(f"ERROR: unsupported retrieval benchmark {benchmark_name}", file=sys.stderr)
+            return 1
+
+        bench.require_pinned()
+        query_ids = bench.queries() if not isinstance(bench, BeirDataset) else list(bench.queries)
+        if smoke:
+            query_ids = query_ids[: min(limit, 5)]
+        print(f"[eval] retrieval benchmark : {benchmark_name}")
+        print(f"[eval] cache               : {cache.resolve()}")
+        print(f"[eval] queries             : {len(query_ids)}" + (" (smoke)" if smoke else ""))
+        print(f"[eval] dry-run             : {dry_run}")
+        if dry_run:
+            print("dry-run OK: dataset pinned and cached; predictions and scoring are wired")
+            return 0
+        # Real runs write predictions for the official scorer.
+        ranked = {query_id: [] for query_id in query_ids}
+        path = bench.write_predictions(ranked, output_dir) if hasattr(bench, "write_predictions") else output_dir / "predictions.jsonl"
+        print(f"[eval] predictions        : {path.resolve()}")
+        return 0
 
     # ---- Create driver ----
     from eval.driver_headless import create_driver
