@@ -174,6 +174,7 @@ def scan(
     chunk_ngrams: list[set[str]] = []
     chunk_sigs: list[list[int]] = []
     chunk_embs: list[list[float]] = []
+    chunk_emb_ids: list[int] = []
     for i, chunk in enumerate(chunks):
         if not normalize(chunk):
             continue
@@ -185,6 +186,7 @@ def scan(
             vec = embedding_fn(chunk)
             if vec:
                 chunk_embs.append(vec)
+                chunk_emb_ids.append(i)
 
     # MinHash LSH：band -> 候选 chunk（按 chunk 在 chunk_sigs 中的位置）
     buckets: dict[tuple[int, ...], list[int]] = {}
@@ -237,7 +239,7 @@ def scan(
                     if s > best_score:
                         best_score, best_ci = s, ci
                 if best_ci >= 0 and best_score >= threshold:
-                    report.high_similarity.append((j, chunk_ids[best_ci], best_score, "embedding"))
+                    report.high_similarity.append((j, chunk_emb_ids[best_ci], best_score, "embedding"))
                     emb_hits += 1
 
     # ---- 层 notes：说明扫描范围或跳过原因 ----

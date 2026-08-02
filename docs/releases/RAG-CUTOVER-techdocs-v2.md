@@ -219,6 +219,8 @@ powershell -ExecutionPolicy Bypass -File scripts/rag/rollback-alias.ps1 `
 | | `-MySqlHost` / `-MySqlPort` / `-MySqlUser` / `-MySqlPassword` / `-MySqlDatabase` / `-MySqlClient` / `-MySqlClientExtraArgs` / `-MySqlCountQuery` | 本机 codeagent 库 / `mysql` / 空 / `SELECT COUNT(*) FROM knowledge_document` | 只读 SELECT 计数，命令可配置 |
 | | `-MinioEndpoint` / `-MinioAlias` / `-MinioBucket` / `-MinioCountCommand` / `-SkipMinio` | `http://127.0.0.1:9000` / `localcode-preflight` / `uploads` / `mc` / 关 | 只读列对象计数 |
 | | `-PhoenixUrl` | `http://127.0.0.1:6006` | 指标/trace，不可达时 SKIP |
+| | `-MinEsChunkCount` | `1` | ES 计数检查的下界（低于此值 preflight FAIL） |
+| | `-HttpTimeoutSeconds` | `10` | 所有 ES/embedding REST 调用的超时（秒） |
 | | `-ContaminationSimilarityThreshold` | `0.85` | 阻塞阈值 |
 | switch-alias.ps1 | `-Alias` / `-Target` / `-Previous` / `-NoPrevious` / `-EsBaseUrl` | — / — / `@("knowledge_base")` / 关 / `http://127.0.0.1:9200` | 单次原子 remove+add；`-NoPrevious` 用于新 alias 演练（只 add） |
 | rollback-alias.ps1 | `-Alias` / `-Target` / `-Current` / `-EsBaseUrl` | — / — / `@("knowledge_base_v2_bge_m3")` / `http://127.0.0.1:9200` | 单次原子 remove+add（逆操作） |

@@ -97,6 +97,29 @@ def test_embedding_layer_skipped_without_fn() -> None:
     assert all(layer != "embedding" for _, _, _, layer in report.high_similarity)
 
 
+def test_embedding_layer_index_alignment_with_empty_vectors() -> None:
+    """Regression: embedding_fn returning empty for one chunk must not shift
+    the chunk index reported in high_similarity (was chunk_embs vs
+    chunk_ids divergence)."""
+
+    def emb(text: str) -> list[float]:
+        if "empty" in text:
+            return []  # empty vector: skipped from embedding layer
+        if "alpha" in text:
+            return [1.0, 0.0]
+        if "gamma" in text:
+            return [0.0, 1.0]
+        return [0.0, 0.0]
+
+    chunks = ["empty chunk", "alpha document", "gamma document"]
+    items = ["gamma query"]
+    report = scan(chunks, items, embedding_fn=emb)
+    # The reported chunk index must be 2 (gamma), not 1 (alpha) — an index
+    # shift from the skipped empty-vector chunk would misreport alpha.
+    embedding_hits = [(j, ci) for j, ci, s, layer in report.high_similarity if layer == "embedding"]
+    assert embedding_hits == [(0, 2)]
+
+
 def test_blocking_verdict_true_when_high_similarity() -> None:
     chunk = "The quick brown fox jumps over the lazy dog."
     item = "the quick brown fox jumps over the lazy dog and"
