@@ -105,6 +105,7 @@ retrieval:
   rerank_topn: 100
   final_topk: 5
   rerank_timeout_ms: 120
+  strict_mode: true
 
 reranker:
   enabled: true

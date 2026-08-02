@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/log"
 	"code-agent/pkg/reranker"
@@ -211,6 +211,11 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 	wg.Wait()
 
 	if mode == model.RetrievalModeVector && len(vectorHits) == 0 && vectorErr != nil {
+		if isVectorDimensionMismatchError(vectorErr) && s.retrievalCfg.StrictMode {
+			// Acceptance mode: dimension mismatch must fail explicitly,
+			// never silently degrade to BM25 (design spec §10).
+			return nil, fmt.Errorf("vector recall failed: %w", vectorErr)
+		}
 		log.Warnf("[SearchService] vector-only mode degraded to bm25 for query=%q: %v", query, vectorErr)
 		bm25Hits, bm25Err = s.bm25Search(ctx, keywordQuery, s.retrievalCfg.BM25TopN, user.ID, orgTags)
 		mode = model.RetrievalModeBM25
@@ -259,6 +264,7 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 		return []model.SearchResponseDTO{}, nil
 	}
 
+	fusedHits = fuseAndExpand(fusedHits, maxInt(returnTopK, s.retrievalCfg.FinalTopK))
 	finalHits := truncateHits(fusedHits, returnTopK)
 	rerankApplied := false
 	rerankTimeout := false
@@ -526,14 +532,24 @@ func (s *searchService) buildResponseDTOs(hits []retrievalHit) ([]model.SearchRe
 			fileName = "unknown"
 		}
 		results = append(results, model.SearchResponseDTO{
-			FileMD5:     hit.Source.FileMD5,
-			FileName:    fileName,
-			ChunkID:     hit.Source.ChunkID,
-			TextContent: hit.Source.TextContent,
-			Score:       hit.Score,
-			UserID:      strconv.FormatUint(uint64(hit.Source.UserID), 10),
-			OrgTag:      hit.Source.OrgTag,
-			IsPublic:    hit.Source.IsPublic,
+			FileMD5:       hit.Source.FileMD5,
+			FileName:      fileName,
+			ChunkID:       hit.Source.ChunkID,
+			TextContent:   hit.Source.TextContent,
+			Score:         hit.Score,
+			UserID:        strconv.FormatUint(uint64(hit.Source.UserID), 10),
+			OrgTag:        hit.Source.OrgTag,
+			IsPublic:      hit.Source.IsPublic,
+			DocumentID:    hit.Source.DocumentID,
+			ParentChunkID: hit.Source.ParentChunkID,
+			SectionPath:   hit.Source.SectionPath,
+			PageID:        hit.Source.PageID,
+			PageSpan:      hit.Source.PageSpan,
+			ElementIDs:    hit.Source.ElementIDs,
+			ElementTypes:  hit.Source.ElementTypes,
+			BBoxRefs:      hit.Source.BBoxRefs,
+			AssetRefs:     hit.Source.AssetRefs,
+			SourceURL:     hit.Source.SourceURL,
 		})
 	}
 
@@ -630,7 +646,34 @@ func buildPermissionFilter(userID uint, orgTags []string) map[string]any {
 
 // buildSourceFields builds source fields.
 func buildSourceFields() []string {
-	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public"}
+	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url"}
+}
+
+// fuseAndExpand keeps evidence diverse by allowing only one hit per page or parent group.
+func fuseAndExpand(hits []retrievalHit, topK int) []retrievalHit {
+	if topK <= 0 {
+		return []retrievalHit{}
+	}
+	out := make([]retrievalHit, 0, minInt(len(hits), topK))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		key := hit.Source.PageID
+		if key == "" {
+			key = hit.Source.ParentChunkID
+		}
+		if key == "" {
+			key = candidateKey(hit.Source, hit.ID)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, hit)
+		if len(out) >= topK {
+			break
+		}
+	}
+	return out
 }
 
 // fuseHitsByMode fuses hits by mode.
