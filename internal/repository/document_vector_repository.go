@@ -14,6 +14,9 @@ type DocumentVectorRepository interface {
 	FindByFileMD5Range(fileMD5 string, offset, limit int) ([]*model.DocumentVector, error)
 	CountByFileMD5(fileMD5 string) (int64, error)
 	DeleteByFileMD5(fileMD5 string) error
+	// FindByParentChunkID returns all children of a parent chunk (evidence
+	// expansion support). ACL enforcement happens in the caller.
+	FindByParentChunkID(parentChunkID string) ([]*model.DocumentVector, error)
 }
 
 // documentVectorRepository implements persistence operations for document vector data.
@@ -24,6 +27,16 @@ type documentVectorRepository struct {
 // NewDocumentVectorRepository creates a document vector repository.
 func NewDocumentVectorRepository(db *gorm.DB) DocumentVectorRepository {
 	return &documentVectorRepository{db: db}
+}
+
+// FindByParentChunkID finds all children of a parent chunk.
+func (r *documentVectorRepository) FindByParentChunkID(parentChunkID string) ([]*model.DocumentVector, error) {
+	if parentChunkID == "" {
+		return []*model.DocumentVector{}, nil
+	}
+	var vectors []*model.DocumentVector
+	err := r.db.Where("parent_chunk_id = ?", parentChunkID).Order("chunk_id asc").Find(&vectors).Error
+	return vectors, err
 }
 
 // BatchCreate handles batch create.

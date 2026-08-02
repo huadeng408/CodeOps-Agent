@@ -60,6 +60,16 @@ func (f *fakeVectorRepo) DeleteByFileMD5(fileMD5 string) error {
 	return nil
 }
 
+func (f *fakeVectorRepo) FindByParentChunkID(parentChunkID string) ([]*model.DocumentVector, error) {
+	var out []*model.DocumentVector
+	for _, v := range f.vectors {
+		if v.ParentChunkID == parentChunkID {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
 // fakeESWriter records writes and failures.
 type fakeESWriter struct {
 	writes    int
