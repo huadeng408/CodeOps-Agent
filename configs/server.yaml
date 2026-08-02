@@ -62,11 +62,18 @@ corpus:
   allow_alias_switch: false
 
 # Embedding model config
+# model_revision must be pinned to an immutable commit before any corpus
+# cutover; floating tags (@main/@latest) are rejected by ValidateEmbeddingContract.
+# Placeholder below — replace with the verified BGE-M3 commit hash.
 embedding:
-  model: "BAAI/bge-small-zh-v1.5"
-  api_key: ""
-  base_url: "http://127.0.0.1:8009"
-  dimensions: 512
+    model: "BAAI/bge-m3"
+    model_revision: "BAAI/bge-m3@8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c"
+    api_key: ""
+    base_url: "http://127.0.0.1:8009"
+    dimensions: 1024
+    expected_dimensions: 1024
+    health_path: "/health"
+    require_native_dimensions: true
 
 # LLM config
 llm:

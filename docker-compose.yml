@@ -160,9 +160,10 @@ services:
     ports:
       - "8009:8009"
     environment:
-      EMBEDDING_MODEL: "BAAI/bge-small-zh-v1.5"
+      EMBEDDING_MODEL: "BAAI/bge-m3"
+      EMBEDDING_REVISION: "BAAI/bge-m3@8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c"
       EMBEDDING_THREADS: "2"
-      EMBEDDING_OUTPUT_DIMENSIONS: "512"
+      EMBEDDING_OUTPUT_DIMENSIONS: "0"
     volumes:
       - codeagent-embedding-cache:/root/.cache
 

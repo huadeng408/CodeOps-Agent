@@ -38,6 +38,7 @@ class EmbeddingResponse(BaseModel):
 
 
 DEFAULT_MODEL = os.getenv("EMBEDDING_MODEL", "jinaai/jina-embeddings-v2-base-zh")
+DEFAULT_REVISION = os.getenv("EMBEDDING_REVISION", "")
 DEFAULT_THREADS = int(os.getenv("EMBEDDING_THREADS", "0"))
 PRELOAD_MODEL = os.getenv("EMBEDDING_PRELOAD", "true").lower() not in {"0", "false", "no"}
 SERIALIZE_REQUESTS = os.getenv("EMBEDDING_SERIALIZE_REQUESTS", "true").lower() not in {"0", "false", "no"}
@@ -147,6 +148,8 @@ def health():
     return {
         "status": "ok" if _ready else "degraded",
         "model": _model_name or DEFAULT_MODEL,
+        "model_revision": DEFAULT_REVISION,
+        "dimensions": OUTPUT_DIMENSIONS or None,
         "ready": _ready,
         "last_error": _last_error,
     }

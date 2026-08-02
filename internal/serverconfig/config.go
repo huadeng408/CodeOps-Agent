@@ -136,10 +136,14 @@ type MinIOConfig struct {
 
 // EmbeddingConfig 存储 Embedding 模型相关的配置。
 type EmbeddingConfig struct {
-	APIKey     string `mapstructure:"api_key"`
-	BaseURL    string `mapstructure:"base_url"`
-	Model      string `mapstructure:"model"`
-	Dimensions int    `mapstructure:"dimensions"`
+	APIKey                  string `mapstructure:"api_key"`
+	BaseURL                 string `mapstructure:"base_url"`
+	Model                   string `mapstructure:"model"`
+	ModelRevision           string `mapstructure:"model_revision"`
+	Dimensions              int    `mapstructure:"dimensions"`
+	ExpectedDimensions      int    `mapstructure:"expected_dimensions"`
+	HealthPath              string `mapstructure:"health_path"`
+	RequireNativeDimensions bool   `mapstructure:"require_native_dimensions"`
 }
 
 // LLMConfig 存储大语言模型相关的配置。

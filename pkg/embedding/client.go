@@ -3,13 +3,13 @@ package embedding
 
 import (
 	"bytes"
+	"code-agent/internal/serverconfig"
+	"code-agent/pkg/log"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"code-agent/internal/serverconfig"
-	"code-agent/pkg/log"
 	"strings"
 	"time"
 )
@@ -95,7 +95,10 @@ func (c *openAICompatibleClient) CreateEmbeddings(ctx context.Context, texts []s
 		return vectors, nil
 	}
 
-	if reqBody.Dimensions > 0 && isDimensionsUnsupported(err) {
+	// When the native-dimension contract is enforced, dropping the
+	// dimensions parameter would silently produce non-native vectors.
+	// Fail closed instead of retrying without dimensions.
+	if reqBody.Dimensions > 0 && !c.cfg.RequireNativeDimensions && isDimensionsUnsupported(err) {
 		log.Warnf("[EmbeddingClient] dimensions=%d unsupported by provider, retrying without dimensions", reqBody.Dimensions)
 		reqBody.Dimensions = 0
 		return c.createEmbeddingsWithRetry(ctx, reqBody)
