@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,13 @@ import (
 	"code-agent/pkg/log"
 	"code-agent/pkg/tasks"
 )
+
+// hashSHA256 returns the hex sha256 of data (source provenance for
+// native-parser documents that have no MinerU payload hash).
+func hashSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 
 // IngestionClient defines the external ingestion worker client.
 type IngestionClient interface {
@@ -162,7 +171,14 @@ func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessi
 	if len(artifact.Elements) > 0 && len(parsed.StructuredChunks) == 0 {
 		return ChunkResult{}, fmt.Errorf("structured chunk response is empty")
 	}
+	// Native-parser documents (md/rst/html) have no MinerU payload hash;
+	// fill source_sha256 from the parsed text so validation passes and the
+	// v2 contract keeps source provenance.
+	sourceHash := hashSHA256([]byte(artifact.ParsedText))
 	for index, chunk := range parsed.StructuredChunks {
+		if strings.TrimSpace(chunk.SourceSHA256) == "" {
+			chunk.SourceSHA256 = sourceHash
+		}
 		if err := chunk.Validate(); err != nil {
 			return ChunkResult{}, fmt.Errorf("structured chunk %d is invalid: %w", index, err)
 		}
