@@ -26,6 +26,7 @@ class StructuredChunk:
     parser_name: str = "mineru"
     parser_version: str = ""
     corpus_generation: str = "techdocs-2026-07-30-v1"
+    target_index: str = ""
     overlap_tokens: int = 0
 
 

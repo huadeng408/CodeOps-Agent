@@ -24,4 +24,8 @@ type FileProcessingTask struct {
 	TotalChunks  int    `json:"total_chunks,omitempty"`
 	ParsedObject string `json:"parsed_object,omitempty"`
 	LastError    string `json:"last_error,omitempty"`
+	// CorpusGeneration marks documents that belong to a pinned corpus; the
+	// pipeline then writes structured chunks to the corpus text index and
+	// enforces the native embedding contract.
+	CorpusGeneration string `json:"corpus_generation,omitempty"`
 }

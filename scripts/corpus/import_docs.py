@@ -85,11 +85,22 @@ def upload_one(server: str, token: str, path: Path, file_name: str, org_tag: str
     resp = requests.post(
         f"{server}/api/v1/upload/merge",
         headers=headers(token),
-        json={"md5": file_md5, "fileName": file_name},
+        json={"fileMd5": file_md5, "fileName": file_name},
         timeout=120,
     )
     resp.raise_for_status()
     print(f"  imported: {file_name} ({len(data)} bytes, {total_chunks} chunk(s))")
+
+
+def manifest_include_paths(source: str) -> list[str]:
+    """Return the include_paths for a source from corpus/sources.yaml."""
+    import yaml
+
+    manifest = yaml.safe_load(open("corpus/sources.yaml", encoding="utf-8"))
+    for entry in manifest.get("sources", []):
+        if entry.get("source_id") == source:
+            return entry.get("include_paths", [])
+    return []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,15 +119,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"source dir not found: {source_dir}", file=sys.stderr)
         return 1
 
+    include_paths = manifest_include_paths(args.source)
     files = []
     for ext in args.ext:
         files.extend(source_dir.rglob(f"*.{ext}"))
+    if include_paths:
+        files = [f for f in files if any(
+            (f.relative_to(source_dir).as_posix().startswith(p.rstrip("/") + "/") or f.relative_to(source_dir).as_posix() == p.rstrip("/"))
+            for p in include_paths
+        )]
     files = sorted(files)
 
-    # Apply manifest include paths (mirror loader rules for the source).
-    from eval.datasets.loader import load_dataset_manifest  # noqa: F401  (not used; keep simple)
-
-    print(f"source {args.source}: {len(files)} candidate files")
+    print(f"source {args.source}: {len(files)} candidate files (include: {include_paths})")
     imported = 0
     for path in files:
         if args.limit and imported >= args.limit:

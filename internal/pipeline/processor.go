@@ -4,6 +4,8 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -525,7 +527,14 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if structuredPath && len(chunkResult.StructuredChunks) == 0 {
 		return errors.New("chunk: structured artifact returned no structured chunks")
 	}
-	for index, chunk := range chunkResult.StructuredChunks {
+	// Native-parser documents (md/rst) have no MinerU payload hash; Go is
+	// the authority for source provenance, so fill source_sha256 from the
+	// parsed artifact bytes when the worker left it empty.
+	for index := range chunkResult.StructuredChunks {
+		chunk := &chunkResult.StructuredChunks[index]
+		if strings.TrimSpace(chunk.SourceSHA256) == "" {
+			chunk.SourceSHA256 = hashSHA256(textBytes)
+		}
 		if err := chunk.Validate(); err != nil {
 			return fmt.Errorf("chunk: structured chunk %d is invalid: %w", index, err)
 		}
@@ -543,6 +552,10 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if len(chunkResult.StructuredChunks) > 0 {
 		dbVectors = make([]*model.DocumentVector, 0, len(chunkResult.StructuredChunks))
 		for i, chunk := range chunkResult.StructuredChunks {
+			if task.CorpusGeneration != "" {
+				chunk.CorpusGeneration = task.CorpusGeneration
+				chunk.TargetIndex = p.corpusCfg.TextIndex
+			}
 			dbVectors = append(dbVectors, documentVectorFromStructuredChunk(task, i, chunk, p.embeddingCfg.Model))
 		}
 	} else {
@@ -654,6 +667,12 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 		OrgTag:           item.OrgTag,
 		IsPublic:         item.IsPublic,
 	}
+}
+
+// hashSHA256 returns the hex sha256 of data.
+func hashSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // indexNameFor resolves the ES index for a document vector. Structured

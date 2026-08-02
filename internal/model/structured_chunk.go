@@ -26,6 +26,7 @@ type StructuredChunk struct {
 	ParserName       string   `json:"parser_name"`
 	ParserVersion    string   `json:"parser_version"`
 	CorpusGeneration string   `json:"corpus_generation"`
+	TargetIndex      string   `json:"target_index,omitempty"`
 	FileMD5          string   `json:"file_md5,omitempty"`
 	UserID           uint     `json:"user_id"`
 	OrgTag           string   `json:"org_tag,omitempty"`

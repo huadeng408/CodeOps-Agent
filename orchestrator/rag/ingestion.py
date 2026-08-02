@@ -118,18 +118,29 @@ class IngestionService:
                 structuredChunks=[item.__dict__ for item in structured],
             )
         cleaned_text = _clean_parsed_text(payload.text, file_name)
-        documents = _split_documents_by_type(cleaned_text, payload.task.file_md5, file_name, file_type)
-        chunks = [doc.page_content for doc in documents if doc.page_content.strip()]
+        # Non-PDF documents also produce structured chunks (native parser
+        # path) so they carry corpus provenance and land in the v2 index.
+        from .elements import Element as _Element
+
+        text_elements = _text_to_elements(cleaned_text, document_id=payload.task.file_md5)
+        structured = chunk_elements(
+            text_elements,
+            child_tokens=payload.chunkSize,
+            overlap_tokens=payload.chunkOverlap,
+            corpus_generation="techdocs-2026-07-30-v1",
+        )
+        chunks = [item.text for item in structured if item.text.strip()]
         log_request(
-            "ingestion_chunk",
+            "ingestion_chunk_text_structured",
             latency_ms=elapsed_ms(start),
             file_md5=payload.task.file_md5,
             file_type=file_type,
-            chunk_size=TOKEN_CHUNK_SIZE,
-            chunk_overlap=TOKEN_CHUNK_OVERLAP,
             chunks=len(chunks),
         )
-        return ChunkResponsePayload(chunks=chunks)
+        return ChunkResponsePayload(
+            chunks=chunks,
+            structuredChunks=[item.__dict__ for item in structured],
+        )
 
     async def embed(self, payload: EmbedRequestPayload) -> EmbedResponsePayload:
         start = time.perf_counter()
@@ -384,6 +395,54 @@ def _warm_splitter_cache() -> None:
     _build_token_splitter(separators=("\n## ", "\n### ", "\n#### ", "\n\n", "\n", "```", " ", ""))
     _build_token_splitter(separators=("\n\n", "\n", "?", "?", "?", " ", ""))
     _build_token_splitter(separators=("\n\n", "\n", " | ", " ", ""))
+
+
+def _text_to_elements(text: str, *, document_id: str) -> list[Element]:
+    """Convert plain text (Markdown/reST) into structured Elements.
+
+    Heading lines become heading elements; everything else becomes text
+    elements. This lets non-PDF documents flow through the same structured
+    chunking path (with corpus provenance) instead of legacy flat splitting.
+    """
+    from .elements import Element
+
+    elements: list[Element] = []
+    heading_path: list[str] = []
+    order = 0
+
+    def add(etype: str, content: str, level: int = 0) -> None:
+        nonlocal order
+        if not content.strip():
+            return
+        if etype == "heading":
+            heading_path[:] = heading_path[: level - 1] + [content.strip()]
+        elements.append(
+            Element(
+                document_id=document_id,
+                element_id=f"{document_id}:p0:e{order}",
+                reading_order=order,
+                type=etype,  # type: ignore[arg-type]
+                heading_path=list(heading_path),
+                page_index=0,
+                text=content.strip(),
+                parser_name="native",
+            )
+        )
+        order += 1
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") and not stripped.startswith("```"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            add("heading", stripped.lstrip("# "), level)
+        elif stripped.startswith("```"):
+            # Keep code fences inside the following text block.
+            continue
+        else:
+            add("text", stripped)
+    return elements
 
 
 def _base_metadata(file_md5: str, file_name: str) -> dict[str, str]:

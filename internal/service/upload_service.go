@@ -299,6 +299,14 @@ func (s *uploadService) GetSupportedFileTypes() (map[string]interface{}, error) 
 		".pptx": "PPT",
 		".txt":  "TEXT",
 		".md":   "MARKDOWN",
+		// Corpus formats (official technical docs): HTML, reST, AsciiDoc,
+		// SGML and XML are routed through Tika/native parsers.
+		".html": "HTML",
+		".htm":  "HTML",
+		".rst":  "REST",
+		".adoc": "ASCIIDOC",
+		".sgml": "SGML",
+		".xml":  "XML",
 	}
 	supportedExtensions := make([]string, 0, len(typeMapping))
 	supportedTypes := make([]string, 0, len(typeMapping))
@@ -483,6 +491,14 @@ func getFileType(fileName string) string {
 		".pptx": "PPT",
 		".txt":  "TEXT",
 		".md":   "MARKDOWN",
+		// Corpus formats (official technical docs): HTML, reST, AsciiDoc,
+		// SGML and XML are routed through Tika/native parsers.
+		".html": "HTML",
+		".htm":  "HTML",
+		".rst":  "REST",
+		".adoc": "ASCIIDOC",
+		".sgml": "SGML",
+		".xml":  "XML",
 	}
 	if typ, ok := typeMapping[ext]; ok {
 		return typ

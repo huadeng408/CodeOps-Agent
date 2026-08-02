@@ -128,11 +128,11 @@ memory:
 
 ai:
   orchestrator:
-    # Disabled by default: the LangGraph Python service is not yet transplanted.
-    # Set enabled: true and point base_url at a running orchestrator to enable
-    # chat/memory/ingestion endpoints. KB CRUD/search/upload work without it.
-    enabled: false
-    ingestion_enabled: false
+    # Python orchestrator service (orchestrator/rag/main.py on :8090) drives
+    # parse/chunk/embed/index for the corpus pipeline. Go remains the
+    # authority for file_md5/user_id/org_tag/is_public and ES writes.
+    enabled: true
+    ingestion_enabled: true
     base_url: "http://127.0.0.1:8090"
     timeout_ms: 120000
     ingestion_timeout_ms: 600000
