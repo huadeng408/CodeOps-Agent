@@ -1,0 +1,89 @@
+# Corpus source manifest (design spec 2026-07-30-rag-technical-corpus-design.md §3).
+#
+# IMPORTANT: source_commit values below are PLACEHOLDERS — they must be replaced
+# with the verified immutable commit of each upstream repository before any
+# download/import. license_sha256 must match the actual license file at that
+# commit; a mismatch blocks import.
+#
+# 首批来源仅使用许可证清楚的官方技术仓库。不导入随机网页、Stack Overflow、
+# benchmark query/qrels/answers。
+schema_version: "1"
+generation: "techdocs-2026-07-30-v1"
+sources:
+  - source_id: "go"
+    repository_url: "https://github.com/golang/go"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["doc/"]
+    exclude_paths: ["doc/contribute*", "doc/articles", "doc/gopher", "doc/tos.html"]
+    license_spdx: "BSD-3-Clause"
+    license_path: "LICENSE"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["md", "html"]
+    expected_documents: 50
+    loader_user: 1
+    language: "en"
+
+  - source_id: "python"
+    repository_url: "https://github.com/python/cpython"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["Doc/"]
+    exclude_paths: ["Doc/includes", "Doc/tools", "Doc/howto/*.txt"]
+    license_spdx: "PSF-2.0"
+    license_path: "LICENSE"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["rst"]
+    expected_documents: 100
+    loader_user: 1
+    language: "en"
+
+  - source_id: "git"
+    repository_url: "https://github.com/git/git"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["Documentation/"]
+    exclude_paths: ["Documentation/technical", "Documentation/howto/*.txt"]
+    license_spdx: "GPL-2.0-only"
+    license_path: "COPYING"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["adoc", "txt"]
+    expected_documents: 60
+    loader_user: 1
+    language: "en"
+
+  - source_id: "docker"
+    repository_url: "https://github.com/docker/docs"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["content/"]
+    exclude_paths: ["content/reference", "content/contribute"]
+    license_spdx: "Apache-2.0"
+    license_path: "LICENSE"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["md"]
+    expected_documents: 80
+    loader_user: 1
+    language: "en"
+
+  - source_id: "kubernetes"
+    repository_url: "https://github.com/kubernetes/website"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["content/en/docs/"]
+    exclude_paths: ["content/en/docs/reference", "content/en/docs/contribute", "content/en/blog"]
+    license_spdx: "CC-BY-4.0"
+    license_path: "LICENSE"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["md"]
+    expected_documents: 150
+    loader_user: 1
+    language: "en"
+
+  - source_id: "postgresql"
+    repository_url: "https://github.com/postgres/postgres"
+    source_commit: "0000000000000000000000000000000000000000"
+    include_paths: ["doc/src/sgml/"]
+    exclude_paths: ["doc/src/sgml/ref"]
+    license_spdx: "PostgreSQL"
+    license_path: "COPYRIGHT"
+    license_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    allowed_formats: ["sgml", "xml"]
+    expected_documents: 40
+    loader_user: 1
+    language: "en"

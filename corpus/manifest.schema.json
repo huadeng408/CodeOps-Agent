@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CorpusSourceManifest",
+  "description": "Pinned corpus source manifest. Every production source must carry verifiable provenance: official URL, immutable commit, license evidence and expected counts. Floating branches, missing license files or hash mismatches block import.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation", "sources"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1" },
+    "generation": { "type": "string", "minLength": 1 },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/source" }
+    }
+  },
+  "definitions": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "repository_url",
+        "source_commit",
+        "include_paths",
+        "exclude_paths",
+        "license_spdx",
+        "license_path",
+        "license_sha256",
+        "allowed_formats",
+        "expected_documents",
+        "loader_user",
+        "language"
+      ],
+      "properties": {
+        "source_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "repository_url": { "type": "string", "format": "uri" },
+        "source_commit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Immutable 40-char commit; format is enforced by the policy layer so the validator can report the exact reason (floating branches like main/latest are rejected)."
+        },
+        "include_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(?!.*\\.\\.)(?!/)(?!.*:)[^\\\\]*$",
+            "description": "Repo-relative path; no .. segments, no absolute paths, no drive letters."
+          }
+        },
+        "exclude_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!.*\\.\\.)(?!/)(?!.*:)[^\\\\]*$"
+          }
+        },
+        "license_spdx": { "type": "string", "minLength": 1 },
+        "license_path": { "type": "string", "minLength": 1 },
+        "license_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "description": "64-char hex digest; format enforced by the policy layer."
+        },
+        "allowed_formats": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["md", "rst", "adoc", "html", "txt", "sgml", "xml"] }
+        },
+        "expected_documents": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Lower bound on documents expected from this source after filtering."
+        },
+        "loader_user": { "type": "integer", "minimum": 1 },
+        "language": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
