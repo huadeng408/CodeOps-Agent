@@ -24,7 +24,7 @@ func TestChunkSendsArtifactElementsAndDecodesStructuredChunks(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		_, _ = w.Write([]byte(`{"code":200,"data":{"chunks":["legacy"],"structuredChunks":[{"document_id":"doc-1","chunk_id":"chunk-1","text":"body","embedding_text":"body context","page_id":"doc-1:p1","element_ids":["e1"],"element_types":["text"],"token_count":1,"parser_name":"mineru","parser_version":"3.4.4","corpus_generation":"techdocs-2026-07-30-v1"}]},"message":"success"}`))
+		_, _ = w.Write([]byte(`{"code":200,"data":{"chunks":["legacy"],"structuredChunks":[{"document_id":"doc-1","source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","chunk_id":"chunk-1","text":"body","embedding_text":"body context","page_id":"doc-1:p1","element_ids":["e1"],"element_types":["text"],"token_count":1,"parser_name":"mineru","parser_version":"3.4.4","corpus_generation":"techdocs-2026-07-30-v1"}]},"message":"success"}`))
 	}))
 	defer server.Close()
 
@@ -60,6 +60,7 @@ func TestChunkRejectsStructuredChunkMissingRequiredProvenance(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				chunk := map[string]any{
 					"document_id":       "doc-1",
+					"source_sha256":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 					"chunk_id":          "chunk-1",
 					"text":              "body",
 					"page_id":           "doc-1:p1",

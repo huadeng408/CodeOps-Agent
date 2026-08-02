@@ -49,8 +49,11 @@ func (e *Executor) readPDF(
 		pages = "all"
 	}
 	mode := "ocr"
-	if _, configured := args["ocr"]; configured && !boolArg(args, "ocr") {
-		mode = "auto"
+	// The harness contract requires explicit OCR for every PDF. An
+	// ocr=false request must not downgrade MinerU to auto mode; the flag is
+	// accepted but ignored so the parser boundary stays enforceable.
+	if _, configured := args["ocr"]; configured {
+		delete(args, "ocr")
 	}
 	backend := strings.TrimSpace(os.Getenv("CODE_AGENT_MINERU_BACKEND"))
 	if backend == "" {
