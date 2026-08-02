@@ -24,7 +24,6 @@ import (
 
 // ESClient stores the shared Elasticsearch client instance.
 var ESClient *elasticsearch.Client
-var ESBaseURL = "http://127.0.0.1:9200"
 
 // InitES initializes the shared Elasticsearch client and ensures the main document index exists.
 func InitES(esCfg serverconfig.ElasticsearchConfig, vectorDims int) error {
@@ -43,7 +42,6 @@ func InitES(esCfg serverconfig.ElasticsearchConfig, vectorDims int) error {
 		return err
 	}
 	ESClient = client
-	ESBaseURL = strings.TrimRight(esCfg.Addresses, "/")
 	return createIndexIfNotExists(esCfg.IndexName, vectorDims)
 }
 
