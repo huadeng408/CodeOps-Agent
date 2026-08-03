@@ -1,0 +1,180 @@
+{"query_id": "go-q001", "query": "What is an interface type in Go, and what does it mean for a type to satisfy an interface?"}
+{"query_id": "go-q002", "query": "Go 里怎么启动一个 goroutine，go 语句的语义是什么？"}
+{"query_id": "go-q003", "query": "How do you declare type parameters in Go and what kinds of constraints can be placed on them?"}
+{"query_id": "go-q004", "query": "Go 的内建函数里，make 和 append 分别有什么用途？"}
+{"query_id": "go-q005", "query": "How does panic propagate through the call stack and how can recover stop it?"}
+{"query_id": "go-q006", "query": "Go 的 channel 类型有哪几种方向，收发操作分别是怎么阻塞的？"}
+{"query_id": "go-q007", "query": "In Go assembly, how do you define initialized data and global symbols?"}
+{"query_id": "go-q008", "query": "在 amd64 的 Go 汇编里访问 g 和 m 指针时，用 MOVQ 还是 MOVL，为什么？"}
+{"query_id": "go-q009", "query": "Which special instructions such as NOP and UNDEF are available in Go assembly?"}
+{"query_id": "go-q010", "query": "Go 汇编里的 SB、FP、PC 这几个伪寄存器各代表什么含义？"}
+{"query_id": "go-q011", "query": "How can Go assembly code reference Go constants and interact with Go types?"}
+{"query_id": "go-q012", "query": "amd64 汇编里 BP 寄存器是调用者保存还是被调用者保存？"}
+{"query_id": "go-q013", "query": "What does happens before mean in the Go memory model?"}
+{"query_id": "go-q014", "query": "Go 里 mutex、channel 这类同步机制是怎么建立 happens-before 关系的？"}
+{"query_id": "go-q015", "query": "What restrictions does the Go memory model place on programs that contain data races?"}
+{"query_id": "go-q016", "query": "多个 goroutine 同时读写共享数据，官方文档建议怎么序列化访问？"}
+{"query_id": "go-q017", "query": "Do atomic operations participate in the happens-before ordering of the Go memory model?"}
+{"query_id": "go-q018", "query": "goroutine 执行结束后，它对内存的写操作在什么条件下一定对其他 goroutine 可见？"}
+{"query_id": "go-q019", "query": "What is the syntax for setting GODEBUG environment variables to toggle Go runtime behaviors?"}
+{"query_id": "go-q020", "query": "GODEBUG 里每个开关的默认值会随 Go 大版本变化吗，默认值在哪里登记？"}
+{"query_id": "go-q021", "query": "Where is the history of GODEBUG settings introduced and removed in each Go release documented?"}
+{"query_id": "go-q022", "query": "Go 为什么用 GODEBUG 这种开关机制维持向后兼容，而不是直接删除旧行为？"}
+{"query_id": "go-q023", "query": "A library's behavior changed after a Go upgrade; how can GODEBUG settings temporarily restore the previous behavior?"}
+{"query_id": "go-q024", "query": "GODEBUG 里 panicnil 这个开关控制的是哪类行为？"}
+{"query_id": "go-q025", "query": "Which command merges the Go release-note fragments under doc/next into a single file?"}
+{"query_id": "go-q026", "query": "Go 仓库里为新增 API 起草的发布说明文件应该放在哪个目录、按什么规则命名？"}
+{"query_id": "go-q027", "query": "go vet 新增的 scannererr 分析器是用来检查什么问题的？"}
+{"query_id": "go-q028", "query": "Why is the ResolveFile function in go/parser deprecated and what should new code use instead?"}
+{"query_id": "go-q030", "query": "Go 的 reflect 包怎么用，能动态修改变量的值吗？"}
+{"query_id": "go-q031", "query": "How do I install the Go toolchain with a package manager?"}
+{"query_id": "py-q001", "query": "What data structures does Python provide for sequences, and which one is best to use as a stack or a queue?"}
+{"query_id": "py-q002", "query": "Python 里的对象、值和类型三者是什么关系？"}
+{"query_id": "py-q003", "query": "How do class variables and instance variables differ in Python, and how does attribute lookup work?"}
+{"query_id": "py-q004", "query": "为什么在循环里定义的 lambda 最后都返回同一个值？"}
+{"query_id": "py-q005", "query": "What is the difference between mutable and immutable built-in types in Python?"}
+{"query_id": "py-q006", "query": "Python 多重继承时方法解析顺序（MRO）是怎么确定的？"}
+{"query_id": "py-q007", "query": "How do you pass arguments to a Python script, and where can the script access them?"}
+{"query_id": "py-q008", "query": "python 命令的 -m 和 -c 选项分别有什么作用？"}
+{"query_id": "py-q009", "query": "What command creates a new virtual environment, and how do you install packages into it with pip?"}
+{"query_id": "py-q011", "query": "How can I run a Python program on Windows?"}
+{"query_id": "py-q013", "query": "怎么配置 Python logging 的日志级别和输出格式？"}
+{"query_id": "py-q014", "query": "What is the dictionary schema used by logging.config to describe a logging setup?"}
+{"query_id": "py-q015", "query": "Python 的 UTF-8 模式是什么，怎么开启？"}
+{"query_id": "py-q017", "query": "Python 源文件的默认编码是什么，怎么在文件里声明其他编码？"}
+{"query_id": "py-q018", "query": "What happens when a Python program raises an exception, and how do try and except handle it?"}
+{"query_id": "py-q019", "query": "为什么 Python 会报 UnboundLocalError，明明变量在函数外面定义过？"}
+{"query_id": "py-q020", "query": "程序里遇到 UnicodeEncodeError 或 UnicodeDecodeError 是为什么，怎么处理编码问题？"}
+{"query_id": "py-q021", "query": "Is there a source-code level debugger with breakpoints and single-stepping for Python?"}
+{"query_id": "py-q022", "query": "When fetching a URL with urllib, how do you handle HTTP errors and connection failures?"}
+{"query_id": "py-q023", "query": "Python 在 Windows 上启动特别慢是为什么，有什么解决办法？"}
+{"query_id": "py-q024", "query": "What does the built-in enumerate function do and how is it used with a for loop?"}
+{"query_id": "py-q025", "query": "怎么用 re 模块写正则表达式来匹配和替换字符串？"}
+{"query_id": "py-q026", "query": "How do you serialize Python objects to JSON and parse JSON back?"}
+{"query_id": "py-q027", "query": "pathlib 的 Path 对象有哪些常用方法用来读写文件和遍历目录？"}
+{"query_id": "py-q028", "query": "How do you create and await tasks with asyncio, and how do you cancel a task safely?"}
+{"query_id": "py-q029", "query": "怎么用 dataclasses 定义数据类，让字段带默认值或默认工厂？"}
+{"query_id": "py-q030", "query": "怎么用 argparse 给脚本添加带不同类型的命令行参数？"}
+{"query_id": "py-q031", "query": "How do I capture and inspect the HTTP traffic between my client and a server?"}
+{"query_id": "py-q032", "query": "How do I package my project as a wheel and publish it to PyPI with pip?"}
+{"query_id": "py-q033", "query": "怎么用 multiprocessing 在多个进程之间共享大量数据？"}
+{"query_id": "git-q001", "query": "What is the staging area (the index) in Git, and what role does it play in making a commit?"}
+{"query_id": "git-q002", "query": "Git 里怎么用 SHA-1、分支名、tag 或相对记号来指定一个提交？"}
+{"query_id": "git-q003", "query": "What are the merge strategies in Git, and when is each one chosen automatically?"}
+{"query_id": "git-q004", "query": "Git 的子模块是什么，为什么要用它来管理嵌套仓库？"}
+{"query_id": "git-q005", "query": "What is a gitignore file and how do its pattern rules match paths?"}
+{"query_id": "git-q006", "query": "git 的 reflog 记录的是什么，为什么说它能救命？"}
+{"query_id": "git-q007", "query": "How do you stage file contents with git add, including only part of a file?"}
+{"query_id": "git-q008", "query": "git commit 有哪些常用选项，比如修改最近一次提交信息？"}
+{"query_id": "git-q009", "query": "How do you inspect commit history with git log and filter commits by author or by file?"}
+{"query_id": "git-q010", "query": "怎么用 git branch 创建、重命名和删除分支？"}
+{"query_id": "git-q011", "query": "How do you switch between branches or create a new branch with git checkout?"}
+{"query_id": "git-q014", "query": "Where does Git store its configuration, and what do user.name and user.email control?"}
+{"query_id": "git-q015", "query": "怎么给 Git 配置命令别名（alias）来简化常用操作？"}
+{"query_id": "git-q016", "query": "What core configuration options control file mode handling and line ending behavior?"}
+{"query_id": "git-q017", "query": ".gitmodules 文件里记录了子模块的哪些配置项？"}
+{"query_id": "git-q018", "query": "How do you use .gitattributes to keep line endings consistent across platforms?"}
+{"query_id": "git-q019", "query": "怎么给 Git 配置钩子脚本，让它在提交等事件发生时自动执行？"}
+{"query_id": "git-q020", "query": "I committed changes to the wrong branch; how do I unstage or reset them?"}
+{"query_id": "git-q021", "query": "怎么通过 reflog 找回被删掉或丢失的提交？"}
+{"query_id": "git-q022", "query": "A blob object in my repository is corrupted; how do I recover it?"}
+{"query_id": "git-q023", "query": "git merge 遇到冲突时会怎样，怎么查看冲突文件？"}
+{"query_id": "git-q025", "query": "怎么把已经推送到公共分支的改动安全地回退？"}
+{"query_id": "git-q026", "query": "How do pattern rules in a .gitattributes file match paths, and what attributes can they set?"}
+{"query_id": "git-q027", "query": "git log 的自定义输出格式怎么写，比如只显示作者和提交时间？"}
+{"query_id": "git-q028", "query": "How do you query the attributes that apply to a path with git check-attr?"}
+{"query_id": "git-q029", "query": "怎么用 git format-patch 生成补丁文件发给别人？"}
+{"query_id": "git-q030", "query": "怎么用 git ls-files 查看当前索引（暂存区）里的文件列表？"}
+{"query_id": "git-q031", "query": "How do I configure Git to sign commits with GPG and verify those signatures?"}
+{"query_id": "git-q032", "query": "怎么在 Git 和 SVN 仓库之间来回同步代码？"}
+{"query_id": "git-q033", "query": "What is the difference between rebase and merge in terms of rewriting history?"}
+{"query_id": "dk-q001", "query": "What is a container, and how does it differ from a virtual machine?"}
+{"query_id": "dk-q002", "query": "Docker 镜像和容器是什么关系，镜像是怎么构成的？"}
+{"query_id": "dk-q003", "query": "What is a container registry and what role does it play in image distribution?"}
+{"query_id": "dk-q004", "query": "Docker 镜像的分层结构是怎么回事，为什么说每层都是只读的？"}
+{"query_id": "dk-q005", "query": "How do Compose services, networks, and volumes fit together in the application model?"}
+{"query_id": "dk-q006", "query": "Swarm 模式里的服务（service）和任务（task）是什么关系？"}
+{"query_id": "dk-q007", "query": "How do you filter docker command output, for example listing only running containers?"}
+{"query_id": "dk-q008", "query": "docker 命令的输出怎么用 --format 自定义成需要的字段？"}
+{"query_id": "dk-q009", "query": "How do you read the Docker daemon logs to see what happened on the host?"}
+{"query_id": "dk-q010", "query": "怎么查看运行中容器的 CPU、内存等资源占用指标？"}
+{"query_id": "dk-q012", "query": "How do you configure the Docker daemon to use a proxy?"}
+{"query_id": "dk-q013", "query": "Compose 里环境变量的优先级是怎么定的？"}
+{"query_id": "dk-q014", "query": "How do you configure the daemon's logging driver and its options?"}
+{"query_id": "dk-q015", "query": "Compose 里的 secrets 怎么定义和使用？"}
+{"query_id": "dk-q016", "query": "How does Docker Compose control the startup and shutdown order of services?"}
+{"query_id": "dk-q018", "query": "How do you set environment variables inside a container when running it?"}
+{"query_id": "dk-q019", "query": "The Docker daemon won't start or behaves erratically; what should I check?"}
+{"query_id": "dk-q020", "query": "Docker Desktop 出问题的时候，官方推荐的排查步骤有哪些？"}
+{"query_id": "dk-q021", "query": "What pitfalls should you watch for when running Docker in rootless mode?"}
+{"query_id": "dk-q022", "query": "Docker 官方镜像的漏洞扫描或策略检查出问题，怎么排查？"}
+{"query_id": "dk-q023", "query": "Why does my build ignore the cache and rebuild everything?"}
+{"query_id": "dk-q024", "query": "构建镜像时缓存总是失效、每次都全量构建，怎么优化缓存利用率？"}
+{"query_id": "dk-q025", "query": "What options does the JSON File logging driver support?"}
+{"query_id": "dk-q026", "query": "Syslog 日志驱动支持哪些配置项？"}
+{"query_id": "dk-q028", "query": "怎么用 BuildKit 的构建密钥（build secrets）避免把密码写进镜像？"}
+{"query_id": "dk-q029", "query": "Bake 里怎么用变量来参数化构建定义？"}
+{"query_id": "dk-q030", "query": "Compose SDK 怎么用编程方式管理 Compose 项目？"}
+{"query_id": "dk-q031", "query": "My Docker Desktop is running out of disk space; how do I clean up old images and containers?"}
+{"query_id": "dk-q032", "query": "Docker Swarm 的节点之间是怎么做加密通信（PKI）的？"}
+{"query_id": "dk-q033", "query": "How do I set up an IPv6 network for my containers?"}
+{"query_id": "kb-q001", "query": "What are the main components of a Kubernetes cluster and what does each one do?"}
+{"query_id": "kb-q002", "query": "Kubernetes 的节点（Node）是什么，节点上有哪些组件？"}
+{"query_id": "kb-q003", "query": "What is the lifecycle of a pod in Kubernetes, from creation to termination?"}
+{"query_id": "kb-q004", "query": "Kubernetes 的 Service 是干什么的，有哪几种类型？"}
+{"query_id": "kb-q005", "query": "How do labels and selectors work together to organize Kubernetes objects?"}
+{"query_id": "kb-q006", "query": "Deployment 控制器是怎么保证 Pod 达到期望副本数的？"}
+{"query_id": "kb-q007", "query": "What are controllers in Kubernetes and how do they maintain desired state?"}
+{"query_id": "kb-q009", "query": "怎么在 Linux 上安装并配置 kubectl？"}
+{"query_id": "kb-q010", "query": "How do you scale a Deployment with kubectl, and what does it change?"}
+{"query_id": "kb-q011", "query": "怎么用 kubectl 把节点安全地排空（drain）以进行维护？"}
+{"query_id": "kb-q012", "query": "怎么检查节点的健康状态和条件（condition）？"}
+{"query_id": "kb-q013", "query": "How do you set kubelet parameters using a configuration file?"}
+{"query_id": "kb-q014", "query": "怎么用 ConfigMap 把配置注入到 Pod 里？"}
+{"query_id": "kb-q015", "query": "How do you configure resource requests and limits for containers?"}
+{"query_id": "kb-q016", "query": "怎么给 Pod 配置存活、就绪和启动探针？"}
+{"query_id": "kb-q017", "query": "How do you manage Secrets using a configuration file?"}
+{"query_id": "kb-q018", "query": "StorageClass 是干什么的，动态供给是怎么工作的？"}
+{"query_id": "kb-q019", "query": "My pod is failing; how do I determine the reason for the failure?"}
+{"query_id": "kb-q020", "query": "kubectl 命令行为异常，怎么排查？"}
+{"query_id": "kb-q021", "query": "DNS 解析在集群里失败，怎么定位问题？"}
+{"query_id": "kb-q022", "query": "怎么进入运行中的 Pod 容器里调试，查看日志和进程？"}
+{"query_id": "kb-q023", "query": "kubeadm 初始化集群失败，常见的错误怎么解决？"}
+{"query_id": "kb-q026", "query": "容器生命周期钩子 postStart 和 preStop 怎么用？"}
+{"query_id": "kb-q027", "query": "What are Custom Resources and how do they extend the Kubernetes API?"}
+{"query_id": "kb-q028", "query": "怎么用 CustomResourceDefinition 定义自己的 API 资源？"}
+{"query_id": "kb-q029", "query": "How do you assign a Pod to a specific node using nodeSelector?"}
+{"query_id": "kb-q030", "query": "Taints 和 Tolerations 是怎么配合来决定 Pod 调度到哪些节点的？"}
+{"query_id": "kb-q031", "query": "How does the horizontal pod autoscaler decide to scale a workload?"}
+{"query_id": "kb-q032", "query": "怎么配置集群的审计日志输出？"}
+{"query_id": "kb-q033", "query": "A Secret was deleted by accident; how do I restore it from a backup?"}
+{"query_id": "pg-q001", "query": "What data types does PostgreSQL provide for numeric, character, and date/time values?"}
+{"query_id": "pg-q002", "query": "PostgreSQL 的事务隔离级别有哪几种，各自有什么特点？"}
+{"query_id": "pg-q003", "query": "How do you define tables, their columns, and default values in PostgreSQL?"}
+{"query_id": "pg-q004", "query": "PostgreSQL 的 MVCC 是怎么实现并发控制的？"}
+{"query_id": "pg-q005", "query": "What are tsvector and tsquery, and how does full text search work?"}
+{"query_id": "pg-q006", "query": "PostgreSQL 支持哪些索引类型，各自的适用场景是什么？"}
+{"query_id": "pg-q007", "query": "How do you create a database cluster and start the PostgreSQL server?"}
+{"query_id": "pg-q008", "query": "什么时候需要执行 VACUUM，它主要解决什么问题？"}
+{"query_id": "pg-q010", "query": "怎么备份 PostgreSQL 数据库，SQL 转储和文件系统备份有什么区别？"}
+{"query_id": "pg-q011", "query": "How do you insert rows into a table and return the modified data?"}
+{"query_id": "pg-q012", "query": "How do you configure client authentication with pg_hba.conf?"}
+{"query_id": "pg-q013", "query": "PostgreSQL 的服务器配置参数有哪些设置方式？"}
+{"query_id": "pg-q015", "query": "怎么配置 PostgreSQL 的日志记录和错误报告？"}
+{"query_id": "pg-q016", "query": "How do you set up logical replication between PostgreSQL servers with publications?"}
+{"query_id": "pg-q017", "query": "怎么开启连续归档并配置时间点恢复（PITR）？"}
+{"query_id": "pg-q018", "query": "A query is stuck waiting for a lock; how do you see which locks are held?"}
+{"query_id": "pg-q020", "query": "What should I check when the PostgreSQL server fails to start?"}
+{"query_id": "pg-q021", "query": "主备切换后应用在备库上执行写操作失败，常见原因是什么？"}
+{"query_id": "pg-q022", "query": "How do I find out which queries are currently running on the server?"}
+{"query_id": "pg-q023", "query": "表膨胀（bloat）导致性能下降，通常怎么处理？"}
+{"query_id": "pg-q024", "query": "How do you write a PL/pgSQL function with parameters and control structures?"}
+{"query_id": "pg-q025", "query": "PostgreSQL 的 JSON 和 JSONB 类型有什么区别？"}
+{"query_id": "pg-q026", "query": "What string functions and operators does PostgreSQL provide for text processing?"}
+{"query_id": "pg-q027", "query": "怎么用 libpq 建立数据库连接并执行查询？"}
+{"query_id": "pg-q028", "query": "怎么在 PL/pgSQL 里写触发器函数？"}
+{"query_id": "pg-q029", "query": "PostgreSQL 的数组类型有哪些常用函数？"}
+{"query_id": "pg-q030", "query": "How does PostgreSQL decide how to convert types in expressions and comparisons?"}
+{"query_id": "pg-q031", "query": "How do I use the Bloom filter index type for large text columns?"}
+{"query_id": "pg-q032", "query": "怎么用 pg_restore 恢复自定义格式的备份文件？"}
+{"query_id": "pg-q033", "query": "How do I set up the pg_stat_statements extension for query monitoring?"}
