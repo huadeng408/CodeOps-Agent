@@ -102,6 +102,20 @@ func main() {
 	}
 	kafka.InitProducer(cfg.Kafka)
 
+	// Embedding preflight is non-fatal: a failed check degrades retrieval but
+	// must not block startup (same semantics as ES being unavailable). The
+	// result is exposed via /healthz for ops/automation to judge.
+	embeddingPreflightStatus := func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := embedding.Preflight(ctx, cfg.Embedding); err != nil {
+			log.Warnf("embedding preflight degraded (non-blocking): %v", err)
+			return "degraded: embedding preflight failed"
+		}
+		log.Info("embedding preflight passed")
+		return "ok"
+	}()
+
 	userRepository := repository.NewUserRepository(database.DB)
 	orgTagRepo := repository.NewOrgTagRepository(database.DB)
 	uploadRepo := repository.NewUploadRepository(database.DB, database.RDB)
@@ -169,9 +183,7 @@ func main() {
 		c.Next()
 	})
 	r.Use(middleware.RequestLogger(), gin.Recovery())
-	r.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	r.GET("/healthz", healthzHandler(func() string { return embeddingPreflightStatus }))
 
 	apiV1 := r.Group("/api/v1")
 	{
@@ -299,6 +311,15 @@ func main() {
 		log.Fatalf("failed to shutdown server: %v", err)
 	}
 	log.Info("server stopped")
+}
+
+// healthzHandler serves the liveness endpoint, reporting the embedding
+// preflight status (from statusFn) alongside the base ok status so
+// ops/automation can judge whether retrieval is fully healthy.
+func healthzHandler(statusFn func() string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "embedding_preflight": statusFn()})
+	}
 }
 
 // initSeedFiles imports local seed files through the normal upload pipeline on startup.
