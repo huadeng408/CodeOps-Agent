@@ -43,10 +43,9 @@ param(
     [int]$ExpectedVectorDims = 1024,
     [int]$MinEsChunkCount = 1,
     [string]$EmbeddingServiceUrl = "http://127.0.0.1:8009",
-    # Pinned immutable BGE-M3 revision. The value in configs/server.yaml is
-    # still a placeholder: replace it with the verified commit before any
-    # cutover, otherwise this check fails by design.
-    [string]$ExpectedModelRevision = "BAAI/bge-m3@8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c",
+    # Pinned immutable BGE-M3 revision (verified against local weights,
+    # 2026-08-03: HF commit 5617a9f6, 5 config files SHA-256 MATCH).
+    [string]$ExpectedModelRevision = "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
     [string]$MySqlHost = "127.0.0.1",
     [int]$MySqlPort = 3306,
     [string]$MySqlUser = "codeagent",
