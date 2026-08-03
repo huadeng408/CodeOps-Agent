@@ -232,13 +232,16 @@ func (h *AdminHandler) ReplayPipelineTask(c *gin.Context) {
 	var req struct {
 		FileMD5 string `json:"fileMd5" binding:"required"`
 		Stage   string `json:"stage"`
+		// RunID optionally scopes the replay to a controlled run so the consumer
+		// bypasses stale prior SUCCESS. Empty lets the server generate one.
+		RunID string `json:"runId"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "无效请求参数", "data": nil})
 		return
 	}
 
-	if err := h.adminService.ReplayPipelineTask(req.FileMD5, tasks.Stage(req.Stage)); err != nil {
+	if err := h.adminService.ReplayPipelineTask(req.FileMD5, tasks.Stage(req.Stage), req.RunID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": err.Error(), "data": nil})
 		return
 	}

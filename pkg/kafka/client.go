@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"code-agent/internal/model"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/repository"
 	"code-agent/pkg/log"
@@ -302,8 +303,20 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 		if task.TaskChunkID > 0 {
 			chunkID = task.TaskChunkID
 		}
-		previous, getErr := tracker.GetByKey(task.FileMD5, string(task.Stage), chunkID)
-		if getErr == nil && previous.Status == "SUCCESS" {
+		// Run-aware dedup: a message carrying a RunID belongs to a controlled
+		// replay and must NOT be skipped by a stale SUCCESS from a prior run.
+		// Dedup within the same run is handled by MarkProcessingRun's upsert.
+		// Legacy messages (no RunID) keep their original key and SUCCESS-skip
+		// semantics, so existing pipeline_task rows behave exactly as before.
+		hasRunID := strings.TrimSpace(task.RunID) != ""
+		var previous *model.PipelineTask
+		var getErr error
+		if hasRunID {
+			previous, getErr = tracker.GetByRunKey(task.RunID, task.FileMD5, string(task.Stage), chunkID)
+		} else {
+			previous, getErr = tracker.GetByKey(task.FileMD5, string(task.Stage), chunkID)
+		}
+		if getErr == nil && shouldSkipByStatus(previous, hasRunID) {
 			_ = r.CommitMessages(context.Background(), m)
 			continue
 		}
@@ -313,14 +326,28 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 			continue
 		}
 
-		if _, err := tracker.MarkProcessing(task.FileMD5, string(task.Stage), chunkID); err != nil {
-			log.Errorf("标记任务处理中失败, stage=%s file=%s err=%v", stage, task.FileMD5, err)
-			time.Sleep(time.Second)
-			continue
+		if hasRunID {
+			if _, err := tracker.MarkProcessingRun(task.RunID, task.FileMD5, string(task.Stage), chunkID); err != nil {
+				log.Errorf("标记任务处理中失败, stage=%s file=%s run=%s err=%v", stage, task.FileMD5, task.RunID, err)
+				time.Sleep(time.Second)
+				continue
+			}
+		} else {
+			if _, err := tracker.MarkProcessing(task.FileMD5, string(task.Stage), chunkID); err != nil {
+				log.Errorf("标记任务处理中失败, stage=%s file=%s err=%v", stage, task.FileMD5, err)
+				time.Sleep(time.Second)
+				continue
+			}
 		}
 
 		if err := processor.Process(context.Background(), task); err != nil {
-			retryCount, markErr := tracker.MarkRetry(task.FileMD5, string(task.Stage), chunkID, err.Error())
+			var retryCount int
+			var markErr error
+			if hasRunID {
+				retryCount, markErr = tracker.MarkRetryRun(task.RunID, task.FileMD5, string(task.Stage), chunkID, err.Error())
+			} else {
+				retryCount, markErr = tracker.MarkRetry(task.FileMD5, string(task.Stage), chunkID, err.Error())
+			}
 			if markErr != nil {
 				log.Errorf("标记任务重试失败, stage=%s file=%s err=%v", stage, task.FileMD5, markErr)
 			}
@@ -334,7 +361,11 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 				}
 			} else {
 				task.LastError = err.Error()
-				_ = tracker.MarkFailed(task.FileMD5, string(task.Stage), chunkID, err.Error())
+				if hasRunID {
+					_ = tracker.MarkFailedRun(task.RunID, task.FileMD5, string(task.Stage), chunkID, err.Error())
+				} else {
+					_ = tracker.MarkFailed(task.FileMD5, string(task.Stage), chunkID, err.Error())
+				}
 				if dlqErr := ProduceTaskToDLQ(task); dlqErr != nil {
 					log.Errorf("写入 DLQ 失败, stage=%s file=%s err=%v", stage, task.FileMD5, dlqErr)
 				} else {
@@ -345,13 +376,40 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 			continue
 		}
 
-		if err := tracker.MarkSuccess(task.FileMD5, string(task.Stage), chunkID); err != nil {
-			log.Errorf("标记任务成功失败, stage=%s file=%s err=%v", stage, task.FileMD5, err)
+		if hasRunID {
+			if err := tracker.MarkSuccessRun(task.RunID, task.FileMD5, string(task.Stage), chunkID); err != nil {
+				log.Errorf("标记任务成功失败, stage=%s file=%s run=%s err=%v", stage, task.FileMD5, task.RunID, err)
+			}
+		} else {
+			if err := tracker.MarkSuccess(task.FileMD5, string(task.Stage), chunkID); err != nil {
+				log.Errorf("标记任务成功失败, stage=%s file=%s err=%v", stage, task.FileMD5, err)
+			}
 		}
 		if err := r.CommitMessages(context.Background(), m); err != nil {
 			log.Errorf("提交 Kafka offset 失败, stage=%s offset=%d err=%v", stage, m.Offset, err)
 		}
 	}
+}
+
+// shouldSkipByStatus decides whether a fetched Kafka message should be skipped
+// because the prior pipeline_task row for its dedup key is already SUCCESS.
+//
+// Legacy semantics (hasRunID==false): skip iff a prior SUCCESS row exists —
+// identical to the pre-run-aware behavior, so the 44 existing legacy rows and
+// ordinary uploads are unaffected.
+//
+// Run semantics (hasRunID==true): NEVER skip on a prior SUCCESS. A controlled
+// replay (distinct RunID) must always execute end-to-end; intra-run duplicate
+// messages are deduped by MarkProcessingRun's idempotent upsert, not by the
+// SUCCESS check here. A nil previous (no row yet) never skips.
+func shouldSkipByStatus(previous *model.PipelineTask, hasRunID bool) bool {
+	if previous == nil {
+		return false
+	}
+	if hasRunID {
+		return false
+	}
+	return previous.Status == model.PipelineStatusSuccess
 }
 
 // parseKafkaBrokers handles parse kafka brokers.

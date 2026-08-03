@@ -4,19 +4,25 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
+	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
+	"code-agent/pkg/objectpath"
+	"code-agent/pkg/storage"
 
 	"github.com/gin-gonic/gin"
+	"github.com/minio/minio-go/v7"
 )
 
 const (
@@ -24,28 +30,66 @@ const (
 	knowledgeIngestMultipartOverhead   = int64(64 * 1024)
 )
 
-// KnowledgeIngestService is the upload capability needed by internal ingestion.
-type KnowledgeIngestService interface {
-	UploadChunk(ctx context.Context, fileMD5, fileName string, totalSize int64, chunkIndex int, file multipart.File, chunkMD5 string, userID uint, orgTag string, isPublic bool) ([]int, int, error)
-	MergeChunks(ctx context.Context, fileMD5, fileName string, userID uint) (string, error)
-}
-
-// KnowledgeIngestHandler accepts complete documents from trusted internal clients.
+// KnowledgeIngestHandler accepts complete documents from trusted internal
+// clients and routes them through the dedicated corpus entry. Unlike the
+// public /api/v1/upload/* path, this entry writes the merged object directly
+// (via storage.MinioClient) and hands the presigned URL plus the full corpus
+// provenance to CorpusIngestService, which is the authority for the corpus
+// contract and lifecycle persistence. The handler never calls the legacy
+// UploadService.MergeChunks, because that path enqueues a parse task without
+// CorpusGeneration and would double-write into the legacy index.
 type KnowledgeIngestHandler struct {
-	service      KnowledgeIngestService
-	maxFileBytes int64
+	corpusService service.CorpusIngestService
+	minioCfg      serverconfig.MinIOConfig
+	maxFileBytes  int64
+	// putMerged and presign are the storage seam: production wiring uses the
+	// package-level MinIO client, tests inject a recording fake. Keeping them
+	// as function-typed fields avoids mutating package globals and lets each
+	// test run hermetically.
+	putMerged func(ctx context.Context, bucket, objectName string, reader io.Reader, size int64) error
+	presign   func(bucket, objectName string) (string, error)
 }
 
-// NewKnowledgeIngestHandler creates an internal knowledge ingestion handler.
-func NewKnowledgeIngestHandler(uploadService KnowledgeIngestService) *KnowledgeIngestHandler {
-	return newKnowledgeIngestHandler(uploadService, defaultKnowledgeIngestMaxFileBytes)
+// NewKnowledgeIngestHandler creates an internal knowledge ingestion handler
+// backed by the dedicated corpus service. The MinIO config supplies the bucket
+// name used for the merged-object write and presigned URL.
+func NewKnowledgeIngestHandler(corpusService service.CorpusIngestService, minioCfg serverconfig.MinIOConfig) *KnowledgeIngestHandler {
+	return newKnowledgeIngestHandler(corpusService, minioCfg, defaultKnowledgeIngestMaxFileBytes)
 }
 
-func newKnowledgeIngestHandler(uploadService KnowledgeIngestService, maxFileBytes int64) *KnowledgeIngestHandler {
-	return &KnowledgeIngestHandler{service: uploadService, maxFileBytes: maxFileBytes}
+func newKnowledgeIngestHandler(corpusService service.CorpusIngestService, minioCfg serverconfig.MinIOConfig, maxFileBytes int64) *KnowledgeIngestHandler {
+	h := &KnowledgeIngestHandler{
+		corpusService: corpusService,
+		minioCfg:      minioCfg,
+		maxFileBytes:  maxFileBytes,
+	}
+	h.putMerged = h.defaultPutMerged
+	h.presign = h.defaultPresign
+	return h
 }
 
-// Ingest uploads a complete document in bounded chunks and queues its processing pipeline.
+// defaultPutMerged writes the full file to the canonical merged-object path via
+// the package-level MinIO client. It is only used in production wiring; tests
+// override the putMerged field.
+func (h *KnowledgeIngestHandler) defaultPutMerged(ctx context.Context, bucket, objectName string, reader io.Reader, size int64) error {
+	if _, err := storage.MinioClient.PutObject(ctx, bucket, objectName, reader, size, minio.PutObjectOptions{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// defaultPresign returns a one-hour presigned GET URL for the merged object.
+func (h *KnowledgeIngestHandler) defaultPresign(bucket, objectName string) (string, error) {
+	return storage.GetPresignedURL(bucket, objectName, time.Hour)
+}
+
+// Ingest reads a complete document plus its corpus provenance from a trusted
+// internal multipart form, writes the merged object, and enqueues the corpus
+// parse task through CorpusIngestService. Validation of generation / target
+// index / loader user lives in the service; the handler is responsible for
+// field presence, the anti-forgery raw-bytes sha256 check, storage, and status
+// code mapping (400 = bad request / validation, 500 = storage or enqueue
+// failure). Error bodies are fixed sanitized strings and never echo err.Error().
 func (h *KnowledgeIngestHandler) Ingest(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxFileBytes+knowledgeIngestMultipartOverhead)
 	if err := c.Request.ParseMultipartForm(service.DefaultChunkSize); err != nil {
@@ -67,12 +111,30 @@ func (h *KnowledgeIngestHandler) Ingest(c *gin.Context) {
 		return
 	}
 
+	orgTag := strings.TrimSpace(c.Request.PostForm.Get("orgTag"))
 	isPublic := false
 	switch c.Request.PostForm.Get("isPublic") {
 	case "", "false":
 	case "true":
 		isPublic = true
 	default:
+		knowledgeIngestBadRequest(c)
+		return
+	}
+
+	// Provenance presence/format is checked here so any missing routing field
+	// fails fast with a 400 and zero service calls. Generation / target index /
+	// loader user equality is the service's authority (it owns the config).
+	provenance := model.CorpusProvenance{
+		SourceID:         strings.TrimSpace(c.Request.PostForm.Get("sourceId")),
+		SourcePath:       strings.TrimSpace(c.Request.PostForm.Get("sourcePath")),
+		SourceURL:        strings.TrimSpace(c.Request.PostForm.Get("sourceUrl")),
+		SourceCommit:     strings.TrimSpace(c.Request.PostForm.Get("sourceCommit")),
+		SourceSHA256:     strings.TrimSpace(c.Request.PostForm.Get("sourceSha256")),
+		TargetIndex:      strings.TrimSpace(c.Request.PostForm.Get("targetIndex")),
+		CorpusGeneration: strings.TrimSpace(c.Request.PostForm.Get("corpusGeneration")),
+	}
+	if err := provenance.Validate(); err != nil {
 		knowledgeIngestBadRequest(c)
 		return
 	}
@@ -94,8 +156,14 @@ func (h *KnowledgeIngestHandler) Ingest(c *gin.Context) {
 		return
 	}
 
-	fullHash := md5.New()
-	totalSize, err := io.Copy(fullHash, io.LimitReader(file, h.maxFileBytes+1))
+	// Stream the upload once, accumulating md5 + sha256 and buffering the bytes
+	// so the merged object can be written afterward. The LimitReader + size
+	// check bounds memory to maxFileBytes and rejects oversized uploads.
+	md5Hash := md5.New()
+	sha256Hash := sha256.New()
+	buffer := &bytes.Buffer{}
+	multi := io.MultiWriter(md5Hash, sha256Hash, buffer)
+	totalSize, err := io.Copy(multi, io.LimitReader(file, h.maxFileBytes+1))
 	if err != nil {
 		knowledgeIngestInternalError(c)
 		return
@@ -108,59 +176,69 @@ func (h *KnowledgeIngestHandler) Ingest(c *gin.Context) {
 		knowledgeIngestBadRequest(c)
 		return
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+
+	fileMD5 := hex.EncodeToString(md5Hash.Sum(nil))
+	contentSHA256 := hex.EncodeToString(sha256Hash.Sum(nil))
+
+	// Anti-forgery guard: the declared source hash must equal the hash of the
+	// raw bytes we actually received. Without this a trusted caller could pin a
+	// benign hash and route unrelated content into the corpus index. Checked
+	// before any storage write or service call.
+	if contentSHA256 != provenance.SourceSHA256 {
+		knowledgeIngestBadRequest(c)
+		return
+	}
+
+	objectName := objectpath.MergedObjectName(fileMD5, fileName)
+	if err := h.putMerged(c.Request.Context(), h.minioCfg.BucketName, objectName, bytes.NewReader(buffer.Bytes()), totalSize); err != nil {
 		knowledgeIngestInternalError(c)
 		return
 	}
 
-	fileMD5 := hex.EncodeToString(fullHash.Sum(nil))
-	buffer := make([]byte, service.DefaultChunkSize)
-	for chunkIndex := 0; ; chunkIndex++ {
-		read, readErr := io.ReadFull(file, buffer)
-		if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
-			knowledgeIngestInternalError(c)
-			return
-		}
-		if read == 0 {
-			break
-		}
-
-		chunk := buffer[:read]
-		chunkHash := md5.Sum(chunk)
-		chunkFile := &knowledgeIngestChunkFile{Reader: bytes.NewReader(chunk)}
-		if _, _, err := h.service.UploadChunk(
-			c.Request.Context(),
-			fileMD5,
-			fileName,
-			totalSize,
-			chunkIndex,
-			chunkFile,
-			hex.EncodeToString(chunkHash[:]),
-			uint(userIDValue),
-			c.Request.PostForm.Get("orgTag"),
-			isPublic,
-		); err != nil {
-			knowledgeIngestInternalError(c)
-			return
-		}
-		if readErr == io.ErrUnexpectedEOF {
-			break
-		}
-	}
-
-	objectURL, err := h.service.MergeChunks(c.Request.Context(), fileMD5, fileName, uint(userIDValue))
+	objectURL, err := h.presign(h.minioCfg.BucketName, objectName)
 	if err != nil {
 		knowledgeIngestInternalError(c)
 		return
 	}
 
+	req := service.CorpusIngestRequest{
+		UserID:        uint(userIDValue),
+		OrgTag:        orgTag,
+		IsPublic:      isPublic,
+		FileMD5:       fileMD5,
+		FileName:      fileName,
+		TotalSize:     totalSize,
+		ObjectURL:     objectURL,
+		ContentSHA256: contentSHA256,
+		Provenance:    provenance,
+		// runId scopes the enqueued parse task to a controlled run so the
+		// consumer's run-aware dedup bypasses any stale historical SUCCESS for
+		// this file_md5 and re-runs parse/chunk/embed/index. Optional on the
+		// wire: absent -> empty -> legacy dedup semantics (backward compatible).
+		RunID: strings.TrimSpace(c.Request.PostForm.Get("runId")),
+	}
+	result, err := h.corpusService.Ingest(c.Request.Context(), req)
+	if err != nil {
+		if errors.Is(err, service.ErrCorpusValidation) {
+			knowledgeIngestBadRequest(c)
+			return
+		}
+		knowledgeIngestInternalError(c)
+		return
+	}
+
+	documentID := ""
+	if result != nil {
+		documentID = result.DocumentID
+	}
 	c.JSON(http.StatusAccepted, gin.H{
 		"code":    http.StatusAccepted,
 		"message": "ingestion queued",
 		"data": gin.H{
-			"fileMd5":   fileMD5,
-			"fileName":  fileName,
-			"objectUrl": objectURL,
+			"fileMd5":    fileMD5,
+			"fileName":   fileName,
+			"objectUrl":  objectURL,
+			"documentId": documentID,
 		},
 	})
 }
@@ -189,24 +267,4 @@ func safeKnowledgeIngestFileName(value string) (string, bool) {
 		return "", false
 	}
 	return fileName, true
-}
-
-type knowledgeIngestChunkFile struct {
-	Reader *bytes.Reader
-}
-
-func (f *knowledgeIngestChunkFile) Read(p []byte) (int, error) {
-	return f.Reader.Read(p)
-}
-
-func (f *knowledgeIngestChunkFile) ReadAt(p []byte, off int64) (int, error) {
-	return f.Reader.ReadAt(p, off)
-}
-
-func (f *knowledgeIngestChunkFile) Seek(offset int64, whence int) (int64, error) {
-	return f.Reader.Seek(offset, whence)
-}
-
-func (f *knowledgeIngestChunkFile) Close() error {
-	return nil
 }

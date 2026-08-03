@@ -1,14 +1,32 @@
-"""Corpus import via the RAG server upload pipeline (real ingestion).
+"""Corpus importer — dedicated client for the internal corpus entry.
 
-One-shot script used during corpus bring-up: uploads each document through
-the standard check -> chunk -> merge flow, which triggers the Kafka pipeline
-(parse -> chunk -> embed -> index) exactly like a user upload. Idempotent:
-files already merged (FastUpload true) are skipped.
+This is the trusted client for the official technical corpus pipeline. Unlike
+the public ``/api/v1/upload/*`` path, it talks only to the internal corpus
+entrypoints protected by ``X-Internal-Token``:
+
+    POST /internal/orchestrator/knowledge-ingest
+         (multipart: file + userId + orgTag + isPublic + six provenance fields)
+    GET  /internal/orchestrator/knowledge-documents?generation=&status=
+
+Per document it:
+  1. checks whether the document is already ACTIVE (legitimate skip — duplicate
+     imports are detected from the ACTIVE polling result, never from fast-upload);
+  2. uploads the raw bytes with full corpus provenance (the server recomputes
+     md5/sha256 over the stream and rejects a forged source hash);
+  3. polls the read-only status endpoint until the document is ACTIVE or FAILED
+     (or the polling budget is exhausted -> treated as failed).
+
+Exit codes: 0 = all ACTIVE or legitimate skip; 1 = any document failed (or a
+``--file`` pointed at a path the manifest excludes); 2 = parameter / manifest /
+preflight error (missing token file, missing staging dir, unparseable manifest,
+unknown source, incomplete policy). The internal token is read only from
+``--token-file`` and is never written to stdout, logs, or the JSON report.
 
 Usage:
-    python scripts/corpus/import_docs.py \
-        --server http://127.0.0.1:8081 --token-file /tmp/corpus-token.txt \
-        --staging /tmp/corpus-pins --source go [--limit 5]
+    python scripts/corpus/import_docs.py \\
+        --server http://127.0.0.1:8081 --token-file "$TEMP/corpus-token.txt" \\
+        --staging "$TEMP/corpus-pins" --source go [--limit 20] [--file doc/asm.html] \\
+        [--report results/corpus/go.json]
 """
 
 from __future__ import annotations
@@ -16,133 +34,523 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import re
 import sys
+import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
+import yaml
 
 CHUNK_SIZE = 5 * 1024 * 1024
+DEFAULT_TARGET_INDEX = "knowledge_base_v2_bge_m3"
+DEFAULT_POLL_TIMEOUT_SECONDS = 300
+DEFAULT_POLL_INTERVAL_SECONDS = 3
+
+
+# --------------------------------------------------------------------------- #
+# Hash + URL helpers
+# --------------------------------------------------------------------------- #
 
 
 def md5_of(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
-def fast_upload(server: str, token: str, file_md5: str) -> bool:
-    resp = requests.post(
-        f"{server}/api/v1/upload/fast-upload",
-        headers=headers(token),
-        json={"md5": file_md5},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return bool(resp.json().get("data"))
+def knowledge_ingest_url(server: str) -> str:
+    return f"{server.rstrip('/')}/internal/orchestrator/knowledge-ingest"
 
 
-def upload_one(server: str, token: str, path: Path, file_name: str, org_tag: str = "", is_public: bool = True) -> None:
-    data = path.read_bytes()
-    file_md5 = md5_of(data)
+def knowledge_documents_url(server: str, generation: str, status: str) -> str:
+    query = urlencode({"generation": generation, "status": status})
+    return f"{server.rstrip('/')}/internal/orchestrator/knowledge-documents?{query}"
 
-    if fast_upload(server, token, file_md5):
-        print(f"  skip (already imported): {file_name}")
-        return
 
-    # check
-    resp = requests.post(
-        f"{server}/api/v1/upload/check",
-        headers=headers(token),
-        json={"md5": file_md5, "fileName": file_name},
-        timeout=30,
-    )
-    resp.raise_for_status()
+def source_url(repository_url: str, commit: str, rel_path: str) -> str:
+    """GitHub-style blob URL: <repository_url>/blob/<commit>/<path>."""
+    return f"{repository_url.rstrip('/')}/blob/{commit}/{rel_path}"
 
-    total_chunks = max(1, (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE)
-    for idx in range(total_chunks):
-        chunk = data[idx * CHUNK_SIZE : (idx + 1) * CHUNK_SIZE]
-        files = {"file": (f"{file_md5}-{idx}", chunk, "application/octet-stream")}
-        form = {
-            "fileMd5": file_md5,
-            "fileName": file_name,
-            "totalSize": str(len(data)),
-            "chunkIndex": str(idx),
-            "chunkMd5": md5_of(chunk),
-            "orgTag": org_tag,
-            "isPublic": "true" if is_public else "false",
-        }
-        resp = requests.post(
-            f"{server}/api/v1/upload/chunk",
-            headers=headers(token),
-            files=files,
-            data=form,
-            timeout=120,
+
+def document_id(source_id: str, commit: str, source_path: str) -> str:
+    """Mirror model.DocumentID: {source_id}@{commit}:{source_path}."""
+    return f"{source_id}@{commit}:{source_path}"
+
+
+# --------------------------------------------------------------------------- #
+# Manifest + path policy (aligned with internal/corpus/manifest.go)
+# --------------------------------------------------------------------------- #
+
+
+def load_manifest(manifest_path: Path) -> dict:
+    """Parse the corpus manifest YAML into a dict.
+
+    Raises OSError on read failure and ValueError on parse/shape failure so
+    ``main`` can map both to the preflight exit code (2).
+    """
+    text = manifest_path.read_text(encoding="utf-8")
+    try:
+        manifest = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"manifest parse error in {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(f"manifest {manifest_path} must be a YAML mapping")
+    return manifest
+
+
+def resolve_source(manifest: dict, source: str) -> dict:
+    for entry in manifest.get("sources", []):
+        if entry.get("source_id") == source:
+            return entry
+    raise ValueError(f"unknown corpus source: {source}")
+
+
+def _glob_to_regex(pattern: str) -> str:
+    """Translate a glob to a regex where '*' and '?' do not cross '/'.
+
+    This matches Go's ``filepath.Match`` semantics so manifest globs behave the
+    same on the importer side as they do on the server side.
+    """
+    parts: list[str] = []
+    for ch in pattern:
+        if ch == "*":
+            parts.append("[^/]*")
+        elif ch == "?":
+            parts.append("[^/]")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
+
+def path_matches(pattern: str, relative_path: str) -> bool:
+    """Match a manifest glob against a slash-separated path.
+
+    Mirrors ``internal/corpus/manifest.go pathMatches``: a trailing ``/`` (or
+    ``/**``) matches the whole subtree; a plain directory pattern matches the
+    directory and its subtree; ``*`` is a segment-local wildcard.
+    """
+    pattern = pattern.replace("\\", "/").strip()
+    if not pattern:
+        return False
+    if pattern.endswith("/"):
+        pattern += "**"
+    if pattern == relative_path:
+        return True
+    if pattern.endswith("/**"):
+        prefix = pattern[:-3]
+        return relative_path == prefix or relative_path.startswith(f"{prefix}/")
+    if "*" not in pattern and relative_path.startswith(f"{pattern}/"):
+        return True
+    if "*" in pattern and re.fullmatch(_glob_to_regex(pattern), relative_path):
+        return True
+    return False
+
+
+def _policy_includes(relative_path: str, includes: list[str], excludes: list[str]) -> bool:
+    """Apply manifest include/exclude rules; exclude wins, traversal rejected."""
+    cleaned = relative_path.replace("\\", "/")
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    # Reject absolute paths and traversal segments defensively.
+    if cleaned.startswith("/") or "../" in cleaned or "..\\" in cleaned:
+        return False
+    for pattern in excludes:
+        if path_matches(pattern, cleaned):
+            return False
+    for pattern in includes:
+        if path_matches(pattern, cleaned):
+            return True
+    return False
+
+
+def select_files(spec: dict, source_dir: Path) -> list[Path]:
+    """Return the deterministic set of files selected by a source policy."""
+    includes = [str(p) for p in (spec.get("include_paths") or [])]
+    excludes = [str(p) for p in (spec.get("exclude_paths") or [])]
+    allowed_formats = {str(ext).lower().lstrip(".") for ext in (spec.get("allowed_formats") or [])}
+    if not includes or not allowed_formats:
+        raise ValueError(
+            f"source {spec.get('source_id', '?')} has incomplete document policy "
+            "(include_paths and allowed_formats are both required)"
         )
-        resp.raise_for_status()
 
+    selected: list[Path] = []
+    for path in sorted(source_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(source_dir).as_posix()
+        extension = path.suffix.lower().lstrip(".")
+        if extension not in allowed_formats:
+            continue
+        if not _policy_includes(relative_path, includes, excludes):
+            continue
+        selected.append(path)
+    return selected
+
+
+def manifest_document_paths(source: str, source_dir: Path, manifest_path: Path) -> list[Path]:
+    """Public selector: load manifest, resolve source, apply policy."""
+    manifest = load_manifest(manifest_path)
+    spec = resolve_source(manifest, source)
+    return select_files(spec, source_dir)
+
+
+# --------------------------------------------------------------------------- #
+# Server interaction
+# --------------------------------------------------------------------------- #
+
+
+def list_documents(server: str, token: str, generation: str, status: str) -> list[dict]:
+    """GET the read-only document status list (one status at a time)."""
+    resp = requests.get(
+        knowledge_documents_url(server, generation, status),
+        headers={"X-Internal-Token": token},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json() or {}
+    docs = payload.get("documents")
+    return docs if isinstance(docs, list) else []
+
+
+def is_document_active(server: str, token: str, generation: str, doc_id: str) -> bool:
+    return any(d.get("documentId") == doc_id for d in list_documents(server, token, generation, "ACTIVE"))
+
+
+def upload_one(
+    server: str,
+    token: str,
+    *,
+    path: Path,
+    source_id: str,
+    source_path: str,
+    source_commit: str,
+    repository_url: str,
+    corpus_generation: str,
+    target_index: str,
+    loader_user: int,
+    run_id: str,
+    org_tag: str = "corpus",
+) -> str:
+    """Upload one document through the dedicated corpus entry; return documentId.
+
+    Computes md5 + sha256 over the raw staging bytes, posts the multipart form
+    with the full provenance chain, and parses the 202 response for documentId.
+    Never calls ``/api/v1/upload/fast-upload`` — corpus duplicates are detected
+    via the ACTIVE status poll, not the legacy fast-upload probe.
+
+    ``run_id`` pins this upload to a controlled run (import-<unix>); it lands in
+    the form's ``runId`` so the server enqueues a run-scoped parse task and the
+    consumer's run-aware dedup bypasses any stale historical SUCCESS for this
+    file_md5, forcing parse/chunk/embed/index to re-execute.
+    """
+    data = path.read_bytes()
+    content_sha256 = sha256_of(data)
+
+    form = {
+        "userId": str(loader_user),
+        "orgTag": org_tag,
+        "isPublic": "true",
+        "sourceId": source_id,
+        "sourcePath": source_path,
+        "sourceUrl": source_url(repository_url, source_commit, source_path),
+        "sourceCommit": source_commit,
+        "sourceSha256": content_sha256,
+        "targetIndex": target_index,
+        "corpusGeneration": corpus_generation,
+        "runId": run_id,
+    }
+    files = {"file": (source_path, data, "application/octet-stream")}
     resp = requests.post(
-        f"{server}/api/v1/upload/merge",
-        headers=headers(token),
-        json={"fileMd5": file_md5, "fileName": file_name},
+        knowledge_ingest_url(server),
+        headers={"X-Internal-Token": token},
+        files=files,
+        data=form,
         timeout=120,
     )
     resp.raise_for_status()
-    print(f"  imported: {file_name} ({len(data)} bytes, {total_chunks} chunk(s))")
+    payload = resp.json() or {}
+    data_field = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data_field, dict) and data_field.get("documentId"):
+        return str(data_field["documentId"])
+    return document_id(source_id, source_commit, source_path)
 
 
-def manifest_include_paths(source: str) -> list[str]:
-    """Return the include_paths for a source from corpus/sources.yaml."""
-    import yaml
+def poll_document(
+    server: str,
+    token: str,
+    generation: str,
+    doc_id: str,
+    *,
+    timeout_seconds: int,
+    interval_seconds: int,
+) -> tuple[str, str]:
+    """Poll until the document is ACTIVE, SKIPPED, or FAILED (or budget exhausted).
 
-    manifest = yaml.safe_load(open("corpus/sources.yaml", encoding="utf-8"))
-    for entry in manifest.get("sources", []):
-        if entry.get("source_id") == source:
-            return entry.get("include_paths", [])
-    return []
+    Returns (status, failure) where status is ``active`` / ``skipped`` /
+    ``failed``. A SKIPPED document (empty content after parse) is a graceful
+    skip — not indexed, not a failure — so it returns ``("skipped", "")`` and
+    counts as success. A timeout is reported as ``failed`` with a sanitized
+    message (no internal details). Statuses are queried one at a time in the
+    order ACTIVE, then SKIPPED, then FAILED.
+    """
+    attempts = 1
+    if timeout_seconds > 0 and interval_seconds > 0:
+        attempts = max(1, int(math.ceil(timeout_seconds / interval_seconds)))
+    for _ in range(attempts):
+        for doc in list_documents(server, token, generation, "ACTIVE"):
+            if doc.get("documentId") == doc_id:
+                return ("active", "")
+        for doc in list_documents(server, token, generation, "SKIPPED"):
+            if doc.get("documentId") == doc_id:
+                return ("skipped", "")
+        for doc in list_documents(server, token, generation, "FAILED"):
+            if doc.get("documentId") == doc_id:
+                last_error = str(doc.get("lastError") or "").strip()
+                return ("failed", last_error or "document reported FAILED")
+        time.sleep(interval_seconds)
+    return ("failed", f"polling timed out after {attempts} attempt(s)")
+
+
+def process_one(
+    server: str,
+    token: str,
+    *,
+    path: Path,
+    source_dir: Path,
+    source_id: str,
+    source_commit: str,
+    repository_url: str,
+    generation: str,
+    target_index: str,
+    loader_user: int,
+    run_id: str,
+    poll_timeout: int,
+    poll_interval: int,
+) -> dict:
+    """Run the full per-document lifecycle; return a report file record."""
+    rel = path.relative_to(source_dir).as_posix()
+    data = path.read_bytes()
+    file_md5 = md5_of(data)
+    content_sha256 = sha256_of(data)
+    base_record = {
+        "path": rel,
+        "sha256": content_sha256,
+        "md5": file_md5,
+        "status": "failed",
+        "failure": "",
+        "documentId": document_id(source_id, source_commit, rel),
+    }
+
+    if is_document_active(server, token, generation, base_record["documentId"]):
+        base_record["status"] = "skipped"
+        return base_record
+
+    try:
+        doc_id = upload_one(
+            server,
+            token,
+            path=path,
+            source_id=source_id,
+            source_path=rel,
+            source_commit=source_commit,
+            repository_url=repository_url,
+            corpus_generation=generation,
+            target_index=target_index,
+            loader_user=loader_user,
+            run_id=run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a sanitized per-file failure
+        base_record["failure"] = str(exc) or "upload failed"
+        return base_record
+    base_record["documentId"] = doc_id
+
+    status, failure = poll_document(
+        server,
+        token,
+        generation,
+        doc_id,
+        timeout_seconds=poll_timeout,
+        interval_seconds=poll_interval,
+    )
+    base_record["status"] = status
+    base_record["failure"] = failure
+    return base_record
+
+
+# --------------------------------------------------------------------------- #
+# Report
+# --------------------------------------------------------------------------- #
+
+
+def build_report(
+    *,
+    run_id: str,
+    source: str,
+    generation: str,
+    commit: str,
+    selected: int,
+    records: list[dict],
+    attempted: int,
+    duration_sec: float,
+) -> dict:
+    active = sum(1 for r in records if r["status"] == "active")
+    skipped = sum(1 for r in records if r["status"] == "skipped")
+    failed = sum(1 for r in records if r["status"] == "failed")
+    queued = active + failed
+    return {
+        "runId": run_id,
+        "source": source,
+        "generation": generation,
+        "commit": commit,
+        "selected": selected,
+        "attempted": attempted,
+        "queued": queued,
+        "active": active,
+        "skipped": skipped,
+        "failed": failed,
+        "durationSec": round(duration_sec, 3),
+        "files": records,
+    }
+
+
+def write_report(path: Path, report: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Import official corpus via the dedicated internal entry.")
+    parser.add_argument("--server", default="http://127.0.0.1:8081")
+    parser.add_argument("--token-file", required=True, type=Path, help="path to a file containing the X-Internal-Token value")
+    parser.add_argument("--manifest", type=Path, default=Path("corpus/sources.yaml"))
+    parser.add_argument("--staging", required=True, type=Path, help="root staging dir; source checkout at <staging>/<source>")
+    parser.add_argument("--source", required=True, help="manifest source_id to import")
+    parser.add_argument("--limit", type=int, default=0, help="cap on attempted documents (0 = all)")
+    parser.add_argument("--file", dest="selected_file", default="", help="restrict to one manifest-relative source path")
+    parser.add_argument("--target-index", default=DEFAULT_TARGET_INDEX)
+    parser.add_argument("--loader-user", type=int, default=None, help="override manifest loader_user")
+    parser.add_argument("--report", type=Path, default=None, help="write a sanitized JSON report to this path")
+    parser.add_argument("--poll-timeout-seconds", type=int, default=DEFAULT_POLL_TIMEOUT_SECONDS)
+    parser.add_argument("--poll-interval-seconds", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS)
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--server", default="http://127.0.0.1:8081")
-    parser.add_argument("--token-file", required=True)
-    parser.add_argument("--staging", required=True)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--limit", type=int, default=0, help="0 = all")
-    parser.add_argument("--ext", nargs="*", default=["md", "rst", "html", "txt", "sgml", "xml", "adoc"])
-    args = parser.parse_args(argv)
+    args = parse_args(argv)
+    started = time.monotonic()
+    run_id = f"import-{int(time.time())}"
 
-    token = Path(args.token_file).read_text(encoding="utf-8").strip()
-    source_dir = Path(args.staging) / args.source
+    # Preflight: token file (must exist before we touch the network).
+    try:
+        token = args.token_file.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        print(f"token file unreadable: {exc}", file=sys.stderr)
+        return 2
+    if not token:
+        print("token file is empty", file=sys.stderr)
+        return 2
+
+    # Preflight: staging source dir.
+    source_dir = args.staging / args.source
     if not source_dir.is_dir():
         print(f"source dir not found: {source_dir}", file=sys.stderr)
-        return 1
+        return 2
 
-    include_paths = manifest_include_paths(args.source)
-    files = []
-    for ext in args.ext:
-        files.extend(source_dir.rglob(f"*.{ext}"))
-    if include_paths:
-        files = [f for f in files if any(
-            (f.relative_to(source_dir).as_posix().startswith(p.rstrip("/") + "/") or f.relative_to(source_dir).as_posix() == p.rstrip("/"))
-            for p in include_paths
-        )]
-    files = sorted(files)
+    # Preflight: manifest + source resolution.
+    try:
+        manifest = load_manifest(args.manifest)
+        spec = resolve_source(manifest, args.source)
+    except (OSError, ValueError) as exc:
+        print(f"manifest error: {exc}", file=sys.stderr)
+        return 2
 
-    print(f"source {args.source}: {len(files)} candidate files (include: {include_paths})")
-    imported = 0
+    generation = str(manifest.get("generation", "")).strip()
+    source_commit = str(spec.get("source_commit", "")).strip()
+    repository_url = str(spec.get("repository_url", "")).strip()
+    if not generation or not source_commit:
+        print(f"source {args.source} has incomplete provenance metadata", file=sys.stderr)
+        return 2
+    loader_user = args.loader_user if args.loader_user is not None else int(spec.get("loader_user", 0) or 0)
+
+    try:
+        files = select_files(spec, source_dir)
+    except ValueError as exc:
+        print(f"manifest policy error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.selected_file:
+        target = args.selected_file.replace("\\", "/")
+        if target.startswith("./"):
+            target = target[2:]
+        files = [p for p in files if p.relative_to(source_dir).as_posix() == target]
+        if not files:
+            print(
+                f"file not selected by manifest policy: {args.source}/{args.selected_file}",
+                file=sys.stderr,
+            )
+            return 1
+
+    selected_count = len(files)
+    records: list[dict] = []
+    attempted = 0
+    print(f"source {args.source}: {selected_count} manifest-selected file(s); generation={generation}")
     for path in files:
-        if args.limit and imported >= args.limit:
+        if args.limit and attempted >= args.limit:
             break
+        attempted += 1
         rel = path.relative_to(source_dir).as_posix()
+        record = process_one(
+            args.server,
+            token,
+            path=path,
+            source_dir=source_dir,
+            source_id=args.source,
+            source_commit=source_commit,
+            repository_url=repository_url,
+            generation=generation,
+            target_index=args.target_index,
+            loader_user=loader_user,
+            run_id=run_id,
+            poll_timeout=args.poll_timeout_seconds,
+            poll_interval=args.poll_interval_seconds,
+        )
+        records.append(record)
+        print(f"  {record['status']:7s} {rel}" + (f" ({record['failure']})" if record["failure"] else ""))
+
+    report = build_report(
+        run_id=run_id,
+        source=args.source,
+        generation=generation,
+        commit=source_commit,
+        selected=selected_count,
+        records=records,
+        attempted=attempted,
+        duration_sec=time.monotonic() - started,
+    )
+
+    if args.report is not None:
         try:
-            upload_one(args.server, token, path, f"{args.source}/{rel}")
-            imported += 1
-        except Exception as exc:  # noqa: BLE001
-            print(f"  FAILED {rel}: {exc}", file=sys.stderr)
-    print(f"done: {imported} imported")
-    return 0
+            write_report(args.report, report)
+        except OSError as exc:
+            print(f"report write failed: {exc}", file=sys.stderr)
+
+    print(
+        "done: "
+        f"attempted={report['attempted']} queued={report['queued']} "
+        f"active={report['active']} skipped={report['skipped']} failed={report['failed']}"
+    )
+    return 1 if report["failed"] else 0
 
 
 if __name__ == "__main__":

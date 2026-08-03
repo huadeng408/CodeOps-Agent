@@ -51,6 +51,10 @@ type Processor struct {
 	uploadRepo      repository.UploadRepository
 	docVectorRepo   repository.DocumentVectorRepository
 	ingestionClient orchestratorclient.IngestionClient
+	// documentRepo advances the knowledge_document lifecycle (STAGED→ACTIVE
+	// on index success, →FAILED on persist failure). Nil-tolerant so legacy
+	// uploads and tests that never carry a DocumentID are left untouched.
+	documentRepo repository.KnowledgeDocumentRepository
 
 	// esWriter is the ES bulk writer; defaulted to es.BulkIndexDocuments.
 	// Injectable so tests can assert zero writes on validation failure.
@@ -72,6 +76,7 @@ func NewProcessor(
 	uploadRepo repository.UploadRepository,
 	docVectorRepo repository.DocumentVectorRepository,
 	ingestionClient orchestratorclient.IngestionClient,
+	documentRepo repository.KnowledgeDocumentRepository,
 ) *Processor {
 	return &Processor{
 		documentParser:  documentParser,
@@ -84,6 +89,7 @@ func NewProcessor(
 		uploadRepo:      uploadRepo,
 		docVectorRepo:   docVectorRepo,
 		ingestionClient: ingestionClient,
+		documentRepo:    documentRepo,
 		esWriter:        es.BulkIndexDocuments,
 	}
 }
@@ -426,6 +432,10 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		}
 	}
 
+	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
+	// the cache/parsed-object cleanup runs.
+	p.markDocumentActive(task)
+
 	if database.RDB != nil {
 		_ = database.RDB.Del(ctx, cacheKey).Err()
 	}
@@ -453,6 +463,18 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 		return fmt.Errorf("parse: external worker failed: %w", err)
 	}
 	if strings.TrimSpace(artifact.ParsedText) == "" {
+		// A corpus document (carries a DocumentID) whose parsed text comes back
+		// empty — e.g. a k8s _index.md that is pure Hugo front matter with no
+		// body — is a data-quality reality, not a format bug. Mark it SKIPPED
+		// (not indexed, not a failure) and end the parse stage cleanly so the
+		// task is not retried as FAILED and the importer poll resolves. No chunk
+		// task is produced. Legacy uploads (no DocumentID) keep the original
+		// error so a normal empty-file upload still surfaces a parse failure.
+		if p.documentRepo != nil && strings.TrimSpace(task.DocumentID) != "" {
+			p.markDocumentSkipped(task, "parse: empty content after parse")
+			log.Infof("[Processor][parse] skip empty corpus document file=%s doc=%s", task.FileMD5, task.DocumentID)
+			return nil
+		}
 		return errors.New("parse: extracted text is empty")
 	}
 	if structuredArtifact(task, artifact) {
@@ -507,6 +529,15 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if err != nil {
 		return fmt.Errorf("chunk: read parsed stream failed: %w", err)
 	}
+	return p.processChunkExternalArtifact(ctx, task, parsedObject, textBytes)
+}
+
+// processChunkExternalArtifact runs the chunk-stage pipeline (decode → chunk →
+// provenance fill → persist → enqueue) against the parsed artifact bytes
+// already loaded from object storage. Splitting the MinIO read out keeps the
+// fill/persist/lifecycle logic unit-testable without the storage or Kafka
+// globals.
+func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks.FileProcessingTask, parsedObject string, textBytes []byte) error {
 	var artifact orchestratorclient.ParsedArtifact
 	if err := json.Unmarshal(textBytes, &artifact); err != nil {
 		return fmt.Errorf("chunk: decode structured artifact failed: %w", err)
@@ -527,14 +558,13 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if structuredPath && len(chunkResult.StructuredChunks) == 0 {
 		return errors.New("chunk: structured artifact returned no structured chunks")
 	}
-	// Native-parser documents (md/rst) have no MinerU payload hash; Go is
-	// the authority for source provenance, so fill source_sha256 from the
-	// parsed artifact bytes when the worker left it empty.
+	// Go is the authority for source provenance: prefer the raw file hash
+	// carried on the task (validated at the internal trust boundary) over the
+	// worker/client artifact hash, falling back to the artifact hash only for
+	// legacy uploads that carry no provenance.
 	for index := range chunkResult.StructuredChunks {
 		chunk := &chunkResult.StructuredChunks[index]
-		if strings.TrimSpace(chunk.SourceSHA256) == "" {
-			chunk.SourceSHA256 = hashSHA256(textBytes)
-		}
+		chunk.SourceSHA256 = sourceSHA256ForChunk(task, chunk.SourceSHA256, textBytes)
 		if err := chunk.Validate(); err != nil {
 			return fmt.Errorf("chunk: structured chunk %d is invalid: %w", index, err)
 		}
@@ -546,7 +576,9 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 	if err := p.docVectorRepo.DeleteByFileMD5(task.FileMD5); err != nil {
 		log.Warnf("[Processor][chunk] clear old chunks failed file=%s err=%v", task.FileMD5, err)
 	}
-	_ = database.RDB.Del(ctx, p.embeddingCacheKey(task.FileMD5)).Err()
+	if database.RDB != nil {
+		_ = database.RDB.Del(ctx, p.embeddingCacheKey(task.FileMD5)).Err()
+	}
 
 	var dbVectors []*model.DocumentVector
 	if len(chunkResult.StructuredChunks) > 0 {
@@ -573,6 +605,7 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 		}
 	}
 	if err := p.docVectorRepo.BatchCreate(dbVectors); err != nil {
+		p.markDocumentFailed(task, "chunk", err)
 		return fmt.Errorf("chunk: persist chunks failed: %w", err)
 	}
 
@@ -673,6 +706,98 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 func hashSHA256(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// sourceSHA256ForChunk resolves the source hash for a structured chunk. A
+// corpus task carrying Provenance.SourceSHA256 (the raw file hash validated at
+// the internal trust boundary) always wins — the worker/client artifact hash
+// is only a fallback when no provenance is present (legacy uploads). This
+// keeps document_vectors.source_sha256 aligned with the raw content hash
+// stored on knowledge_document.content_sha256 rather than the parsed JSON.
+func sourceSHA256ForChunk(task tasks.FileProcessingTask, current string, artifactBytes []byte) string {
+	if task.Provenance != nil && strings.TrimSpace(task.Provenance.SourceSHA256) != "" {
+		return task.Provenance.SourceSHA256
+	}
+	if strings.TrimSpace(current) == "" {
+		return hashSHA256(artifactBytes)
+	}
+	return current
+}
+
+// markDocumentActive flips a corpus document to ACTIVE after the index stage
+// confirms the ES write. Nil-tolerant and a no-op for tasks without a
+// DocumentID so legacy uploads never trigger a lifecycle update.
+func (p *Processor) markDocumentActive(task tasks.FileProcessingTask) {
+	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+		return
+	}
+	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentActive, ""); err != nil {
+		log.Warnf("[Processor] mark document active failed doc=%s err=%v", task.DocumentID, err)
+	}
+}
+
+// markDocumentSkipped records a graceful skip (not indexed, not a failure)
+// against a corpus document — used when parse extracts no text (empty content
+// after parse, e.g. a front-matter-only _index.md). The task ends SUCCESS so it
+// is not retried; no chunk task is produced. Nil-tolerant and a no-op for tasks
+// without a DocumentID so legacy uploads never trigger a lifecycle update.
+func (p *Processor) markDocumentSkipped(task tasks.FileProcessingTask, reason string) {
+	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+		return
+	}
+	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentSkipped, reason); err != nil {
+		log.Warnf("[Processor] mark document skipped failed doc=%s err=%v", task.DocumentID, err)
+	}
+}
+
+// markDocumentFailed records a sanitized failure summary against a corpus
+// document. The stored last_error never carries tokens, headers or full file
+// content (see sanitizeErrorSummary); the raw error is still returned to the
+// caller for logging/retry.
+func (p *Processor) markDocumentFailed(task tasks.FileProcessingTask, stage string, cause error) {
+	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+		return
+	}
+	summary := sanitizeErrorSummary(stage, cause)
+	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentFailed, summary); err != nil {
+		log.Warnf("[Processor] mark document failed failed doc=%s err=%v", task.DocumentID, err)
+	}
+}
+
+// maxErrorSummaryLen bounds the last_error excerpt persisted to the document
+// row; the remainder of the wrapped error chain stays in logs only.
+const maxErrorSummaryLen = 160
+
+// sanitizeErrorSummary reduces an error to a single short, stage-prefixed line
+// safe to persist as knowledge_document.last_error. It strips newlines (so
+// later lines of a multi-line message, where secrets or payloads typically
+// land, are never echoed) and truncates to a small bound.
+func sanitizeErrorSummary(stage string, cause error) string {
+	stage = strings.TrimSpace(stage)
+	if cause == nil {
+		if stage == "" {
+			return "failed"
+		}
+		return stage + " failed"
+	}
+	msg := strings.TrimSpace(cause.Error())
+	if i := strings.IndexAny(msg, "\r\n"); i >= 0 {
+		msg = msg[:i]
+	}
+	msg = strings.TrimSpace(msg)
+	if len(msg) > maxErrorSummaryLen {
+		msg = msg[:maxErrorSummaryLen]
+	}
+	if msg == "" {
+		if stage == "" {
+			return "failed"
+		}
+		return stage + " failed"
+	}
+	if stage == "" {
+		return msg
+	}
+	return stage + ": " + msg
 }
 
 // indexNameFor resolves the ES index for a document vector. Structured
@@ -871,8 +996,16 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 		return fmt.Errorf("index: external worker failed: %w", err)
 	}
 
-	_ = database.RDB.Del(ctx, cacheKey).Err()
-	_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5), minio.RemoveObjectOptions{})
+	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
+	// the cache/parsed-object cleanup runs.
+	p.markDocumentActive(task)
+
+	if database.RDB != nil {
+		_ = database.RDB.Del(ctx, cacheKey).Err()
+	}
+	if storage.MinioClient != nil {
+		_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5), minio.RemoveObjectOptions{})
+	}
 	log.Infof("[Processor][index] done file=%s docs=%d worker=external", task.FileMD5, len(docs))
 	return nil
 }

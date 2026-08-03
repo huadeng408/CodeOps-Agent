@@ -1,6 +1,8 @@
 // Package tasks defines the structure for tasks that are sent to Kafka.
 package tasks
 
+import "code-agent/internal/model"
+
 type Stage string
 
 const (
@@ -28,4 +30,14 @@ type FileProcessingTask struct {
 	// pipeline then writes structured chunks to the corpus text index and
 	// enforces the native embedding contract.
 	CorpusGeneration string `json:"corpus_generation,omitempty"`
+	// RunID scopes this message to a controlled run so the consumer does not
+	// skip it on a stale prior SUCCESS (empty keeps legacy dedup semantics).
+	RunID string `json:"run_id,omitempty"`
+	// DocumentID is the knowledge_document identifier the pipeline updates as
+	// the document advances toward ACTIVE.
+	DocumentID string `json:"document_id,omitempty"`
+	// Provenance carries the pinned corpus identity (source commit + hashes +
+	// target index) validated at the internal trust boundary. Nil for ordinary
+	// uploads, which never enter the corpus pipeline.
+	Provenance *model.CorpusProvenance `json:"provenance,omitempty"`
 }

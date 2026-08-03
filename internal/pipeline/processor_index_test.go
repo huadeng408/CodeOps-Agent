@@ -17,7 +17,8 @@ func init() {
 
 // fakeVectorRepo stores vectors in memory.
 type fakeVectorRepo struct {
-	vectors []*model.DocumentVector
+	vectors  []*model.DocumentVector
+	batchErr error
 }
 
 func (f *fakeVectorRepo) FindByFileMD5(fileMD5 string) ([]*model.DocumentVector, error) {
@@ -41,6 +42,9 @@ func (f *fakeVectorRepo) CountByFileMD5(fileMD5 string) (int64, error) {
 }
 
 func (f *fakeVectorRepo) BatchCreate(vectors []*model.DocumentVector) error {
+	if f.batchErr != nil {
+		return f.batchErr
+	}
 	f.vectors = append(f.vectors, vectors...)
 	return nil
 }

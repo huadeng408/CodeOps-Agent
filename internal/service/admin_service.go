@@ -52,7 +52,7 @@ type AdminService interface {
 	AssignOrgTagsToUser(userID uint, orgTags []string) error
 	ListUsers(page, size int) (*UserListResponse, error)
 	GetAllConversations(ctx context.Context, userID *uint, startTime, endTime *time.Time) ([]map[string]interface{}, error)
-	ReplayPipelineTask(fileMD5 string, stage tasks.Stage) error
+	ReplayPipelineTask(fileMD5 string, stage tasks.Stage, runID string) error
 }
 
 // adminService implements admin operations.
@@ -62,22 +62,34 @@ type adminService struct {
 	conversationRepo repository.ConversationRepository
 	pipelineTaskRepo repository.PipelineTaskRepository
 	uploadRepo       repository.UploadRepository
+	docRepo          repository.KnowledgeDocumentRepository
+	producer         func(tasks.FileProcessingTask) error
 }
 
-// NewAdminService creates an admin service.
+// NewAdminService creates an admin service. docRepo backs corpus-aware replay
+// provenance; producer is the Kafka seam used by ReplayPipelineTask — a nil
+// producer falls back to the real kafka.ProduceTask so production wiring stays
+// explicit while tests inject a recording fake.
 func NewAdminService(
 	orgTagRepo repository.OrgTagRepository,
 	userRepo repository.UserRepository,
 	conversationRepo repository.ConversationRepository,
 	pipelineTaskRepo repository.PipelineTaskRepository,
 	uploadRepo repository.UploadRepository,
+	docRepo repository.KnowledgeDocumentRepository,
+	producer func(tasks.FileProcessingTask) error,
 ) AdminService {
+	if producer == nil {
+		producer = kafka.ProduceTask
+	}
 	return &adminService{
 		orgTagRepo:       orgTagRepo,
 		userRepo:         userRepo,
 		conversationRepo: conversationRepo,
 		pipelineTaskRepo: pipelineTaskRepo,
 		uploadRepo:       uploadRepo,
+		docRepo:          docRepo,
+		producer:         producer,
 	}
 }
 
@@ -335,8 +347,22 @@ func (s *adminService) getConversationsForUser(ctx context.Context, user *model.
 	return result, nil
 }
 
-// ReplayPipelineTask handles replay pipeline task.
-func (s *adminService) ReplayPipelineTask(fileMD5 string, stage tasks.Stage) error {
+// ReplayPipelineTask rebuilds a pipeline task from the file_upload record and
+// re-enqueues it at the requested stage under a controlled RunID. The RunID
+// scopes the task to a fresh run so the consumer's run-aware dedup bypasses any
+// stale prior SUCCESS (the whole reason controlled replay exists). An empty
+// runID is replaced by replay-<unixnano>.
+//
+// When the file_md5 belongs to a corpus document (a knowledge_document row
+// exists), the task is automatically stamped with that document's provenance
+// (source identity, ContentSHA256 as SourceSHA256, TargetIndex, CorpusGeneration
+// and DocumentID) so the replayed stage re-enters the corpus pipeline with full
+// traceability. A non-corpus upload keeps the legacy task shape (no provenance,
+// no CorpusGeneration) so ordinary replays are never promoted into the corpus
+// index; the RunID is still attached so the replay actually executes. ObjectURL
+// is left empty on purpose — the parse worker presigns the merged object on
+// demand. Produce failures propagate to the caller (Global Constraint #4).
+func (s *adminService) ReplayPipelineTask(fileMD5 string, stage tasks.Stage, runID string) error {
 	fileMD5 = strings.TrimSpace(fileMD5)
 	if fileMD5 == "" {
 		return errors.New("fileMd5 cannot be empty")
@@ -346,6 +372,10 @@ func (s *adminService) ReplayPipelineTask(fileMD5 string, stage tasks.Stage) err
 	}
 	if stage != tasks.StageParse && stage != tasks.StageChunk && stage != tasks.StageEmbed && stage != tasks.StageIndex {
 		return fmt.Errorf("unsupported stage: %s", stage)
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		runID = fmt.Sprintf("replay-%d", time.Now().UnixNano())
 	}
 
 	uploadRecord, err := s.uploadRepo.GetFileUploadRecordByMD5(fileMD5)
@@ -361,8 +391,35 @@ func (s *adminService) ReplayPipelineTask(fileMD5 string, stage tasks.Stage) err
 		IsPublic:  uploadRecord.IsPublic,
 		Stage:     stage,
 		ObjectURL: "",
+		RunID:     runID,
 	}
-	return kafka.ProduceTask(task)
+
+	// Attach corpus provenance when this file_md5 maps to a knowledge_document.
+	// A missing row (gorm.ErrRecordNotFound) is the normal "ordinary upload"
+	// case and leaves the task in its legacy shape; any other lookup error
+	// propagates instead of silently degrading the replay.
+	if s.docRepo != nil {
+		doc, docErr := s.docRepo.GetDocumentByFileMD5(fileMD5)
+		if docErr != nil {
+			if !errors.Is(docErr, gorm.ErrRecordNotFound) {
+				return docErr
+			}
+		} else if doc != nil {
+			task.CorpusGeneration = doc.CorpusGeneration
+			task.DocumentID = doc.DocumentID
+			task.Provenance = &model.CorpusProvenance{
+				SourceID:         doc.SourceID,
+				SourcePath:       doc.SourcePath,
+				SourceURL:        doc.SourceURL,
+				SourceCommit:     doc.SourceCommit,
+				SourceSHA256:     doc.ContentSHA256,
+				TargetIndex:      doc.TargetIndex,
+				CorpusGeneration: doc.CorpusGeneration,
+			}
+		}
+	}
+
+	return s.producer(task)
 }
 
 // containsTag reports whether tag is present.

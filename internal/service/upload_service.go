@@ -259,16 +259,19 @@ func (s *uploadService) MergeChunks(ctx context.Context, fileMD5, fileName strin
 		IsPublic:  record.IsPublic,
 		Stage:     tasks.StageParse,
 	}
-	if err := kafka.ProduceFileTask(task); err != nil {
-		log.Errorf("[MergeChunks] failed to produce kafka task: %v", err)
-	}
-
+	// The merge already succeeded, so the per-chunk redis bitmap is no longer
+	// needed: clear it on every post-merge path (including produce failure) so
+	// an enqueue error never leaks the upload mark. Earlier failures keep the
+	// mark so the client can resume uploading missing chunks.
 	go func() {
 		bgCtx := context.Background()
 		if err := s.uploadRepo.DeleteUploadMark(bgCtx, fileMD5, userID); err != nil {
 			log.Warnf("[MergeChunks] failed to clear redis upload mark, fileMD5=%s err=%v", fileMD5, err)
 		}
 	}()
+	if err := kafka.ProduceFileTask(task); err != nil {
+		return "", fmt.Errorf("merge: enqueue parse task failed: %w", err)
+	}
 
 	return objectURL, nil
 }

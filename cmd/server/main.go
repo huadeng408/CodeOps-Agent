@@ -120,7 +120,8 @@ func main() {
 	rerankerClient := reranker.NewClient(cfg.Reranker)
 
 	userService := service.NewUserService(userRepository, orgTagRepo, jwtManager)
-	adminService := service.NewAdminService(orgTagRepo, userRepository, conversationRepo, pipelineTaskRepo, uploadRepo)
+	documentRepo := repository.NewKnowledgeDocumentRepository(database.DB)
+	adminService := service.NewAdminService(orgTagRepo, userRepository, conversationRepo, pipelineTaskRepo, uploadRepo, documentRepo, nil)
 	uploadService := service.NewUploadService(uploadRepo, userRepository, cfg.MinIO)
 	documentService := service.NewDocumentService(uploadRepo, userRepository, orgTagRepo, docVectorRepo, pipelineTaskRepo, cfg.MinIO, cfg.Elasticsearch.IndexName, documentParser)
 	searchService := service.NewSearchService(
@@ -148,6 +149,7 @@ func main() {
 		uploadRepo,
 		docVectorRepo,
 		ingestionClient,
+		documentRepo,
 	)
 	go kafka.StartPipelineConsumers(cfg.Kafka, processor, pipelineTaskRepo)
 
@@ -258,7 +260,11 @@ func main() {
 		internalGroup.Use(middleware.InternalAuthMiddleware())
 		{
 			orchHandler := handler.NewOrchestratorHandler(orchestratorSupportService)
-			knowledgeIngestHandler := handler.NewKnowledgeIngestHandler(uploadService)
+			corpusSourceRepo := repository.NewKnowledgeSourceRepository(database.DB)
+			corpusDocRepo := repository.NewKnowledgeDocumentRepository(database.DB)
+			corpusIngestService := service.NewCorpusIngestService(corpusSourceRepo, corpusDocRepo, cfg.Corpus, nil)
+			knowledgeIngestHandler := handler.NewKnowledgeIngestHandler(corpusIngestService, cfg.MinIO)
+			knowledgeDocumentHandler := handler.NewKnowledgeDocumentHandler(corpusDocRepo, cfg.Corpus)
 			internalGroup.POST("/orchestrator/session", orchHandler.LoadSession)
 			internalGroup.POST("/orchestrator/retrieve", orchHandler.RetrieveContext)
 			internalGroup.POST("/orchestrator/prompt-context", orchHandler.PreparePromptContext)
@@ -267,6 +273,9 @@ func main() {
 			internalGroup.POST("/orchestrator/rerank-context", orchHandler.RerankContext)
 			internalGroup.POST("/orchestrator/persist", orchHandler.PersistTurn)
 			internalGroup.POST("/orchestrator/knowledge-ingest", knowledgeIngestHandler.Ingest)
+			// Read-only document status query the importer polls after an
+			// ingestion; InternalAuthMiddleware already guards the group.
+			internalGroup.GET("/orchestrator/knowledge-documents", knowledgeDocumentHandler.List)
 		}
 	}
 

@@ -11,9 +11,10 @@ import (
 type KnowledgeDocumentStatus string
 
 const (
-	DocumentStaged KnowledgeDocumentStatus = "STAGED"
-	DocumentActive KnowledgeDocumentStatus = "ACTIVE"
-	DocumentFailed KnowledgeDocumentStatus = "FAILED"
+	DocumentStaged  KnowledgeDocumentStatus = "STAGED"
+	DocumentActive  KnowledgeDocumentStatus = "ACTIVE"
+	DocumentFailed  KnowledgeDocumentStatus = "FAILED"
+	DocumentSkipped KnowledgeDocumentStatus = "SKIPPED"
 )
 
 // DocumentID returns the stable identifier for a source document path.

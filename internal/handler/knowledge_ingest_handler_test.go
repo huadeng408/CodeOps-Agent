@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,166 +23,424 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type knowledgeIngestUploadCall struct {
-	fileMD5   string
-	fileName  string
-	totalSize int64
-	index     int
-	chunkMD5  string
-	userID    uint
-	orgTag    string
-	isPublic  bool
-	content   []byte
+const (
+	testLoaderUser       = 42
+	testCorpusGeneration = "techdocs-test-v1"
+	testTargetIndex      = "knowledge_base_test_idx"
+	// 40 lowercase hex git commit.
+	testCommitHex = "abcdef0123456789abcdef0123456789abcdef01"
+	// defaultTestObjectURL is the presigned URL the fake storage hands back.
+	defaultTestObjectURL = "http://minio.test/merged/object"
+	// defaultTestDocumentID is the document ID the recording service returns.
+	defaultTestDocumentID = "go@abcdef0123456789abcdef0123456789abcdef01:techdocs-test-v1:doc/asm.html"
+)
+
+// recordingCorpusIngestService implements service.CorpusIngestService and records
+// the last Ingest call so handler tests can assert on the forwarded payload. A
+// non-nil ingestErr is returned verbatim; otherwise result (or a default) is
+// returned so the handler can echo a document_id.
+type recordingCorpusIngestService struct {
+	ingestCalls []service.CorpusIngestRequest
+	ingestErr   error
+	result      *service.CorpusIngestResult
 }
 
-type recordingKnowledgeIngestService struct {
-	uploadCalls []knowledgeIngestUploadCall
-	mergeCalls  int
-	mergeMD5    string
-	mergeName   string
-	mergeUserID uint
-	uploadErr   error
-	mergeErr    error
-	objectURL   string
+func (s *recordingCorpusIngestService) Ingest(_ context.Context, req service.CorpusIngestRequest) (*service.CorpusIngestResult, error) {
+	s.ingestCalls = append(s.ingestCalls, req)
+	if s.ingestErr != nil {
+		return nil, s.ingestErr
+	}
+	if s.result != nil {
+		return s.result, nil
+	}
+	return &service.CorpusIngestResult{
+		FileMD5:    req.FileMD5,
+		FileName:   req.FileName,
+		ObjectURL:  req.ObjectURL,
+		DocumentID: defaultTestDocumentID,
+	}, nil
 }
 
-func (s *recordingKnowledgeIngestService) UploadChunk(
-	_ context.Context,
-	fileMD5, fileName string,
-	totalSize int64,
-	chunkIndex int,
-	file multipart.File,
-	chunkMD5 string,
-	userID uint,
-	orgTag string,
-	isPublic bool,
-) ([]int, int, error) {
-	content, err := io.ReadAll(file)
+// fakeKnowledgeStorage records PutObject/presign interactions so the handler
+// test exercises the merged-object write without a live MinIO client.
+type fakeKnowledgeStorage struct {
+	putCalls     []fakeStoragePutCall
+	presignCalls []fakeStoragePresignCall
+	presignedURL string
+	putErr       error
+	presignErr   error
+}
+
+type fakeStoragePutCall struct {
+	bucket  string
+	object  string
+	size    int64
+	content []byte
+}
+
+type fakeStoragePresignCall struct {
+	bucket string
+	object string
+}
+
+func (s *fakeKnowledgeStorage) put(_ context.Context, bucket, object string, reader io.Reader, size int64) error {
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, 0, err
+		return err
 	}
-	s.uploadCalls = append(s.uploadCalls, knowledgeIngestUploadCall{
-		fileMD5:   fileMD5,
-		fileName:  fileName,
-		totalSize: totalSize,
-		index:     chunkIndex,
-		chunkMD5:  chunkMD5,
-		userID:    userID,
-		orgTag:    orgTag,
-		isPublic:  isPublic,
-		content:   append([]byte(nil), content...),
+	s.putCalls = append(s.putCalls, fakeStoragePutCall{
+		bucket:  bucket,
+		object:  object,
+		size:    size,
+		content: append([]byte(nil), data...),
 	})
-	if s.uploadErr != nil {
-		return nil, 0, s.uploadErr
+	if s.putErr != nil {
+		return s.putErr
 	}
-	return []int{chunkIndex}, chunkIndex + 1, nil
+	return nil
 }
 
-func (s *recordingKnowledgeIngestService) MergeChunks(_ context.Context, fileMD5, fileName string, userID uint) (string, error) {
-	s.mergeCalls++
-	s.mergeMD5 = fileMD5
-	s.mergeName = fileName
-	s.mergeUserID = userID
-	if s.mergeErr != nil {
-		return "", s.mergeErr
+func (s *fakeKnowledgeStorage) presign(bucket, object string) (string, error) {
+	s.presignCalls = append(s.presignCalls, fakeStoragePresignCall{bucket: bucket, object: object})
+	if s.presignErr != nil {
+		return "", s.presignErr
 	}
-	return s.objectURL, nil
+	return s.presignedURL, nil
 }
 
-func TestKnowledgeIngestRejectsInvalidRequestsWithoutServiceCalls(t *testing.T) {
-	tests := []struct {
-		name        string
-		fields      map[string]string
-		fileName    string
-		file        []byte
-		includeFile bool
-	}{
-		{name: "missing user id", fields: map[string]string{}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "zero user id", fields: map[string]string{"userId": "0"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "non numeric user id", fields: map[string]string{"userId": "abc"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "missing file", fields: map[string]string{"userId": "7"}},
-		{name: "empty file", fields: map[string]string{"userId": "7"}, fileName: "doc.pdf", includeFile: true},
-		{name: "invalid is public", fields: map[string]string{"userId": "7", "isPublic": "sometimes"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "numeric true is public", fields: map[string]string{"userId": "7", "isPublic": "1"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "numeric false is public", fields: map[string]string{"userId": "7", "isPublic": "0"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "uppercase true is public", fields: map[string]string{"userId": "7", "isPublic": "TRUE"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-		{name: "mixed case false is public", fields: map[string]string{"userId": "7", "isPublic": "False"}, fileName: "doc.pdf", file: []byte("x"), includeFile: true},
-	}
+func (s *fakeKnowledgeStorage) apply(h *KnowledgeIngestHandler) {
+	h.putMerged = s.put
+	h.presign = s.presign
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			svc := &recordingKnowledgeIngestService{}
-			response := serveKnowledgeIngest(t, svc, tt.fields, tt.fileName, tt.file, tt.includeFile)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-			}
-			if len(svc.uploadCalls) != 0 || svc.mergeCalls != 0 {
-				t.Fatalf("service calls = uploads:%d merges:%d, want none", len(svc.uploadCalls), svc.mergeCalls)
-			}
-		})
+func testMinIOConfig() serverconfig.MinIOConfig {
+	return serverconfig.MinIOConfig{BucketName: "test-bucket"}
+}
+
+// newValidCorpusFields builds the full multipart form for a legal corpus request
+// whose sourceSha256 matches the handler-computed SHA-256 of file.
+func newValidCorpusFields(file []byte) map[string]string {
+	return map[string]string{
+		"userId":           strconv.Itoa(testLoaderUser),
+		"orgTag":           "corpus",
+		"isPublic":         "true",
+		"sourceId":         "go",
+		"sourcePath":       "doc/asm.html",
+		"sourceUrl":        "https://example.test/go/blob/abc/doc/asm.html",
+		"sourceCommit":     testCommitHex,
+		"corpusGeneration": testCorpusGeneration,
+		"targetIndex":      testTargetIndex,
+		"sourceSha256":     sha256Hex(file),
+		"runId":            "import-123",
 	}
 }
 
-func TestKnowledgeIngestUploadsSmallFileAndQueuesIngestion(t *testing.T) {
-	content := []byte("small multimodal pdf")
-	svc := &recordingKnowledgeIngestService{objectURL: "http://minio.test/object"}
-	response := serveKnowledgeIngest(t, svc, map[string]string{
-		"userId":   "42",
-		"orgTag":   "research",
-		"isPublic": "true",
-	}, "../../safe.pdf", content, true)
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestKnowledgeIngestQueuesCorpusDocument(t *testing.T) {
+	content := []byte("<html>real asm payload</html>")
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}
+
+	response := serveKnowledgeIngestWithStorage(
+		t, svc, storage,
+		newValidCorpusFields(content),
+		"doc/asm.html",
+		content,
+		true,
+	)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
 	}
-	if len(svc.uploadCalls) != 1 {
-		t.Fatalf("upload calls = %d, want 1", len(svc.uploadCalls))
+	if len(svc.ingestCalls) != 1 {
+		t.Fatalf("service ingest calls = %d, want 1", len(svc.ingestCalls))
 	}
+
+	call := svc.ingestCalls[0]
+	wantSHA := sha256Hex(content)
 	wantMD5 := md5Hex(content)
-	call := svc.uploadCalls[0]
-	if call.fileMD5 != wantMD5 || call.fileName != "safe.pdf" || call.totalSize != int64(len(content)) || call.index != 0 || call.chunkMD5 != wantMD5 || call.userID != 42 || call.orgTag != "research" || !call.isPublic || !bytes.Equal(call.content, content) {
-		t.Fatalf("unexpected upload call: %+v", call)
+	if call.ContentSHA256 != wantSHA {
+		t.Errorf("ContentSHA256 = %q, want raw-bytes sha256 %q", call.ContentSHA256, wantSHA)
 	}
-	if svc.mergeCalls != 1 {
-		t.Fatalf("merge calls = %d, want 1", svc.mergeCalls)
+	if call.FileMD5 != wantMD5 {
+		t.Errorf("FileMD5 = %q, want %q", call.FileMD5, wantMD5)
 	}
-	if svc.mergeMD5 != wantMD5 || svc.mergeName != "safe.pdf" || svc.mergeUserID != 42 {
-		t.Fatalf("unexpected merge call: md5=%s name=%s user=%d", svc.mergeMD5, svc.mergeName, svc.mergeUserID)
+	if call.UserID != testLoaderUser {
+		t.Errorf("UserID = %d, want %d", call.UserID, testLoaderUser)
+	}
+	if call.FileName != "asm.html" {
+		t.Errorf("FileName = %q, want %q", call.FileName, "asm.html")
+	}
+	if call.TotalSize != int64(len(content)) {
+		t.Errorf("TotalSize = %d, want %d", call.TotalSize, len(content))
+	}
+	if call.OrgTag != "corpus" || !call.IsPublic {
+		t.Errorf("OrgTag=%q IsPublic=%v, want corpus/true", call.OrgTag, call.IsPublic)
+	}
+	if call.ObjectURL == "" || call.ObjectURL != defaultTestObjectURL {
+		t.Errorf("ObjectURL = %q, want non-empty %q", call.ObjectURL, defaultTestObjectURL)
+	}
+
+	prov := call.Provenance
+	if prov.SourceID != "go" ||
+		prov.SourcePath != "doc/asm.html" ||
+		prov.SourceCommit != testCommitHex ||
+		prov.CorpusGeneration != testCorpusGeneration ||
+		prov.TargetIndex != testTargetIndex ||
+		prov.SourceSHA256 != wantSHA ||
+		prov.SourceURL != "https://example.test/go/blob/abc/doc/asm.html" {
+		t.Errorf("unexpected provenance: %+v", prov)
+	}
+
+	// The handler must forward the form's runId into CorpusIngestRequest.RunID
+	// so the enqueued task is run-scoped and the consumer's run-aware dedup
+	// bypasses any stale historical SUCCESS for this file_md5.
+	if call.RunID != "import-123" {
+		t.Errorf("RunID = %q, want %q (handler must forward form runId)", call.RunID, "import-123")
+	}
+
+	if len(storage.putCalls) != 1 {
+		t.Fatalf("storage put calls = %d, want 1", len(storage.putCalls))
+	}
+	put := storage.putCalls[0]
+	if put.bucket != "test-bucket" {
+		t.Errorf("put bucket = %q, want test-bucket", put.bucket)
+	}
+	if !bytes.Equal(put.content, content) {
+		t.Errorf("put content does not match uploaded bytes (size=%d want=%d)", len(put.content), len(content))
+	}
+	if put.size != int64(len(content)) {
+		t.Errorf("put size = %d, want %d", put.size, len(content))
+	}
+	if len(storage.presignCalls) != 1 || storage.presignCalls[0].object != put.object {
+		t.Errorf("presign must be called once on the merged object: %+v", storage.presignCalls)
 	}
 
 	var envelope struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
-			FileMD5   string `json:"fileMd5"`
-			FileName  string `json:"fileName"`
-			ObjectURL string `json:"objectUrl"`
+			FileMD5    string `json:"fileMd5"`
+			FileName   string `json:"fileName"`
+			ObjectURL  string `json:"objectUrl"`
+			DocumentID string `json:"documentId"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if envelope.Code != http.StatusAccepted || envelope.Message != "ingestion queued" || envelope.Data.FileMD5 != wantMD5 || envelope.Data.FileName != "safe.pdf" || envelope.Data.ObjectURL != svc.objectURL {
-		t.Fatalf("unexpected response: %+v", envelope)
+	if envelope.Code != http.StatusAccepted || envelope.Message != "ingestion queued" {
+		t.Fatalf("unexpected envelope: %+v", envelope)
+	}
+	if envelope.Data.FileMD5 != wantMD5 || envelope.Data.FileName != "asm.html" || envelope.Data.ObjectURL != defaultTestObjectURL {
+		t.Errorf("unexpected response data: %+v", envelope.Data)
+	}
+	if envelope.Data.DocumentID == "" || envelope.Data.DocumentID != defaultTestDocumentID {
+		t.Errorf("documentId = %q, want non-empty %q", envelope.Data.DocumentID, defaultTestDocumentID)
+	}
+}
+
+// TestKnowledgeIngestOmitsRunIDWhenAbsent is the backward-compatibility guard:
+// runId is optional on the wire. A request that omits it must still be accepted
+// (202) and reach the service with an empty RunID — legacy callers that predate
+// the run-scoped dedup are not forced to send it.
+func TestKnowledgeIngestOmitsRunIDWhenAbsent(t *testing.T) {
+	content := []byte("<html>real asm payload</html>")
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}
+
+	fields := newValidCorpusFields(content)
+	delete(fields, "runId")
+
+	response := serveKnowledgeIngestWithStorage(t, svc, storage, fields, "doc/asm.html", content, true)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 1 {
+		t.Fatalf("service ingest calls = %d, want 1", len(svc.ingestCalls))
+	}
+	if svc.ingestCalls[0].RunID != "" {
+		t.Errorf("RunID = %q, want empty when form omits runId", svc.ingestCalls[0].RunID)
+	}
+}
+
+func TestKnowledgeIngestRejectsInvalidRequestsWithoutServiceCalls(t *testing.T) {
+	cases := []struct {
+		name        string
+		base        map[string]string
+		omit        string
+		fileName    string
+		file        []byte
+		includeFile bool
+	}{
+		{name: "missing user id", base: newValidCorpusFields([]byte("x")), omit: "userId", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "zero user id", base: withField(newValidCorpusFields([]byte("x")), "userId", "0"), fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "non numeric user id", base: withField(newValidCorpusFields([]byte("x")), "userId", "abc"), fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing file", base: newValidCorpusFields(nil), fileName: "asm.html", includeFile: false},
+		{name: "empty file", base: newValidCorpusFields([]byte("")), fileName: "asm.html", file: []byte(""), includeFile: true},
+		{name: "invalid is public", base: withField(newValidCorpusFields([]byte("x")), "isPublic", "sometimes"), fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing sourceId", base: newValidCorpusFields([]byte("x")), omit: "sourceId", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing sourcePath", base: newValidCorpusFields([]byte("x")), omit: "sourcePath", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing sourceCommit", base: newValidCorpusFields([]byte("x")), omit: "sourceCommit", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing corpusGeneration", base: newValidCorpusFields([]byte("x")), omit: "corpusGeneration", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing sourceSha256", base: newValidCorpusFields([]byte("x")), omit: "sourceSha256", fileName: "asm.html", file: []byte("x"), includeFile: true},
+		{name: "missing targetIndex", base: newValidCorpusFields([]byte("x")), omit: "targetIndex", fileName: "asm.html", file: []byte("x"), includeFile: true},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := tt.base
+			if tt.omit != "" {
+				delete(fields, tt.omit)
+			}
+			svc := &recordingCorpusIngestService{}
+			response := serveKnowledgeIngest(t, svc, fields, tt.fileName, tt.file, tt.includeFile)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if len(svc.ingestCalls) != 0 {
+				t.Fatalf("service ingest calls = %d, want 0 (validation must reject before service)", len(svc.ingestCalls))
+			}
+		})
+	}
+}
+
+// TestKnowledgeIngestRejectsForgedSourceSHA256 is the anti-forgery guard: a
+// caller cannot route unrelated content into the corpus index by declaring a
+// mismatched source hash. The handler computes the hash over the raw bytes it
+// received and must 400 before touching storage or the service.
+func TestKnowledgeIngestRejectsForgedSourceSHA256(t *testing.T) {
+	content := []byte("actual bytes on the wire")
+	declaredSHA := sha256Hex([]byte("completely different content"))
+	if declaredSHA == sha256Hex(content) {
+		t.Fatal("test setup invariant broken: declared hash must differ from actual")
+	}
+	fields := newValidCorpusFields(content)
+	fields["sourceSha256"] = declaredSHA
+
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}
+	response := serveKnowledgeIngestWithStorage(t, svc, storage, fields, "asm.html", content, true)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 0 {
+		t.Fatalf("service ingest calls = %d, want 0", len(svc.ingestCalls))
+	}
+	if len(storage.putCalls) != 0 {
+		t.Fatalf("storage put calls = %d, want 0 (no object write on hash mismatch)", len(storage.putCalls))
+	}
+}
+
+func TestKnowledgeIngestMapsValidationErrorsToBadRequest(t *testing.T) {
+	content := []byte("payload")
+	svc := &recordingCorpusIngestService{ingestErr: service.ErrCorpusValidation}
+	response := serveKnowledgeIngest(t, svc, newValidCorpusFields(content), "asm.html", content, true)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 1 {
+		t.Fatalf("service should be invoked once for validation mapping, got %d", len(svc.ingestCalls))
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("validation")) || bytes.Contains(response.Body.Bytes(), []byte("mismatch")) {
+		t.Fatalf("response leaks internal validation detail: %s", response.Body.String())
+	}
+}
+
+// TestKnowledgeIngestMapsLoaderUserMismatchToBadRequest mirrors the (f)
+// scenario: the handler passes userId through; the service is the authority
+// and rejects a non-loader user with ErrCorpusValidation, which the handler
+// must surface as 400.
+func TestKnowledgeIngestMapsLoaderUserMismatchToBadRequest(t *testing.T) {
+	content := []byte("payload")
+	fields := newValidCorpusFields(content)
+	fields["userId"] = strconv.Itoa(testLoaderUser + 7)
+	svc := &recordingCorpusIngestService{ingestErr: service.ErrCorpusValidation}
+	response := serveKnowledgeIngest(t, svc, fields, "asm.html", content, true)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	if len(svc.ingestCalls) != 1 || svc.ingestCalls[0].UserID != testLoaderUser+7 {
+		t.Fatalf("service should observe the forwarded user id, got %+v", svc.ingestCalls)
+	}
+}
+
+func TestKnowledgeIngestMapsServiceErrorsToInternalError(t *testing.T) {
+	content := []byte("payload")
+	svc := &recordingCorpusIngestService{ingestErr: errors.New("kafka broker credentials exploded")}
+	response := serveKnowledgeIngest(t, svc, newValidCorpusFields(content), "asm.html", content, true)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusInternalServerError, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 1 {
+		t.Fatalf("service should be invoked once, got %d", len(svc.ingestCalls))
+	}
+	for _, leak := range []string{"kafka", "credentials", "exploded", "broker"} {
+		if bytes.Contains(response.Body.Bytes(), []byte(leak)) {
+			t.Fatalf("response leaks internal error %q: %s", leak, response.Body.String())
+		}
+	}
+}
+
+func TestKnowledgeIngestReturnsInternalErrorWhenStoragePutFails(t *testing.T) {
+	content := []byte("payload")
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{
+		presignedURL: defaultTestObjectURL,
+		putErr:       errors.New("minio putobject 503 slow down"),
+	}
+	response := serveKnowledgeIngestWithStorage(t, svc, storage, newValidCorpusFields(content), "asm.html", content, true)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusInternalServerError, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 0 {
+		t.Fatalf("service ingest calls = %d, want 0 on storage failure", len(svc.ingestCalls))
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("minio")) {
+		t.Fatalf("response leaks storage detail: %s", response.Body.String())
+	}
+}
+
+func TestKnowledgeIngestReturnsInternalErrorWhenPresignFails(t *testing.T) {
+	content := []byte("payload")
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{
+		presignErr: errors.New("minio presign endpoint unreachable"),
+	}
+	response := serveKnowledgeIngestWithStorage(t, svc, storage, newValidCorpusFields(content), "asm.html", content, true)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusInternalServerError, response.Body.String())
+	}
+	if len(svc.ingestCalls) != 0 {
+		t.Fatalf("service ingest calls = %d, want 0 on presign failure", len(svc.ingestCalls))
 	}
 }
 
 func TestKnowledgeIngestRejectsFileAboveConfiguredLimit(t *testing.T) {
-	svc := &recordingKnowledgeIngestService{}
-	response := serveKnowledgeIngestWithHandler(
-		t,
-		newKnowledgeIngestHandler(svc, 1024),
-		map[string]string{"userId": "42"},
-		"too-large.pdf",
-		make([]byte, 1025),
-		true,
-	)
+	content := make([]byte, 1025)
+	svc := &recordingCorpusIngestService{}
+	storage := &fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}
+
+	handler := newKnowledgeIngestHandler(svc, testMinIOConfig(), 1024)
+	storage.apply(handler)
+	response := serveKnowledgeIngestWithHandler(t, handler, newValidCorpusFields(content), "too-large.html", content, true)
 
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusRequestEntityTooLarge, response.Body.String())
 	}
-	if len(svc.uploadCalls) != 0 || svc.mergeCalls != 0 {
-		t.Fatalf("service calls = uploads:%d merges:%d, want none", len(svc.uploadCalls), svc.mergeCalls)
+	if len(svc.ingestCalls) != 0 {
+		t.Fatalf("service ingest calls = %d, want 0", len(svc.ingestCalls))
 	}
 	if bytes.Contains(response.Body.Bytes(), []byte("1024")) {
 		t.Fatalf("response leaks configured limit: %s", response.Body.String())
@@ -189,26 +448,27 @@ func TestKnowledgeIngestRejectsFileAboveConfiguredLimit(t *testing.T) {
 }
 
 func TestKnowledgeIngestNormalizesWindowsStyleFileName(t *testing.T) {
-	fileName, ok := safeKnowledgeIngestFileName(`C:\fakepath\evil.pdf`)
+	fileName, ok := safeKnowledgeIngestFileName(`C:\fakepath\asm.html`)
 	if !ok {
 		t.Fatal("Windows-style browser path was rejected")
 	}
-	if fileName != "evil.pdf" {
-		t.Fatalf("file name = %q, want %q", fileName, "evil.pdf")
+	if fileName != "asm.html" {
+		t.Fatalf("file name = %q, want %q", fileName, "asm.html")
 	}
 
-	svc := &recordingKnowledgeIngestService{objectURL: "http://minio.test/object"}
-	response := serveKnowledgeIngest(t, svc, map[string]string{"userId": "42"}, `C:\fakepath\evil.pdf`, []byte("content"), true)
+	content := []byte("content")
+	svc := &recordingCorpusIngestService{}
+	response := serveKnowledgeIngest(t, svc, newValidCorpusFields(content), `C:\fakepath\asm.html`, content, true)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
 	}
-	if len(svc.uploadCalls) != 1 || svc.uploadCalls[0].fileName != "evil.pdf" {
-		t.Fatalf("unexpected upload calls: %+v", svc.uploadCalls)
+	if len(svc.ingestCalls) != 1 || svc.ingestCalls[0].FileName != "asm.html" {
+		t.Fatalf("unexpected ingest call: %+v", svc.ingestCalls)
 	}
 }
 
 func TestKnowledgeIngestRejectsUnsafeFileNames(t *testing.T) {
-	for _, fileName := range []string{"", ".", "..", "bad\x00name.pdf", "line\nbreak.pdf"} {
+	for _, fileName := range []string{"", ".", "..", "bad\x00name.html", "line\nbreak.html"} {
 		t.Run(strconv.Quote(fileName), func(t *testing.T) {
 			if normalized, ok := safeKnowledgeIngestFileName(fileName); ok {
 				t.Fatalf("unsafe file name normalized to %q", normalized)
@@ -233,120 +493,12 @@ func TestKnowledgeIngestFileNameUTF8ByteLimit(t *testing.T) {
 	}
 }
 
-func TestKnowledgeIngestRejectsFileNameAboveDatabaseLimitWithoutServiceCalls(t *testing.T) {
-	svc := &recordingKnowledgeIngestService{}
-	response := serveKnowledgeIngest(
-		t,
-		svc,
-		map[string]string{"userId": "42"},
-		strings.Repeat("a", 252)+".pdf",
-		[]byte("content"),
-		true,
-	)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-	}
-	if len(svc.uploadCalls) != 0 || svc.mergeCalls != 0 {
-		t.Fatalf("service calls = uploads:%d merges:%d, want none", len(svc.uploadCalls), svc.mergeCalls)
-	}
-}
-
-func TestKnowledgeIngestUploadsLargeFileInOrderedBoundedChunks(t *testing.T) {
-	content := make([]byte, service.DefaultChunkSize+17)
-	for i := range content {
-		content[i] = byte(i % 251)
-	}
-	svc := &recordingKnowledgeIngestService{objectURL: "http://minio.test/large"}
-	response := serveKnowledgeIngest(t, svc, map[string]string{"userId": "9"}, "large.pdf", content, true)
-
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
-	}
-	if len(svc.uploadCalls) != 2 {
-		t.Fatalf("upload calls = %d, want 2", len(svc.uploadCalls))
-	}
-	var reassembled []byte
-	for index, call := range svc.uploadCalls {
-		if call.index != index {
-			t.Errorf("call %d chunk index = %d", index, call.index)
-		}
-		if len(call.content) == 0 || len(call.content) > service.DefaultChunkSize {
-			t.Errorf("call %d chunk size = %d", index, len(call.content))
-		}
-		if call.chunkMD5 != md5Hex(call.content) {
-			t.Errorf("call %d chunk MD5 = %s, want %s", index, call.chunkMD5, md5Hex(call.content))
-		}
-		if call.fileMD5 != md5Hex(content) || call.totalSize != int64(len(content)) {
-			t.Errorf("call %d file metadata = md5:%s size:%d", index, call.fileMD5, call.totalSize)
-		}
-		reassembled = append(reassembled, call.content...)
-	}
-	if !bytes.Equal(reassembled, content) {
-		t.Fatal("uploaded chunks do not reconstruct the original file")
-	}
-	if svc.mergeCalls != 1 {
-		t.Fatalf("merge calls = %d, want 1", svc.mergeCalls)
-	}
-}
-
-func TestKnowledgeIngestUploadsExactChunkBoundaryAsOneChunk(t *testing.T) {
-	content := make([]byte, service.DefaultChunkSize)
-	for i := range content {
-		content[i] = byte(i % 251)
-	}
-	svc := &recordingKnowledgeIngestService{objectURL: "http://minio.test/exact"}
-	response := serveKnowledgeIngest(t, svc, map[string]string{"userId": "9"}, "exact.pdf", content, true)
-
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
-	}
-	if len(svc.uploadCalls) != 1 {
-		t.Fatalf("upload calls = %d, want 1", len(svc.uploadCalls))
-	}
-	if svc.uploadCalls[0].index != 0 || len(svc.uploadCalls[0].content) != service.DefaultChunkSize || svc.uploadCalls[0].chunkMD5 != md5Hex(content) {
-		t.Fatalf("unexpected boundary chunk: %+v", svc.uploadCalls[0])
-	}
-	if svc.mergeCalls != 1 {
-		t.Fatalf("merge calls = %d, want 1", svc.mergeCalls)
-	}
-}
-
-func TestKnowledgeIngestStopsOnUploadError(t *testing.T) {
-	svc := &recordingKnowledgeIngestService{uploadErr: errors.New("storage credentials leaked")}
-	response := serveKnowledgeIngest(t, svc, map[string]string{"userId": "3"}, "doc.pdf", []byte("content"), true)
-
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
-	}
-	if svc.mergeCalls != 0 {
-		t.Fatalf("merge calls = %d, want 0", svc.mergeCalls)
-	}
-	if bytes.Contains(response.Body.Bytes(), []byte("credentials")) {
-		t.Fatalf("response leaks internal error: %s", response.Body.String())
-	}
-}
-
-func TestKnowledgeIngestReturnsInternalErrorWhenMergeFails(t *testing.T) {
-	svc := &recordingKnowledgeIngestService{mergeErr: errors.New("private minio detail")}
-	response := serveKnowledgeIngest(t, svc, map[string]string{"userId": "3"}, "doc.pdf", []byte("content"), true)
-
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
-	}
-	if len(svc.uploadCalls) != 1 || svc.mergeCalls != 1 {
-		t.Fatalf("service calls = uploads:%d merges:%d, want 1 each", len(svc.uploadCalls), svc.mergeCalls)
-	}
-	if bytes.Contains(response.Body.Bytes(), []byte("minio")) {
-		t.Fatalf("response leaks internal error: %s", response.Body.String())
-	}
-}
-
 func TestKnowledgeIngestInternalRouteRequiresToken(t *testing.T) {
 	previousSecret := serverconfig.Conf.AI.Orchestrator.SharedSecret
 	serverconfig.Conf.AI.Orchestrator.SharedSecret = "correct-secret"
 	t.Cleanup(func() { serverconfig.Conf.AI.Orchestrator.SharedSecret = previousSecret })
 
+	content := []byte("payload")
 	for _, tt := range []struct {
 		name       string
 		token      string
@@ -358,24 +510,41 @@ func TestKnowledgeIngestInternalRouteRequiresToken(t *testing.T) {
 		{name: "correct token", token: "correct-secret", wantStatus: http.StatusAccepted, wantCalls: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &recordingKnowledgeIngestService{objectURL: "http://minio.test/auth"}
-			response := serveAuthenticatedKnowledgeIngest(t, svc, map[string]string{"userId": "8"}, "doc.pdf", []byte("content"), tt.token)
+			svc := &recordingCorpusIngestService{}
+			response := serveAuthenticatedKnowledgeIngest(t, svc, newValidCorpusFields(content), "asm.html", content, tt.token)
 			if response.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", response.Code, tt.wantStatus, response.Body.String())
 			}
-			if len(svc.uploadCalls) != tt.wantCalls {
-				t.Fatalf("upload calls = %d, want %d", len(svc.uploadCalls), tt.wantCalls)
-			}
-			if svc.mergeCalls != tt.wantCalls {
-				t.Fatalf("merge calls = %d, want %d", svc.mergeCalls, tt.wantCalls)
+			if len(svc.ingestCalls) != tt.wantCalls {
+				t.Fatalf("service ingest calls = %d, want %d", len(svc.ingestCalls), tt.wantCalls)
 			}
 		})
 	}
 }
 
-func serveKnowledgeIngest(t *testing.T, svc KnowledgeIngestService, fields map[string]string, fileName string, file []byte, includeFile bool) *httptest.ResponseRecorder {
+// withField returns a shallow copy of fields with key set to value.
+func withField(fields map[string]string, key, value string) map[string]string {
+	out := make(map[string]string, len(fields)+1)
+	for k, v := range fields {
+		out[k] = v
+	}
+	out[key] = value
+	return out
+}
+
+func serveKnowledgeIngest(t *testing.T, svc service.CorpusIngestService, fields map[string]string, fileName string, file []byte, includeFile bool) *httptest.ResponseRecorder {
 	t.Helper()
-	return serveKnowledgeIngestWithHandler(t, NewKnowledgeIngestHandler(svc), fields, fileName, file, includeFile)
+	return serveKnowledgeIngestWithStorage(t, svc, nil, fields, fileName, file, includeFile)
+}
+
+func serveKnowledgeIngestWithStorage(t *testing.T, svc service.CorpusIngestService, storage *fakeKnowledgeStorage, fields map[string]string, fileName string, file []byte, includeFile bool) *httptest.ResponseRecorder {
+	t.Helper()
+	h := NewKnowledgeIngestHandler(svc, testMinIOConfig())
+	if storage == nil {
+		storage = &fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}
+	}
+	storage.apply(h)
+	return serveKnowledgeIngestWithHandler(t, h, fields, fileName, file, includeFile)
 }
 
 func serveKnowledgeIngestWithHandler(t *testing.T, handler *KnowledgeIngestHandler, fields map[string]string, fileName string, file []byte, includeFile bool) *httptest.ResponseRecorder {
@@ -389,7 +558,7 @@ func serveKnowledgeIngestWithHandler(t *testing.T, handler *KnowledgeIngestHandl
 	return recorder
 }
 
-func serveAuthenticatedKnowledgeIngest(t *testing.T, svc KnowledgeIngestService, fields map[string]string, fileName string, file []byte, token string) *httptest.ResponseRecorder {
+func serveAuthenticatedKnowledgeIngest(t *testing.T, svc service.CorpusIngestService, fields map[string]string, fileName string, file []byte, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	request := newKnowledgeIngestRequest(t, fields, fileName, file, true)
@@ -400,7 +569,9 @@ func serveAuthenticatedKnowledgeIngest(t *testing.T, svc KnowledgeIngestService,
 	router := gin.New()
 	group := router.Group("/internal")
 	group.Use(middleware.InternalAuthMiddleware())
-	group.POST("/orchestrator/knowledge-ingest", NewKnowledgeIngestHandler(svc).Ingest)
+	handler := NewKnowledgeIngestHandler(svc, testMinIOConfig())
+	(&fakeKnowledgeStorage{presignedURL: defaultTestObjectURL}).apply(handler)
+	group.POST("/orchestrator/knowledge-ingest", handler.Ingest)
 	router.ServeHTTP(recorder, request)
 	return recorder
 }

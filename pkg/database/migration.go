@@ -35,6 +35,12 @@ func EnsureRuntimeSchema() error {
 		"ALTER TABLE document_vectors ADD COLUMN parser_version VARCHAR(128) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN corpus_generation VARCHAR(128) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN target_index VARCHAR(255) NULL",
+		// RunID scopes a pipeline_task idempotency key to a controlled replay.
+		// AutoMigrate (cmd/server) already adds this column for fresh/existing
+		// databases because model.PipelineTask is registered; this statement is
+		// a belt-and-suspenders fallback for schemas that predate the field and
+		// must never block startup if the column is already present.
+		"ALTER TABLE pipeline_task ADD COLUMN run_id VARCHAR(96) NULL",
 	}
 
 	for _, stmt := range statements {
