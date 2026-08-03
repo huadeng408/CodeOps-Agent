@@ -147,23 +147,30 @@ def test_count_reviewed_counts_only_rows_with_hashes(tmp_path: Path) -> None:
 
 
 def test_seed_qrels_file_shape() -> None:
-    """The shipped seed file is exactly one placeholder row per source."""
+    """The shipped qrels file is the 180-row retrieval-eval set (6 sources × 30)."""
     rows = _read_rows(QRELS_SEED)
-    assert len(rows) == 6
-    assert sorted(r["source_id"] for r in rows) == sorted(SEED_SOURCES)
-    assert all(r["relevance"] == 1 for r in rows)
-    assert all(r["reviewer_hash"] == "" for r in rows)
-    assert all(r["evidence_type"] == "text" for r in rows)
-    # Stable IDs: source_id + pinned commit + source path + section path.
+    assert len(rows) == 180
+    from collections import Counter
+
+    per_source = Counter(r["source_id"] for r in rows)
+    assert set(per_source) == set(SEED_SOURCES)
+    assert all(v == 30 for v in per_source.values()), per_source
+    assert all(r["relevance"] in (0.0, 1.0) for r in rows)
+    # Retrieval-eval qrels carry no reviewer/evidence fields (annotation
+    # workflow adds those when it exports a worksheet).
     for row in rows:
-        assert row["source_commit"] == PLACEHOLDER_COMMIT
-        assert row["document_id"].startswith(f"{row['source_id']}/{PLACEHOLDER_COMMIT}/")
-        assert isinstance(row["section_path"], list) and row["section_path"]
+        assert "reviewer_hash" not in row
+        assert "evidence_type" not in row
+        assert isinstance(row["section_path"], list)
+        # Stable ID: source_id@commit:path (evaluation format).
+        assert row["document_id"].startswith(f"{row['source_id']}@")
+        assert ":" in row["document_id"]
 
 
 def test_seed_qrels_file_validates() -> None:
     counts = validate_counts(QRELS_SEED)
-    assert counts["total"] == 6
-    assert counts["per_source"] == {s: 1 for s in SEED_SOURCES}
-    assert counts["zh_count"] == 3  # half Chinese queries over English docs
-    assert count_reviewed(QRELS_SEED) == 0  # seed rows await human review
+    assert counts["total"] == 180
+    assert counts["per_source"] == {s: 30 for s in SEED_SOURCES}
+    # ~half Chinese queries over English docs (per build spec: 15 zh per source).
+    assert counts["zh_count"] == 90
+    assert count_reviewed(QRELS_SEED) == 0  # no reviewer_hash fields yet

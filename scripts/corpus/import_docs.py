@@ -205,12 +205,14 @@ def manifest_document_paths(source: str, source_dir: Path, manifest_path: Path) 
 # --------------------------------------------------------------------------- #
 
 
-def list_documents(server: str, token: str, generation: str, status: str) -> list[dict]:
+def list_documents(
+    server: str, token: str, generation: str, status: str, *, http_timeout: int = 30
+) -> list[dict]:
     """GET the read-only document status list (one status at a time)."""
     resp = requests.get(
         knowledge_documents_url(server, generation, status),
         headers={"X-Internal-Token": token},
-        timeout=30,
+        timeout=http_timeout,
     )
     resp.raise_for_status()
     payload = resp.json() or {}
@@ -218,8 +220,13 @@ def list_documents(server: str, token: str, generation: str, status: str) -> lis
     return docs if isinstance(docs, list) else []
 
 
-def is_document_active(server: str, token: str, generation: str, doc_id: str) -> bool:
-    return any(d.get("documentId") == doc_id for d in list_documents(server, token, generation, "ACTIVE"))
+def is_document_active(
+    server: str, token: str, generation: str, doc_id: str, *, http_timeout: int = 30
+) -> bool:
+    return any(
+        d.get("documentId") == doc_id
+        for d in list_documents(server, token, generation, "ACTIVE", http_timeout=http_timeout)
+    )
 
 
 def upload_one(
@@ -235,6 +242,7 @@ def upload_one(
     target_index: str,
     loader_user: int,
     run_id: str,
+    http_timeout: int = 120,
     org_tag: str = "corpus",
 ) -> str:
     """Upload one document through the dedicated corpus entry; return documentId.
@@ -271,7 +279,7 @@ def upload_one(
         headers={"X-Internal-Token": token},
         files=files,
         data=form,
-        timeout=120,
+        timeout=http_timeout,
     )
     resp.raise_for_status()
     payload = resp.json() or {}
@@ -289,6 +297,7 @@ def poll_document(
     *,
     timeout_seconds: int,
     interval_seconds: int,
+    http_timeout: int = 30,
 ) -> tuple[str, str]:
     """Poll until the document is ACTIVE, SKIPPED, or FAILED (or budget exhausted).
 
@@ -303,13 +312,13 @@ def poll_document(
     if timeout_seconds > 0 and interval_seconds > 0:
         attempts = max(1, int(math.ceil(timeout_seconds / interval_seconds)))
     for _ in range(attempts):
-        for doc in list_documents(server, token, generation, "ACTIVE"):
+        for doc in list_documents(server, token, generation, "ACTIVE", http_timeout=http_timeout):
             if doc.get("documentId") == doc_id:
                 return ("active", "")
-        for doc in list_documents(server, token, generation, "SKIPPED"):
+        for doc in list_documents(server, token, generation, "SKIPPED", http_timeout=http_timeout):
             if doc.get("documentId") == doc_id:
                 return ("skipped", "")
-        for doc in list_documents(server, token, generation, "FAILED"):
+        for doc in list_documents(server, token, generation, "FAILED", http_timeout=http_timeout):
             if doc.get("documentId") == doc_id:
                 last_error = str(doc.get("lastError") or "").strip()
                 return ("failed", last_error or "document reported FAILED")
@@ -332,6 +341,7 @@ def process_one(
     run_id: str,
     poll_timeout: int,
     poll_interval: int,
+    http_timeout: int,
 ) -> dict:
     """Run the full per-document lifecycle; return a report file record."""
     rel = path.relative_to(source_dir).as_posix()
@@ -347,7 +357,9 @@ def process_one(
         "documentId": document_id(source_id, source_commit, rel),
     }
 
-    if is_document_active(server, token, generation, base_record["documentId"]):
+    if is_document_active(
+        server, token, generation, base_record["documentId"], http_timeout=http_timeout
+    ):
         base_record["status"] = "skipped"
         return base_record
 
@@ -364,6 +376,7 @@ def process_one(
             target_index=target_index,
             loader_user=loader_user,
             run_id=run_id,
+            http_timeout=http_timeout,
         )
     except Exception as exc:  # noqa: BLE001 — surface a sanitized per-file failure
         base_record["failure"] = str(exc) or "upload failed"
@@ -377,6 +390,7 @@ def process_one(
         doc_id,
         timeout_seconds=poll_timeout,
         interval_seconds=poll_interval,
+        http_timeout=http_timeout,
     )
     base_record["status"] = status
     base_record["failure"] = failure
@@ -443,6 +457,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=None, help="write a sanitized JSON report to this path")
     parser.add_argument("--poll-timeout-seconds", type=int, default=DEFAULT_POLL_TIMEOUT_SECONDS)
     parser.add_argument("--poll-interval-seconds", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS)
+    parser.add_argument(
+        "--http-timeout",
+        type=int,
+        default=120,
+        help="per-request HTTP timeout in seconds (slow-ES resilience; uploads and status polls)",
+    )
     return parser.parse_args(argv)
 
 
@@ -524,6 +544,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             poll_timeout=args.poll_timeout_seconds,
             poll_interval=args.poll_interval_seconds,
+            http_timeout=args.http_timeout,
         )
         records.append(record)
         print(f"  {record['status']:7s} {rel}" + (f" ({record['failure']})" if record["failure"] else ""))

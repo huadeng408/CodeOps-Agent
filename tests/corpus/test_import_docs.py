@@ -93,7 +93,7 @@ class FakeServer:
 
     def post(self, url: str, headers=None, files=None, data=None, timeout=None):
         self.post_urls.append(url)
-        self.post_calls.append({"url": url, "headers": headers, "files": files, "data": data})
+        self.post_calls.append({"url": url, "headers": headers, "files": files, "data": data, "timeout": timeout})
         if self.on_post is not None:
             return self.on_post(url, headers, files, data)
         form = dict(data or {})
@@ -829,3 +829,46 @@ def test_upload_one_form_carries_run_id(
     assert len(fake.post_calls) == 1
     form = fake.post_calls[0]["data"]
     assert form["runId"] == "import-1700000000"
+
+
+
+
+def test_upload_one_honors_http_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """upload_one must pass the configured http_timeout to the requests.post
+    call so slow-ES environments do not hit the default 30s ReadTimeout."""
+    path = tmp_path / "doc" / "README.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("body", encoding="utf-8")
+    fake = FakeServer()
+    patch_server(monkeypatch, fake)
+
+    import_docs.upload_one(
+        "http://127.0.0.1:8081",
+        "tok",
+        path=path,
+        source_id="go",
+        source_path="doc/README.md",
+        source_commit=GO_COMMIT,
+        repository_url=GO_REPO,
+        corpus_generation=GENERATION,
+        target_index="knowledge_base_v2_bge_m3",
+        loader_user=1,
+        run_id="import-test",
+        http_timeout=222,
+    )
+    assert fake.post_calls and fake.post_calls[0]["timeout"] == 222, fake.post_calls
+
+
+def test_list_documents_honors_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """list_documents must pass the configured http_timeout to requests.get."""
+    seen: dict[str, object] = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return FakeResp(200, {"documents": []})
+
+    monkeypatch.setattr(import_docs.requests, "get", fake_get)
+    import_docs.list_documents("http://x", "tok", GENERATION, "ACTIVE", http_timeout=333)
+    assert seen.get("timeout") == 333, seen
