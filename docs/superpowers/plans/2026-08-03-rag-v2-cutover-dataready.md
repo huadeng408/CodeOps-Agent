@@ -70,7 +70,7 @@ Invoke-RestMethod http://127.0.0.1:8009/health
 
 ```powershell
 $body=@{task=@{file_md5='diag';file_name='d.md';user_id=1;stage='embed'};texts=@('hello')}|ConvertTo-Json -Compress
-Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8090/v1/ingestion/embed' -Method POST -Headers @{'X-Internal-Token'='codeagent-internal-dev'} -ContentType 'application/json' -Body $body -TimeoutSec 40
+Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8090/v1/ingestion/embed' -Method POST -Headers @{'X-Internal-Token'='<internal-shared-secret>'} -ContentType 'application/json' -Body $body -TimeoutSec 40
 ```
 期望 200 且 vectors[0] 长度 1024。若 worker 未运行，按 GC4 env（token 从 `configs/server.yaml` 读取）重启后重试。
 
