@@ -64,7 +64,11 @@ corpus:
 # Embedding model config
 # model_revision must be pinned to an immutable commit before any corpus
 # cutover; floating tags (@main/@latest) are rejected by ValidateEmbeddingContract.
-# Placeholder below — replace with the verified BGE-M3 commit hash.
+# VERIFIED 2026-08-06: 5617a9f61b028005a4858fdac845db406aefb181 is the current
+# BAAI/bge-m3 main-branch commit per hf-mirror API (lastModified 2024-07-03);
+# local weights (D:/tools/mineru-models/models/BAAI--bge-m3) sha256-match the
+# HF LFS etags (pytorch_model.bin b5e0ce34...aad38, sentencepiece.bpe.model
+# cfc8146a...2865, tokenizer.json 21106b6d...dd08). dims 1024 native.
 embedding:
     model: "BAAI/bge-m3"
     model_revision: "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181"
