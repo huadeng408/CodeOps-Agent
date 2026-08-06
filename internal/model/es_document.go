@@ -32,6 +32,9 @@ type EsDocument struct {
 	TextContent      string    `json:"text_content"`
 	SourceURL        string    `json:"source_url,omitempty"`
 	SourceSHA256     string    `json:"source_sha256,omitempty"`
+	SourcePath       string    `json:"source_path,omitempty"`
+	SourceCommit     string    `json:"source_commit,omitempty"`
+	SourceID         string    `json:"source_id,omitempty"`
 	Vector           []float32 `json:"vector"` // 文本内容的向量表示
 	ModelVersion     string    `json:"model_version"`
 	DocumentID       string    `json:"document_id,omitempty"`

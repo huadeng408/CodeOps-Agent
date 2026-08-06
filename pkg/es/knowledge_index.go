@@ -42,6 +42,7 @@ func KnowledgeV2Mapping(dimensions int) map[string]any {
 		"embedding_text": map[string]any{"type": "text"}, "vector": map[string]any{"type": "dense_vector", "dims": dimensions, "index": true, "similarity": "cosine"},
 		"model_version": map[string]any{"type": "keyword"}, "document_id": map[string]any{"type": "keyword"},
 		"source_sha256": map[string]any{"type": "keyword"}, "source_url": map[string]any{"type": "keyword"},
+		"source_path": map[string]any{"type": "keyword"}, "source_commit": map[string]any{"type": "keyword"}, "source_id": map[string]any{"type": "keyword"},
 		"parent_chunk_id": map[string]any{"type": "keyword"}, "section_path": map[string]any{"type": "keyword"},
 		"page_id": map[string]any{"type": "keyword"}, "page_span": map[string]any{"type": "integer"},
 		"element_ids": map[string]any{"type": "keyword"}, "element_types": map[string]any{"type": "keyword"},

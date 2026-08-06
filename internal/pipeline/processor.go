@@ -635,15 +635,39 @@ func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int,
 	if embeddingText == "" {
 		embeddingText = sourceText
 	}
+	// The task's knowledge_document identifier (git@commit:path) is the
+	// corpus document_id eval qrels match on; the worker-supplied chunk
+	// identifier is only a fallback for legacy uploads without a task
+	// DocumentID.
+	documentID := chunk.DocumentID
+	if strings.TrimSpace(task.DocumentID) != "" {
+		documentID = task.DocumentID
+	}
+	// Source identity comes from the provenance validated at the internal
+	// trust boundary; SourceURL keeps the chunk's value when the worker
+	// already supplied one.
+	var sourceID, sourcePath, sourceCommit string
+	sourceURL := chunk.SourceURL
+	if task.Provenance != nil {
+		sourceID = task.Provenance.SourceID
+		sourcePath = task.Provenance.SourcePath
+		sourceCommit = task.Provenance.SourceCommit
+		if strings.TrimSpace(sourceURL) == "" {
+			sourceURL = task.Provenance.SourceURL
+		}
+	}
 	return &model.DocumentVector{
 		FileMD5:          task.FileMD5,
 		ChunkID:          index,
 		TextContent:      sourceText,
 		EmbeddingText:    embeddingText,
 		ModelVersion:     modelVersion,
-		DocumentID:       chunk.DocumentID,
+		DocumentID:       documentID,
 		SourceSHA256:     chunk.SourceSHA256,
-		SourceURL:        chunk.SourceURL,
+		SourceURL:        sourceURL,
+		SourcePath:       sourcePath,
+		SourceCommit:     sourceCommit,
+		SourceID:         sourceID,
 		PageID:           chunk.PageID,
 		ParentChunkID:    chunk.ParentChunkID,
 		SectionPath:      chunk.SectionPath,
@@ -682,6 +706,9 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 		DocumentID:       item.DocumentID,
 		SourceSHA256:     item.SourceSHA256,
 		SourceURL:        item.SourceURL,
+		SourcePath:       item.SourcePath,
+		SourceCommit:     item.SourceCommit,
+		SourceID:         item.SourceID,
 		ParentChunkID:    item.ParentChunkID,
 		SectionPath:      item.SectionPath,
 		PageID:           item.PageID,
