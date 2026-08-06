@@ -51,6 +51,12 @@ SERIALIZE_REQUESTS = os.getenv("EMBEDDING_SERIALIZE_REQUESTS", "true").lower() n
 WARMUP_TEXT = os.getenv("EMBEDDING_WARMUP_TEXT", "warmup")
 OUTPUT_DIMENSIONS = int(os.getenv("EMBEDDING_OUTPUT_DIMENSIONS", "0"))
 
+# Map logical model names to local model directories so callers can keep
+# using the canonical name ("BAAI/bge-m3") while the service loads the
+# already-downloaded local weights (never re-downloads from the hub).
+LOCAL_MODEL_DIR = os.getenv("EMBEDDING_LOCAL_DIR", "")
+MODEL_ALIASES = {"BAAI/bge-m3": LOCAL_MODEL_DIR} if LOCAL_MODEL_DIR else {}
+
 app = FastAPI(title="PaiSmart Embedding", version="1.0.0")
 _model_name = DEFAULT_MODEL
 _model = None  # TextEmbedding | BGEM3FlagModel
@@ -91,6 +97,11 @@ def _load_fastembed(model_name: str):
     return TextEmbedding(model_name=model_name, **init_kwargs)
 
 
+def _resolve_model_name(model_name: str) -> str:
+    """Resolve a logical model name to a local directory when aliased."""
+    return MODEL_ALIASES.get(model_name, model_name)
+
+
 def load_model(model_name: str):
     """Load the requested embedding model once and reuse it across requests."""
     global _model
@@ -98,19 +109,20 @@ def load_model(model_name: str):
     global _ready
     global _last_error
 
+    resolved = _resolve_model_name(model_name)
     with _model_lock:
-        if _model is not None and _model_name == model_name:
+        if _model is not None and _model_name == resolved:
             return _model
 
         started = time.perf_counter()
-        if _is_bge_m3(model_name):
-            _model = _load_bge_m3(model_name)
+        if _is_bge_m3(resolved):
+            _model = _load_bge_m3(resolved)
         else:
-            _model = _load_fastembed(model_name)
-        _model_name = model_name
+            _model = _load_fastembed(resolved)
+        _model_name = resolved
         _ready = True
         _last_error = None
-        logger.info("loaded embedding model=%s in %.2fs", model_name, time.perf_counter() - started)
+        logger.info("loaded embedding model=%s in %.2fs", resolved, time.perf_counter() - started)
         return _model
 
 
@@ -186,10 +198,15 @@ def preload_model():
 
 @app.get("/health")
 def health():
-    """Return the current readiness state of the embedding service."""
+    """Return the current readiness state of the embedding service.
+
+    ``model`` reports the canonical logical name (EMBEDDING_MODEL) so callers
+    comparing it against their configured model see a match even when the
+    service loads weights from a local directory alias.
+    """
     return {
         "status": "ok" if _ready else "degraded",
-        "model": _model_name or DEFAULT_MODEL,
+        "model": DEFAULT_MODEL,
         "model_revision": DEFAULT_REVISION,
         "dimensions": OUTPUT_DIMENSIONS or None,
         "ready": _ready,
