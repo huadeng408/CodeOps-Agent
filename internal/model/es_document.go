@@ -21,6 +21,14 @@ type SearchResponseDTO struct {
 	BBoxRefs      []string `json:"bboxRefs,omitempty"`
 	AssetRefs     []string `json:"assetRefs,omitempty"`
 	SourceURL     string   `json:"sourceUrl,omitempty"`
+	TokenCount    int      `json:"tokenCount,omitempty"`
+	// CitationKey is the stable citation for this chunk
+	// (source/page/element, falling back to file_md5:chunk_id), filled by
+	// evidence expansion.
+	CitationKey string `json:"citationKey,omitempty"`
+	// ExpansionStatus is "full" when same-parent neighbor evidence was
+	// loaded for this chunk, "partial" when the parent is missing.
+	ExpansionStatus string `json:"expansionStatus,omitempty"`
 }
 
 // EsDocument 代表存储在 Elasticsearch 中的文档结构。

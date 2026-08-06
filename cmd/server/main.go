@@ -149,8 +149,8 @@ func main() {
 	)
 	conversationService := service.NewConversationService(conversationRepo)
 	memoryService := service.NewMemoryService(memoryRepo, embeddingClient, orchestratorMemoryClient, rerankerClient, es.ESClient, cfg.Memory)
-	orchestratorSupportService := service.NewOrchestratorSupportService(searchService, memoryService, conversationRepo, rerankerClient)
-	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient)
+	orchestratorSupportService := service.NewOrchestratorSupportService(searchService, memoryService, conversationRepo, rerankerClient, docVectorRepo, userService)
+	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient, docVectorRepo, userService)
 
 	processor := pipeline.NewProcessor(
 		documentParser,

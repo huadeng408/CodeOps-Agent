@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/log"
 	"code-agent/pkg/reranker"
 )
@@ -30,6 +30,8 @@ type orchestratorSupportService struct {
 	memoryService    MemoryService
 	conversationRepo repository.ConversationRepository
 	rerankerClient   reranker.Client
+	evidenceLoader   EvidenceLoader
+	userService      UserService
 }
 
 // NewOrchestratorSupportService creates a support service for the external LangGraph orchestrator.
@@ -38,12 +40,16 @@ func NewOrchestratorSupportService(
 	memoryService MemoryService,
 	conversationRepo repository.ConversationRepository,
 	rerankerClient reranker.Client,
+	evidenceLoader EvidenceLoader,
+	userService UserService,
 ) OrchestratorSupportService {
 	return &orchestratorSupportService{
 		searchService:    searchService,
 		memoryService:    memoryService,
 		conversationRepo: conversationRepo,
 		rerankerClient:   rerankerClient,
+		evidenceLoader:   evidenceLoader,
+		userService:      userService,
 	}
 }
 
@@ -246,6 +252,8 @@ func (s *orchestratorSupportService) SearchKnowledge(ctx context.Context, req *m
 		return nil, err
 	}
 
+	results = expandEvidenceForUser(ctx, s.evidenceLoader, s.userService, user, results, req.Query)
+
 	return &model.OrchestratorKnowledgeSearchResponse{Results: results}, nil
 }
 
@@ -389,6 +397,8 @@ func (s *orchestratorSupportService) newCoordinator() *chatService {
 		searchService:    s.searchService,
 		memoryService:    s.memoryService,
 		conversationRepo: s.conversationRepo,
+		evidenceLoader:   s.evidenceLoader,
+		userService:      s.userService,
 	}
 }
 

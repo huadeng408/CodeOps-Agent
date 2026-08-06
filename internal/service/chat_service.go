@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/log"
 	orchestratorclient "code-agent/pkg/orchestrator"
 
@@ -29,6 +29,8 @@ type chatService struct {
 	memoryService    MemoryService
 	conversationRepo repository.ConversationRepository
 	orchestrator     orchestratorclient.Client
+	evidenceLoader   EvidenceLoader
+	userService      UserService
 }
 
 // NewChatService creates a new chat service.
@@ -37,12 +39,16 @@ func NewChatService(
 	memoryService MemoryService,
 	conversationRepo repository.ConversationRepository,
 	orchestrator orchestratorclient.Client,
+	evidenceLoader EvidenceLoader,
+	userService UserService,
 ) ChatService {
 	return &chatService{
 		searchService:    searchService,
 		memoryService:    memoryService,
 		conversationRepo: conversationRepo,
 		orchestrator:     orchestrator,
+		evidenceLoader:   evidenceLoader,
+		userService:      userService,
 	}
 }
 
@@ -162,6 +168,7 @@ func (s *chatService) retrieveKnowledgeWithPlan(ctx context.Context, query strin
 	}
 
 	merged := mergeSearchResults(collected, topK)
+	merged = expandEvidenceForUser(ctx, s.evidenceLoader, s.userService, user, merged, query)
 	return s.convertSearchResultsToContext(merged), nil
 }
 

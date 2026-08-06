@@ -178,6 +178,9 @@ type RetrievalConfig struct {
 	RerankTopN      int `mapstructure:"rerank_topn"`
 	FinalTopK       int `mapstructure:"final_topk"`
 	RerankTimeoutMs int `mapstructure:"rerank_timeout_ms"`
+	// EvidenceTokenBudget caps the total tokens of same-parent neighbor
+	// evidence loaded per retrieval turn (0 uses the expander's default).
+	EvidenceTokenBudget int `mapstructure:"evidence_token_budget"`
 	// StrictMode enables acceptance-mode behavior: a vector dimension
 	// mismatch must fail the request explicitly instead of silently
 	// degrading to BM25 (design spec §10: no legacy fallback on mismatch).

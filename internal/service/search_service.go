@@ -557,6 +557,7 @@ func (s *searchService) buildResponseDTOs(hits []retrievalHit) ([]model.SearchRe
 			BBoxRefs:      hit.Source.BBoxRefs,
 			AssetRefs:     hit.Source.AssetRefs,
 			SourceURL:     hit.Source.SourceURL,
+			TokenCount:    hit.Source.TokenCount,
 		})
 	}
 
@@ -604,6 +605,9 @@ func normalizeRetrievalConfig(cfg serverconfig.RetrievalConfig) serverconfig.Ret
 	}
 	if cfg.RerankTimeoutMs <= 0 {
 		cfg.RerankTimeoutMs = 120
+	}
+	if cfg.EvidenceTokenBudget <= 0 {
+		cfg.EvidenceTokenBudget = 4096
 	}
 	return cfg
 }
@@ -653,7 +657,7 @@ func buildPermissionFilter(userID uint, orgTags []string) map[string]any {
 
 // buildSourceFields builds source fields.
 func buildSourceFields() []string {
-	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url"}
+	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url", "token_count"}
 }
 
 // fuseAndExpand keeps evidence diverse by allowing only one hit per
