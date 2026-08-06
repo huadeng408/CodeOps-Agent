@@ -184,6 +184,11 @@ class EvalPlusBenchmark:
             self._instances = _build_instances(self.problems, self.limit)
         return self._instances
 
+    @property
+    def results(self) -> List[EvalResult]:
+        """Per-instance :class:`EvalResult` list from the most recent run()."""
+        return list(self._results)
+
     # -- run -----------------------------------------------------------------
 
     def run(
@@ -767,6 +772,42 @@ def _run_official_evaluate(
     except Exception as exc:
         print(f"[EvalPlus] Official evaluate skipped: {exc}")
         print("           (this is expected for --limit runs; results are from our scorer)")
+
+
+# ========================================================================
+# Module-level run() -- eval/run.py CLI contract
+# ========================================================================
+
+def run(
+    driver: Any,
+    limit: Optional[int] = None,
+    **kwargs: Any,
+) -> List[EvalResult]:
+    """Module-level runner aligned with the ``eval.run`` CLI contract.
+
+    Builds an :class:`EvalPlusBenchmark`, attaches *driver* as the adapter,
+    runs the full pipeline (official evalplus scoring), and returns the
+    per-instance :class:`EvalResult` list.  The thin wrapper never bypasses
+    official evalplus scoring.
+
+    Extra keyword arguments are forwarded to the benchmark: ``dataset``
+    (``"humaneval"`` or ``"mbpp"``), ``base_only``, ``parallel``, and
+    ``output_dir``.
+    """
+    dataset = kwargs.pop("dataset", "humaneval")
+    base_only = bool(kwargs.pop("base_only", False))
+    parallel = kwargs.pop("parallel", None)
+    output_dir = kwargs.pop("output_dir", "./results")
+
+    benchmark = EvalPlusBenchmark(
+        dataset=dataset,
+        adapter=driver,
+        limit=limit,
+        base_only=base_only,
+        parallel=parallel,
+    )
+    benchmark.run(output_dir=output_dir, **kwargs)
+    return benchmark.results
 
 
 # ========================================================================

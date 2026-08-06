@@ -13,7 +13,8 @@ Two execution paths are available (tried in order):
 
 The driver defaults to the ollama ``qwen3:4b`` model at
 ``http://127.0.0.1:11434/v1``.  Override via environment variables
-``LOCAL_LLM_BASE_URL``, ``LOCAL_LLM_MODEL``, or pass them to the constructor.
+``LOCAL_LLM_BASE_URL``, ``LOCAL_LLM_MODEL``, ``LOCAL_LLM_API_KEY``, or pass
+them to the constructor (explicit arguments win over env vars).
 """
 
 from __future__ import annotations
@@ -408,7 +409,11 @@ class HeadlessDriver(DefaultAgentAdapter):
     base_url:
         OpenAI-compatible base URL (default ``http://127.0.0.1:11434/v1``).
     api_key:
-        API key sent to the LLM provider (default ``"ollama"``).
+        API key sent to the LLM provider.  Resolution order: explicit value,
+        then ``LOCAL_LLM_API_KEY``, then the local-ollama placeholder
+        ``"ollama"``.  The default ``None`` matters: a hard-coded ``"ollama"``
+        default would shadow ``LOCAL_LLM_API_KEY`` and silently break remote
+        providers.
     use_runner:
         If ``True``, always attempt the ConversationRunner path first.
         Default ``True``.
@@ -420,7 +425,7 @@ class HeadlessDriver(DefaultAgentAdapter):
         self,
         model: str | None = None,
         base_url: str | None = None,
-        api_key: str = "ollama",
+        api_key: str | None = None,
         use_runner: bool = True,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> None:
@@ -429,6 +434,8 @@ class HeadlessDriver(DefaultAgentAdapter):
         self.base_url = base_url or os.environ.get(
             "LOCAL_LLM_BASE_URL", DEFAULT_OLLAMA_BASE_URL
         )
+        # Explicit argument -> LOCAL_LLM_API_KEY env -> local ollama placeholder.
+        # Defaulting to None (not "ollama") is what lets the env var win.
         self.api_key = api_key or os.environ.get("LOCAL_LLM_API_KEY", "ollama")
         self.timeout_s = timeout_s
         self.use_runner = use_runner
@@ -786,6 +793,7 @@ class HeadlessDriver(DefaultAgentAdapter):
 def create_driver(
     model: str | None = None,
     base_url: str | None = None,
+    api_key: str | None = None,
     use_runner: bool = True,
 ) -> HeadlessDriver:
     """Create a :class:`HeadlessDriver` with the given or env-default settings.
@@ -795,5 +803,11 @@ def create_driver(
         from eval.driver_headless import create_driver
         driver = create_driver()
         result = driver.solve_instance(instance, "/tmp/eval_work")
+
+    *api_key* may carry an already-resolved key (e.g. read from
+    ``LOCAL_LLM_API_KEY``); if omitted the driver resolves it itself in the
+    order explicit argument -> ``LOCAL_LLM_API_KEY`` -> ``"ollama"``.
     """
-    return HeadlessDriver(model=model, base_url=base_url, use_runner=use_runner)
+    return HeadlessDriver(
+        model=model, base_url=base_url, api_key=api_key, use_runner=use_runner
+    )

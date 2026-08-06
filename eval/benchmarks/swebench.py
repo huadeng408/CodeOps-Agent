@@ -912,6 +912,36 @@ def _apply_hinted_fix(
 
 
 # ---------------------------------------------------------------------------
+# Module-level run() -- eval/run.py CLI contract
+# ---------------------------------------------------------------------------
+
+
+def run(
+    driver: "AgentAdapter",
+    limit: int | None = None,
+    **kwargs: Any,
+) -> list[EvalResult]:
+    """Module-level runner aligned with the ``eval.run`` CLI contract.
+
+    Builds a :class:`SWEBenchRunner` around *driver* and returns the
+    per-instance :class:`EvalResult` list from ``run_all()``.  The default
+    path loads real SWE-bench Verified data (synthetic instances only on an
+    explicit ``dry_run=True``), and predictions.jsonl is written for the
+    official harness.
+
+    Extra keyword arguments are forwarded to the runner: ``dry_run``,
+    ``output_dir``, ``verbose``.
+    """
+    runner = SWEBenchRunner(
+        adapter=driver,
+        output_dir=kwargs.pop("output_dir", "."),
+        dry_run=bool(kwargs.pop("dry_run", False)),
+        verbose=bool(kwargs.pop("verbose", True)),
+    )
+    return runner.run_all(max_instances=limit)
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 

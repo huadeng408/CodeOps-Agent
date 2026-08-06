@@ -44,9 +44,15 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
     i = 0
     while i < len(argv):
         flag = argv[i]
-        if flag in ("--benchmark", "-b") and i + 1 < len(argv):
-            args["benchmark"] = argv[i + 1]
-            i += 2
+        if flag in ("--benchmark", "-b"):
+            # `-b NAME` selects a benchmark; `-b` without a value (or
+            # `-b list`) lists the available benchmarks.
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                args["benchmark"] = argv[i + 1]
+                i += 2
+            else:
+                args["benchmark"] = "list"
+                i += 1
         elif flag in ("--model", "-m") and i + 1 < len(argv):
             args["model"] = argv[i + 1]
             i += 2
@@ -89,6 +95,7 @@ def _print_usage() -> None:
         "\n"
         "flags:\n"
         "  --benchmark, -b NAME    Benchmark to run (evalplus, swebench) [default: evalplus]\n"
+        "  -b                      List available benchmarks (same as `-b list`)\n"
         "  --model, -m NAME        LLM model name [default: qwen3:4b]\n"
         "  --limit, -n N           Max instances to evaluate [default: 10]\n"
         "  --output-dir, -o DIR    Directory for result files [default: eval_results]\n"
@@ -99,7 +106,27 @@ def _print_usage() -> None:
         "env vars:\n"
         "  LOCAL_LLM_BASE_URL      LLM API base URL (overrides --base-url)\n"
         "  LOCAL_LLM_MODEL         LLM model name (overrides --model)\n"
+        "  LOCAL_LLM_API_KEY       LLM API key (used unless --api-key is given)\n"
     )
+
+
+def _list_benchmarks() -> list[str]:
+    """Return names of benchmark modules that expose a module-level run()."""
+    import pkgutil
+
+    import eval.benchmarks as pkg
+
+    names: list[str] = []
+    for mod_info in pkgutil.iter_modules(pkg.__path__):
+        if mod_info.name.startswith("_"):
+            continue
+        try:
+            mod = importlib.import_module(f"eval.benchmarks.{mod_info.name}")
+        except Exception:
+            continue
+        if callable(getattr(mod, "run", None)):
+            names.append(mod_info.name)
+    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +150,16 @@ def main(argv: list[str] | None = None) -> int:
     smoke: bool = args.get("smoke", False)
     cache_dir: str = args.get("cache", "")
 
+    # ---- List available benchmarks ----
+    if benchmark_name == "list":
+        available = _list_benchmarks()
+        print("Available benchmarks:")
+        if not available:
+            print("  (none -- create eval/benchmarks/<name>.py with a run() function)")
+        for name in available:
+            print(f"  {name}")
+        return 0
+
     # ---- Load benchmark adapter ----
     module_name = f"eval.benchmarks.{benchmark_name}"
     try:
@@ -134,7 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         print(
-            "Available benchmarks: (none yet -- create eval/benchmarks/<name>.py)",
+            "Available benchmarks (run `python -m eval.run -b list` to see them): "
+            + ", ".join(_list_benchmarks()),
             file=sys.stderr,
         )
         return 1

@@ -3,11 +3,14 @@ eval.benchmarks  --  benchmark adapter collection for the code-agent eval harnes
 
 Each module implements a standardized adapter for a specific benchmark family:
 
-    =============  =============================
-    Module          Benchmark
-    =============  =============================
-    ``evalplus``    HumanEval+ (164) / MBPP+ (378)
-    =============  =============================
+    ===============  ========================================
+    Module            Benchmark
+    ===============  ========================================
+    ``evalplus``      HumanEval+ (164) / MBPP+ (378)
+    ``swebench``      SWE-bench Verified (repo-level fixes)
+    ``tau2bench``     τ²-bench (tool-use, official runner)
+    ``terminalbench`` Terminal-Bench (terminal tasks, official runner)
+    ===============  ========================================
 
 Every benchmark adapter follows the same contract:
 
@@ -15,6 +18,11 @@ Every benchmark adapter follows the same contract:
 2. Convert each problem to an ``EvalInstance`` (see ``eval.adapter``).
 3. Call ``adapter.solve_instance(instance, working_dir)`` for every instance.
 4. Write results in the benchmark-native format and score them.
+
+In addition, every module exposes a module-level ``run(driver, limit=None,
+**kwargs)`` returning a list of :class:`EvalResult`-shaped records so the
+unified CLI (``python -m eval.run -b <name>``) can drive any benchmark
+(``python -m eval.run -b`` lists them).
 """
 
 __all__ = [

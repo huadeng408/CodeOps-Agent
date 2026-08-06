@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from eval.adapter import EvalResult
 from eval.manifest import ALLOWED_LICENSES
 
 # The official runner command. This is the sanctioned execution path only;
@@ -96,3 +98,100 @@ def official_runner_command(config: TerminalBenchConfig, task_file: Path, output
 def env_for_runner() -> dict[str, str]:
     """Sanctioned env for the official runner; never injects API keys."""
     return dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# Module-level run() -- eval/run.py CLI contract
+# ---------------------------------------------------------------------------
+
+#: Env var naming the offline Terminal-Bench data dir used by ``run()``.
+DATA_DIR_ENV = "TERMINALBENCH_DATA_DIR"
+
+
+def run(driver: Any, limit: int | None = None, **kwargs: Any) -> list[EvalResult]:
+    """Module-level runner aligned with the ``eval.run`` CLI contract.
+
+    Terminal-Bench defers execution to its official container runner
+    (:data:`OFFICIAL_RUNNER_MODULE`): this wrapper validates prerequisites,
+    materialises the task file, invokes the official runner, and returns one
+    :class:`EvalResult` per task.  It never masquerades as a unified scorer --
+    the official runner owns scoring.
+
+    Missing data dir / official runner fail loudly *before* any model call
+    (per design spec §6).  Data dir defaults to ``$TERMINALBENCH_DATA_DIR``.
+    """
+    data_dir_raw = kwargs.pop("data_dir", os.environ.get(DATA_DIR_ENV, ""))
+    if not str(data_dir_raw):
+        raise RuntimeError(
+            f"terminal-bench cannot run: no data dir provided "
+            f"(set {DATA_DIR_ENV} or pass data_dir=...)"
+        )
+    data_dir = Path(data_dir_raw)
+    output_dir = Path(kwargs.pop("output_dir", "."))
+    image_name = kwargs.pop("image_name", "terminal-bench")
+    timeout = float(kwargs.pop("timeout", 3600))
+
+    config = TerminalBenchConfig(data_dir=data_dir, image_name=image_name)
+    issues = config.validate()
+    if issues:
+        raise RuntimeError(
+            f"terminal-bench cannot run: {'; '.join(issues)} "
+            f"(set {DATA_DIR_ENV} to the offline data dir)"
+        )
+
+    tasks = load_tasks(config.data_dir)
+    if not tasks:
+        raise RuntimeError(f"no tasks found in {config.data_dir}")
+    if limit is not None:
+        tasks = tasks[:limit]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    task_file = output_dir / "terminalbench_tasks.jsonl"
+    with task_file.open("w", encoding="utf-8") as fh:
+        for task in tasks:
+            fh.write(json.dumps(task, ensure_ascii=False) + "\n")
+
+    cmd = official_runner_command(config, task_file, output_dir)
+    print(f"[terminalbench] invoking official runner: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env_for_runner(),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"terminal-bench official runner failed (exit {proc.returncode}): "
+            f"{proc.stderr[-1000:]}"
+        )
+
+    _write_summary(config, task_file, output_dir, cmd, tasks)
+    return [
+        EvalResult(instance_id=str(task.get("name", i)), error="")
+        for i, task in enumerate(tasks)
+    ]
+
+
+def _write_summary(
+    config: TerminalBenchConfig,
+    task_file: Path,
+    output_dir: Path,
+    cmd: list[str],
+    tasks: list[dict[str, Any]],
+) -> Path:
+    """Write the repo-side summary JSON (metadata only, no API keys)."""
+    summary = {
+        "benchmark": "terminal-bench",
+        "num_tasks": len(tasks),
+        "image_name": config.image_name,
+        "timeout_seconds": config.timeout_seconds,
+        "official_runner": OFFICIAL_RUNNER_MODULE,
+        "task_file": str(task_file),
+        "runner_command": cmd,
+        "upstream_results_dir": str(output_dir),
+    }
+    path = output_dir / "terminalbench_summary.json"
+    path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[terminalbench] summary -> {path}")
+    return path
