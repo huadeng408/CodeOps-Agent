@@ -463,16 +463,19 @@ def fetch_evidence(
 ) -> list[EvidenceChunk]:
     """Fetch corpus evidence chunks from ES for a qrel document.
 
-    Uses a ``term`` query on ``document_id``. When *section_path* is non-empty,
-    adds a ``term`` filter on ``section_path`` (exact multi-value match).
+    Uses a ``term`` query on ``document_id`` only. *section_path* is kept
+    in the signature for API compatibility but intentionally NOT used as an
+    ES filter — corpus section_path values are hierarchical while qrel
+    section_path values are flat short paths, so filtering by them would
+    return zero results. The model judges relevance of retrieved chunks.
+
     Returns up to *max_chars* total text (individual chunks truncated to
     ``EVIDENCE_CHUNK_TRUNCATE``). Raises RuntimeError on ES failure.
     """
+    del section_path  # unused; see docstring above
     must_clauses: list[dict[str, Any]] = [
         {"term": {"document_id": document_id}},
     ]
-    if section_path:
-        must_clauses.append({"term": {"section_path": section_path}})
 
     payload: dict[str, Any] = {
         "query": {"bool": {"must": must_clauses}},

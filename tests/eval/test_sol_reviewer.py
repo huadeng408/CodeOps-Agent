@@ -436,7 +436,8 @@ class _FakeChatResponse:
 
 
 # ---------------------------------------------------------------------------
-# Task 3 tests — fetch_evidence
+# Task 3 tests — fetch_evidence (section_path is passed but intentionally
+# ignored by fetch_evidence — see docstring in sol_reviewer.py for why)
 # ---------------------------------------------------------------------------
 
 
