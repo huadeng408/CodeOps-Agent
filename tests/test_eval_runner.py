@@ -198,3 +198,99 @@ def test_redact_text_scrubs_common_key_shapes() -> None:
         redacted = redact_text(f"prefix {secret} suffix")
         assert secret not in redacted
         assert "[REDACTED]" in redacted
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.1 — nDCG boundary, dedup, relevance=0 exclusion contract tests
+# ---------------------------------------------------------------------------
+
+
+def test_ndcg_never_exceeds_1_with_multi_chunk_same_document(tmp_path) -> None:
+    """nDCG must be ≤ 1.0 when the same document appears as multiple chunks in top-10."""
+    qrels = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["API"],
+         "relevance": 2.0, "language": "en", "query_type": "concept", "source_id": "go"},
+    ]
+    # doc-a appears 3 times as different chunks — all in top 10
+    hits = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["API"], "score": 0.9},
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["Overview"], "score": 0.8},
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["Details"], "score": 0.7},
+    ]
+    summary, _ = _run(tmp_path, qrels, hits)
+    ndcg = summary["overall"]["ndcg@10"]
+    assert 0.0 <= ndcg <= 1.0, f"nDCG must be in [0,1], got {ndcg}"
+
+
+def test_perfect_ranking_ndcg_equals_1(tmp_path) -> None:
+    """All relevant docs at rank 1 → nDCG=1.0 (not > 1)."""
+    qrels = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "relevance": 2},
+        {"query_id": "q1", "document_id": "doc-b", "section_path": [], "relevance": 1},
+    ]
+    hits = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "score": 0.9},
+        {"query_id": "q1", "document_id": "doc-b", "section_path": [], "score": 0.8},
+    ]
+    summary, _ = _run(tmp_path, qrels, hits)
+    # Both qrels have same query_id=q1, so they're grouped.
+    # The _score_query function handles multi-qrel queries — both match, nDCG=1.0
+    assert summary["overall"]["ndcg@10"] == 1.0
+
+
+def test_imperfect_ranking_ndcg_below_1(tmp_path) -> None:
+    """Relevant doc at rank 3 instead of rank 1 → nDCG < 1.0.
+
+    The DCG formula discounts at position i by 1/log2(i) for i>=2.
+    Since log2(2)=1.0 the discount at rank 2 is 1.0 — same as rank 1.
+    The first real discount is at rank 3: 1/log2(3) ≈ 0.631.
+    So we put doc-a at rank 3 to get a measurable nDCG drop."""
+    qrels = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "relevance": 2},
+    ]
+    hits = [
+        {"query_id": "q1", "document_id": "doc-x", "section_path": [], "score": 0.9},
+        {"query_id": "q1", "document_id": "doc-y", "section_path": [], "score": 0.85},
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "score": 0.8},
+    ]
+    summary, _ = _run(tmp_path, qrels, hits)
+    ndcg = summary["overall"]["ndcg@10"]
+    assert ndcg < 1.0, f"nDCG should be < 1.0 for doc at rank 3, got {ndcg}"
+
+
+def test_relevance_zero_qrels_excluded_from_scoring(tmp_path) -> None:
+    """Qrels with relevance=0 are NOT relevant — don't count for Recall/DCG/IDCG."""
+    qrels = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "relevance": 0.0,
+         "language": "en", "query_type": "concept", "source_id": "go"},
+    ]
+    hits = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "score": 0.9},
+    ]
+    summary, _ = _run(tmp_path, qrels, hits)
+    assert summary["overall"]["recall@5"] == 0.0, "relevance=0 should give 0 recall"
+    assert summary["overall"]["ndcg@10"] == 0.0, "no relevant docs => nDCG=0"
+
+
+def test_hybrid_dedup_by_document_id(tmp_path) -> None:
+    """Duplicate document in hits counted once at first occurrence."""
+    qrels = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": [], "relevance": 2},
+        {"query_id": "q1", "document_id": "doc-b", "section_path": [], "relevance": 1},
+    ]
+    # doc-a at rank 1 AND rank 2 (duplicate chunks), doc-b at rank 3
+    hits = [
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["A"], "score": 0.9},
+        {"query_id": "q1", "document_id": "doc-a", "section_path": ["B"], "score": 0.8},
+        {"query_id": "q1", "document_id": "doc-b", "section_path": [], "score": 0.7},
+    ]
+    summary, _ = _run(tmp_path, qrels, hits)
+    ndcg = summary["overall"]["ndcg@10"]
+    assert 0.0 <= ndcg <= 1.0, f"nDCG must be in [0,1] with dedup, got {ndcg}"
+    # doc-a (rel=2) at rank 1, duplicate skipped, doc-b (rel=1) at rank 3
+    # IDCG = dcg([2, 1]) = 2.0 + 1/1.0 = 3.0
+    # After dedup top10 = [doc-a, doc-b]; actual = [2.0, 1.0]
+    # DCG = 2.0 + 1/log2(2) = 2.0 + 1.0 = 3.0; nDCG = 1.0
+    # Wait — with dedup, we have [doc-a, doc-b] perfectly ordered, so nDCG = 1.0
+    # The duplicate at rank 2 is skipped; doc-b slides from rank 3 to rank 2 in deduped list
+    assert ndcg == 1.0, f"deduped [doc-a, doc-b] = perfect order => nDCG=1.0, got {ndcg}"
