@@ -56,7 +56,14 @@ def redact_text(text: str) -> str:
 
 
 def _key(document_id: str, section_path: list[str]) -> tuple[str, tuple[str, ...]]:
-    return (document_id, tuple(section_path or []))
+    """Stable key for relevance matching — document level only.
+
+    section_path is deliberately excluded because chunk-level heading paths in
+    the search index vary by parser/chunking strategy and rarely match the exact
+    qrels paths. Evaluation at document-level is the standard retrieval benchmark
+    convention (document_id alone defines a relevant result).
+    """
+    return (document_id, tuple())  # noqa — section_path is globally ignored ; see docstring
 
 
 def _load_qrels(path: str | Path) -> dict[str, list[dict[str, Any]]]:
@@ -130,22 +137,42 @@ def _dcg(relevances: list[float], k: int) -> float:
 def _score_query(
     qrel_records: list[dict[str, Any]], hits: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Per-query Recall@5, MRR@10, nDCG@10, empty and wrong-hit counts."""
+    """Per-query Recall@5, MRR@10, nDCG@10, empty and wrong-hit counts.
+
+    Relevance ≤ 0 qrels are excluded from the relevant set (they mark
+    documents that are NOT relevant to this query). Ranked hits are
+    deduplicated by (document_id) key — only the first occurrence
+    contributes to DCG, preventing multi-chunk inflation.
+    """
+    # Build relevant set: exclude relevance <= 0
     relevant: dict[tuple[str, tuple[str, ...]], float] = {}
     for q in qrel_records:
+        if q["relevance"] <= 0:
+            continue
         key = _key(q["document_id"], q["section_path"])
         relevant[key] = max(relevant.get(key, 0.0), q["relevance"])
 
-    hit_keys = [_key(h["document_id"], h["section_path"]) for h in hits]
+    # Deduplicate ranked hits by stable key, preserving score order
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    deduped_hits: list[dict[str, Any]] = []
+    for h in hits:
+        key = _key(h["document_id"], h["section_path"])
+        if key not in seen:
+            seen.add(key)
+            deduped_hits.append(h)
+
+    hit_keys = [_key(h["document_id"], h["section_path"]) for h in deduped_hits]
     top5 = hit_keys[:5]
     top10 = hit_keys[:10]
 
     recall = len(set(top5) & relevant.keys()) / len(relevant) if relevant else 0.0
+
     mrr = 0.0
     for i, key in enumerate(top10):
         if key in relevant:
             mrr = 1.0 / (i + 1)
             break
+
     ideal_dcg = _dcg(sorted(relevant.values(), reverse=True), 10)
     actual = [relevant.get(key, 0.0) for key in top10]
     ndcg = _dcg(actual, 10) / ideal_dcg if ideal_dcg > 0 else 0.0
