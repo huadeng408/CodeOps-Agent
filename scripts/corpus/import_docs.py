@@ -44,10 +44,36 @@ from urllib.parse import urlencode
 import requests
 import yaml
 
+try:
+    import pymysql
+    _HAS_PYMYSQL = True
+except ImportError:
+    pymysql = None
+    _HAS_PYMYSQL = False
+
 CHUNK_SIZE = 5 * 1024 * 1024
 DEFAULT_TARGET_INDEX = "knowledge_base_v2_bge_m3"
 DEFAULT_POLL_TIMEOUT_SECONDS = 300
 DEFAULT_POLL_INTERVAL_SECONDS = 3
+DEFAULT_MYSQL_DSN = ""  # set via --mysql-dsn CLI arg or MYSQL_DSN env var
+
+
+def _parse_mysql_dsn(dsn: str) -> dict:
+    """Parse user:password@tcp(host:port)/db into a pymysql connect kwargs dict."""
+    m = re.match(
+        r"^(?P<user>[^:]+):(?P<password>[^@]+)@tcp\((?P<host>[^:]+):(?P<port>\d+)\)/(?P<db>.+)$",
+        dsn,
+    )
+    if not m:
+        raise ValueError(f"unsupported MySQL DSN format: {dsn}")
+    return {
+        "user": m.group("user"),
+        "password": m.group("password"),
+        "host": m.group("host"),
+        "port": int(m.group("port")),
+        "database": m.group("db"),
+        "charset": "utf8mb4",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +231,48 @@ def manifest_document_paths(source: str, source_dir: Path, manifest_path: Path) 
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# MySQL-backed fast polling — O(1) status lookup per document instead of
+# pulling the full ACTIVE/SKIPPED/FAILED list over HTTP every 3 seconds.
+# When the HTTP list grows to thousands of documents (1 MB+) the HTTP polling
+# path transfers gigabytes of redundant JSON during a full-source import.
+# --------------------------------------------------------------------------- #
+
+
+def _mysql_poll_status(
+    doc_id: str,
+    generation: str,
+    *,
+    timeout_seconds: int,
+    interval_seconds: int,
+    mysql_dsn: str,
+) -> tuple[str, str]:
+    """Poll MySQL until the document exits STAGING; returns (status, failure)."""
+    attempts = 1
+    if timeout_seconds > 0 and interval_seconds > 0:
+        attempts = max(1, int(math.ceil(timeout_seconds / interval_seconds)))
+    for _ in range(attempts):
+        try:
+            conn = pymysql.connect(**mysql_dsn)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT status, last_error FROM knowledge_document "
+                "WHERE document_id=%s AND corpus_generation=%s "
+                "AND status IN ('ACTIVE','SKIPPED','FAILED') "
+                "LIMIT 1",
+                (doc_id, generation),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row is not None:
+                status, last_error = row
+                return (status.lower(), str(last_error or ""))
+        except Exception:
+            pass  # fall through to sleep and retry
+        time.sleep(interval_seconds)
+    return ("failed", f"polling timed out after {attempts} attempt(s)")
+
+
 def list_documents(
     server: str, token: str, generation: str, status: str, *, http_timeout: int = 30
 ) -> list[dict]:
@@ -221,8 +289,35 @@ def list_documents(
 
 
 def is_document_active(
-    server: str, token: str, generation: str, doc_id: str, *, http_timeout: int = 30
+    server: str, token: str, generation: str, doc_id: str, *, http_timeout: int = 30,
+    _mysql_dsn: str | None = None,
 ) -> bool:
+    if _HAS_PYMYSQL and _mysql_dsn:
+        try:
+            conn = pymysql.connect(**_mysql_dsn)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM knowledge_document "
+                "WHERE document_id=%s AND corpus_generation=%s AND status='ACTIVE' LIMIT 1",
+                (doc_id, generation),
+            )
+            found = cur.fetchone() is not None
+            conn.close()
+            if found:
+                return True
+            # Also check SKIPPED — legacy docs may be SKIPPED but functionally complete
+            conn2 = pymysql.connect(**_mysql_dsn)
+            cur2 = conn2.cursor()
+            cur2.execute(
+                "SELECT 1 FROM knowledge_document "
+                "WHERE document_id=%s AND corpus_generation=%s AND status='SKIPPED' LIMIT 1",
+                (doc_id, generation),
+            )
+            found2 = cur2.fetchone() is not None
+            conn2.close()
+            return found2
+        except Exception:
+            pass  # fall through to HTTP
     return any(
         d.get("documentId") == doc_id
         for d in list_documents(server, token, generation, "ACTIVE", http_timeout=http_timeout)
@@ -298,16 +393,25 @@ def poll_document(
     timeout_seconds: int,
     interval_seconds: int,
     http_timeout: int = 30,
+    _mysql_dsn: dict | None = None,
 ) -> tuple[str, str]:
     """Poll until the document is ACTIVE, SKIPPED, or FAILED (or budget exhausted).
 
     Returns (status, failure) where status is ``active`` / ``skipped`` /
-    ``failed``. A SKIPPED document (empty content after parse) is a graceful
-    skip — not indexed, not a failure — so it returns ``("skipped", "")`` and
-    counts as success. A timeout is reported as ``failed`` with a sanitized
-    message (no internal details). Statuses are queried one at a time in the
-    order ACTIVE, then SKIPPED, then FAILED.
+    ``failed``. When pymysql is available and _mysql_dsn is passed, uses a
+    single-row MySQL query per poll interval instead of pulling the full
+    ACTIVE/SKIPPED/FAILED lists over HTTP — the HTTP path transfers ~1 MB+
+    per poll once there are thousands of documents, turning a 928-doc import
+    into a multi-hour affair.
     """
+    if _HAS_PYMYSQL and _mysql_dsn:
+        return _mysql_poll_status(
+            doc_id, generation,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            mysql_dsn=_mysql_dsn,
+        )
+
     attempts = 1
     if timeout_seconds > 0 and interval_seconds > 0:
         attempts = max(1, int(math.ceil(timeout_seconds / interval_seconds)))
@@ -342,6 +446,8 @@ def process_one(
     poll_timeout: int,
     poll_interval: int,
     http_timeout: int,
+    _mysql_dsn: dict | None = None,
+    force: bool = False,
 ) -> dict:
     """Run the full per-document lifecycle; return a report file record."""
     rel = path.relative_to(source_dir).as_posix()
@@ -357,8 +463,9 @@ def process_one(
         "documentId": document_id(source_id, source_commit, rel),
     }
 
-    if is_document_active(
-        server, token, generation, base_record["documentId"], http_timeout=http_timeout
+    if not force and is_document_active(
+        server, token, generation, base_record["documentId"],
+        http_timeout=http_timeout, _mysql_dsn=_mysql_dsn,
     ):
         base_record["status"] = "skipped"
         return base_record
@@ -391,6 +498,7 @@ def process_one(
         timeout_seconds=poll_timeout,
         interval_seconds=poll_interval,
         http_timeout=http_timeout,
+        _mysql_dsn=_mysql_dsn,
     )
     base_record["status"] = status
     base_record["failure"] = failure
@@ -463,6 +571,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=120,
         help="per-request HTTP timeout in seconds (slow-ES resilience; uploads and status polls)",
     )
+    parser.add_argument(
+        "--mysql-fast-poll",
+        action="store_true",
+        default=False,
+        help="poll document status via MySQL (O(1) per poll) instead of pulling "
+        "the full per-status list over HTTP (O(N) per poll)"
+    )
+    parser.add_argument(
+        "--mysql-dsn",
+        default="",
+        help="Go-style MySQL DSN user:pass@tcp(host:port)/db for --mysql-fast-poll "
+        "(falls back to MYSQL_DSN env var)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="re-import documents even when already ACTIVE in MySQL",
+    )
     return parser.parse_args(argv)
 
 
@@ -480,6 +607,22 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         print("token file is empty", file=sys.stderr)
         return 2
+
+    # MySQL fast-poll DSN — read from CLI or env var so the HTTP polling
+    # path is unchanged unless the user opts in with --mysql-fast-poll.
+    import os
+
+    mysql_dsn: dict | None = None
+    if args.mysql_fast_poll:
+        dsn_str = args.mysql_dsn or os.environ.get("MYSQL_DSN", "")
+        if not dsn_str:
+            print(
+                "--mysql-fast-poll requires --mysql-dsn or MYSQL_DSN env var",
+                file=sys.stderr,
+            )
+            return 2
+        if _HAS_PYMYSQL:
+            mysql_dsn = _parse_mysql_dsn(dsn_str)
 
     # Preflight: staging source dir.
     source_dir = args.staging / args.source
@@ -545,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
             poll_timeout=args.poll_timeout_seconds,
             poll_interval=args.poll_interval_seconds,
             http_timeout=args.http_timeout,
+            _mysql_dsn=mysql_dsn,
+            force=args.force,
         )
         records.append(record)
         print(f"  {record['status']:7s} {rel}" + (f" ({record['failure']})" if record["failure"] else ""))

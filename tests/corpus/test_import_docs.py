@@ -872,3 +872,18 @@ def test_list_documents_honors_http_timeout(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(import_docs.requests, "get", fake_get)
     import_docs.list_documents("http://x", "tok", GENERATION, "ACTIVE", http_timeout=333)
     assert seen.get("timeout") == 333, seen
+
+
+# --------------------------------------------------------------------------- #
+# Phase 1.1 — Credential safety
+# --------------------------------------------------------------------------- #
+
+
+def test_mysql_dsn_not_hardcoded_in_source() -> None:
+    """DEFAULT_MYSQL_DSN must not carry real credentials in committed code."""
+    import inspect
+
+    source = inspect.getsource(import_docs)
+    assert "codeagent:codeagent" not in source, (
+        "DEFAULT_MYSQL_DSN hardcodes real credentials — must use --mysql-dsn CLI arg"
+    )
