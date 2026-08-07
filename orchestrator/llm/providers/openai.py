@@ -93,7 +93,12 @@ class OpenAIClient(LLMClient):
             cancel_event=request.cancel_event,
         )
         body = body_bytes.decode("utf-8")
-        return self._parse_response(json.loads(body))
+        try:
+            return self._parse_response(json.loads(body))
+        except Exception as exc_inner:
+            raise RuntimeError(
+                f"OpenAI response parse error: {exc_inner}"
+            ) from exc_inner
 
     async def stream(self, request: ChatRequest):
         """Server-Sent-Events streaming override (design 22.6).
@@ -398,7 +403,7 @@ class OpenAIClient(LLMClient):
                 input_tokens=int(usage_payload.get("prompt_tokens", 0) or 0),
                 output_tokens=int(usage_payload.get("completion_tokens", 0) or 0),
                 cached_input_tokens=int(
-                    usage_payload.get("prompt_tokens_details", {}).get(
+                    (usage_payload.get("prompt_tokens_details") or {}).get(
                         "cached_tokens", 0
                     )
                     or 0

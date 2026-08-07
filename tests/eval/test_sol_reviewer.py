@@ -539,8 +539,8 @@ class TestVerdictToRow:
         )
         row = _verdict_to_row(v, _SAMPLE_QREL, "gpt-5.6-sol", "unknown")
         assert row["review_pass"] == "A"
-        # For success rows, "review_status" key is absent (not in the dict at all)
-        assert "review_status" not in row
+        # Successful rows should be marked AI_REVIEWED
+        assert row["review_status"] == "AI_REVIEWED"
         assert row["reviewer_model"] == "gpt-5.6-sol"
         assert "verdicts" in row
         assert row["verdicts"]["confidence"] == 0.85

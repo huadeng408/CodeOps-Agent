@@ -564,12 +564,12 @@ async def review_one(
                 thinking_enabled=False,
             )
         )
-    except Exception:
+    except Exception as exc:
         return PassVerdict(
             query_id=qid,
             pass_id=pass_id,
             failed=True,
-            fail_reason="llm_error",
+            fail_reason=f"llm_error:{str(exc)[:200]}",
             answerable=False,
             language_correct=False,
             query_type_correct=False,
@@ -670,7 +670,9 @@ def _verdict_to_row(verdict: PassVerdict, qrel: dict[str, Any], model: str, revi
     }
     if verdict.failed:
         row["review_status"] = "DISPUTED"
-        row["verdicts"]["fail_reason"] = verdict.fail_reason
+        row["verdicts"]["fail_reason"] = verdict.fail_reason or ""
+    else:
+        row["review_status"] = "AI_REVIEWED"
     return row
 
 
@@ -779,6 +781,15 @@ async def run_pass(
             verdict = await review_one(
                 client, pass_id, query_text, qrel, evidence, model, revision
             )
+
+        # Overwrite the output file on first write to prevent stale rows
+        # from previous runs from accumulating alongside new rows.
+        if i == 0 and not resume:
+            try:
+                with open(out_path, "w", encoding="utf-8") as dummy:
+                    dummy.write("")
+            except OSError:
+                pass
 
         results[qid] = verdict
 
@@ -1037,14 +1048,12 @@ def run_review(
     # Arbitration (always runs from file contents to support --only arbitrate)
     if only is None or only == "arbitrate":
         # Reload from files (handles --only passA/B followed by --only arbitrate)
-        if only != "arbitrate":
+        if not pass_a:
             pass_a_src = load_sidecar(str(pass_a_out))
+            pass_a = _reconstruct_verdicts(pass_a_src, "A")
+        if not pass_b:
             pass_b_src = load_sidecar(str(pass_b_out))
-            # Reconstruct PassVerdict dicts from loaded rows
-            if not pass_a:
-                pass_a = _reconstruct_verdicts(pass_a_src, "A")
-            if not pass_b:
-                pass_b = _reconstruct_verdicts(pass_b_src, "B")
+            pass_b = _reconstruct_verdicts(pass_b_src, "B")
 
         print(f"=== ARBITRATE ({len(pass_a)} A, {len(pass_b)} B) ===")
         final_rows = arbitrate(pass_a, pass_b, qrels, confidence_threshold)
