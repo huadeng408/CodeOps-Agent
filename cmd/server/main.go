@@ -95,9 +95,20 @@ func main() {
 	// enable search.
 	if err := es.InitES(cfg.Elasticsearch, cfg.Embedding.Dimensions); err != nil {
 		log.Warnf("elasticsearch unavailable — search endpoints degraded: %v", err)
-	} else if cfg.Memory.Enabled {
-		if err := es.EnsureMemoryIndex(cfg.Memory.MemoryIndexName, cfg.Embedding.Dimensions); err != nil {
-			log.Warnf("failed to init memory index — memory endpoints degraded: %v", err)
+	} else {
+		if cfg.Memory.Enabled {
+			if err := es.EnsureMemoryIndex(cfg.Memory.MemoryIndexName, cfg.Embedding.Dimensions); err != nil {
+				log.Warnf("failed to init memory index — memory endpoints degraded: %v", err)
+			}
+		}
+		// Ensure the corpus v2 physical index uses the correct mapping
+		// (dense_vector, provenance keyword fields, section_path)
+		// before any document lands on it via ES dynamic mapping.
+		if es.ESClient != nil {
+			mgr := es.NewKnowledgeIndexManager(es.ESClient, cfg.Elasticsearch.Addresses)
+			if err := mgr.EnsurePhysicalIndex(context.Background(), cfg.Corpus.TextIndex, cfg.Embedding.Dimensions); err != nil {
+				log.Warnf("corpus v2 index ensure failed — text indexing degraded: %v", err)
+			}
 		}
 	}
 	kafka.InitProducer(cfg.Kafka)

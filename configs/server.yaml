@@ -26,7 +26,7 @@ kafka:
   consumer_group_prefix: "paismart-go"
   max_retries: 3
   base_backoff_ms: 800
-  embedding_batch_size: 8
+  embedding_batch_size: 2
   es_bulk_batch_size: 100
   topics:
     parse: "file-parse"
@@ -139,5 +139,5 @@ ai:
     ingestion_enabled: true
     base_url: "http://127.0.0.1:8090"
     timeout_ms: 120000
-    ingestion_timeout_ms: 600000
+    ingestion_timeout_ms: 3600000
     shared_secret: "codeagent-internal-dev"

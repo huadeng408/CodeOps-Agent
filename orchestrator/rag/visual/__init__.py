@@ -63,7 +63,7 @@ def page_crop_artifacts(
     for element in elements:
         if element.type not in ("image", "table", "equation"):
             continue
-        if not element.image_path and not element.asset_ref():
+        if not element.image_path:
             continue
         crops.append(
             {

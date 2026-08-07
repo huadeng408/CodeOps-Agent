@@ -1,0 +1,10 @@
+./admin_handler.go
+./auth_handler.go
+./chat_handler.go
+./conversation_handler.go
+./document_handler.go
+./knowledge_ingest_handler.go
+./orchestrator_handler.go
+./search_handler.go
+./upload_handler.go
+./user_handler.go

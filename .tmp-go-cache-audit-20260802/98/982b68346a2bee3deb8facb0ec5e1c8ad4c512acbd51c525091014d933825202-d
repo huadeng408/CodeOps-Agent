@@ -1,0 +1,10 @@
+./conversation_repository.go
+./document_vector_repository.go
+./knowledge_document_repository.go
+./knowledge_source_repository.go
+./memory_repository.go
+./org_tag_repository.go
+./pipeline_task_repository.go
+./upload_repository.go
+./user_repository.go
+./knowledge_repository_test.go

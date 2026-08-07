@@ -20,7 +20,7 @@
 - 涉及多文件修改时，先用 EnterPlanMode 出方案，用户确认后再写代码。
 - 能用专用工具（Read/Glob/Grep/Edit/Write）就不用 Shell 命令。
 - 提交代码前跑一下 `git diff --stat` 确认改动范围符合预期。
-- **有意义的进展必须同步写入 `D:\Obsidian\code-autogrowth\私人\localcode`**，包括架构决策、阶段性成果、真实验收、数据状态变化、踩坑记录和重要未完成项。
+- **有意义的进展必须同步写入 `D:\Obsidian\code-autogrowth\私人\localcode`**，包括架构决策、阶段性成果、真实验收、数据状态变化、踩坑记录和重要未完成项，注意使用中文。
 - 进展记录使用按日期命名的 `PROGRESS-YYYY-MM-DD.md`，或更新当天已有的对应文档；至少写明分支/提交、事实证据、执行过的验证、当前数据快照、未完成项和回滚边界。
 - 严格区分 `DESIGNED`、`IMPLEMENTED`、`VERIFIED` 和 `BLOCKED`：存在规格或测试代码不等于实现或真实验收通过，不得把计划写成完成。
 - 在提交或交接前检查从上一份 Obsidian 记录到当前 HEAD 的提交，补录所有尚未沉淀的有意义进展。若当前环境暂时不能写 Obsidian，先在仓库 `docs/` 生成同名待同步文档，并在获得写入权限后完成同步。

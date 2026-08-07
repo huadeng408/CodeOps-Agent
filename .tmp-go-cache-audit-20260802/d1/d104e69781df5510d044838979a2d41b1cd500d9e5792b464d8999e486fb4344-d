@@ -1,0 +1,4 @@
+./bulk.go
+./helpers.go
+./request.go
+./response.go

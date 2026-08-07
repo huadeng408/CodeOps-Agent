@@ -5,7 +5,7 @@
 
 ## 0. 关键结论（先读这个）
 
-1. **代码 bug 已彻底解决**（提交 `3f05bb1`）：非 PDF 文档走结构化管道时，Go 客户端 `for index, chunk := range slice` 的 **range 值拷贝**导致 `ParserVersion`/`SourceSHA256` 填充从未写回 slice——`Validate()` 永远看到空值。这是之前 4 次"修复无效"的真正根因。**决定性单元测试** `pkg/orchestrator/client_fill_test.go::TestChunkClientFillsMissingProvenance` 已证明修复生效。
+1. **代码 bug 已解决**（提交 `3f05bb1`）：非 PDF 文档走结构化管道时，Go 客户端 `for index, chunk := range slice` 的 **range 值拷贝**导致 `ParserVersion`/`SourceSHA256` 填充从未写回 slice——`Validate()` 永远看到空值。这是之前 4 次"修复无效"的真正根因。**决定性单元测试** `pkg/orchestrator/client_fill_test.go::TestChunkClientFillsMissingProvenance` 已证明修复生效。
 2. **当前环境状态**：Docker Desktop 已重启（用户授权可直接重启），但**容器尚未启动**（9200/3306/9092 全不通）。RAG server（code-server.exe PID 40440）在跑但依赖不可用。
 3. **下一个动作**：`docker compose up -d` 启动全部容器 → 确认 Kafka/ES/MySQL 健康 → 重导一个文档验证 ES v2 首次写入 → 批量 pilot 导入。
 

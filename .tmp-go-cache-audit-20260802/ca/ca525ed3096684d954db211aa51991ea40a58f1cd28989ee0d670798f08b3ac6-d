@@ -1,0 +1,3 @@
+./client.go
+./preflight.go
+./preflight_test.go

@@ -1,0 +1,16 @@
+./config_test.go
+./hooks_test.go
+./mcp_test.go
+./memory_test.go
+./metrics_test.go
+./notebook_test.go
+./orchestrator_events_test.go
+./orchestrator_process_test.go
+./orchestrator_test.go
+./permission_test.go
+./safety_test.go
+./session_test.go
+./todo_test.go
+./tools_test.go
+./undo_test.go
+./worktree_test.go

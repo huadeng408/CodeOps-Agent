@@ -1,0 +1,3 @@
+./client.go
+./knowledge_index.go
+./knowledge_index_test.go

@@ -128,13 +128,13 @@ services:
       - xpack.security.enrollment.enabled=false
       - xpack.security.http.ssl.enabled=false
       - cluster.name=codeagent-es-cluster
-      - ES_JAVA_OPTS=-Xms768m -Xmx768m
+      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
     volumes:
       - codeagent-es:/usr/share/elasticsearch/data
     deploy:
       resources:
         limits:
-          memory: 1g
+          memory: 2g
     command: >
       bash -c "
       if ! elasticsearch-plugin list | grep -q 'analysis-ik'; then

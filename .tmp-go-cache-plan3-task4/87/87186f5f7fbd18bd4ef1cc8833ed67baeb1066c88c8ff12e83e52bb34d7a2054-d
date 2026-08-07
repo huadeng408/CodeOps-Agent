@@ -1,0 +1,17 @@
+./bash.go
+./edit.go
+./executor.go
+./git.go
+./glob.go
+./grep.go
+./notebook.go
+./pdf.go
+./rag.go
+./read.go
+./safe_url.go
+./webfetch.go
+./websearch.go
+./write.go
+./pdf_test.go
+./rag_test.go
+./safe_url_test.go

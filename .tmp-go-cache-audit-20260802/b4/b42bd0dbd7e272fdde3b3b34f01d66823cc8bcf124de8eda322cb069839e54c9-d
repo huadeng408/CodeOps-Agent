@@ -1,0 +1,16 @@
+./app.go
+./ask.go
+./input.go
+./rag.go
+./rag_open.go
+./rag_open_windows.go
+./renderer.go
+./statusline.go
+./app_commit_test.go
+./app_permission_test.go
+./app_rag_integration_test.go
+./app_rag_test.go
+./input_test.go
+./interrupt_test.go
+./rag_windows_test.go
+./renderer_test.go

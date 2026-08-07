@@ -77,6 +77,21 @@ def test_page_crop_artifacts_require_asset_ref() -> None:
     assert crops == []
 
 
+def test_visual_package_reexports_artifact_builders() -> None:
+    # The package root (__init__.py) re-exports the artifact builders; it must
+    # import and behave identically to artifacts.py. Regression: the root used
+    # to call Element.asset_ref(), which does not exist.
+    from orchestrator.rag.visual import page_crop_artifacts
+
+    crops = page_crop_artifacts("doc-1", 0, "images/p0.png", [_element(0, "image")])
+    assert len(crops) == 1
+    assert crops[0]["asset_ref"] == "images/p0.png"
+
+    no_asset = _element(1, "image")
+    no_asset.image_path = ""  # no asset: skipped via image_path, not asset_ref()
+    assert page_crop_artifacts("doc-1", 1, "images/p1.png", [no_asset]) == []
+
+
 def test_encoder_status_disabled_without_gpu() -> None:
     # No GPU / no model: the encoder must report disabled, never crash.
     status, reason = encoder_status(device=None, model=None)

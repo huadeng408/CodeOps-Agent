@@ -1,0 +1,4 @@
+./processor.go
+./processor_index_test.go
+./processor_structured_test.go
+./structured_index_test.go

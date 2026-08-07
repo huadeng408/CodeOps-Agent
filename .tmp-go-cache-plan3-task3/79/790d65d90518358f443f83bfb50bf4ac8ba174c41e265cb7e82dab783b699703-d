@@ -1,0 +1,3 @@
+./put_trained_model_definition_part.go
+./request.go
+./response.go
