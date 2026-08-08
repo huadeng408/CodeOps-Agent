@@ -465,13 +465,26 @@ class HeadlessDriver(DefaultAgentAdapter):
         if self.use_runner:
             try:
                 return self._solve_with_runner(instance, working_dir, trace_id, cancel_event)
-            except Exception:
+            except Exception as exc:
                 # Log and fall through to direct path
                 sys.stderr.write(
                     f"[eval] ConversationRunner path failed for {instance.instance_id}, "
                     f"falling back to direct LLM:\n{traceback.format_exc()}\n"
                 )
                 sys.stderr.flush()
+
+                # ---- IMPROVED FALLBACK: give the direct LLM the SAME context ----
+                # Previously the direct path lost ALL tool-execution context (git diff
+                # output, file contents the agent read, error messages from tool calls).
+                # Now we capture whatever the ConversationRunner managed to produce
+                # (tool outputs, state updates) as context for the direct fallback.
+                if isinstance(exc, Exception):
+                    fallback_context = self._capture_fallback_context(working_dir)
+                    instance.task_description = (
+                        instance.task_description
+                        + "\n\n## Additional Context (from prior tool execution)\n\n"
+                        + fallback_context
+                    )
 
         # ---- path 2: direct LLM call ----
         try:
@@ -783,6 +796,64 @@ class HeadlessDriver(DefaultAgentAdapter):
         cost-based comparisons work uniformly."""
         # Ollama is free; use a nominal $0 / 1k tokens rate for accounting.
         return 0.0
+
+    def _capture_fallback_context(self, working_dir: str) -> str:
+        """Capture context from the failed ConversationRunner for the
+        direct LLM fallback.
+
+        When the ConversationRunner path fails (e.g. tool-calling protocol
+        error), the direct fallback used to get only the problem statement.
+        This collects whatever the agent managed to produce — git diff,
+        recent file modifications, error logs — so the direct LLM has
+        meaningful context to work with.
+        """
+        parts: list[str] = []
+
+        # 1. Git diff (what the agent has already changed)
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "HEAD"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=15,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                diff_text = proc.stdout.decode("utf-8", errors="replace")
+                parts.append(f"Current changes (git diff):\n```diff\n{diff_text}\n```")
+        except Exception:
+            pass
+
+        # 2. Git log (last commit for context)
+        try:
+            proc = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parts.append(f"Recent commits:\n{proc.stdout.decode('utf-8', errors='replace')}")
+        except Exception:
+            pass
+
+        # 3. List recently modified files
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                changed = proc.stdout.decode("utf-8", errors="replace").strip()
+                parts.append(f"Modified files: {changed}")
+        except Exception:
+            pass
+
+        if not parts:
+            return ""
+
+        return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
