@@ -30,7 +30,6 @@ type Span interface {
 	RecordError(err error)
 	AddEvent(name string)
 }
-
 // Tracer is the public interface for creating gen_ai spans. Both the real
 // GenAITelemetry and NoopTracer implement it.
 type Tracer interface {

@@ -10,6 +10,8 @@ import (
 
 	"code-agent/internal/rag"
 	"code-agent/internal/telemetry/genai"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ---------------------------------------------------------------------------
@@ -35,7 +37,7 @@ type recordingSpan struct {
 	name       string
 	operation  string
 	provider   string
-	attrs      []string // key=value strings for simple assertion
+	attrs      []attribute.KeyValue
 	errors     []error
 	events     []string
 	ended      bool
@@ -43,19 +45,20 @@ type recordingSpan struct {
 
 func (s *recordingSpan) End() { s.ended = true }
 
-func (s *recordingSpan) SetAttributes(kvs ...interface{}) {
-	// Simplified: we just count them; the genai Span interface uses
-	// attribute.KeyValue, but testing with that import would add an
-	// OTel dependency. Instead we expose a simple SetAttrKeyVal for tests.
+func (s *recordingSpan) SetAttributes(kvs ...attribute.KeyValue) {
+	s.attrs = append(s.attrs, kvs...)
 }
 
 func (s *recordingSpan) RecordError(err error) { s.errors = append(s.errors, err) }
 
 func (s *recordingSpan) AddEvent(name string) { s.events = append(s.events, name) }
 
-// setAttrKeyVal records a key=value pair for test assertions (non-OTel).
-func (s *recordingSpan) setAttrKeyVal(k, v string) {
-	s.attrs = append(s.attrs, k+"="+v)
+func (s *recordingSpan) attrKeys() []string {
+	keys := make([]string, 0, len(s.attrs))
+	for _, kv := range s.attrs {
+		keys = append(keys, string(kv.Key))
+	}
+	return keys
 }
 
 func (t *recordingTracer) StartSpan(ctx context.Context, name string, operation string, provider string) (context.Context, genai.Span) {
