@@ -75,6 +75,7 @@ results/
 /eval_results_*.jsonl
 /eval_results_*.json
 /eval_results/
+/eval/benchmark_data/
 
 # Go build caches (multiple audit copies, ~3.2 GB total)
 .tmp-go-cache-*/
