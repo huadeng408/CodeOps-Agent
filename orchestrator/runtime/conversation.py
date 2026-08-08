@@ -312,6 +312,12 @@ class ConversationRunner:
                     return
                 continue
 
+            # ── Collect deferred recovery messages so we never inject
+            # system messages *between* a tool_calls assistant message and
+            # its corresponding tool messages.  Some providers (DeepSeek)
+            # enforce this ordering strictly (HTTP 400 otherwise).
+            deferred_recoveries: list[ChatMessage] = []
+
             for call in response.tool_calls:
                 call_id = self._tool_call_id(call)
                 if call.name == "AskUser":
@@ -465,7 +471,7 @@ class ConversationRunner:
                             message_content_text(cached_message.content),
                         )
                         if recovery_message:
-                            messages.append(
+                            deferred_recoveries.append(
                                 ChatMessage(
                                     role="system",
                                     content=recovery_message,
@@ -491,7 +497,7 @@ class ConversationRunner:
                     consecutive_errors += 1
                     recovery_message = self._recovery_message(consecutive_errors, result.error or result.output)
                     if recovery_message:
-                        messages.append(
+                        deferred_recoveries.append(
                             ChatMessage(
                                 role="system",
                                 content=recovery_message,
@@ -500,6 +506,11 @@ class ConversationRunner:
                         yield self._text(recovery_message)
                 else:
                     consecutive_errors = 0
+
+            # Flush deferred recovery messages AFTER all tool results so the
+            # ordering is: assistant(tool_calls) → tool₁ … toolₙ → recovery.
+            if deferred_recoveries:
+                messages.extend(deferred_recoveries)
 
         final_turn = self.max_tool_rounds + 1
         messages.append(
@@ -1077,6 +1088,7 @@ class ConversationRunner:
                 requested_keys.add(key)
 
         result_messages: dict[str, ChatMessage] = {}
+        deferred_recoveries: list[ChatMessage] = []
         if request_calls:
             request_ids = [self._tool_call_id(call) for call in request_calls]
             yield self._tool_request_batch(request_calls)
@@ -1118,7 +1130,10 @@ class ConversationRunner:
                     message_content_text(cached_message.content),
                 )
                 if recovery_message:
-                    messages.append(
+                    # Defer the system recovery message until ALL tool
+                    # results are emitted so the message ordering is
+                    # assistant(tool_calls) → tool₁ … toolₙ → system.
+                    deferred_recoveries.append(
                         ChatMessage(
                             role="system",
                             content=recovery_message,
@@ -1127,6 +1142,12 @@ class ConversationRunner:
                     yield self._text(recovery_message)
             else:
                 consecutive_errors = 0
+
+        # Flush deferred recovery messages AFTER all tool results.
+        if deferred_recoveries:
+            messages.extend(deferred_recoveries)
+            deferred_recoveries.clear()
+
         return consecutive_errors, False
 
     def _cached_tool_message(
@@ -1360,6 +1381,31 @@ class ConversationRunner:
         summary = self.compactor.compact_history([self._message_for_compaction(message) for message in compactable])
         recent_count = min(max(1, self.compactor.max_messages // 2), len(compactable))
         recent = compactable[-recent_count:]
+
+        # ── Preserve tool-call adjacency ──────────────────────────────
+        # Some providers (DeepSeek) require that every tool message
+        # immediately follows the assistant message whose tool_calls it
+        # answers.  When compaction drops older messages, walk backwards
+        # from the start of the "recent" window and include any orphaned
+        # assistant(tool_calls) / tool pairs so no tool message is left
+        # without its preceding assistant.
+        orphan_start = None
+        for i, msg in enumerate(recent):
+            if msg.role == "tool":
+                orphan_start = i
+                break
+        if orphan_start is not None and orphan_start > 0:
+            # The first recent message is a tool result.  Walk backwards
+            # through compactable to find the matching assistant(tool_calls)
+            # message and include it + all intermediate messages.
+            search_start = len(compactable) - recent_count - 1
+            for idx in range(search_start, -1, -1):
+                m = compactable[idx]
+                if m.role == "assistant" and m.tool_calls:
+                    # Include this assistant message → re-slice recent
+                    recent = compactable[idx:]
+                    break
+
         return [system, ChatMessage(role="system", content=summary), *recent]
 
     @staticmethod

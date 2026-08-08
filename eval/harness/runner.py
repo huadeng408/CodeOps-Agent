@@ -38,6 +38,11 @@ ERROR_SCORER = "scorer"
 # Returns a dict that gets merged into the prediction artifact.
 ScorerCallback = Callable[[EvalResult, EvalInstance], dict[str, Any]]
 
+# Workspace setup callback: called before each solve_instance to populate
+# the working directory (e.g. clone a repo, checkout a commit).  Receives
+# the instance and the temp directory path the harness created.
+WorkspaceSetup = Callable[[EvalInstance, str], None]
+
 
 def classify_error(exc: BaseException) -> str:
     if isinstance(exc, BudgetExceeded):
@@ -64,6 +69,7 @@ class HarnessRun:
     network_allowed: bool = False
     adapter: AgentAdapter | None = None
     scorer: ScorerCallback | None = None
+    setup_workspace: WorkspaceSetup | None = None  # clone repo, checkout, etc.
     config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -138,6 +144,10 @@ class HarnessRun:
             workspace = Path(tempfile.mkdtemp(prefix=f"eval-{self.run_id}-"))
             usage = BudgetUsage()
             try:
+                # Populate workspace (e.g. clone repo) before the agent runs
+                if self.setup_workspace is not None:
+                    self.setup_workspace(instance, str(workspace))
+
                 if not self.network_allowed:
                     _block_network(workspace)
 

@@ -598,7 +598,7 @@ class HeadlessDriver(DefaultAgentAdapter):
                     req = msg.tool_request
                     result = tool_executor.execute(req.tool_name, req.parameters_json)
                     tool_queue.put(
-                        orchestrator_pb2.OrchestratorMessage(
+                        orchestrator_pb2.HarnessMessage(
                             tool_result=orchestrator_pb2.ToolResult(
                                 tool_call_id=req.tool_call_id,
                                 output=result.output,
@@ -614,7 +614,7 @@ class HeadlessDriver(DefaultAgentAdapter):
                     for req in batch.requests:
                         result = tool_executor.execute(req.tool_name, req.parameters_json)
                         tool_queue.put(
-                            orchestrator_pb2.OrchestratorMessage(
+                            orchestrator_pb2.HarnessMessage(
                                 tool_result=orchestrator_pb2.ToolResult(
                                     tool_call_id=req.tool_call_id,
                                     output=result.output,
@@ -637,7 +637,7 @@ class HeadlessDriver(DefaultAgentAdapter):
                     # message so the agent continues without blocking.
                     ask = msg.ask_user_request
                     tool_queue.put(
-                        orchestrator_pb2.OrchestratorMessage(
+                        orchestrator_pb2.HarnessMessage(
                             tool_result=orchestrator_pb2.ToolResult(
                                 tool_call_id=ask.ask_user_id,
                                 output="[eval] User interaction is disabled during evaluation. "

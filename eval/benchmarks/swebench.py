@@ -579,11 +579,11 @@ def _setup_workdir(
             f"No base_commit in metadata for instance {instance.instance_id}"
         )
 
-    print(f"[swebench] Cloning {repo_url} at {base_commit}...")
+    print(f"[swebench] Cloning https://github.com/{repo_url}.git at {base_commit}...")
     # Full clone — base_commit is typically an old SHA that a shallow
     # clone of the default-branch tip cannot resolve.
     subprocess.run(
-        ["git", "clone", repo_url, workdir],
+        ["git", "clone", f"https://github.com/{repo_url}.git", workdir],
         check=True,
         capture_output=True,
         timeout=600,
