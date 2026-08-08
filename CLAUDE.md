@@ -24,13 +24,14 @@
 - 进展记录使用按日期命名的 `PROGRESS-YYYY-MM-DD.md`，或更新当天已有的对应文档；至少写明分支/提交、事实证据、执行过的验证、当前数据快照、未完成项和回滚边界。
 - 严格区分 `DESIGNED`、`IMPLEMENTED`、`VERIFIED` 和 `BLOCKED`：存在规格或测试代码不等于实现或真实验收通过，不得把计划写成完成。
 - 在提交或交接前检查从上一份 Obsidian 记录到当前 HEAD 的提交，补录所有尚未沉淀的有意义进展。若当前环境暂时不能写 Obsidian，先在仓库 `docs/` 生成同名待同步文档，并在获得写入权限后完成同步。
-- **需要模型调用来测试 agent 或其他效果时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 API key，模型用 `deepseek-v4`；注意 key 只用于本地测试，不要硬编码或提交进代码仓库。
+- **需要模型调用来测试 agent 或其他效果时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 API key，模型用 `deepseek-v4-pro`；注意 key 只用于本地测试，不要硬编码或提交进代码仓库。
 - **阶段性任务完成后可以自动 `git commit` 并 `git push`**，不必等用户手动确认；提交信息需概括本轮改动要点，结尾附带 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`。
 - **任何项目需要 Docker 服务时都可直接隐藏启动 Docker Desktop**，无需再次请求确认；该授权不包含删除容器、volume、索引或业务数据。
 - **如果本地网络代理不通（如 WSL 内无法访问 HuggingFace、GitHub），可以用 Clash for Windows 配置网络**：
   - Clash for Windows 默认监听 `127.0.0.1:7890`（HTTP 代理）
   - Windows 侧 Python 用代理：`$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`
   - WSL 侧用代理：`export http_proxy=http://<Windows主机IP>:7890 https_proxy=http://<Windows主机IP>:7890`（Windows 主机 IP 可通过 `ip route show default | awk '{print $3}'` 获取，通常是 WSL 网关地址）
+- **所有超过 15 分钟的工作（如下载大文件、Docker 构建、pip install 等）都必须先检查网络是否可以通过代理走得更快**。优先在代理可达的环境中下载（如 WSL 直连而不是 Docker 容器内），然后将本地文件传入 Docker build context 或目标环境，而不是在受限网络中硬等。
 
 ## RAG continuation memory
 

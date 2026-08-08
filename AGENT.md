@@ -31,6 +31,7 @@
   - Clash for Windows 默认监听 `127.0.0.1:7890`（HTTP 代理）
   - Windows 侧 Python 用代理：`$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`
   - WSL 侧用代理：`export http_proxy=http://<Windows主机IP>:7890 https_proxy=http://<Windows主机IP>:7890`（Windows 主机 IP 可通过 `ip route show default | awk '{print $3}'` 获取，通常是 WSL 网关地址）
+- **所有超过 15 分钟的工作（如下载大文件、Docker 构建、pip install 等）都必须先检查网络是否可以通过代理走得更快**。优先在代理可达的环境中下载（如 WSL 直连而不是 Docker 容器内），然后将本地文件传入 Docker build context 或目标环境，而不是在受限网络中硬等。
 
 ## RAG continuation memory
 
