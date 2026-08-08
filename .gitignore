@@ -67,6 +67,7 @@ eval/eval_results_*.json
 eval/eval_results_*.jsonl
 eval/samples_*_eval_results.json
 eval/samples_*_filtered.jsonl
+eval/*.ckpt.edge_cases.json
 eval/swebench_flask5014.json
 results/
 # Stray eval intermediates written to repo root
