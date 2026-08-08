@@ -99,3 +99,6 @@ eval/swebench_work/repos/
 eval/swebench_work/astropy/
 eval/swebench_work/agent_run/
 .mnm/
+eval/swebench_work/run_swebench_honest_10.py
+eval/swebench_work/run_terminalbench_honest_5.py
+eval/swebench_work/run_tau2bench_honest_5.py
