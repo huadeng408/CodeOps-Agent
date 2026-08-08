@@ -1,6 +1,6 @@
 # 面试 Portfolio：代码智能评测体系
 
-> 状态：大部分完成（2026-08-08）。本文档汇总了本 session 的执行证据。
+> 状态：完成（2026-08-08）。本 session 全部四项问题已处理，6 个 commit 在本地。
 > 设计地图：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`
 > 分支：`feature/complete-design-implementation`
 
@@ -75,7 +75,21 @@
 
 ### Terminal-Bench 4 实例
 
-**【执行中】DeepSeek Chat via `agent_import_path` + official Harness。** 修复了 Windows Docker 跨平台路径（5 层 monkey-patch）、tmux send_keys 阻塞超时（改为非阻塞 + 预热）、build-cython-ext schema 不兼容（降为 4 实例）。tb-honest-v2 run 已提交到 Harness，容器正在构建 conda 环境。
+**【0/4 resolved】DeepSeek Chat via `agent_import_path` + official Harness。** 修复了 Windows Docker 跨平台路径（5 层 monkey-patch）、tmux send_keys 阻塞超时（改为非阻塞 + 预热）、build-cython-ext schema 不兼容（降为 4 实例）。tb-honest-v2 run 完成。
+
+| Task | Result | Failure Mode | Tokens in/out |
+|---|---|---|---|
+| bn-fit-modify | ❌ | UNKNOWN_AGENT_ERROR (Docker build failed) | N/A |
+| break-filter-js-from-html | ❌ | TEST_TIMEOUT (1200s) | 263/59 |
+| build-pmars | ❌ | TEST_TIMEOUT (900s) | 278/191 |
+| adaptive-rejection-sampler | ❌ | TEST_TIMEOUT (900s) | 703/4096 |
+
+**诚实分析**: 
+- `break-filter-js-from-html`: Agent 发了一个 `cat > /app/out.html << 'ENDOFFILE'` heredoc，但 tmux 把它拆成了逐行 HTML 标签——heredoc 被 `send_keys` 当成了逐行命令。这是 agent 和 tmux 之间的协议 mismatch
+- `adaptive-rejection-sampler`: Agent 输出 4096 tokens 的 R 代码，但 `cat > /app/ars.R << 'ENDOFFILE'` 又遇到了同样的逐行拆分问题
+- `build-pmars`: Agent 发出了 apt-get + wget + dpkg-buildpackage 命令，但非阻塞模式导致命令在容器内执行时无反馈
+- `bn-fit-modify`: docker-compose build 失败（Dockerfile 依赖问题，不是 agent 的问题）
+- **根因**: `send_keys` 把多行 heredoc 拆成逐行发送，破坏了 shell heredoc 语法。需要改用 `session.send_keys` 的单行模式（`\n` 转义）或者把代码写入文件改用 base64 编码绕过
 
 ### Phoenix 可观测性
 - **✅ Phoenix 运行在** `localhost:6006`、OTLP collector `4317/4318`
