@@ -887,3 +887,63 @@ def test_mysql_dsn_not_hardcoded_in_source() -> None:
     assert "codeagent:codeagent" not in source, (
         "DEFAULT_MYSQL_DSN hardcodes real credentials — must use --mysql-dsn CLI arg"
     )
+
+
+# ── _parse_mysql_dsn Go-style DSN parameter support ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "dsn,expected_user,expected_db,expected_charset",
+    [
+        # Basic — already works
+        ("user:pass@tcp(127.0.0.1:3306)/mydb", "user", "mydb", "utf8mb4"),
+        # With charset query param — currently CRASHES (ValueError)
+        (
+            "user:pass@tcp(127.0.0.1:3306)/mydb?charset=utf8mb4",
+            "user",
+            "mydb",
+            "utf8mb4",
+        ),
+        # Full production DSN from configs/server.yaml — currently CRASHES
+        (
+            "codeagent:codeagent@tcp(127.0.0.1:3306)/codeagent?charset=utf8mb4&parseTime=True&loc=Local",
+            "codeagent",
+            "codeagent",
+            "utf8mb4",
+        ),
+        # Password with colon
+        (
+            "root:p@ss:word@tcp(localhost:3307)/testdb?charset=utf8",
+            "root",
+            "testdb",
+            "utf8",
+        ),
+        # Non-default port, custom host
+        (
+            "admin:secret@tcp(db.example.com:13306)/production",
+            "admin",
+            "production",
+            "utf8mb4",
+        ),
+    ],
+)
+def test_parse_mysql_dsn_parametrized(
+    dsn: str, expected_user: str, expected_db: str, expected_charset: str
+) -> None:
+    from scripts.corpus.import_docs import _parse_mysql_dsn
+
+    result = _parse_mysql_dsn(dsn)
+    assert result["user"] == expected_user
+    assert result["database"] == expected_db
+    assert result["host"] is not None
+    assert result["port"] is not None and result["port"] > 0
+    assert result["charset"] == expected_charset
+
+
+def test_parse_mysql_dsn_rejects_junk() -> None:
+    from scripts.corpus.import_docs import _parse_mysql_dsn
+
+    with pytest.raises(ValueError):
+        _parse_mysql_dsn("not a dsn at all")
+    with pytest.raises(ValueError):
+        _parse_mysql_dsn("")

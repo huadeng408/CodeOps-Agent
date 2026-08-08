@@ -59,20 +59,70 @@ DEFAULT_MYSQL_DSN = ""  # set via --mysql-dsn CLI arg or MYSQL_DSN env var
 
 
 def _parse_mysql_dsn(dsn: str) -> dict:
-    """Parse user:password@tcp(host:port)/db into a pymysql connect kwargs dict."""
-    m = re.match(
-        r"^(?P<user>[^:]+):(?P<password>[^@]+)@tcp\((?P<host>[^:]+):(?P<port>\d+)\)/(?P<db>.+)$",
-        dsn,
+    """Parse a Go-style MySQL DSN into pymysql connect kwargs.
+
+    Format: ``user:password@tcp(host:port)/dbname?param1=val1&param2=val2``
+    Go-only params (parseTime, loc, readTimeout, writeTimeout, timeout) are
+    silently dropped; charset is preserved as the charset key. The password
+    may itself contain ``:`` and ``@`` (the separator is the rightmost
+    ``@tcp(``). Raises ValueError on malformed input; the DSN is never
+    included in error messages because it carries a password.
+    """
+    _GO_ONLY = frozenset(
+        {"parsetime", "loc", "readtimeout", "writetimeout", "timeout"}
     )
-    if not m:
-        raise ValueError(f"unsupported MySQL DSN format: {dsn}")
+
+    dsn_stripped = (dsn or "").strip()
+    sep = dsn_stripped.rfind("@tcp(")
+    if sep < 0:
+        raise ValueError("not a Go-style MySQL DSN: missing @tcp(host:port)")
+    credentials = dsn_stripped[:sep]
+    rest = dsn_stripped[sep + len("@tcp("):]  # host:port)/db?params...
+
+    if ":" not in credentials:
+        raise ValueError("not a Go-style MySQL DSN: credentials must be user:password")
+    user, password = credentials.split(":", 1)
+    if not user:
+        raise ValueError("not a Go-style MySQL DSN: empty user")
+
+    close = rest.find(")")
+    if close < 0 or not rest[:close]:
+        raise ValueError("not a Go-style MySQL DSN: missing host in tcp(...)")
+    host, _, port_text = rest[:close].partition(":")
+    if not host:
+        raise ValueError("not a Go-style MySQL DSN: empty host")
+    try:
+        port = int(port_text) if port_text else 3306
+    except ValueError:
+        raise ValueError("not a Go-style MySQL DSN: port is not an integer") from None
+
+    after = rest[close + 1:]  # /dbname?params...
+    if not after.startswith("/"):
+        raise ValueError(
+            "not a Go-style MySQL DSN: missing /database after tcp(...)"
+        )
+    database, _, query = after[1:].partition("?")
+    if not database:
+        raise ValueError("not a Go-style MySQL DSN: empty database name")
+
+    charset = "utf8mb4"
+    if query:
+        for pair in query.split("&"):
+            if not pair:
+                continue
+            key, _, value = pair.partition("=")
+            if key.lower() in _GO_ONLY:
+                continue
+            if key.lower() == "charset":
+                charset = value
+
     return {
-        "user": m.group("user"),
-        "password": m.group("password"),
-        "host": m.group("host"),
-        "port": int(m.group("port")),
-        "database": m.group("db"),
-        "charset": "utf8mb4",
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "database": database,
+        "charset": charset,
     }
 
 
