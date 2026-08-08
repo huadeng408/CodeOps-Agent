@@ -273,3 +273,106 @@ def test_driver_api_key_env_wins_over_placeholder(monkeypatch) -> None:
     monkeypatch.delenv("LOCAL_LLM_API_KEY")
     assert HeadlessDriver().api_key == "ollama"  # placeholder fallback
     assert create_driver().api_key == "ollama"
+
+
+# ---------------------------------------------------------------------------
+# HarnessRun integration tests — Phase 4 (AgentAdapter protocol)
+# ---------------------------------------------------------------------------
+
+
+def test_evalplus_through_harness_run(tmp_path: Path) -> None:
+    """evalplus benchmark routed through HarnessRun produces full artifact tree."""
+    from eval.harness import HarnessRun, Budget, RunArtifacts
+    from eval.adapter import EvalInstance, EvalResult
+
+    run_id = "test-harness-001"
+    root = tmp_path / "eval_results" / run_id
+
+    class FakeEvalPlusAdapter:
+        """Minimal adapter: returns canned EvalResults for known instances."""
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                answer=f"def {instance.instance_id}(): pass",
+                cost=0.005,
+                tokens_in=150,
+                tokens_out=80,
+                wall_time_s=0.5,
+                trace_id=f"trace-{instance.instance_id}",
+            )
+
+    adapter = FakeEvalPlusAdapter()
+    artifacts = RunArtifacts(run_id=run_id, root=str(tmp_path / "eval_results"))
+    harness = HarnessRun(
+        run_id=run_id,
+        artifacts=artifacts,
+        budget=Budget(wall_clock_seconds=60, max_tokens=10_000),
+        adapter=adapter,
+    )
+
+    instances = [
+        EvalInstance(instance_id="HumanEval/0", task_description="def foo(): ..."),
+        EvalInstance(instance_id="HumanEval/1", task_description="def bar(): ..."),
+        EvalInstance(instance_id="HumanEval/2", task_description="def baz(): ..."),
+    ]
+    summary = harness.run(instances)
+
+    # Assertions: full artifact tree exists
+    assert summary["summary"]["ok"] == 3
+    assert summary["summary"]["failed"] == 0
+    # Check files exist
+    assert (root / "instances.jsonl").exists()
+    assert (root / "predictions.jsonl").exists()
+    assert (root / "events.jsonl").exists()
+    assert (root / "summary.json").exists()
+    assert (root / "environment.txt").exists()
+    # failures.jsonl must exist (empty is fine — or may not exist if no failures)
+    # instances.jsonl has 3 lines
+    instances_lines = root.joinpath("instances.jsonl").read_text(encoding="utf-8").strip().split("\n")
+    assert len(instances_lines) == 3
+    # predictions.jsonl has 3 lines with trace_id
+    pred_lines = root.joinpath("predictions.jsonl").read_text(encoding="utf-8").strip().split("\n")
+    assert len(pred_lines) == 3
+    for line in pred_lines:
+        pred = json.loads(line)
+        assert "trace_id" in pred
+        assert pred["trace_id"].startswith("trace-")
+
+    # Manifest assertions (Task 3)
+    assert (root / "run-manifest.json").exists(), "run-manifest.json must exist"
+    manifest = json.loads(root.joinpath("run-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"] == run_id
+    assert "synthetic" in manifest
+    assert "budgets" in manifest
+    assert manifest["budgets"]["wall_clock_seconds"] == 60
+    assert manifest["budgets"]["max_tokens"] == 10_000
+    assert manifest["network_policy"] == "disabled"
+
+
+def test_harness_run_missing_instance_id_fail_closed(tmp_path: Path) -> None:
+    """Empty instance_id is recorded as failure, not silently skipped."""
+    from eval.harness import HarnessRun, Budget, RunArtifacts
+    from eval.adapter import EvalInstance, EvalResult
+
+    run_id = "test-fail-closed-001"
+    root = tmp_path / "eval_results" / run_id
+
+    class OkAdapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            return EvalResult(instance_id=instance.instance_id, answer="ok")
+
+    adapter = OkAdapter()
+    artifacts = RunArtifacts(run_id=run_id, root=str(tmp_path / "eval_results"))
+    harness = HarnessRun(run_id=run_id, artifacts=artifacts, adapter=adapter)
+
+    instances = [
+        EvalInstance(instance_id="", task_description="bad — no id"),
+        EvalInstance(instance_id="ok-1", task_description="good"),
+    ]
+    summary = harness.run(instances)
+    assert summary["summary"]["ok"] == 1
+    assert summary["summary"]["failed"] >= 1  # the empty-id instance
+    # failure recorded
+    failures = [json.loads(line) for line in root.joinpath("failures.jsonl").read_text(encoding="utf-8").strip().split("\n")]
+    bad_ids = [f for f in failures if not f["instance_id"]]
+    assert len(bad_ids) >= 1
