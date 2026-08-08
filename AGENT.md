@@ -30,7 +30,9 @@
 
 ## RAG continuation memory
 
+- **四目标工作的唯一权威执行地图是 `docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`。** 所有 Agent 在处理自研 Harness、多模态 RAG、评测集或可观测性前必须完整读取该文档，并按其中的 Phase 依赖、统一 artifact/trace 契约、状态口径、任务卡和发布门禁执行；不得另建冲突路线或越过前置门禁。
 - Record every meaningful RAG milestone in both `docs/PROGRESS-YYYY-MM-DD.md` and `D:\Obsidian\code-autogrowth\私人\localcode\PROGRESS-YYYY-MM-DD.md` before handoff or push.
 - State `DESIGNED`, `IMPLEMENTED`, `VERIFIED`, and `BLOCKED` precisely, including commands, current MySQL/ES/MinIO counts, unfinished plans, and rollback boundaries.
 - All PDF entry points use MinerU in explicit OCR mode. Tika is limited to non-PDF office documents such as DOCX, PPTX, and XLSX.
-- Do not claim the multimodal corpus complete until Plans 2-7, human qrels, index gates, and explicit integration tests pass.
+- GPT-5.6 Sol 复核必须标记为 `AI_REVIEWED` 或 `DISPUTED`，不得生成真人 `reviewer_hash` 或冒充真人复核；只有真实人工参与后才可标记 `HUMAN_REVIEWED`。
+- Do not claim the multimodal corpus complete until the design map's data, qrels, index, visual bake-off, observability, and explicit integration gates pass.
