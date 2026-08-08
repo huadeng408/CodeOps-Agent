@@ -1,6 +1,6 @@
 # 面试 Portfolio：代码智能评测体系
 
-> 状态：完成（2026-08-08）。四项问题全部处理，9 个 commit 本地，Push 待用户事后手动处理。
+> 状态：持续更新（2026-08-08）。SWE-bench v2 10/10, tau2-bench 2/5, Terminal-Bench ongoing, Phoenix traced。
 > 设计地图：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`
 > 分支：`feature/complete-design-implementation`
 

@@ -44,10 +44,20 @@ class DeepSeekTBAgent(BaseAgent):
         system_prompt = (
             "You are an expert software engineer working in a Linux container via tmux. "
             "You must solve the given task by executing shell commands.\n\n"
-            "Output ONLY bash commands within ```bash code blocks. Use cat with heredoc "
-            "to write multi-line files. Example:\n"
-            "```bash\ncat > /app/solve.py << 'ENDOFFILE'\nprint('hello')\nENDOFFILE\n```\n"
-            "For multi-step tasks, output commands in logical order, one per line.\n"
+            "IMPORTANT: To write multi-line files, use base64 encoding — do NOT use heredoc "
+            "because tmux sends each line separately and breaks the heredoc syntax. "
+            "Example:\n"
+            "```bash\n"
+            "echo 'cHJpbnQoJ2hlbGxvJyk=' | base64 -d > /app/solve.py\n"
+            "```\n"
+            "Use python3 -c 'import base64; print(base64.b64encode(b\"\"\"...multi-line content...\"\"\").decode())' "
+            "to generate the base64 string if you need to.\n\n"
+            "Alternative for short files: use printf with \\n for newlines:\n"
+            "```bash\n"
+            "printf 'line1\\nline2\\n' > /app/file.txt\n"
+            "```\n"
+            "Output ONLY bash commands within ```bash blocks. "
+            "For multi-step tasks, output commands in logical order.\n"
             "If a command is likely to take >30s (pip install, apt-get, large build), "
             "prefix it with `timeout 300`.\n"
             "Do NOT output explanations — only the ```bash block with commands."
@@ -70,7 +80,7 @@ class DeepSeekTBAgent(BaseAgent):
         print(f"\n[DeepSeekAgent] Model output ({tokens_out} tokens):")
         print(output_text[:2000])
 
-        # Extract bash commands
+        # Extract bash commands — now supports base64 encoded payloads
         commands = self._extract_commands(output_text)
 
         if not commands:
@@ -88,7 +98,8 @@ class DeepSeekTBAgent(BaseAgent):
         except Exception as e:
             print(f"  WARMUP ERROR: {e}")
 
-        # Phase 2: Send actual commands
+        # Phase 2: Send actual commands — each command as a SINGLE line
+        # (tmux send_keys with a literal newline in the string, not heredoc lines)
         for i, line in enumerate(commands.split("\n")):
             line = line.strip()
             if not line or line.startswith("#"):
@@ -98,17 +109,17 @@ class DeepSeekTBAgent(BaseAgent):
 
             print(f"  [{i}] SEND: {line[:150]}")
             try:
-                # Use non-blocking for commands that might take long
-                # The harness's test phase will verify results independently
+                # Send each command as a single string including \n for multi-line
+                # The command text already contains \n for multi-line printf/echo
                 session.send_keys([line, "Enter"], block=False, max_timeout_sec=30)
-                time.sleep(1)  # brief pause between commands
+                time.sleep(2)  # brief pause for execution
             except Exception as e:
                 print(f"  [{i}] SEND ERROR: {e}")
 
-        # Phase 3: Wait for final command to settle
+        # Phase 3: Wait for final command to settle with longer timeout
         try:
-            time.sleep(5)
-            session.send_keys(["echo agent-done", "Enter"], block=True, max_timeout_sec=60)
+            time.sleep(10)  # more settling time for apt-get, pip install, etc.
+            session.send_keys(["echo agent-done", "Enter"], block=True, max_timeout_sec=120)
         except Exception as e:
             print(f"  FINAL WAIT ERROR: {e}")
 
