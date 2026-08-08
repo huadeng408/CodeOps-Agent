@@ -95,3 +95,7 @@ data/reports/corpus/
 # Personal session scratch at root
 CLAUDE-CODE-*.md
 # Personal agent instructions (not for publication)
+eval/swebench_work/repos/
+eval/swebench_work/astropy/
+eval/swebench_work/agent_run/
+.mnm/
