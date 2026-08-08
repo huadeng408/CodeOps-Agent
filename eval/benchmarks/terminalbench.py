@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,141 @@ def _can_score_official() -> tuple[bool, str]:
         return True, "terminal_bench + Docker available"
     except ImportError as e:
         return False, f"terminal_bench or Docker not available: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Task-dir materialization (TB 2.0 layout -> terminal_bench.Harness layout)
+# ---------------------------------------------------------------------------
+
+#: docker-compose for a task whose Dockerfile lives under ``environment/``.
+#: Env vars are provided by the official ``DockerComposeManager`` at runtime.
+_COMPOSE_TEMPLATE = """\
+# Materialized by the localcode eval adapter (TB 2.0 -> terminal_bench.Harness).
+# Builds the task environment from environment/ and adds tmux/asciinema, which
+# the official harness requires inside the container.
+services:
+  client:
+    build:
+      context: environment
+      dockerfile: Dockerfile.tb-harness
+    image: ${T_BENCH_TASK_DOCKER_CLIENT_IMAGE_NAME}
+    container_name: ${T_BENCH_TASK_DOCKER_CLIENT_CONTAINER_NAME}
+    command: [ "sh", "-c", "sleep infinity" ]
+    environment:
+      - TEST_DIR=${T_BENCH_TEST_DIR}
+    volumes:
+      - ${T_BENCH_TASK_LOGS_PATH}:${T_BENCH_CONTAINER_LOGS_PATH}
+      - ${T_BENCH_TASK_AGENT_LOGS_PATH}:${T_BENCH_CONTAINER_AGENT_LOGS_PATH}
+"""
+
+#: Layer appended to the task Dockerfile.  terminal_bench.Harness hard-requires
+#: tmux in the container and asciinema unless the task disables recording.
+_HARNESS_LAYER = """\
+# --- localcode harness shim: required by terminal_bench.Harness ---
+RUN apt-get update && apt-get install -y --no-install-recommends tmux asciinema \\
+    && rm -rf /var/lib/apt/lists/*
+"""
+
+
+def _materialize_task_dir(task_dir: Path) -> list[str]:
+    """Convert one TB 2.0 task dir to the layout ``terminal_bench.Harness``
+    (0.2.18) expects, writing only the files that are missing.
+
+    The offline TB 2.0 layout keeps the Dockerfile under ``environment/``,
+    the test runner under ``tests/test.sh`` and the solution under
+    ``solution/solve.sh``, while the harness requires ``docker-compose.yaml``,
+    ``run-tests.sh`` and ``solution.sh`` at the task root.
+
+    Returns the list of files written (for logging).
+    """
+    written: list[str] = []
+
+    # 1. docker-compose.yaml at the task root.
+    compose_path = task_dir / "docker-compose.yaml"
+    if not compose_path.exists():
+        compose_path.write_text(_COMPOSE_TEMPLATE, encoding="utf-8")
+        written.append("docker-compose.yaml")
+
+    # 2. environment/Dockerfile.tb-harness: task Dockerfile + tmux/asciinema.
+    env_dockerfile = task_dir / "environment" / "Dockerfile"
+    harness_dockerfile = task_dir / "environment" / "Dockerfile.tb-harness"
+    if not harness_dockerfile.exists() and env_dockerfile.exists():
+        harness_dockerfile.write_text(
+            env_dockerfile.read_text(encoding="utf-8") + _HARNESS_LAYER,
+            encoding="utf-8",
+        )
+        written.append("environment/Dockerfile.tb-harness")
+
+    # 3. run-tests.sh: the harness copies this (with tests/) to /tests and
+    #    runs `bash /tests/run-tests.sh`.
+    run_tests = task_dir / "run-tests.sh"
+    if not run_tests.exists():
+        test_sh = task_dir / "tests" / "test.sh"
+        if test_sh.exists():
+            shutil.copyfile(test_sh, run_tests)
+            written.append("run-tests.sh")
+        else:
+            run_tests.write_text(
+                "#!/bin/bash\n# Placeholder: no tests/test.sh found in this task.\n",
+                encoding="utf-8",
+            )
+            written.append("run-tests.sh (placeholder)")
+
+    # 4. solution.sh at the task root (harness TaskPaths may probe it).
+    if not (task_dir / "solution.sh").exists() and not (task_dir / "solution.yaml").exists():
+        solve_sh = task_dir / "solution" / "solve.sh"
+        if solve_sh.exists():
+            shutil.copyfile(solve_sh, task_dir / "solution.sh")
+            written.append("solution.sh")
+
+    return written
+
+
+def _patch_terminal_bench_windows() -> None:
+    """Monkeypatch ``terminal_bench`` container-path handling for Windows hosts.
+
+    The official package derives container paths from ``pathlib.Path``, which
+    stringifies to ``\\tmp`` / ``\\tests`` on Windows; the Docker API then
+    404s on ``put_archive`` (``Could not find the file \\tmp ...``) and the
+    in-container test command becomes ``bash \\tests\\run-tests.sh``, which
+    bash mangles.  The adapter normalizes container dirs to POSIX separators
+    and uses ``PurePosixPath`` for the container-side constants.
+    """
+    from pathlib import PurePosixPath
+
+    try:
+        from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
+    except ImportError:  # pragma: no cover - official package not installed
+        return
+
+    if getattr(DockerComposeManager, "_localcode_patched", False):
+        return
+
+    _orig_copy = DockerComposeManager.copy_to_container
+
+    def _copy_posix(
+        container: Any,
+        paths: Any,
+        container_dir: str | None = None,
+        container_filename: str | None = None,
+    ) -> None:
+        if container_dir:
+            container_dir = str(container_dir).replace("\\", "/")
+        return _orig_copy(container, paths, container_dir, container_filename)
+
+    DockerComposeManager.copy_to_container = staticmethod(_copy_posix)
+    DockerComposeManager.CONTAINER_TEST_DIR = PurePosixPath("/tests")
+
+    try:
+        from terminal_bench.terminal.tmux_session import TmuxSession
+
+        TmuxSession._GET_ASCIINEMA_TIMESTAMP_SCRIPT_CONTAINER_PATH = PurePosixPath(
+            "/tmp/get-asciinema-timestamp.sh"
+        )
+    except ImportError:  # pragma: no cover
+        pass
+
+    DockerComposeManager._localcode_patched = True
 
 
 # ---------------------------------------------------------------------------
@@ -207,16 +344,46 @@ def _run_with_harness(
         raise RuntimeError("No task IDs found in loaded tasks")
 
     # Build and run the harness.
+    # The Dataset expects task directories directly under dataset_path, but our
+    # offline layout has them under a tasks/ subdirectory.
+    dataset_path = config.data_dir / "tasks"
+    if not dataset_path.exists():
+        dataset_path = config.data_dir
+
+    # Materialize the harness-required per-task layout (TB 2.0 -> harness).
+    for task_id in task_ids:
+        task_dir = dataset_path / task_id
+        if not task_dir.is_dir():
+            logger.warning(
+                "[terminalbench] task dir missing for %s — harness will fail it", task_id
+            )
+            continue
+        for fname in _materialize_task_dir(task_dir):
+            logger.info("[terminalbench] materialized %s/%s", task_id, fname)
+
     harness = Harness(
         output_path=output_dir,
         run_id="code-agent-terminalbench",
         agent_name=AgentName.NOP,
-        dataset_path=config.data_dir,
+        dataset_path=dataset_path,
         task_ids=task_ids,
         n_concurrent_trials=1,
         n_attempts=1,
         cleanup=False,
     )
+
+    # terminal_bench's rich progress bar emits non-ASCII glyphs (e.g. U+2717);
+    # on a GBK-locale Windows console that crashes the whole run with a
+    # UnicodeEncodeError. Force UTF-8 output for the harness duration.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            enc = (stream.encoding or "").lower().replace("-", "")
+            if stream is not None and enc not in ("", "utf8"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+    _patch_terminal_bench_windows()
 
     results = harness.run()
 
