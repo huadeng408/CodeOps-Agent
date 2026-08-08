@@ -1,6 +1,0 @@
-./commit_skill.go
-./init_skill.go
-./manager.go
-./review_skill.go
-./security_skill.go
-./manager_test.go

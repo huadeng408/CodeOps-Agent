@@ -1,4 +1,0 @@
-./migration.go
-./mysql.go
-./redis.go
-./migration_integration_test.go

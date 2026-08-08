@@ -1,5 +1,0 @@
-./admin_auth.go
-./auth.go
-./internal_auth.go
-./logging.go
-./logging_test.go

@@ -23,6 +23,8 @@ venv/
 设计方案.md
 *.draft.md
 notes/
+*.bak
+*.backup
 
 # Claude Code local overrides (settings.json is shared; *.local.json is personal)
 .claude/settings.local.json
@@ -71,3 +73,21 @@ results/
 /eval_checkpoint_*.json
 /eval_results_*.jsonl
 /eval_results_*.json
+
+# Go build caches (multiple audit copies, ~3.2 GB total)
+.tmp-go-cache-*/
+
+# Temporary / scratch directories
+tmp/
+temp/
+scratch/
+
+# AI workflow internals (plans, specs — not project docs)
+.superpowers/
+docs/superpowers/
+
+# Generated audit / report snapshots
+data/reports/corpus/
+
+# Personal session scratch at root
+CLAUDE-CODE-*.md

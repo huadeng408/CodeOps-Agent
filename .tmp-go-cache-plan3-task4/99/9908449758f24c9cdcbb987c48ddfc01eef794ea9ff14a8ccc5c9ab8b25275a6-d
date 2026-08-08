@@ -1,3 +1,0 @@
-./migration.go
-./mysql.go
-./redis.go
