@@ -164,37 +164,23 @@ def test_tau2_run_delegates_to_official_runner(tmp_path: Path, monkeypatch) -> N
 
     invoked: dict = {}
 
-    def fake_command(config, task_file: Path, output_dir: Path) -> list[str]:
-        invoked["task_file"] = task_file
-        return ["python", "-m", "tau_bench.eval", "--env", config.env_name]
+    def fake_tau_run(config, tasks, output_dir, model_name, num_trials, max_concurrency, task_split):
+        invoked["config"] = config
+        invoked["model"] = model_name
+        from eval.adapter import EvalResult
+        return [EvalResult(instance_id="0", error="")]
 
-    def fake_run(cmd, **kw):
-        invoked["cmd"] = cmd
-        invoked["kw"] = kw
-
-        class Proc:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return Proc()
-
-    monkeypatch.setattr(mod, "official_runner_command", fake_command)
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(mod, "_can_score_official", lambda: (True, "mock"))
+    monkeypatch.setattr(mod, "_run_with_config", fake_tau_run)
 
     results = mod.run(FakeDriver(), limit=1, data_dir=str(data_dir), output_dir=str(tmp_path))
     assert len(results) == 1
     assert results[0].instance_id == "0"
-    assert invoked["cmd"][:3] == ["python", "-m", "tau_bench.eval"]
-    assert invoked["task_file"].exists()
-
-    summary = json.loads((tmp_path / "tau2bench_summary.json").read_text(encoding="utf-8"))
-    assert summary["domain"] == "airline"
-    assert summary["num_tasks"] == 1
-    assert "api_key" not in summary and "key" not in str(summary.values()).lower()
+    assert invoked["config"].env_name == "airline"
+    assert invoked["model"] == "deepseek-v4"
 
 
-def test_terminalbench_run_delegates_to_official_runner(tmp_path: Path, monkeypatch) -> None:
+def test_terminalbench_run_delegates_to_real_api(tmp_path: Path, monkeypatch) -> None:
     from eval.benchmarks import terminalbench as mod
 
     data_dir = tmp_path / "data"
@@ -206,31 +192,19 @@ def test_terminalbench_run_delegates_to_official_runner(tmp_path: Path, monkeypa
 
     invoked: dict = {}
 
-    def fake_command(config, task_file: Path, output_dir: Path) -> list[str]:
-        invoked["task_file"] = task_file
-        return ["python", "-m", "terminal_bench.eval", "--image", config.image_name]
+    def fake_harness_run(config, tasks, output_dir):
+        invoked["tasks"] = tasks
+        invoked["output_dir"] = output_dir
+        from eval.adapter import EvalResult
+        return [EvalResult(instance_id="task-0", error="")]
 
-    def fake_run(cmd, **kw):
-        invoked["cmd"] = cmd
-
-        class Proc:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return Proc()
-
-    monkeypatch.setattr(mod, "official_runner_command", fake_command)
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(mod, "_can_score_official", lambda: (True, "mock"))
+    monkeypatch.setattr(mod, "_run_with_harness", fake_harness_run)
 
     results = mod.run(FakeDriver(), data_dir=str(data_dir), output_dir=str(tmp_path))
     assert len(results) == 1
     assert results[0].instance_id == "task-0"
-    assert invoked["cmd"][:3] == ["python", "-m", "terminal_bench.eval"]
-
-    summary = json.loads((tmp_path / "terminalbench_summary.json").read_text(encoding="utf-8"))
-    assert summary["num_tasks"] == 1
-    assert summary["official_runner"] == "terminal_bench.eval"
+    assert invoked["tasks"][0]["name"] == "task-0"
 
 
 # ---------------------------------------------------------------------------

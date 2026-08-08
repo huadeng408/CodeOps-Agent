@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -1168,6 +1169,151 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Official scoring — automated on Linux+Docker, WSL2 on Windows, fail-closed
+# ---------------------------------------------------------------------------
+
+
+def _can_score_official() -> tuple[bool, str]:
+    """Check whether the official swebench scorer can run in this environment.
+
+    Returns (available, detail) where detail explains why scoring is or isn't
+    available.
+    """
+    # Linux: check Docker + swebench
+    if platform.system() == "Linux":
+        try:
+            import resource  # noqa: F401
+            import swebench.harness.run_evaluation  # noqa: F401
+            import docker  # noqa: F401
+            return True, "Linux + Docker + swebench available"
+        except ImportError as e:
+            return False, f"Linux but missing dependency: {e}"
+        except Exception as e:
+            return False, f"Linux but check failed: {e}"
+
+    # Windows: check WSL2 availability
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c",
+                 "python3 -c 'import docker; print(\"ok\")' 2>/dev/null || echo 'no-docker'"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if "ok" in result.stdout:
+                return True, "Windows + WSL2 Ubuntu-24.04 + Docker available"
+            else:
+                return False, f"Windows + WSL2 but Docker not available in WSL: {result.stdout.strip()}"
+        except Exception as e:
+            return False, f"Windows but WSL2 check failed: {e}"
+
+    return False, f"unsupported platform: {platform.system()}"
+
+
+def _run_official_scoring(
+    predictions_path: str,
+    output_dir: str,
+    dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+    split: str = "test",
+    max_workers: int = 4,
+    run_id: str = "code-agent-eval",
+    timeout: int = 3600,
+) -> tuple[bool, str]:
+    """Invoke the official swebench scoring harness.
+
+    On Linux, runs directly. On Windows, delegates to WSL2. Returns
+    (success, detail).
+    """
+    if platform.system() == "Windows":
+        return _run_official_scoring_wsl(
+            predictions_path, output_dir, dataset_name, split,
+            max_workers, run_id, timeout,
+        )
+    else:
+        return _run_official_scoring_local(
+            predictions_path, output_dir, dataset_name, split,
+            max_workers, run_id, timeout,
+        )
+
+
+def _run_official_scoring_local(
+    predictions_path: str,
+    output_dir: str,
+    dataset_name: str,
+    split: str,
+    max_workers: int,
+    run_id: str,
+    timeout: int,
+) -> tuple[bool, str]:
+    """Run swebench.harness.run_evaluation locally (Linux only)."""
+    import resource  # noqa: F401
+    from swebench.harness.run_evaluation import main as run_eval_main
+
+    try:
+        run_eval_main(
+            dataset_name=dataset_name,
+            split=split,
+            instance_ids=[],
+            predictions_path=predictions_path,
+            max_workers=max_workers,
+            force_rebuild=False,
+            cache_level="env",
+            clean=False,
+            open_file_limit=4096,
+            run_id=run_id,
+            timeout=timeout,
+            namespace=None,
+            rewrite_reports=False,
+            modal=False,
+            report_dir=output_dir,
+        )
+        return True, f"official scoring completed for {run_id}"
+    except Exception as e:
+        return False, f"official scoring failed: {e}"
+
+
+def _run_official_scoring_wsl(
+    predictions_path: str,
+    output_dir: str,
+    dataset_name: str,
+    split: str,
+    max_workers: int,
+    run_id: str,
+    timeout: int,
+) -> tuple[bool, str]:
+    """Run official scoring via WSL2 Ubuntu-24.04."""
+    wsl_preds = f"/mnt/d/vscode/localcode/{predictions_path}"
+    wsl_output = f"/mnt/d/vscode/localcode/{output_dir}"
+
+    cmd = (
+        f"cd /mnt/d/vscode/localcode && "
+        f"python3 -c \""
+        f"import sys; sys.path.insert(0, '.'); "
+        f"from swebench.harness.run_evaluation import main; "
+        f"main(dataset_name='{dataset_name}', split='{split}', "
+        f"instance_ids=[], predictions_path='{wsl_preds}', "
+        f"max_workers={max_workers}, force_rebuild=False, "
+        f"cache_level='env', clean=False, open_file_limit=4096, "
+        f"run_id='{run_id}', timeout={timeout}, namespace=None, "
+        f"rewrite_reports=False, modal=False, "
+        f"report_dir='{wsl_output}')\""
+    )
+
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
+            capture_output=True, text=True, timeout=timeout + 600,
+        )
+        if result.returncode == 0:
+            return True, f"WSL2 official scoring completed: {result.stdout[-200:]}"
+        else:
+            return False, f"WSL2 scoring failed (exit {result.returncode}): {result.stderr[-500:]}"
+    except subprocess.TimeoutExpired:
+        return False, f"WSL2 scoring timed out after {timeout}s"
+    except Exception as e:
+        return False, f"WSL2 scoring error: {e}"
 
 
 if __name__ == "__main__":

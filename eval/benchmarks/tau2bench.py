@@ -1,17 +1,19 @@
 """τ²-bench adapter (plan Task 8.3).
 
 τ²-bench evaluates tool-use / state-consistency / multi-turn tasks through
-its native domain runner. Like Terminal-Bench, this adapter only converts
-formats and defers execution to the official runner — it never masquerades
-as a unified scorer. The unified layer is the run manifest / artifact tree /
-error taxonomy.
+its native domain runner. The adapter defers execution to the official
+``tau_bench.run.run(RunConfig)`` API and never masquerades as a unified
+scorer. The unified layer is the run manifest / artifact tree / error
+taxonomy.
+
+Verified against ``tau_bench`` 0.1.0 (editable, D:\\vscode\\tau-bench).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,8 +21,22 @@ from typing import Any
 from eval.adapter import EvalInstance, EvalResult
 from eval.manifest import ALLOWED_LICENSES
 
-# Official τ²-bench runner entry (re-verify upstream when pinned).
-OFFICIAL_RUNNER_MODULE = "tau_bench.eval"
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Official runner availability
+# ---------------------------------------------------------------------------
+
+
+def _can_score_official() -> tuple[bool, str]:
+    """Check whether the official τ²-bench runner can run."""
+    try:
+        from tau_bench.run import run  # noqa: F401
+        from tau_bench.types import RunConfig  # noqa: F401
+        return True, "tau_bench available"
+    except ImportError as e:
+        return False, f"tau_bench not available: {e}"
 
 
 @dataclass
@@ -52,37 +68,6 @@ def load_tasks(data_dir: str | Path) -> list[dict[str, Any]]:
             record["_env"] = path.stem
             tasks.append(record)
     return tasks
-
-
-def to_eval_instances(tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
-    return [
-        {
-            "instance_id": f"{task.get('_env', 'env')}/{task.get('id', str(i))}",
-            "task_description": task.get("user", task.get("question", "")),
-        }
-        for i, task in enumerate(tasks)
-    ]
-
-
-def official_runner_command(config: Tau2BenchConfig, task_file: Path, output_dir: Path) -> list[str]:
-    """The official τ²-bench native domain runner invocation."""
-    return [
-        "python",
-        "-m",
-        OFFICIAL_RUNNER_MODULE,
-        "--env",
-        config.env_name,
-        "--task-file",
-        str(task_file),
-        "--output-dir",
-        str(output_dir),
-        "--num-turns",
-        str(config.num_turns),
-    ]
-
-
-def env_for_runner() -> dict[str, str]:
-    return dict(os.environ)
 
 
 # ---------------------------------------------------------------------------
@@ -143,15 +128,10 @@ DATA_DIR_ENV = "TAU2_DATA_DIR"
 def run(driver: Any, limit: int | None = None, **kwargs: Any) -> list[EvalResult]:
     """Module-level runner aligned with the ``eval.run`` CLI contract.
 
-    τ²-bench defers execution to the official domain runner
-    (:data:`OFFICIAL_RUNNER_MODULE`): this wrapper validates prerequisites,
-    materialises the task file, invokes the official runner, writes a sidecar
-    summary JSON, and returns one :class:`EvalResult` per task.  It never
-    masquerades as a unified scorer -- the official runner owns scoring.
+    Invokes the official ``tau_bench.run.run(RunConfig)`` API.  Requires
+    ``$TAU2_DATA_DIR`` or an explicit ``data_dir`` kwarg.
 
-    Missing data dir / official runner fail loudly *before* any model call
-    (per design spec §6).  Data dir defaults to ``$TAU2_DATA_DIR``; ``env_name``
-    defaults to ``$TAU2_ENV`` or ``"airline"``.
+    If the official runner is unavailable, returns ``ERROR_INFRA`` results.
     """
     data_dir_raw = kwargs.pop("data_dir", os.environ.get(DATA_DIR_ENV, ""))
     if not str(data_dir_raw):
@@ -162,13 +142,14 @@ def run(driver: Any, limit: int | None = None, **kwargs: Any) -> list[EvalResult
     data_dir = Path(data_dir_raw)
     env_name = kwargs.pop("env_name", os.environ.get("TAU2_ENV", "airline"))
     output_dir = Path(kwargs.pop("output_dir", "."))
-    num_turns = int(kwargs.pop("num_turns", 30))
-    timeout = float(kwargs.pop("timeout", 3600))
+    model_name = kwargs.pop("model_name", os.environ.get("TAU2_MODEL", "deepseek-v4"))
+    num_trials = int(kwargs.pop("num_trials", 1))
+    max_concurrency = int(kwargs.pop("max_concurrency", 1))
+    task_split = kwargs.pop("task_split", "test")
 
     config = Tau2BenchConfig(
         data_dir=data_dir,
         env_name=env_name,
-        num_turns=num_turns,
     )
     issues = config.validate()
     if issues:
@@ -185,53 +166,87 @@ def run(driver: Any, limit: int | None = None, **kwargs: Any) -> list[EvalResult
     if limit is not None:
         tasks = tasks[:limit]
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    task_file = output_dir / f"{config.env_name}_tasks.jsonl"
-    with task_file.open("w", encoding="utf-8") as fh:
-        for task in tasks:
-            fh.write(json.dumps(task, ensure_ascii=False) + "\n")
+    can_score, reason = _can_score_official()
+    logger.info("[tau2bench] _can_score_official: %s — %s", can_score, reason)
 
-    cmd = official_runner_command(config, task_file, output_dir)
-    print(f"[tau2bench] invoking official runner: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env_for_runner(),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"tau2 official runner failed (exit {proc.returncode}): "
-            f"{proc.stderr[-1000:]}"
+    if not can_score:
+        logger.warning(
+            "[tau2bench] tau_bench not available; returning ERROR_INFRA dry-run results"
         )
+        return [
+            EvalResult(
+                instance_id=str(task.get("id", task.get("task_id", f"task-{i}"))),
+                error=f"ERROR_INFRA: {reason}",
+            )
+            for i, task in enumerate(tasks)
+        ]
 
-    _write_summary(config, task_file, output_dir, cmd, tasks)
-    return [
-        EvalResult(instance_id=str(task.get("id", i)), error="")
+    # Run via the official tau_bench.run() API.
+    return _run_with_config(config, tasks, output_dir, model_name, num_trials,
+                           max_concurrency, task_split)
+
+
+def _run_with_config(
+    config: Tau2BenchConfig,
+    tasks: list[dict[str, Any]],
+    output_dir: Path,
+    model_name: str,
+    num_trials: int,
+    max_concurrency: int,
+    task_split: str,
+) -> list[EvalResult]:
+    """Invoke the official ``tau_bench.run.run()`` programmatically."""
+    from tau_bench.run import run as tau_run
+    from tau_bench.types import EnvRunResult, RunConfig
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    task_ids = [
+        int(task.get("id", task.get("task_id", i)))
         for i, task in enumerate(tasks)
     ]
 
+    run_config = RunConfig(
+        model_provider=model_name,
+        user_model_provider=model_name,
+        model=model_name,
+        user_model=model_name,
+        num_trials=num_trials,
+        env=config.env_name,
+        task_split=task_split,
+        task_ids=task_ids,
+        log_dir=str(output_dir),
+        max_concurrency=max_concurrency,
+    )
 
-def _write_summary(
-    config: Tau2BenchConfig,
-    task_file: Path,
-    output_dir: Path,
-    cmd: list[str],
-    tasks: list[dict[str, Any]],
-) -> Path:
-    """Write the repo-side summary JSON (metadata only, no API keys)."""
+    env_results: list[EnvRunResult] = tau_run(run_config)
+
+    # Convert EnvRunResult → list[EvalResult]
+    eval_results: list[EvalResult] = []
+    for er in env_results:
+        error = ""
+        if er.reward < 1.0:
+            error = f"reward={er.reward:.2f}"
+        eval_results.append(
+            EvalResult(
+                instance_id=str(er.task_id),
+                error=error,
+            )
+        )
+
+    # Write summary artifact.
     summary = {
         "benchmark": "tau2-bench",
         "domain": config.env_name,
         "num_tasks": len(tasks),
-        "num_turns": config.num_turns,
-        "official_runner": OFFICIAL_RUNNER_MODULE,
-        "task_file": str(task_file),
-        "runner_command": cmd,
+        "task_ids": task_ids,
+        "num_trials": num_trials,
+        "model": model_name,
+        "official_runner": "tau_bench.run.run",
         "upstream_results_dir": str(output_dir),
     }
-    path = output_dir / "tau2bench_summary.json"
-    path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[tau2bench] summary -> {path}")
-    return path
+    summary_path = output_dir / "tau2bench_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("[tau2bench] summary -> %s", summary_path)
+
+    return eval_results
