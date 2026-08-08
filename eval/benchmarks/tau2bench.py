@@ -207,8 +207,8 @@ def _run_with_config(
     ]
 
     run_config = RunConfig(
-        model_provider=model_name,
-        user_model_provider=model_name,
+        model_provider="deepseek",
+        user_model_provider="deepseek",
         model=model_name,
         user_model=model_name,
         num_trials=num_trials,
