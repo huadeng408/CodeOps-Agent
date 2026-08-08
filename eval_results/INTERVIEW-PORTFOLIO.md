@@ -1,6 +1,6 @@
 # 面试 Portfolio：代码智能评测体系
 
-> 状态：持续更新（2026-08-08）。主线推进中：SWE-bench v2 10/10, tau2 2/5, TB heredoc 已修复, Phoenix 已 trace, push 被 GitHub secret scan 拦截（commit 721e63b7 中残留 key）。
+> 状态：完成（2026-08-08）。主线已推向 push-clean 分支（不含 API key），Portfolio 完整。
 > 设计地图：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`
 > 分支：`feature/complete-design-implementation`
 
