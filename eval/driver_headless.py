@@ -710,7 +710,11 @@ class HeadlessDriver(DefaultAgentAdapter):
         trace_id: str,
         cancel_event: Any = None,
     ) -> EvalResult:
-        """Simplified path: one-shot chat completion, no tools."""
+        """Simplified path: one-shot chat completion, no tools.
+
+        When used as a fallback from ConversationRunner failure, the
+        task_description has already been enriched with git diff context.
+        """
         from orchestrator.llm.client import ChatMessage, ChatRequest
 
         llm = self._get_llm_client()
