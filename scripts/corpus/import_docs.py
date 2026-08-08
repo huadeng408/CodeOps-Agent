@@ -343,6 +343,8 @@ def is_document_active(
     _mysql_dsn: str | None = None,
 ) -> bool:
     if _HAS_PYMYSQL and _mysql_dsn:
+        conn = None
+        conn2 = None
         try:
             conn = pymysql.connect(**_mysql_dsn)
             cur = conn.cursor()
@@ -352,7 +354,9 @@ def is_document_active(
                 (doc_id, generation),
             )
             found = cur.fetchone() is not None
+            cur.close()
             conn.close()
+            conn = None
             if found:
                 return True
             # Also check SKIPPED — legacy docs may be SKIPPED but functionally complete
@@ -364,10 +368,23 @@ def is_document_active(
                 (doc_id, generation),
             )
             found2 = cur2.fetchone() is not None
+            cur2.close()
             conn2.close()
+            conn2 = None
             return found2
         except Exception:
             pass  # fall through to HTTP
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if conn2 is not None:
+                try:
+                    conn2.close()
+                except Exception:
+                    pass
     return any(
         d.get("documentId") == doc_id
         for d in list_documents(server, token, generation, "ACTIVE", http_timeout=http_timeout)

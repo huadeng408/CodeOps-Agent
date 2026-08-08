@@ -947,3 +947,93 @@ def test_parse_mysql_dsn_rejects_junk() -> None:
         _parse_mysql_dsn("not a dsn at all")
     with pytest.raises(ValueError):
         _parse_mysql_dsn("")
+
+
+def test_mysql_connection_closed_on_active_query_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First (ACTIVE) connection opened must be closed even on query failure."""
+    closed: list[int] = []
+
+    class _RaisingCursor:
+        def execute(self, sql: str, params: object) -> None:
+            raise RuntimeError("simulated query failure")
+
+        def close(self) -> None:
+            pass
+
+    class _FakeConn:
+        def cursor(self) -> _RaisingCursor:
+            return _RaisingCursor()
+
+        def close(self) -> None:
+            closed.append(1)
+
+    monkeypatch.setattr(
+        "scripts.corpus.import_docs.pymysql.connect", lambda **kw: _FakeConn()
+    )
+    monkeypatch.setattr("scripts.corpus.import_docs._HAS_PYMYSQL", True)
+    monkeypatch.setattr(
+        "scripts.corpus.import_docs.list_documents",
+        lambda server, token, generation, status, **kw: [],
+    )
+
+    from scripts.corpus.import_docs import is_document_active
+
+    result = is_document_active(
+        "http://127.0.0.1:8081", "tok", "gen", "doc1",
+        _mysql_dsn={"host": "x", "user": "u", "password": "p", "database": "d", "port": 3306},
+    )
+    assert result is False
+    assert len(closed) == 1, f"ACTIVE connection must be closed; got {len(closed)} closes"
+
+
+def test_mysql_both_connections_closed_when_skipped_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACTIVE succeeds, SKIPPED query fails — both connections must be closed."""
+    closed: list[int] = []
+    _call_count: list[int] = [0]
+
+    class _ConditionalCursor:
+        """ACTIVE returns no rows (pretend not active), SKIPPED raises."""
+
+        def __init__(self, call_index: int) -> None:
+            self._call_index = call_index
+
+        def execute(self, sql: str, params: object) -> None:
+            if self._call_index >= 1:  # second connection → SKIPPED check
+                raise RuntimeError("simulated SKIPPED query failure")
+
+        def fetchone(self) -> object:
+            return None  # not ACTIVE, not SKIPPED (if it reaches fetchone)
+
+        def close(self) -> None:
+            pass
+
+    class _FakeConn:
+        def cursor(self) -> _ConditionalCursor:
+            idx = _call_count[0]
+            _call_count[0] += 1
+            return _ConditionalCursor(idx)
+
+        def close(self) -> None:
+            closed.append(1)
+
+    monkeypatch.setattr(
+        "scripts.corpus.import_docs.pymysql.connect", lambda **kw: _FakeConn()
+    )
+    monkeypatch.setattr("scripts.corpus.import_docs._HAS_PYMYSQL", True)
+    monkeypatch.setattr(
+        "scripts.corpus.import_docs.list_documents",
+        lambda server, token, generation, status, **kw: [],
+    )
+
+    from scripts.corpus.import_docs import is_document_active
+
+    result = is_document_active(
+        "http://127.0.0.1:8081", "tok", "gen", "doc1",
+        _mysql_dsn={"host": "x", "user": "u", "password": "p", "database": "d", "port": 3306},
+    )
+    assert result is False
+    assert len(closed) == 2, f"ACTIVE + SKIPPED connections must be closed; got {len(closed)} closes"
