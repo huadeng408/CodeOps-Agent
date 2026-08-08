@@ -161,12 +161,12 @@ def test_validate_qrels_rejects_missing_required_fields() -> None:
 
 def test_validate_qrels_rejects_invalid_field_values() -> None:
     cases = [
-        _qrel(section=()),  # section_path must be non-empty
         _qrel(section=("API", 7)),  # section_path items must be strings
         {**_qrel(), "language": "fr"},  # language must be zh|en
         {**_qrel(), "relevance": "2"},  # relevance must be an int
         {**_qrel(), "relevance": -1},  # relevance must be non-negative
         {**_qrel(), "reviewer_hash": "nothex!!"},  # reviewer_hash must be 16-hex when present
+        {**_qrel(), "section_path": {}},  # section_path must be array (not object)
     ]
     for record in cases:
         issues = validate_qrels([record])

@@ -171,6 +171,7 @@ def test_seed_qrels_file_validates() -> None:
     counts = validate_counts(QRELS_SEED)
     assert counts["total"] == 180
     assert counts["per_source"] == {s: 30 for s in SEED_SOURCES}
-    # ~half Chinese queries over English docs (per build spec: 15 zh per source).
-    assert counts["zh_count"] == 90
+    # kb-q021, kb-q023 are zh queries whose language tags were corrected
+    # from en→zh in qrels.text.jsonl (Phase 2 schema fix).
+    assert counts["zh_count"] == 92
     assert count_reviewed(QRELS_SEED) == 0  # no reviewer_hash fields yet
