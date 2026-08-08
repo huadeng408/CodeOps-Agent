@@ -4,10 +4,17 @@
 > 设计地图：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`
 > 分支：`feature/complete-design-implementation`
 
-## 1. What This Is
+## 1. 执行总结（面试可直接引用）
 
-一套覆盖 Agent 代码能力、RAG 检索质量和可观测性的工业级评测基础设施。
-不是"跑通了几个 benchmark"，而是从头搭建了统一评测管线，以**诚实评测**为核心方法论。
+**一句话**：搭了一套覆盖 3 个国际基准 + 自建 RAG 的诚实评测体系，不造假、不走捷径。**核心发现不是"模型行不行"而是"评测管线有没有 bug"。**
+
+**关键数字面试可用**：
+- SWE-bench: v1 3/10 patch → **v2 10/10 patch**（绕过自研 ConversationRunner 的 DeepSeek tool-calling bug）
+- tau2-bench: 2/5 reward=1.0（复杂多步任务做对简单子任务，做错支付选择）
+- Terminal-Bench: 0/4（认识到了 tmux heredoc 拆分 bug，base64 方案已验证）
+- RAG: BM25 0.52 / BGE-M3 0.65 / Hybrid RRF 0.56 nDCG，180 qrels，59 AI_REVIEWED
+- Phoenix: OTel trace 已发送到仪表盘
+- **最重要的教训**：评测本身也会出错，诚实比数字更重要
 
 ## 2. 架构概览
 
