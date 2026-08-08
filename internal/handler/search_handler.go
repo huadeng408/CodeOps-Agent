@@ -8,6 +8,7 @@ import (
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/service"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,7 @@ import (
 // SearchHandler handles search requests.
 type SearchHandler struct {
 	searchService service.SearchService
+	tracer        genai.Tracer
 }
 
 // NewSearchHandler creates a search handler.
@@ -23,6 +25,11 @@ func NewSearchHandler(searchService service.SearchService) *SearchHandler {
 	return &SearchHandler{
 		searchService: searchService,
 	}
+}
+
+// SetTracer injects a genai.Tracer for creating retrieve/rerank spans.
+func (h *SearchHandler) SetTracer(t genai.Tracer) {
+	h.tracer = t
 }
 
 // HybridSearch handles hybrid search.
@@ -60,8 +67,23 @@ func (h *SearchHandler) HybridSearch(c *gin.Context) {
 		searchCtx = service.WithRerankDisabled(searchCtx)
 	}
 
+	// Create rag.retrieve span (HTTP handler layer)
+	var retrieveSpan genai.Span
+	if h.tracer != nil {
+		searchCtx, retrieveSpan = h.tracer.StartSpan(searchCtx, "retrieve HTTP /api/v1/search/hybrid", genai.OperationRetrieve, genai.SystemGenAI)
+		retrieveSpan.SetAttributes(
+			genai.QueryHashKV(genai.HashQuery(query)),
+			genai.TopNKV(topK),
+			genai.RetrievalModeKV("hybrid"),
+		)
+		defer retrieveSpan.End()
+	}
+
 	results, err := h.searchService.HybridSearch(searchCtx, query, topK, user.(*model.User))
 	if err != nil {
+		if retrieveSpan != nil {
+			retrieveSpan.RecordError(err)
+		}
 		log.Errorf("[SearchHandler] hybrid search failed, query=%q topK=%d disableRerank=%t err=%v", query, topK, disableRerank, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 		return

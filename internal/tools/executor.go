@@ -12,6 +12,7 @@ import (
 	"code-agent/internal/mcp"
 	"code-agent/internal/rag"
 	"code-agent/internal/skills"
+	"code-agent/internal/telemetry/genai"
 )
 
 const maxMultimodalBytes = 20 << 20
@@ -56,6 +57,7 @@ type Executor struct {
 	// httpAllowPrivate lifts the SSRF private/loopback block for WebFetch/WebSearch.
 	// Intended only for tests and trusted local providers; production MUST stay false.
 	httpAllowPrivate bool
+	tracer           genai.Tracer
 }
 
 func NewExecutor(root string) *Executor {
@@ -77,6 +79,13 @@ func (e *Executor) SetRAGSearcher(searcher rag.Searcher) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.rag = searcher
+}
+
+// SetTracer injects a genai.Tracer for creating execute_tool and retrieve spans.
+func (e *Executor) SetTracer(t genai.Tracer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.tracer = t
 }
 
 // UsesRAGSearcher reports whether the executor is configured with this RAG client instance.

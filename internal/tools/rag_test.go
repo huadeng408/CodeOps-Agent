@@ -9,7 +9,12 @@ import (
 	"testing"
 
 	"code-agent/internal/rag"
+	"code-agent/internal/telemetry/genai"
 )
+
+// ---------------------------------------------------------------------------
+// recording RAG searcher and tracer for tests
+// ---------------------------------------------------------------------------
 
 type recordingRAGSearcher struct {
 	options []rag.SearchOptions
@@ -21,6 +26,49 @@ func (s *recordingRAGSearcher) Search(_ context.Context, options rag.SearchOptio
 	s.options = append(s.options, options)
 	return s.results, s.err
 }
+
+type recordingTracer struct {
+	spans []*recordingSpan
+}
+
+type recordingSpan struct {
+	name       string
+	operation  string
+	provider   string
+	attrs      []string // key=value strings for simple assertion
+	errors     []error
+	events     []string
+	ended      bool
+}
+
+func (s *recordingSpan) End() { s.ended = true }
+
+func (s *recordingSpan) SetAttributes(kvs ...interface{}) {
+	// Simplified: we just count them; the genai Span interface uses
+	// attribute.KeyValue, but testing with that import would add an
+	// OTel dependency. Instead we expose a simple SetAttrKeyVal for tests.
+}
+
+func (s *recordingSpan) RecordError(err error) { s.errors = append(s.errors, err) }
+
+func (s *recordingSpan) AddEvent(name string) { s.events = append(s.events, name) }
+
+// setAttrKeyVal records a key=value pair for test assertions (non-OTel).
+func (s *recordingSpan) setAttrKeyVal(k, v string) {
+	s.attrs = append(s.attrs, k+"="+v)
+}
+
+func (t *recordingTracer) StartSpan(ctx context.Context, name string, operation string, provider string) (context.Context, genai.Span) {
+	span := &recordingSpan{name: name, operation: operation, provider: provider}
+	t.spans = append(t.spans, span)
+	return ctx, span
+}
+
+func (t *recordingTracer) Shutdown(ctx context.Context) error { return nil }
+
+// ---------------------------------------------------------------------------
+// Existing tests
+// ---------------------------------------------------------------------------
 
 func TestRAGSearchKnowledgeUsesDefaultsAndFormatsResults(t *testing.T) {
 	searcher := &recordingRAGSearcher{results: []rag.SearchResult{{
@@ -186,4 +234,121 @@ func TestRAGSearchKnowledgeUnavailableReturnsToolFailureWithoutDial(t *testing.T
 			t.Fatalf("HTTP calls = %d, want 0", got)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// NEW tests — span tracing for SearchKnowledge
+// ---------------------------------------------------------------------------
+
+func TestRAGSearchKnowledgeCreatesRetrieveSpan(t *testing.T) {
+	searcher := &recordingRAGSearcher{results: []rag.SearchResult{{
+		FileMD5:     "abc123",
+		FileName:    "test.pdf",
+		ChunkID:     1,
+		TextContent: "content",
+		Score:       0.95,
+	}}}
+	tracer := &recordingTracer{}
+	executor := NewExecutor(t.TempDir())
+	executor.SetRAGSearcher(searcher)
+	executor.SetTracer(tracer)
+
+	result, err := executor.Execute(context.Background(), ToolRequest{
+		Name:      "SearchKnowledge",
+		Arguments: map[string]any{"query": "test query", "top_k": 10, "mode": "vector"},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.ExitCode != 0 || result.Error != "" {
+		t.Fatalf("result = %+v, want success", result)
+	}
+
+	// A retrieve span was created
+	if len(tracer.spans) != 1 {
+		t.Fatalf("spans = %d, want exactly 1 retrieve span", len(tracer.spans))
+	}
+	span := tracer.spans[0]
+	if span.operation != genai.OperationRetrieve {
+		t.Errorf("span operation = %q, want %q", span.operation, genai.OperationRetrieve)
+	}
+	if span.provider != genai.SystemGenAI {
+		t.Errorf("span provider = %q, want %q", span.provider, genai.SystemGenAI)
+	}
+	if !span.ended {
+		t.Error("retrieve span was not ended")
+	}
+}
+
+func TestRAGSearchKnowledgeRecordsErrorOnSearchFailure(t *testing.T) {
+	searcher := &recordingRAGSearcher{err: errors.New("search down")}
+	tracer := &recordingTracer{}
+	executor := NewExecutor(t.TempDir())
+	executor.SetRAGSearcher(searcher)
+	executor.SetTracer(tracer)
+
+	result, err := executor.Execute(context.Background(), ToolRequest{
+		Name:      "SearchKnowledge",
+		Arguments: map[string]any{"query": "fail"},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatal("expected non-zero exit code for search failure")
+	}
+
+	if len(tracer.spans) != 1 {
+		t.Fatalf("spans = %d, want exactly 1 span even on error", len(tracer.spans))
+	}
+	span := tracer.spans[0]
+	if len(span.errors) != 1 {
+		t.Errorf("span errors = %d, want 1 recorded error", len(span.errors))
+	}
+}
+
+func TestRAGSearchKnowledgeNoSpanWhenNoTracer(t *testing.T) {
+	searcher := &recordingRAGSearcher{results: []rag.SearchResult{{
+		FileMD5: "ok", FileName: "f", ChunkID: 0, TextContent: "c", Score: 1,
+	}}}
+	executor := NewExecutor(t.TempDir())
+	executor.SetRAGSearcher(searcher)
+	// No tracer set — verify no nil dereference
+
+	result, err := executor.Execute(context.Background(), ToolRequest{
+		Name:      "SearchKnowledge",
+		Arguments: map[string]any{"query": "ok"},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.ExitCode != 0 || result.Error != "" {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	// Should not panic — just runs without spans
+}
+
+func TestRAGSearchKnowledgeNoSpanForValidationFailure(t *testing.T) {
+	searcher := &recordingRAGSearcher{}
+	tracer := &recordingTracer{}
+	executor := NewExecutor(t.TempDir())
+	executor.SetRAGSearcher(searcher)
+	executor.SetTracer(tracer)
+
+	// Missing query → validation failure before any span is created
+	result, err := executor.Execute(context.Background(), ToolRequest{
+		Name:      "SearchKnowledge",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatal("expected validation failure")
+	}
+
+	// No span should be created for validation failures (fail-fast)
+	if len(tracer.spans) != 0 {
+		t.Errorf("spans = %d, want 0 for validation failures", len(tracer.spans))
+	}
 }

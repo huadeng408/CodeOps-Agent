@@ -23,6 +23,7 @@ import (
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
@@ -157,11 +158,22 @@ func main() {
 		uploadRepo,
 		cfg.Elasticsearch.IndexName,
 		cfg.Retrieval,
+		cfg.Embedding.Model,
+		cfg.Embedding.Dimensions,
 	)
 	conversationService := service.NewConversationService(conversationRepo)
 	memoryService := service.NewMemoryService(memoryRepo, embeddingClient, orchestratorMemoryClient, rerankerClient, es.ESClient, cfg.Memory)
 	orchestratorSupportService := service.NewOrchestratorSupportService(searchService, memoryService, conversationRepo, rerankerClient, docVectorRepo, userService)
 	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient, docVectorRepo, userService)
+
+	// Telemetry: create tracer and wire into handlers and services.
+	telemetry := genai.NewTelemetry(context.Background())
+	searchService.SetTracer(telemetry)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = telemetry.Shutdown(shutdownCtx)
+	}()
 
 	processor := pipeline.NewProcessor(
 		documentParser,
@@ -244,7 +256,9 @@ func main() {
 		search := apiV1.Group("/search")
 		search.Use(middleware.AuthMiddleware(jwtManager, userService))
 		{
-			search.GET("/hybrid", handler.NewSearchHandler(searchService).HybridSearch)
+			searchHandler := handler.NewSearchHandler(searchService)
+			searchHandler.SetTracer(telemetry)
+			search.GET("/hybrid", searchHandler.HybridSearch)
 		}
 
 		conversation := apiV1.Group("/users/conversation")
@@ -283,6 +297,7 @@ func main() {
 		internalGroup.Use(middleware.InternalAuthMiddleware())
 		{
 			orchHandler := handler.NewOrchestratorHandler(orchestratorSupportService)
+			orchHandler.SetTracer(telemetry)
 			corpusSourceRepo := repository.NewKnowledgeSourceRepository(database.DB)
 			corpusDocRepo := repository.NewKnowledgeDocumentRepository(database.DB)
 			corpusIngestService := service.NewCorpusIngestService(corpusSourceRepo, corpusDocRepo, cfg.Corpus, nil)

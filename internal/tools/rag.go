@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"code-agent/internal/rag"
+	"code-agent/internal/telemetry/genai"
 )
 
 const (
@@ -44,10 +45,25 @@ func (e *Executor) executeSearchKnowledge(ctx context.Context, args map[string]a
 
 	e.mu.Lock()
 	searcher := e.rag
+	tracer := e.tracer
 	e.mu.Unlock()
 	if searcher == nil {
 		return ragToolFailure(rag.ErrUnavailable.Error()), nil
 	}
+
+	// Agent-initiated search — create a rag.retrieve span.
+	var retrieveSpan genai.Span
+	if tracer != nil {
+		ctx, retrieveSpan = tracer.StartSpan(ctx, "retrieve SearchKnowledge", genai.OperationRetrieve, genai.SystemGenAI)
+		retrieveSpan.SetAttributes(
+			genai.QueryHashKV(genai.HashQuery(query)),
+			genai.TopNKV(topK),
+			genai.RetrievalModeKV(mode),
+			genai.ToolNameKV("SearchKnowledge"),
+		)
+		defer retrieveSpan.End()
+	}
+
 	results, err := searcher.Search(ctx, rag.SearchOptions{
 		Query:         query,
 		TopK:          topK,
@@ -55,11 +71,17 @@ func (e *Executor) executeSearchKnowledge(ctx context.Context, args map[string]a
 		DisableRerank: disableRerank,
 	})
 	if err != nil {
+		if retrieveSpan != nil {
+			retrieveSpan.RecordError(err)
+		}
 		return ragToolFailure(err.Error()), nil
 	}
 
 	output := formatRAGResults(results)
 	output, truncated := e.TruncateOutput(output)
+	if retrieveSpan != nil {
+		retrieveSpan.SetAttributes(genai.DocumentLengthKV(len(output)))
+	}
 	return ToolResult{Name: "SearchKnowledge", Output: output, Truncated: truncated}, nil
 }
 

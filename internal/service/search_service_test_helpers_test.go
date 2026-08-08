@@ -79,5 +79,7 @@ func newTestSearchService(esURL string) SearchService {
 		normalizeRetrievalConfig(serverconfig.RetrievalConfig{
 			BM25TopN: 100, VectorTopN: 100, RRFK: 60, FinalTopK: 20, RerankTopN: 100, StrictMode: true,
 		}),
+		"test-model",
+		1024,
 	)
 }

@@ -139,6 +139,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 	telemetry := genai.NewTelemetry(context.Background())
 	orchestratorClient.SetTracer(telemetry)
+	executor.SetTracer(telemetry)
 
 	return &App{
 		cfg:            cfg,

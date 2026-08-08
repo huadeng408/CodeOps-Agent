@@ -18,6 +18,7 @@ import (
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/log"
 	"code-agent/pkg/reranker"
@@ -40,6 +41,7 @@ var (
 type SearchService interface {
 	HybridSearch(ctx context.Context, query string, topK int, user *model.User) ([]model.SearchResponseDTO, error)
 	Search(ctx context.Context, options SearchOptions, user *model.User) ([]model.SearchResponseDTO, error)
+	SetTracer(t genai.Tracer)
 }
 
 // SearchOptions represents a search options.
@@ -60,6 +62,9 @@ type searchService struct {
 	indexName       string
 	retrievalCfg    serverconfig.RetrievalConfig
 	observer        *retrievalObserver
+	embedderModel   string
+	embedderDim     int
+	tracer          genai.Tracer
 }
 
 // retrievalHit represents a retrieval hit.
@@ -118,6 +123,8 @@ func NewSearchService(
 	uploadRepo repository.UploadRepository,
 	indexName string,
 	retrievalCfg serverconfig.RetrievalConfig,
+	embedderModel string,
+	embedderDim int,
 ) SearchService {
 	if strings.TrimSpace(indexName) == "" {
 		indexName = "knowledge_base"
@@ -131,6 +138,8 @@ func NewSearchService(
 		indexName:       indexName,
 		retrievalCfg:    normalizeRetrievalConfig(retrievalCfg),
 		observer:        newRetrievalObserver(512),
+		embedderModel:   embedderModel,
+		embedderDim:     embedderDim,
 	}
 }
 
@@ -141,6 +150,11 @@ func (s *searchService) HybridSearch(ctx context.Context, query string, topK int
 		TopK:  topK,
 		Mode:  model.RetrievalModeHybrid,
 	}, user)
+}
+
+// SetTracer injects a genai.Tracer for creating embedding/rerank child spans.
+func (s *searchService) SetTracer(t genai.Tracer) {
+	s.tracer = t
 }
 
 // Search handles search.
@@ -354,8 +368,25 @@ func (s *searchService) vectorSearch(ctx context.Context, query string, topN int
 		return []retrievalHit{}, nil
 	}
 
+	// Create an embedding span (child of the caller's retrieve span)
+	var embSpan genai.Span
+	if s.tracer != nil {
+		ctx, embSpan = s.tracer.StartSpan(ctx, "embedding vectorSearch", genai.OperationEmbedding, genai.SystemGenAI)
+		if s.embedderModel != "" {
+			embSpan.SetAttributes(genai.RequestModelKV(s.embedderModel))
+		}
+		if s.embedderDim > 0 {
+			embSpan.SetAttributes(genai.DocumentLengthKV(s.embedderDim))
+		}
+		embSpan.SetAttributes(genai.QueryHashKV(genai.HashQuery(query)))
+		defer embSpan.End()
+	}
+
 	queryVector, err := s.embeddingClient.CreateEmbedding(ctx, query)
 	if err != nil {
+		if embSpan != nil {
+			embSpan.RecordError(err)
+		}
 		return nil, fmt.Errorf("create query embedding failed: %w", err)
 	}
 

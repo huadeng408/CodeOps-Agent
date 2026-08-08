@@ -9,6 +9,7 @@ import (
 
 	"code-agent/internal/model"
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 )
 
@@ -34,6 +35,8 @@ func (s *stubSearchService) Search(_ context.Context, _ SearchOptions, _ *model.
 	}
 	return s.results, nil
 }
+
+func (s *stubSearchService) SetTracer(_ genai.Tracer) {}
 
 // failingEvidenceLoader simulates a down vector store during expansion.
 type failingEvidenceLoader struct{}

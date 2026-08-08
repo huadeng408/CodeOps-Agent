@@ -5,6 +5,7 @@ import (
 
 	"code-agent/internal/model"
 	"code-agent/internal/service"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 
 	"github.com/gin-gonic/gin"
@@ -13,11 +14,17 @@ import (
 // OrchestratorHandler serves internal endpoints consumed by the external LangGraph service.
 type OrchestratorHandler struct {
 	supportService service.OrchestratorSupportService
+	tracer         genai.Tracer
 }
 
 // NewOrchestratorHandler creates a new internal orchestrator handler.
 func NewOrchestratorHandler(supportService service.OrchestratorSupportService) *OrchestratorHandler {
 	return &OrchestratorHandler{supportService: supportService}
+}
+
+// SetTracer injects a genai.Tracer for creating retrieve/rerank spans.
+func (h *OrchestratorHandler) SetTracer(t genai.Tracer) {
+	h.tracer = t
 }
 
 // LoadSession returns the current conversation id and history for a user.
@@ -82,8 +89,25 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.supportService.SearchKnowledge(c.Request.Context(), &req)
+	ctx := c.Request.Context()
+
+	// Orchestrator-initiated search — create a rag.retrieve span.
+	var retrieveSpan genai.Span
+	if h.tracer != nil {
+		ctx, retrieveSpan = h.tracer.StartSpan(ctx, "retrieve orchestrator /knowledge-search", genai.OperationRetrieve, genai.SystemGenAI)
+		retrieveSpan.SetAttributes(
+			genai.QueryHashKV(genai.HashQuery(req.Query)),
+			genai.TopNKV(req.TopK),
+			genai.RetrievalModeKV(req.Mode),
+		)
+		defer retrieveSpan.End()
+	}
+
+	resp, err := h.supportService.SearchKnowledge(ctx, &req)
 	if err != nil {
+		if retrieveSpan != nil {
+			retrieveSpan.RecordError(err)
+		}
 		log.Errorf("[OrchestratorHandler] knowledge search failed query=%q mode=%s err=%v", req.Query, req.Mode, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search knowledge"})
 		return
