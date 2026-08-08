@@ -3,6 +3,9 @@ package serverconfig
 
 import (
 	"fmt"
+	"os"
+	"reflect"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -248,11 +251,47 @@ func Init(configPath string) {
 	Conf = Config{Corpus: DefaultCorpusConfig()}
 	viper.SetConfigType("yaml")
 
+	// Support ${ENV_VAR:default} expansion in config values so secrets
+	// can stay out of the tracked config file.
+	viper.AutomaticEnv()
+
 	if err := viper.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("读取配置文件失败: %w", err))
 	}
 
 	if err := viper.Unmarshal(&Conf); err != nil {
 		panic(fmt.Errorf("无法将配置解析到结构体中: %w", err))
+	}
+
+	// Expand ${ENV:default} placeholders that viper doesn't natively support.
+	expandEnvBind(&Conf)
+}
+
+// expandEnvBind walks a struct pointer with reflection and replaces
+// "${ENV_VAR:default}" values using os.Getenv. Only string fields are
+// touched; the default after the colon is used when the env var is unset
+// or empty.
+func expandEnvBind(v any) {
+	val := reflect.ValueOf(v).Elem()
+	for i := range val.NumField() {
+		f := val.Field(i)
+		if f.Kind() == reflect.String && f.CanSet() {
+			s := f.String()
+			if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
+				inner := s[2 : len(s)-1]
+				if idx := strings.IndexByte(inner, ':'); idx >= 0 {
+					envKey := inner[:idx]
+					def := inner[idx+1:]
+					if envVal := os.Getenv(envKey); envVal != "" {
+						f.SetString(envVal)
+					} else {
+						f.SetString(def)
+					}
+				}
+			}
+		}
+		if f.Kind() == reflect.Struct {
+			expandEnvBind(f.Addr().Interface())
+		}
 	}
 }
