@@ -92,3 +92,4 @@ data/reports/corpus/
 
 # Personal session scratch at root
 CLAUDE-CODE-*.md
+AGENT.md
