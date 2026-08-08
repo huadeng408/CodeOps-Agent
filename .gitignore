@@ -102,3 +102,16 @@ eval/swebench_work/agent_run/
 eval/swebench_work/run_swebench_honest_10.py
 eval/swebench_work/run_terminalbench_honest_5.py
 eval/swebench_work/run_tau2bench_honest_5.py
+eval/swebench_work/agent_honest.py
+eval/swebench_work/agent_pipeline.py
+eval/swebench_work/run_astropy_12907.py
+eval/swebench_work/run_tau2bench.py
+eval/swebench_work/run_terminalbench.py
+eval/swebench_work/run_terminalbench_honest.py
+eval/swebench_work/score_agent.py
+eval/swebench_work/score_honest.py
+eval/swebench_work/score_honest_10.py
+eval/swebench_work/run_swebench_honest_10.py
+eval/swebench_work/run_terminalbench_honest_5.py
+eval/swebench_work/run_tau2bench_honest_5.py
+deepseek-chat-honest-20s.honest-test-v1.json

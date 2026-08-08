@@ -167,7 +167,7 @@
 | tau2-bench 5 | task 0-1 ✅ (reward=1.0), task 2-4 ❌ (wrong reservation updates) | ✅ Done |
 | RAG 3-way | BM25 0.52 / BGE-M3 0.65 / Hybrid RRF 0.56 — all nDCG ∈ [0,1] | ✅ Done |
 | Phoenix | localhost:6006 reachable, OTLP gRPC 4317 / HTTP 6006/v1/traces | ✅ Deployed |
-| Repo | 15 files committed to `main`, 3 API-key files removed from tracking in `3753d3a6` | 🟡 Pending (push blocked — prior commits contain API key in history) |
+| Repo | 6 commits on `main` (local only — push blocked by GitHub secret scanning of `2bef2877`). Clean files tracked, API-key files in gitignore. | 🟡 Needs `git rebase` to scrub key from `2bef2877` history or user to allow secret at GitHub |
 
 ## 9. API Key 安全问题（诚实声明）
 提交中 `run_swebench_honest_10.py`, `run_terminalbench_honest_5.py`, `run_tau2bench_honest_5.py` 包含硬编码的 DeepSeek API key。Push 被拦截是**正确的行为**。需要：1) 轮换 key，2) 改为从外部文件读取，3) 从 Git 历史中清理后才 push。
