@@ -177,11 +177,12 @@
 | 维度 | 现状 | 状态 |
 |---|---|---|
 | SWE-bench 10 | 3/10 patch rate, WSL2 scoring in progress | ✅ Agent done |
-| Terminal-Bench 4 | tb-honest-v2 Harness running — container building conda env | ⏳ In progress |
-| tau2-bench 5 | task 0-1 ✅ (reward=1.0), task 2-4 ❌ (wrong reservation updates) | ✅ Done |
+| Terminal-Bench 4 | 0/4 resolved — tmux heredoc splitting bug identified | 🟡 Honest finding |
+| tau2-bench 5 | task 0-1 ✅ (reward=1.0), task 2-4 ❌ (wrong reservation/payment) | ✅ Done |
 | RAG 3-way | BM25 0.52 / BGE-M3 0.65 / Hybrid RRF 0.56 — all nDCG ∈ [0,1] | ✅ Done |
-| Phoenix | localhost:6006 reachable, OTLP gRPC 4317 / HTTP 6006/v1/traces | ✅ Deployed |
-| Repo | 6 commits on `main` (local only — push blocked by GitHub secret scanning of `2bef2877`). Clean files tracked, API-key files in gitignore. | 🟡 Needs `git rebase` to scrub key from `2bef2877` history or user to allow secret at GitHub |
+| Phoenix | localhost:6006 reachable, 5-span test trace sent successfully | ✅ Done |
+| HeadlessDriver | `_capture_fallback_context` added — fallback now preserves context | ✅ Fixed |
+| Repo | 8 commits local (push blocked — `2bef2877` in history has API key) | 🟡 Pending |
 
 ## 9. API Key 安全问题（诚实声明）
 提交中 `run_swebench_honest_10.py`, `run_terminalbench_honest_5.py`, `run_tau2bench_honest_5.py` 包含硬编码的 DeepSeek API key。Push 被拦截是**正确的行为**。需要：1) 轮换 key，2) 改为从外部文件读取，3) 从 Git 历史中清理后才 push。
