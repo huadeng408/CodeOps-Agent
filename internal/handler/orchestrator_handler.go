@@ -98,7 +98,7 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		retrieveSpan.SetAttributes(
 			genai.QueryHashKV(genai.HashQuery(req.Query)),
 			genai.TopNKV(req.TopK),
-			genai.RetrievalModeKV(req.Mode),
+			genai.RetrievalModeKV(string(req.Mode)),
 		)
 		defer retrieveSpan.End()
 	}

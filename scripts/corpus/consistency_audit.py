@@ -130,10 +130,30 @@ def parse_go_dsn(dsn: str) -> dict:
     }
 
 
+def _expand_env_default(value: str) -> str:
+    """Expand ``${ENV_VAR:default}`` placeholders using os.environ.
+
+    This mirrors the Go server's ``expandEnvBind()`` so that Python scripts
+    can read ``configs/server.yaml`` after its credentials were de-hardcoded
+    to ``${ENV:default}`` placeholders (Phase 2 credential security fix).
+    """
+    import os as _os
+
+    if not isinstance(value, str) or not value.startswith("${"):
+        return value
+    if not value.endswith("}"):
+        return value
+    inner = value[2:-1]
+    if ":" not in inner:
+        return _os.environ.get(inner, value)
+    env_key, default = inner.split(":", 1)
+    return _os.environ.get(env_key, default)
+
+
 def resolve_mysql_dsn(explicit_dsn: str, config_path: Path) -> str:
-    """Pick the MySQL DSN: an explicit flag wins, otherwise fall back to
-    ``database.mysql.dsn`` in the server config YAML. Raises ValueError when
-    neither source yields a DSN.
+    """Pick the MySQL DSN: an explicit flag wins; otherwise read
+    ``database.mysql.dsn`` from server YAML and expand ``${ENV:default}``
+    placeholders. Raises ValueError when neither source yields a DSN.
     """
     if explicit_dsn:
         return explicit_dsn
@@ -151,7 +171,15 @@ def resolve_mysql_dsn(explicit_dsn: str, config_path: Path) -> str:
     dsn = mysql.get("dsn")
     if not dsn:
         raise ValueError(f"no database.mysql.dsn in config: {config_path}")
-    return str(dsn)
+    dsn = str(dsn)
+    if dsn.startswith("${"):
+        dsn = _expand_env_default(dsn)
+        if not dsn or dsn.startswith("${"):
+            raise ValueError(
+                f"config DSN uses ${{ENV:default}} placeholder but env var is not set; "
+                f"set the env var or pass --mysql-dsn explicitly"
+            )
+    return dsn
 
 
 # --------------------------------------------------------------------------- #
