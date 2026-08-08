@@ -264,7 +264,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[dry-run] benchmark : {benchmark_name}")
         print(f"[dry-run] model     : {model}")
         print(f"[dry-run] run_id    : {run_id}")
-        print(f"[dry-run] synthetic : True")
         print("dry-run OK: manifest validated, no instances will be solved")
         return 0
 

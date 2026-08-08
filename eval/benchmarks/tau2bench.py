@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eval.adapter import EvalResult
+from eval.adapter import EvalInstance, EvalResult
 from eval.manifest import ALLOWED_LICENSES
 
 # Official τ²-bench runner entry (re-verify upstream when pinned).
@@ -83,6 +83,53 @@ def official_runner_command(config: Tau2BenchConfig, task_file: Path, output_dir
 
 def env_for_runner() -> dict[str, str]:
     return dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# Module-level load_instances() -- eval/run.py HarnessRun path
+# ---------------------------------------------------------------------------
+
+
+def load_instances(
+    limit: int | None = None,
+    **kwargs: Any,
+) -> list[EvalInstance]:
+    """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
+
+    Loads τ²-bench tasks from the offline data dir.  Requires
+    ``$TAU2_DATA_DIR`` or an explicit ``data_dir`` kwarg.
+
+    Raises:
+        RuntimeError: No data dir or no tasks found.
+    """
+    data_dir_raw = kwargs.pop("data_dir", os.environ.get(DATA_DIR_ENV, ""))
+    if not str(data_dir_raw):
+        raise RuntimeError(
+            f"tau2-bench cannot load instances: no data dir provided "
+            f"(set {DATA_DIR_ENV} or pass data_dir=...)"
+        )
+    data_dir = Path(data_dir_raw)
+    env_name = kwargs.pop("env_name", os.environ.get("TAU2_ENV", "airline"))
+    config = Tau2BenchConfig(data_dir=data_dir, env_name=env_name)
+    issues = config.validate()
+    if issues:
+        raise RuntimeError(
+            f"tau2-bench cannot run: {'; '.join(issues)}"
+        )
+    tasks = [t for t in load_tasks(config.data_dir) if t.get("_env") == config.env_name]
+    if not tasks:
+        raise RuntimeError(
+            f"no tasks found for env {config.env_name!r} in {config.data_dir}"
+        )
+    if limit is not None:
+        tasks = tasks[:limit]
+    return [
+        EvalInstance(
+            instance_id=f"{task.get('_env', 'env')}/{task.get('id', str(i))}",
+            task_description=task.get("user", task.get("question", "")),
+        )
+        for i, task in enumerate(tasks)
+    ]
 
 
 # ---------------------------------------------------------------------------

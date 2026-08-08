@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eval.adapter import EvalResult
+from eval.adapter import EvalInstance, EvalResult
 from eval.manifest import ALLOWED_LICENSES
 
 # The official runner command. This is the sanctioned execution path only;
@@ -98,6 +98,50 @@ def official_runner_command(config: TerminalBenchConfig, task_file: Path, output
 def env_for_runner() -> dict[str, str]:
     """Sanctioned env for the official runner; never injects API keys."""
     return dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# Module-level load_instances() -- eval/run.py HarnessRun path
+# ---------------------------------------------------------------------------
+
+
+def load_instances(
+    limit: int | None = None,
+    **kwargs: Any,
+) -> list[EvalInstance]:
+    """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
+
+    Loads Terminal-Bench tasks from the offline data dir.  Requires
+    ``$TERMINALBENCH_DATA_DIR`` or an explicit ``data_dir`` kwarg.
+
+    Raises:
+        RuntimeError: No data dir or no tasks found.
+    """
+    data_dir_raw = kwargs.pop("data_dir", os.environ.get(DATA_DIR_ENV, ""))
+    if not str(data_dir_raw):
+        raise RuntimeError(
+            f"terminal-bench cannot load instances: no data dir provided "
+            f"(set {DATA_DIR_ENV} or pass data_dir=...)"
+        )
+    data_dir = Path(data_dir_raw)
+    config = TerminalBenchConfig(data_dir=data_dir)
+    issues = config.validate()
+    if issues:
+        raise RuntimeError(
+            f"terminal-bench cannot run: {'; '.join(issues)}"
+        )
+    tasks = load_tasks(config.data_dir)
+    if not tasks:
+        raise RuntimeError(f"no tasks found in {config.data_dir}")
+    if limit is not None:
+        tasks = tasks[:limit]
+    return [
+        EvalInstance(
+            instance_id=f"{task.get('_family', 'task')}/{task.get('name', str(i))}",
+            task_description=task.get("description", ""),
+        )
+        for i, task in enumerate(tasks)
+    ]
 
 
 # ---------------------------------------------------------------------------

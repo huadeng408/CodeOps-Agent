@@ -281,53 +281,74 @@ def load_synthetic_instances() -> list[EvalInstance]:
 
 def load_swebench_instances(
     max_instances: int | None = None,
+    *,
+    allow_synthetic: bool = False,
 ) -> list[EvalInstance]:
     """Load SWE-bench Verified instances from HuggingFace datasets.
 
-    Tries to load `princeton-nlp/SWE-bench_Verified` (test split). Falls
-    back to synthetic instances if the dataset cannot be downloaded (no
-    network, datasets not installed, etc.).
+    Tries to load ``princeton-nlp/SWE-bench_Verified`` (test split).  If the
+    dataset cannot be downloaded and *allow_synthetic* is ``True``, falls back
+    to bundled synthetic instances for pipeline testing.  When
+    *allow_synthetic* is ``False`` (the default for real evaluation), any
+    dataset-load failure is raised immediately — per the design map, synthetic
+    instances must never be silently mixed into official results.
 
     Args:
         max_instances: If set, return at most this many instances.
+        allow_synthetic: If True, synthetic fallback is permitted (dry-run only).
 
     Returns:
         List of EvalInstance objects, one per SWE-bench task.
+
+    Raises:
+        ImportError: ``datasets`` package is not installed and synthetic is
+            not allowed.
+        RuntimeError: The dataset could not be loaded and synthetic is not
+            allowed.
     """
     try:
         from datasets import load_dataset  # type: ignore[import-untyped]
-    except ImportError:
-        print(
-            "[swebench] 'datasets' package not installed. "
-            "Install with: pip install datasets",
-            file=sys.stderr,
-        )
-        print(
-            "[swebench] Falling back to synthetic instances for pipeline testing.",
-            file=sys.stderr,
-        )
-        instances = load_synthetic_instances()
-        if max_instances is not None:
-            instances = instances[:max_instances]
-        return instances
+    except ImportError as exc:
+        if allow_synthetic:
+            print(
+                "[swebench] 'datasets' package not installed. "
+                "Install with: pip install datasets",
+                file=sys.stderr,
+            )
+            print(
+                "[swebench] Falling back to synthetic instances for pipeline testing.",
+                file=sys.stderr,
+            )
+            instances = load_synthetic_instances()
+            if max_instances is not None:
+                instances = instances[:max_instances]
+            return instances
+        raise ImportError(
+            "'datasets' package is required to load SWE-bench Verified instances. "
+            "Install with: pip install datasets"
+        ) from exc
 
     try:
         ds = load_dataset(
             "princeton-nlp/SWE-bench_Verified", split="test", trust_remote_code=True
         )
     except Exception as exc:
-        print(
-            f"[swebench] Failed to load SWE-bench Verified dataset: {exc}",
-            file=sys.stderr,
-        )
-        print(
-            "[swebench] Falling back to synthetic instances for pipeline testing.",
-            file=sys.stderr,
-        )
-        instances = load_synthetic_instances()
-        if max_instances is not None:
-            instances = instances[:max_instances]
-        return instances
+        if allow_synthetic:
+            print(
+                f"[swebench] Failed to load SWE-bench Verified dataset: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "[swebench] Falling back to synthetic instances for pipeline testing.",
+                file=sys.stderr,
+            )
+            instances = load_synthetic_instances()
+            if max_instances is not None:
+                instances = instances[:max_instances]
+            return instances
+        raise RuntimeError(
+            f"Failed to load SWE-bench Verified dataset: {exc}"
+        ) from exc
 
     instances: list[EvalInstance] = []
     for row in ds:
@@ -553,20 +574,26 @@ def _setup_workdir(
             f"No repo URL in metadata for instance {instance.instance_id}"
         )
 
+    if not base_commit:
+        raise ValueError(
+            f"No base_commit in metadata for instance {instance.instance_id}"
+        )
+
     print(f"[swebench] Cloning {repo_url} at {base_commit}...")
+    # Full clone — base_commit is typically an old SHA that a shallow
+    # clone of the default-branch tip cannot resolve.
     subprocess.run(
-        ["git", "clone", "--depth=1", repo_url, workdir],
+        ["git", "clone", repo_url, workdir],
         check=True,
         capture_output=True,
-        timeout=300,
+        timeout=600,
     )
-    if base_commit:
-        subprocess.run(
-            ["git", "-C", workdir, "checkout", base_commit],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
+    subprocess.run(
+        ["git", "-C", workdir, "checkout", base_commit],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
     return workdir
 
 
@@ -660,8 +687,14 @@ class SWEBenchRunner:
         if self._dry_run:
             if self._verbose:
                 print("[swebench] Dry-run mode: using synthetic instances.")
-            return load_synthetic_instances()[:max_instances] if max_instances else load_synthetic_instances()
-        return load_swebench_instances(max_instances=max_instances)
+            instances = load_synthetic_instances()
+            if max_instances is not None:
+                instances = instances[:max_instances]
+            return instances
+        return load_swebench_instances(
+            max_instances=max_instances,
+            allow_synthetic=False,
+        )
 
     def run_all(
         self,
@@ -909,6 +942,37 @@ def _apply_hinted_fix(
             if old in content:
                 content = content.replace(old, new)
                 target.write_text(content, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Module-level load_instances() -- eval/run.py HarnessRun path
+# ---------------------------------------------------------------------------
+
+
+def load_instances(
+    limit: int | None = None,
+    **kwargs: Any,
+) -> list[EvalInstance]:
+    """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
+
+    Loads real SWE-bench Verified instances from HuggingFace datasets.  Does
+    **not** fall back to synthetic data — per the design map, synthetic
+    instances must never be mixed into official results.
+
+    Args:
+        limit: If set, return at most this many instances.
+
+    Returns:
+        List of :class:`EvalInstance` objects.
+
+    Raises:
+        ImportError: ``datasets`` is not installed.
+        RuntimeError: The dataset could not be loaded.
+    """
+    return load_swebench_instances(
+        max_instances=limit,
+        allow_synthetic=False,
+    )
 
 
 # ---------------------------------------------------------------------------
