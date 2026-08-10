@@ -284,14 +284,21 @@ def _augment_for_uplift(instance: EvalInstance, workdir: str) -> EvalInstance:
     the same two things a human would have — so this cannot become a channel for
     the answer fields; :mod:`eval.harness.leakage` asserts that structurally.
     """
-    from eval.harness.uplift import augment_task_description, uplift_config
+    from eval.harness.uplift import augment_with_record, uplift_config
 
     config = uplift_config()
     if not config.enabled:
         return instance
-    augmented = augment_task_description(
+    augmented, localization = augment_with_record(
         instance.task_description, workdir, config=config
     )
+    if localization:
+        # Stashed on the shared metadata dict, which the harness records after
+        # solve returns, so what localization proposed lands in the artifacts
+        # next to the patch it was supposed to help produce. Contains only file
+        # paths, symbol names, line ranges and BM25 scores — all derived from the
+        # repository the agent could read anyway.
+        instance.metadata["localization"] = localization
     if augmented == instance.task_description:
         return instance
     return replace(instance, task_description=augmented)

@@ -159,6 +159,69 @@ def uplift_config() -> UpliftConfig:
     )
 
 
+def augment_with_record(
+    task_description: str,
+    repo_root: str,
+    *,
+    config: UpliftConfig | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Augment the task and return what localization actually proposed.
+
+    The record is the difference between "the score went up" and "the score went
+    up *because* the agent was pointed at the right file". Without it, arm B can
+    only be compared on its total, and localization's contribution would be an
+    assertion rather than a measurement: nothing else in the artifacts says which
+    files were ranked, so nothing can check whether the patch landed on one.
+
+    Returns ``(augmented_text, record)``. The record is ``{}`` when the uplift is
+    off or localization produced nothing, so the absence of a ranking and a
+    ranking that missed stay distinguishable.
+    """
+    cfg = config or uplift_config()
+    if not cfg.enabled:
+        return task_description, {}
+
+    blocks: list[str] = []
+    record: dict[str, Any] = {}
+    if cfg.localization:
+        try:
+            from eval.harness.localize import localize, render_localization_block
+
+            result = localize(
+                task_description,
+                repo_root,
+                top_files=UPLIFT_TOP_FILES,
+                top_functions=UPLIFT_TOP_FUNCTIONS,
+            )
+            block = render_localization_block(result)
+            if block:
+                blocks.append(block)
+            record = {
+                "files": list(result.files),
+                "file_scores": dict(result.file_scores),
+                "functions": [
+                    {
+                        "path": site.path,
+                        "qualname": site.qualname,
+                        "lineno": site.lineno,
+                        "end_lineno": site.end_lineno,
+                        "score": site.score,
+                    }
+                    for site in result.functions
+                ],
+                "scanned_files": result.scanned_files,
+                "degraded_reason": result.degraded_reason,
+            }
+        except Exception as exc:  # pragma: no cover - defensive by intent
+            print(f"[uplift] localization skipped: {type(exc).__name__}: {exc}")
+            record = {"degraded_reason": f"{type(exc).__name__}: {exc}"}
+    if cfg.edit_mandate:
+        blocks.append(EDIT_MANDATE)
+    if not blocks:
+        return task_description, record
+    return "\n\n".join([task_description, *blocks]), record
+
+
 def augment_task_description(
     task_description: str,
     repo_root: str,
@@ -174,28 +237,5 @@ def augment_task_description(
     agent gets the same task it would have got anyway. An accelerator that can
     fail the run is a liability, and a localizer is only an accelerator.
     """
-    cfg = config or uplift_config()
-    if not cfg.enabled:
-        return task_description
-
-    blocks: list[str] = []
-    if cfg.localization:
-        try:
-            from eval.harness.localize import localize, render_localization_block
-
-            result = localize(
-                task_description,
-                repo_root,
-                top_files=UPLIFT_TOP_FILES,
-                top_functions=UPLIFT_TOP_FUNCTIONS,
-            )
-            block = render_localization_block(result)
-            if block:
-                blocks.append(block)
-        except Exception as exc:  # pragma: no cover - defensive by intent
-            print(f"[uplift] localization skipped: {type(exc).__name__}: {exc}")
-    if cfg.edit_mandate:
-        blocks.append(EDIT_MANDATE)
-    if not blocks:
-        return task_description
-    return "\n\n".join([task_description, *blocks])
+    text, _record = augment_with_record(task_description, repo_root, config=config)
+    return text
