@@ -116,10 +116,10 @@ vectorGapCount=0
 
 | 目标 | 当前级别 | 已有能力 | 主要缺口 |
 |---|---|---|---|
-| Harness | `IMPLEMENTED` 局部 | runner/budget/resume/artifacts/adapters | 未接统一入口；无 current-HEAD 官方 run |
+| Harness | `IMPLEMENTED` 局部 | runner/budget/resume/artifacts/adapters | ~~未接统一入口；无 current-HEAD 官方 run~~ → **本条已修复**：`eval/run.py` 为统一入口，已跑出 current-HEAD 官方 run（WSL2 官方 scorer，含 `traces/`）。**剩余缺口**：20 实例子集未跑完 |
 | 多模态 RAG | `DESIGNED` + 脚手架 | visual index/artifact/encoder contracts | encoder 未实现；无真实 qrels/model/index/bake-off |
-| 评测集 | `BLOCKED` | 180 queries/qrels；三路 predictions | 0/180 复核；schema 冲突；scorer `nDCG>1` |
-| 可观测性 | `IMPLEMENTED` 局部 | root/tool/chat span；W3C traceparent | 无生产 RAG/scorer spans；Phoenix 未运行 |
+| 评测集 | `BLOCKED` | 180 queries/qrels；三路 predictions | ~~0/180 复核；schema 冲突；scorer `nDCG>1`~~ → **后两项已修复**（schema 已统一；scorer 数学已修，`nDCG≤1`）。**剩余缺口**：121/180 disputed、59 条 `AI_REVIEWED` 仲裁有漏洞、人工复核仍需真人 |
+| 可观测性 | `IMPLEMENTED` 局部 | root/tool/chat span；W3C traceparent | ~~Phoenix 未运行~~ → **非门禁项**（in-process span capture 即可，见 §31.6）。**剩余缺口**：生产 RAG/scorer spans 仍缺 |
 
 ## 4. 目标架构总图
 
@@ -287,16 +287,18 @@ seed, start_time, runtime/container versions
 
 已有每实例 workspace、预算、checkpoint/resume、failure taxonomy、artifact tree、原子 summary、secrets redaction，以及 EvalPlus、SWE-bench、Terminal-Bench、tau2-bench、BEIR、MIRACL、BRIGHT、ViDoRe adapters。
 
-GPT-5.6 Sol 只读复核确认的缺口：
+GPT-5.6 Sol 只读复核确认的缺口（**2026-08-07 快照；1–5 已修复，逐条标注**）：
 
-1. `eval/run.py` 直接调用 adapter，未经过 `HarnessRun`。
-2. `max_processes` 未实际使用；网络禁用只有标记；预算在任务完成后才检查。
-3. `ERROR_SCORER` 无可达路径；缺 `instance_id` 被静默跳过。
-4. `eval_results/` 不存在，统一 artifact contract 没有真实产物。
-5. SWE-bench 脚本与 adapter prediction 文件名不一致；模块 CLI 使用 `_StubAdapter`；真实加载失败会降级 synthetic。
-6. Terminal-Bench/tau2-bench 只通过 mocked subprocess，官方包、数据 pin 和真实分数缺失。
+1. ~~`eval/run.py` 直接调用 adapter，未经过 `HarnessRun`~~ → **已修复**，AST 断言 legacy `benchmark_mod.run()` 为 0 call node（H1-H2）。
+2. ~~`max_processes` 未实际使用；网络禁用只有标记；预算在任务完成后才检查~~ → **已修复**（H4）。附带在本轮补一层：预算按实例数缩放，且 `ERROR_BUDGET` 与 `ERROR_AGENT` 分开——累计上限耗尽是 harness 的问题，单实例瞬时进程上限才是 Agent 的行为（缺陷 19）。
+3. ~~`ERROR_SCORER` 无可达路径；缺 `instance_id` 被静默跳过~~ → **已修复**：`OfficialScorerUnavailable` 使该路径可达并 fail-closed，缺 `instance_id` 不再静默。
+4. ~~`eval_results/` 不存在，统一 artifact contract 没有真实产物~~ → **已修复**：真实 run 产出完整 artifact 树（含 `scorer/` 官方原始输出与 `traces/` 233 spans）。
+5. ~~SWE-bench 脚本与 adapter prediction 文件名不一致；模块 CLI 使用 `_StubAdapter`；真实加载失败会降级 synthetic~~ → **已修复**，其中「降级 synthetic」是本项目缺陷族的原型：**基础设施故障伪装成业务判定**。
+6. Terminal-Bench/tau2-bench 只通过 mocked subprocess，官方包、数据 pin 和真实分数缺失。→ **仍成立**，未在本轮处理。
 
-状态：`DESIGNED=yes / IMPLEMENTED=standalone core / VERIFIED=no / BLOCKED=integration+official runs`。
+~~状态：`DESIGNED=yes / IMPLEMENTED=standalone core / VERIFIED=no / BLOCKED=integration+official runs`。~~
+→ **本行已过时**：SWE-bench 一路已有官方 run 与合格 artifact，H5 = `VERIFIED`。当前状态为
+`DESIGNED=yes / IMPLEMENTED=core+integration / VERIFIED=SWE-bench 单实例官方 run / BLOCKED=20 实例子集未跑完、Terminal-Bench 与 tau2-bench 官方分数（第 6 条）`。
 
 ### 6.2 Harness 生命周期
 
@@ -1006,12 +1008,12 @@ Python 真实 MinerU ingestion 在 Windows Selector event loop 下执行 `asynci
 
 | 主线 | 当前资格 | 已确认能力 | 发布阻断 |
 |---|---|---|---|
-| 自研 Agent Harness | core `IMPLEMENTED`；official validation `BLOCKED` | HarnessRun、预算结构、resume、failure taxonomy、artifact 基础、instance ID fail-closed、scorer callback | 统一 CLI 旁路 official runner/scorer；manifest pins 不完整；无合格官方小样本 artifact |
+| 自研 Agent Harness | core `IMPLEMENTED`；official validation ~~`BLOCKED`~~ → **单实例 `VERIFIED`，20 实例子集进行中** | HarnessRun、预算结构、resume、failure taxonomy、artifact 基础、instance ID fail-closed、scorer callback | ~~统一 CLI 旁路 official runner/scorer；manifest pins 不完整；无合格官方小样本 artifact~~ → **本条三项均已修复**：CLI 现经 WSL2 调官方 scorer 且 `resolved` 只读官方 `report.json`（缺陷 14 修复后按 run 隔离）；manifest 已含 `harness_uplift` 臂溯源；已产出带 `traces/` 的合格 artifact（233 spans）。**剩余阻断只有一项：20 实例子集尚未跑完，故 k/20 未出数** |
 | 多模态 RAG | 整体 `DESIGNED`；历史文本一致性与 Go OCR 均待复验 | 2026-08-09 的 3012/3012 一致性与 Go 真实 OCR 曾通过；PDF 强制 MinerU OCR；已有 element/chunk/visual scaffolding | 快照缺 dirty hash；Python MinerU E2E 失败；无 120 多模态 qrels；无真实视觉 encoder/index/alias；无 ViDoRe/bbox/性能 bake-off |
 | 评测集与评分 | scorer 数学修复 `IMPLEMENTED`；release gate `BLOCKED` | 180 queries/qrels、三路预测、双轮 review 产物、部分官方原始文件 | 121/180 disputed；59 AI_REVIEWED 仲裁有漏洞；GPT-5.6 Sol revision 未验证；报告 pins 不全；污染扫描未完成；holdout 污染 |
-| 可观测性 | span 创建点 `IMPLEMENTED`；生产 E2E `BLOCKED` | root/tool/chat/retrieve/embedding 创建点、W3C 传播基础、Phoenix 基础连通 | scorer/rerank 生产 span 缺失或未验证；无 run_id+instance_id 生产 join；现有 trace 为无 RAG 的合成链 |
+| 可观测性 | span 创建点 `IMPLEMENTED`；生产 E2E **部分 `VERIFIED`** | root/tool/chat/retrieve/embedding 创建点、W3C 传播基础、Phoenix 基础连通 | ~~无 run_id+instance_id 生产 join；现有 trace 为无 RAG 的合成链~~ → **join 一项已修复**：真实 SWE-bench run 产出 233 spans / 1 trace_id，**每个 span 都带 `eval.run_id` + `eval.instance_id`**（`BaggageJoinSpanProcessor` 注入），已非合成链。**剩余阻断**：scorer/rerank 生产 span 仍缺失或未验证；RAG 检索链路的生产 trace 仍未产出（Agent 侧 trace 不能替 RAG 侧签收） |
 
-项目整体仍为 `BLOCKED`，不得写成四主线完成或 `VERIFIED`。
+项目整体仍为 `BLOCKED`，不得写成四主线完成或 `VERIFIED`。**但阻断面已收窄**：Harness 与可观测性两条主线的阻断项已各自部分关闭（见上表就地标注），当前整体阻断由多模态 RAG（无真实视觉 index/qrels/bake-off）与评测集（121/180 disputed、holdout 污染、key 待轮换）承担。收窄不等于通过——四主线仍不得写成完成。
 
 ### 20.4 声明与证据对照
 
@@ -1397,12 +1399,15 @@ Baseline artifact hashes captured; full-service startup deferred to later phases
 | Manifest 强制 pins fail-closed | ✅ | **部分虚标** — 写 manifest 时 fail-closed 成立，但启动前从不调 `validate_pins()` |
 | 执行约束 (budget/max_processes/network) | ✅ | **虚标** — `max_processes` 分支不可达（无人上报进程数） |
 | Go + Python 全量回归 | ✅ 473 passed | 成立（当时口径） |
-| H5 1-instance smoke | ❌ postponed | 成立，`BLOCKED` |
+| H5 1-instance smoke | ❌ postponed | ~~成立，`BLOCKED`~~ → **本条已修复：`VERIFIED`（5/5），见 §31.6 / §32** |
 
 ### 22.7 剩余风险
-1. H5 1-instance smoke 未执行 — Go server/embedding/Phoenix 未运行
-2. WSL scorer 路径 bug（已在 swebench score() 中 fail-closed，但需修正）
-3. 真实 DeepSeek API 调用未在 Phase 1 中验证
+
+> **本节三项均已修复（后续补记）**，原文保留以记录当时的判断。
+
+1. ~~H5 1-instance smoke 未执行 — Go server/embedding/Phoenix 未运行~~ → **已执行并验收**。附带纠正：所列依赖里 **Go server 与 Phoenix 从来不是 H5 的前置**（headless driver 进程内跑工具；in-process span capture 即可），详见 §25.3 第 2 条。
+2. ~~WSL scorer 路径 bug~~ → **已修复**（§25.1），且 `resolved` 现只读官方 `report.json`，并按 run 隔离（缺陷 14）。
+3. ~~真实 DeepSeek API 调用未在 Phase 1 中验证~~ → **已验证**：真实 run 产出 233 spans / 1 trace_id，`run_arm.py` 另加单请求凭证 preflight（缺陷 18），无效 key 一次请求即闸断。
 
 ---
 
@@ -1484,10 +1489,11 @@ Phase 0-1 声明 vs 真相逐项对照：
 | H4 执行约束（含可达的 max_processes） | `IMPLEMENTED` | `TestH4MaxProcessesReachable`；`tests/eval/test_h4_constraints.py` 5 tests |
 | H5 官方 1 实例 smoke | ~~`BLOCKED`~~ → **`VERIFIED`（见 §31、§32）** | 原文「从未执行」及所列依赖均已过时：headless driver 在进程内跑工具，**不需要** Go server :8081；Phoenix :6006 亦非门禁项（in-process span capture 即可） |
 
-**Phase 1 Gate = H0-H4 `IMPLEMENTED`，H5 `BLOCKED`。**
+~~**Phase 1 Gate = H0-H4 `IMPLEMENTED`，H5 `BLOCKED`。**~~ → **本条已修复：Phase 1 Gate 通过，H5 = `VERIFIED`（5/5）。**
 按 §20.2 反作弊协议，H0-H4 只能标 `IMPLEMENTED` 不能标 `VERIFIED`：
 它们由单元/静态断言证明，尚未经过一次绑定真实模型身份、官方 scorer 原始输出与 trace 的端到端 run。
-**`VERIFIED` 的唯一路径是 H5 真实跑通。**
+~~**`VERIFIED` 的唯一路径是 H5 真实跑通。**~~ → H5 已真实跑通（真实模型身份 + 官方 scorer 原始输出 + 233 spans 的 trace）。
+**但 H0–H4 仍维持 `IMPLEMENTED`，不因此升为 `VERIFIED`**：H5 过关只解锁门禁，不替 H0–H4 签发验收——那句「唯一路径」说的是**解锁条件**，不是**代签授权**。要把 H0–H4 签成 `VERIFIED`，仍需各自的端到端证据。
 
 ### 24.4 INTERVIEW-PORTFOLIO.md 下修（§23.1 第 7 项闭环）
 
@@ -1556,7 +1562,11 @@ H5 的 1-instance official smoke 正好穿过 `_run_official_scoring_wsl()`，�
 | SWE-bench Docker 镜像 | env 镜像 **1** 个（`sweb.env.py.x86_64.428468730904ff6b4232aa`, 3.98GB）；eval 镜像 **0**；base 镜像 **0** | ⚠️ 几乎全冷 |
 | `DEEPSEEK_API_KEY` 环境变量 | **MISSING**（`OPENAI_API_KEY` / `OPENAI_BASE_URL` 同样 MISSING） | ❌ 阻断 |
 
-> **状态时效说明（后续补记）**：上表是 H5 preflight 当时的真实快照，不改。其中 `Embedding :8009 000 / DOWN` 已于 §29 变更 —— 该服务已启动并实测可用（pin 死 revision `5617a9f61b028005a4858fdac845db406aefb181`）。`Go server :8081` 与 `DEEPSEEK_API_KEY` 仍为阻断项，H5 未解除。请勿引用本表作为当前服务状态。
+> **状态时效说明（后续补记，已二次更新）**：上表是 H5 preflight 当时的真实快照，不改。请勿引用本表作为当前服务状态。逐项时效：
+>
+> - `Embedding :8009 000 / DOWN` 已于 §29 变更 —— 该服务已启动并实测可用（pin 死 revision `5617a9f61b028005a4858fdac845db406aefb181`）。
+> - ~~`Go server :8081` 与 `DEEPSEEK_API_KEY` 仍为阻断项，H5 未解除~~ → **本句已修复**：`DEEPSEEK_API_KEY` 已注入并跑出真实 run；`Go server :8081` **从来不是 H5 的前置**（见 §25.3 第 2 条）。**H5 已解除，= `VERIFIED`（5/5）。**
+> - SWE-bench 镜像「几乎全冷」一栏也已过时：eval/base 镜像已在真实 run 中构建并复用，单实例 clone 由本地 git mirror 从 216.8s 降到 8.5s（`43f8190e`）。
 
 网络（按 CLAUDE.md「超 15 分钟工作先查代理」）：
 
@@ -1569,12 +1579,11 @@ H5 的 1-instance official smoke 正好穿过 `_run_official_scoring_wsl()`，�
 
 ### 25.3 H5 当前判定
 
-**H5 = `BLOCKED`**，阻断原因是**两条硬依赖**，都不是代码问题：
+~~**H5 = `BLOCKED`**，阻断原因是**两条硬依赖**，都不是代码问题：~~
+→ **本条已修复：H5 = `VERIFIED`（5/5），见 §31.6 与 §32。** 两条「硬依赖」的实际结局各不相同，分别记下来，因为它们错在不同的地方：
 
-1. **`DEEPSEEK_API_KEY` 未注入当前 shell** —— 按 §20.1/§20.2，key 只能来自环境变量，代码已 fail-closed，
-   因此在注入前无法产生绑定真实模型身份的 run。**不得**用 mock/合成 patch 顶替。
-2. **Go server `:8081` 与 embedding `:8009` 未运行** —— O3 要求同一次 run 强制经过 SearchKnowledge，
-   缺这两个服务就无法产出含真实 RAG span 的生产 trace。
+1. ~~**`DEEPSEEK_API_KEY` 未注入当前 shell**~~ → **已解决**：key 从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取并注入环境变量（不硬编码、不进 artifact），真实 run 已产出。写作当时这条判断是对的：拒绝用 mock/合成 patch 顶替，正是后来能拿到真实 artifact 的原因。
+2. ~~**Go server `:8081` 与 embedding `:8009` 未运行**~~ → **这条判断本身是错的**，不是「后来满足了」。headless driver 在**进程内**跑工具，不经过 Go server；`:8081` 与 H5 无关。这是把「另一条主线的依赖」误记成「本门禁的依赖」——真正需要 RAG span 的是 O3，而 O3 不是 H5 的前置。**这类错误比未满足的依赖更贵**：它会让一个本可通过的门禁被记成阻塞，进而让整条主线停在原地等一个不需要等的东西。
 
 已排除的「疑似阻断」（本轮实测证明不成立）：
 
@@ -2505,13 +2514,17 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 | C2 定位 | `IMPLEMENTED` | `tests/eval/test_localize.py` 28 条通过（含降级不抛异常、非 UTF-8、语法错误文件、确定性） |
 | C5 泄题守卫 | `VERIFIED` | 15 条通过，且**已实测拦住本轮新模块** |
 | H5 五项门禁 | **`VERIFIED`（5/5）** | 最后一项 `traces/` 已由真实 run 产出：233 spans / 1 trace_id / 每 span 带 join key |
-| A 臂 baseline | **`BLOCKED`** | 机理已量出（32.1），但**分数不可用**：该 run 受缺陷 14 污染（`12907` 假 True）且未跑满 20 实例。**修复后须重跑，不得引用旧数字** |
-| B 臂 | 未开始 | 依赖 A 臂重跑 |
-| C3 / C4 | `DESIGNED` | 仅有设计，无代码 |
+| A 臂 baseline | **`BLOCKED`（进行中，非阻死）** | 受污染的旧 run 已移入 `_discarded-arm-a-contaminated/`（未删除，供复核），**其数字不得引用**；受缺陷 19 预算截断的一代已移入 `_discarded-budget-truncated/`（含两臂），同样不得引用。当前第三代 run `arm-a-baseline/swebench-deepseek-v4-pro-a5cb0378` 于 00:28 启动、41 分钟时 8/20 已判定，`resolved=0`，7 个空 patch，1 个 `failed-scorer`（`12907`，瞬时 SSL，其 patch 实为 506B 真实修复、hunk 位置正确）。未跑完，**不得出数** |
+| B 臂 | 未开始（已自动排队） | `chain_arms.py`（PID 33284）等待 A 臂写出 `summary.json` 后启动，判据是 artifact 而非进程名 |
+| 两臂的一处不受控差异 | **已声明，不得事后补叙** | A 臂 00:28 启动，scorer 瞬时重试（缺陷 21）00:38 才提交 → **A 臂跑的是无重试的代码，B 臂有重试**。按交集配对使其在方向上无偏、只让 N 变小；若 A 臂 scorer 失败 **>3 例**，则差异不可忽略，须两臂全部重跑 |
+| ~~C3 / C4 `DESIGNED`，仅有设计无代码~~ | **本条已修复** | 两者均已实现并各有 20 条测试，见下两行。原行写作当时为真，现已过时。 |
 | C3 验证 + 反馈重试 | `IMPLEMENTED` | `tests/eval/test_validate.py` 20 条 + `test_uplift.py` 重试段 9 条通过。**真实 run 未产出，不签 `VERIFIED`** |
 | C4 best-of-N 选择 | `IMPLEMENTED`，**默认关闭** | `tests/eval/test_select.py` 20 条通过（含全排列下胜者唯一）。开启会让 arm B 运行时间三倍，而实测损失不在这里 |
 | 对照报告工具 | `IMPLEMENTED` | `eval/swebench_work/compare_arms.py` + 14 条测试。单臂时拒绝出数、实例集不一致时拒绝平均 |
-| Python 全量回归 | **1116 passed**（`python -m pytest tests`，81s；其中 `tests/eval` 797） | 本轮新增约 105 条 |
-| Go 回归 | 本轮**未执行**，不作声明 | — |
+| 机理归因工具 | `IMPLEMENTED` | `eval/swebench_work/mechanism_report.py` + 16 条测试。回答「因为什么」而非「涨了多少」：turn 去向（search:edit）、是否交付、定位命中排名（hit@1 / hit@3 / 命中均排名） |
+| 定位记录进 artifact | `IMPLEMENTED` | `augment_with_record()` 把排名写进 `instance.metadata['localization']`，由 runner 序列化进 `instances.jsonl`。28 条测试，含**按引用传递不能被破坏**（`_augment_for_uplift` 先改原对象 metadata，`replace` 再共享同一 dict；两句一互换，记录就静默消失而单测全绿）、**json.dumps 必须成立**（runner 会序列化它，不可序列化字段会让实例因报告问题而失败）、**答案字段不得进入记录或 prompt** |
+| 缺陷 19、20、21 修复 | `VERIFIED` | 19：预算按实例数缩放 + 新增 `ERROR_BUDGET` 区分累计/瞬时上限（12 条）；20：manifest 写入 `harness_uplift` 臂溯源块；21：9 类瞬时网络签名 + 单次重试，非瞬时仍 fail-closed |
+| Python 全量回归 | **1180 passed**（`python -m pytest tests`，113s） | 本轮新增约 169 条 |
+| ~~Go 回归 本轮未执行~~ | **本条已修复：`go test ./...` exit 0，全绿** | `pkg/embedding` 2.334s、`tests/go` 9.308s 为本次真实执行，其余为 cache hit |
 
 **本轮未删除任何容器、volume、ES 索引、MySQL 数据或 MinIO 对象；未重写历史。**
