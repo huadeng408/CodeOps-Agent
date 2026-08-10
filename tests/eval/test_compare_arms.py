@@ -191,3 +191,70 @@ def test_render_includes_the_mechanism_counts(experiment: Path):
     text = C.render(a, b, C.compare(a, b))
     assert "empty patches" in text
     assert "instances w/ edits" in text
+
+
+# ------------------------------------------------------- end-to-end rendering
+
+
+def _write_traces(run: Path, spans: list[dict]) -> None:
+    (run / "traces").mkdir(exist_ok=True)
+    (run / "traces" / "trace-summary.json").write_text(
+        json.dumps({"spans": spans}), encoding="utf-8"
+    )
+
+
+def _edit_span(instance_id: str, tool: str = "Edit") -> dict:
+    return {
+        "name": f"execute_tool {tool}",
+        "attributes": {"tool.name": tool, "eval.instance_id": instance_id},
+    }
+
+
+def test_full_render_over_two_complete_arms(experiment: Path):
+    """Exercise the whole path once, the way the CLI runs it."""
+    a = _write_run(
+        experiment, "arm-a-baseline", "run-a",
+        [_row("i-1", False, patch=""), _row("i-2", False), _row("i-3", False, patch="")],
+    )
+    _write_traces(a, [_edit_span("i-2")])
+    b = _write_run(
+        experiment, "arm-b-optimized", "run-b",
+        [_row("i-1", True), _row("i-2", False), _row("i-3", True)],
+    )
+    _write_traces(b, [_edit_span("i-1"), _edit_span("i-3", "Write")])
+
+    arm_a, arm_b = C.load_arm("baseline"), C.load_arm("optimized")
+    text = C.render(arm_a, arm_b, C.compare(arm_a, arm_b))
+
+    assert "Paired instances (both arms measured): 3" in text
+    assert "arm A resolved: 0/3" in text
+    assert "arm B resolved: 2/3" in text
+    assert "B fixed what A missed: 2" in text
+    assert "A fixed what B missed: 0" in text
+    # The mechanism rows must travel with the totals, not be optional extras.
+    assert "empty patches      A=2  B=0" in text
+    assert "instances w/ edits A=1  B=2" in text
+    assert "NOT a SWE-bench Verified score" in text
+
+
+def test_write_counts_as_an_edit_via_the_shared_set(experiment: Path):
+    """compare_arms imports EDIT_TOOLS rather than re-listing it.
+
+    Two copies of "what counts as an edit" drift, and a tool missing from one
+    copy does not raise: it lowers a count in one report and not the other, so
+    the two reports disagree about the same run.
+    """
+    from eval.swebench_work.mechanism_report import EDIT_TOOLS
+
+    assert C.EDIT_TOOLS is EDIT_TOOLS
+
+    run = _write_run(experiment, "arm-a-baseline", "run-a", [_row("i-1", False)])
+    _write_traces(run, [_edit_span("i-1", "Write")])
+    arm = C.load_arm("baseline")
+    assert arm.edits_by_instance == {"i-1": 1}
+
+
+def test_search_tools_are_not_counted_as_edits(experiment: Path):
+    run = _write_run(experiment, "arm-a-baseline", "run-a", [_row("i-1", False)])
+    _write_traces(run, [_edit_span("i-1", "Grep"), _edit_span("i-1", "Read")])
+    assert C.load_arm("baseline").edits_by_instance == {}

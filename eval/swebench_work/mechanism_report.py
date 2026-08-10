@@ -220,8 +220,18 @@ def render(arms: dict[str, dict[str, Any]]) -> str:
                 lines.append(
                     f"             missed: {', '.join(loc['missed_instances'])}"
                 )
+        elif arm == "baseline":
+            lines.append("  localize   no ranking recorded (expected: the baseline arm has no localizer)")
         else:
-            lines.append("  localize   no ranking recorded (expected for the baseline arm)")
+            # Do not reassure here. The optimized arm is the one that runs the
+            # localizer, so a missing ranking means either the uplift was off or
+            # the record never reached the artifact -- and in both cases the
+            # arm's gain cannot be attributed to retrieval at all.
+            lines.append(
+                "  localize   NO RANKING RECORDED -- unexpected in this arm. "
+                "Either the uplift was off or the record did not reach the "
+                "artifact; localization cannot be credited either way."
+            )
         lines.append("")
 
     baseline = arms.get("baseline", {})

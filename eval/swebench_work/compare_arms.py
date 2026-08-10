@@ -31,6 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from eval.swebench_work.mechanism_report import EDIT_TOOLS  # noqa: E402
+
 EXPERIMENT_DIR = REPO_ROOT / "eval_results" / "harness-uplift-20260810"
 ARMS = {"baseline": "arm-a-baseline", "optimized": "arm-b-optimized"}
 
@@ -127,7 +129,10 @@ def load_arm(arm: str) -> ArmResult:
             attributes = span.get("attributes", {}) or {}
             name = attributes.get("tool.name")
             instance_id = attributes.get("eval.instance_id")
-            if name in ("Edit", "Write", "MultiEdit") and instance_id:
+            # Imported rather than re-listed: two copies of "what counts as an
+            # edit" drift, and a tool missing from one of them does not raise --
+            # it quietly lowers a count in one report and not the other.
+            if name in EDIT_TOOLS and instance_id:
                 result.edits_by_instance[instance_id] = (
                     result.edits_by_instance.get(instance_id, 0) + 1
                 )

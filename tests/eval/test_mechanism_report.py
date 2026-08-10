@@ -209,6 +209,40 @@ def test_baseline_arm_reports_no_ranking_rather_than_zero(experiment: Path):
     assert data["localization"]["mean_rank_of_hits"] is None
 
 
+def test_missing_ranking_is_reassuring_only_for_the_baseline_arm(experiment: Path):
+    """A missing ranking is expected in arm A and a defect in arm B.
+
+    The first version of render() printed "expected for the baseline arm" for
+    both arms, so an optimized run whose record never reached the artifact --
+    the exact failure the report exists to catch -- read as normal.
+    """
+    for arm_dir in ("arm-a-baseline", "arm-b-optimized"):
+        _write_run(
+            experiment, arm_dir, "run",
+            predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
+            instances=[{"instance_id": "i-1", "metadata": {}}],
+        )
+    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
+    text = M.render(arms)
+    baseline_line = next(l for l in text.splitlines() if "expected" in l)
+    optimized_line = next(l for l in text.splitlines() if "unexpected" in l)
+    assert "NO RANKING RECORDED" in optimized_line
+    assert "NO RANKING RECORDED" not in baseline_line
+
+
+def test_optimized_arm_without_a_ranking_refuses_to_credit_localization(
+    experiment: Path,
+):
+    _write_run(
+        experiment, "arm-b-optimized", "run",
+        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
+        instances=[{"instance_id": "i-1", "metadata": {}}],
+    )
+    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
+    text = M.render(arms)
+    assert "cannot be credited" in text
+
+
 def test_mean_rank_is_none_when_there_are_no_hits(experiment: Path):
     _write_run(
         experiment, "arm-b-optimized", "run",
@@ -256,6 +290,30 @@ def test_render_reports_the_ratio_shift(experiment: Path):
     text = M.render(arms)
     assert "8:0" in text and "1.0:1" in text
     assert "Empty patches went 1 -> 0" in text
+
+
+def test_every_driver_tool_is_classified(experiment: Path):
+    """A tool the driver emits but neither set names is silently dropped.
+
+    The search:edit ratio is the report's main attribution figure, so a tool
+    missing from both sets does not raise -- it quietly shrinks a count, which
+    is the failure mode hardest to notice. Pinned against the driver's own
+    handler map rather than a copy of today's tool names, so adding a tool
+    there without classifying it here fails this test.
+    """
+    from eval.driver_headless import _TOOL_HANDLERS
+
+    classified = M.SEARCH_TOOLS | M.EDIT_TOOLS
+    unclassified = set(_TOOL_HANDLERS) - classified
+    assert not unclassified, (
+        f"driver emits {sorted(unclassified)}, classified as neither search nor "
+        "edit; they would vanish from the ratio"
+    )
+
+
+def test_search_and_edit_sets_are_disjoint():
+    """A tool in both sets would be double-counted on each side of the ratio."""
+    assert not (M.SEARCH_TOOLS & M.EDIT_TOOLS)
 
 
 def test_bash_counts_as_search_not_edit(experiment: Path):
