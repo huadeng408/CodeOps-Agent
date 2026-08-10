@@ -56,6 +56,38 @@ def read_key() -> str:
     return anchored_read_key() or ""
 
 
+def preflight_auth(key: str) -> tuple[bool, str]:
+    """Send one minimal completion to confirm the credential works.
+
+    Returns ``(ok, human-readable detail)``. The key is never echoed; only the
+    HTTP status and, on failure, the provider's message with the key redacted.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"{BASE_URL}/chat/completions",
+        data=_json.dumps(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ok"}],
+                "max_tokens": 1,
+            }
+        ).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = _json.loads(response.read())
+            return True, f"HTTP {response.status}, model={body.get('model')}"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:200].replace(key, "<redacted>")
+        return False, f"HTTP {exc.code}: {detail}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:200].replace(key, '<redacted>')}"
+
+
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] not in ARMS:
         print(f"usage: {Path(__file__).name} {{{'|'.join(ARMS)}}}")
@@ -71,6 +103,17 @@ def main() -> int:
 
     if not SUBSET.is_file():
         print(f"FAIL: pinned subset missing: {SUBSET}")
+        return 2
+
+    ok, detail = preflight_auth(key)
+    print(f"auth preflight: {detail}")
+    if not ok:
+        # The first attempt at this experiment ran all 20 instances with a key
+        # that returned HTTP 401 on every call. Each instance still cloned
+        # astropy, still built an image, still invoked the official scorer, and
+        # still recorded resolved=False — twelve minutes of work producing a
+        # number that described the credential, not the agent. One request up
+        # front is the whole cost of never doing that again.
         return 2
 
     env = dict(os.environ)

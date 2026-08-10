@@ -183,6 +183,136 @@ def test_localization_exception_is_swallowed(monkeypatch, repo: Path):
     assert "# bug" in out
 
 
+# ------------------------------------------------- validation retry (arm B only)
+
+
+class _StubAdapter:
+    """Records calls and returns queued patches."""
+
+    def __init__(self, patches):
+        self.patches = list(patches)
+        self.calls = []
+
+    def solve_instance(self, instance, working_dir, **kwargs):
+        from eval.benchmarks.swebench import EvalResult
+
+        self.calls.append(instance.task_description)
+        patch = self.patches.pop(0) if self.patches else ""
+        return EvalResult(instance_id=instance.instance_id, model_patch=patch)
+
+
+GOOD_DIFF = """\
+diff --git a/pkg/table.py b/pkg/table.py
+--- a/pkg/table.py
++++ b/pkg/table.py
+@@ -1,2 +1,3 @@
+ def add_column(data):
++    data = data.view(X)
+     return data
+"""
+
+TESTS_ONLY_DIFF = (
+    "diff --git a/pkg/tests/test_x.py b/pkg/tests/test_x.py\n"
+    "--- a/pkg/tests/test_x.py\n+++ b/pkg/tests/test_x.py\n@@ -1 +1 @@\n-a\n+b\n"
+)
+
+
+def _instance():
+    from eval.benchmarks.swebench import EvalInstance
+
+    return EvalInstance(instance_id="astropy__astropy-13236", task_description="# bug")
+
+
+def test_no_retry_when_uplift_disabled(repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    adapter = _StubAdapter([GOOD_DIFF])
+    out = _retry_if_disqualified(
+        _instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter
+    )
+    assert adapter.calls == [], "arm A must never spend a second attempt"
+    assert out.model_patch == ""
+
+
+def test_retry_fires_on_empty_patch_when_enabled(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([GOOD_DIFF])
+    out = _retry_if_disqualified(
+        _instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter
+    )
+    assert len(adapter.calls) == 1
+    assert out.model_patch == GOOD_DIFF
+
+
+def test_retry_feedback_names_the_observed_problem(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([GOOD_DIFF])
+    _retry_if_disqualified(_instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter)
+    feedback = " ".join(adapter.calls[0].split())
+    assert "not submittable" in feedback
+    assert "git diff" in feedback
+    assert "not whether your diagnosis was right" in feedback
+
+
+def test_retry_feedback_carries_nothing_from_the_dataset(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([GOOD_DIFF])
+    _retry_if_disqualified(_instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter)
+    feedback = adapter.calls[0]
+    for leaked in ("FAIL_TO_PASS", "PASS_TO_PASS", "test_patch", "hints"):
+        assert leaked not in feedback
+
+
+def test_no_retry_when_patch_is_fine(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([""])
+    out = _retry_if_disqualified(
+        _instance(), EvalResult(instance_id="x", model_patch=GOOD_DIFF), repo, adapter
+    )
+    assert adapter.calls == []
+    assert out.model_patch == GOOD_DIFF
+
+
+def test_retry_only_happens_once(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter(["", ""])  # both attempts come back empty
+    _retry_if_disqualified(_instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter)
+    assert len(adapter.calls) == 1, "one retry, not a loop"
+
+
+def test_empty_retry_never_erases_a_non_empty_first_attempt(monkeypatch, repo: Path):
+    """A retry is an attempt to improve, never a way to lose ground."""
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([""])
+    out = _retry_if_disqualified(
+        _instance(), EvalResult(instance_id="x", model_patch=TESTS_ONLY_DIFF), repo, adapter
+    )
+    assert len(adapter.calls) == 1
+    assert out.model_patch == TESTS_ONLY_DIFF
+
+
+def test_validation_can_be_disabled_for_ablation(monkeypatch, repo: Path):
+    from eval.benchmarks.swebench import EvalResult, _retry_if_disqualified
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    monkeypatch.setenv("SWEBENCH_UPLIFT_VALIDATION", "0")
+    adapter = _StubAdapter([GOOD_DIFF])
+    _retry_if_disqualified(_instance(), EvalResult(instance_id="x", model_patch=""), repo, adapter)
+    assert adapter.calls == []
+
+
 # ------------------------------------------------------- anti-leakage guardrail
 
 

@@ -129,7 +129,7 @@ def uplift_config() -> UpliftConfig:
 
     localization = _flag("SWEBENCH_UPLIFT_LOCALIZATION", True)
     edit_mandate = _flag("SWEBENCH_UPLIFT_EDIT_MANDATE", True)
-    validation = _flag("SWEBENCH_UPLIFT_VALIDATION", False)
+    validation = _flag("SWEBENCH_UPLIFT_VALIDATION", True)
     selection = _flag("SWEBENCH_UPLIFT_SELECTION", False)
     try:
         rounds = int(os.environ.get("SWEBENCH_UPLIFT_TOOL_ROUNDS", UPLIFT_TOOL_ROUNDS))

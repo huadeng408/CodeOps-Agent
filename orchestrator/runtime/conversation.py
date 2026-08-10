@@ -138,6 +138,20 @@ class CachedToolResult:
     is_error: bool
 
 
+def _strip_leading_tool_messages(window: list[ChatMessage]) -> list[ChatMessage]:
+    """Drop tool messages at the head of *window*, which have nothing to answer.
+
+    A ``tool`` message is only meaningful directly after the assistant message
+    whose ``tool_calls`` it responds to. At the head of a compacted window that
+    assistant message is gone, and providers that enforce the pairing reject the
+    whole request rather than ignoring the stray message.
+    """
+    start = 0
+    while start < len(window) and window[start].role == "tool":
+        start += 1
+    return window[start:]
+
+
 @dataclass(slots=True)
 class ConversationRunner:
     graph: MainGraph
@@ -1394,17 +1408,32 @@ class ConversationRunner:
             if msg.role == "tool":
                 orphan_start = i
                 break
-        if orphan_start is not None and orphan_start > 0:
-            # The first recent message is a tool result.  Walk backwards
-            # through compactable to find the matching assistant(tool_calls)
-            # message and include it + all intermediate messages.
-            search_start = len(compactable) - recent_count - 1
-            for idx in range(search_start, -1, -1):
-                m = compactable[idx]
-                if m.role == "assistant" and m.tool_calls:
-                    # Include this assistant message → re-slice recent
-                    recent = compactable[idx:]
-                    break
+        if orphan_start is not None:
+            # An earlier version guarded this with ``orphan_start > 0``, which
+            # excluded the only case that is actually broken: when the window
+            # *begins* with a tool result there is no assistant message in front
+            # of it at all.  DeepSeek rejects that request outright — "Messages
+            # with role 'tool' must be a response to a preceding message with
+            # 'tool_calls'", HTTP 400 — which kills the instance mid-solve. The
+            # comment above the old guard described ``orphan_start == 0`` while
+            # the code tested for its complement.
+            anchored = any(
+                msg.role == "assistant" and msg.tool_calls
+                for msg in recent[:orphan_start]
+            )
+            if not anchored:
+                # Walk backwards for the assistant message whose tool_calls this
+                # answers, and re-slice from there so the pair travels together.
+                search_start = len(compactable) - len(recent) - 1
+                for idx in range(search_start, -1, -1):
+                    candidate = compactable[idx]
+                    if candidate.role == "assistant" and candidate.tool_calls:
+                        recent = compactable[idx:]
+                        break
+                # If no anchor exists anywhere, the tool results are
+                # unattributable. Dropping them loses a little context; sending
+                # them loses the whole instance.
+                recent = _strip_leading_tool_messages(recent)
 
         return [system, ChatMessage(role="system", content=summary), *recent]
 

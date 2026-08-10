@@ -297,6 +297,69 @@ def _augment_for_uplift(instance: EvalInstance, workdir: str) -> EvalInstance:
     return replace(instance, task_description=augmented)
 
 
+def _retry_if_disqualified(
+    instance: EvalInstance,
+    result: EvalResult,
+    workdir: Path,
+    adapter: AgentAdapter,
+    **kwargs: Any,
+) -> EvalResult:
+    """Give the agent one more attempt when its patch provably cannot pass.
+
+    Only fires in the optimized arm, and only when validation *disqualifies* the
+    patch — empty, not a diff, or tests-only. Those are the cases where the
+    official scorer's verdict is already determined and re-running it would spend
+    a container to learn nothing. The baseline submitted 9 empty patches out of
+    10 and paid for all 10 verdicts.
+
+    Deliberately one retry, not a loop. The feedback here is about the *shape* of
+    the submission, not its correctness, so a second failure means the agent did
+    not understand the delivery contract and a third attempt would not change
+    that. Looping on a signal that cannot improve is how a retry budget turns
+    into a bill.
+
+    The feedback text contains only what the harness observed about the agent's
+    own output. No test names, no expected behaviour, nothing from the dataset.
+    """
+    from eval.harness.uplift import uplift_config
+    from eval.harness.validate import validate_patch
+
+    config = uplift_config()
+    if not (config.enabled and config.validation):
+        return result
+
+    report = validate_patch(result.model_patch, str(workdir))
+    if not report.disqualified:
+        return result
+
+    reasons = "\n".join(f"- {check.detail}" for check in report.blocking)
+    print(f"[uplift] retrying {instance.instance_id}: {report.summary}")
+    retry_instance = replace(
+        instance,
+        task_description=(
+            f"{instance.task_description}\n\n"
+            "## Your previous attempt was not submittable\n\n"
+            "An automated check of the working directory found:\n\n"
+            f"{reasons}\n\n"
+            "This is about the form of your submission, not whether your "
+            "diagnosis was right. Apply your fix to the source file with the "
+            "editing tools now, then run `git diff` to confirm it is present."
+        ),
+    )
+    retried = adapter.solve_instance(
+        retry_instance, working_dir=str(workdir), **kwargs
+    )
+    if not retried.model_patch:
+        retried.model_patch = _capture_git_diff(str(workdir))
+    # Keep the retry only if it produced something the first attempt did not.
+    # A retry that came back empty must not erase a first attempt that did not.
+    if validate_patch(retried.model_patch, str(workdir)).disqualified and result.model_patch:
+        return result
+    if not retried.instance_id:
+        retried.instance_id = instance.instance_id
+    return retried
+
+
 def load_synthetic_instances() -> list[EvalInstance]:
     """Build EvalInstance objects from the bundled synthetic dataset.
 
@@ -1657,6 +1720,9 @@ class SWEBenchAdapter(AgentBenchmark):
         )
         if not result.model_patch:
             result.model_patch = _capture_git_diff(str(workdir))
+        result = _retry_if_disqualified(
+            instance, result, workdir, adapter, **kwargs
+        )
         if not result.instance_id:
             result.instance_id = instance.instance_id
         return result
