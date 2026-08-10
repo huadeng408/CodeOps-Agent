@@ -2438,6 +2438,15 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说明「评分只读 `git diff`」。模型按对话直觉输出代码块 | 正确修复被判 fail（见 `13236`） | `VERIFIED`（已加 grading contract） |
 | 17 | **`_compact_messages` 的 tool 邻接修复用了反向的守卫**：`if orphan_start > 0` | 该分支只在「已经有 anchor」的情况下才走修复，**恰好跳过唯一真正坏的情况** `orphan_start == 0`——窗口第一条就是 tool 结果、前面根本没有 assistant(tool_calls)。守卫上方的注释描述的正是 `== 0`，代码测的是它的补集 | DeepSeek 直接拒绝整个请求（`HTTP 400: Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`），**实例在 solve 中途死亡**。本轮 arm A 重跑时实时观测到 | `VERIFIED`（已修 + 11 条回归） |
 | 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：每个实例照样 clone astropy、照样起镜像、照样调官方 scorer，产出的数字描述的是**凭证**而不是 Agent | 12 分钟算力换一堆无意义判定 | `VERIFIED`（1 次请求即闸断） |
+| 19 | **run 级 token 预算固定 500k，且耗尽被分类为 `agent`** | 预算是**全 run 累计**的，固定默认值必然截断任何比「选定它时」更大的 run。20 实例 run 在第 6 个之后耗尽，其余 14 个全部死于 `budget tokens exceeded: 542854 > 500000`，并被记为 `ERROR_AGENT`。产物摘要写的是「20 total, 5 ok, 15 failed, agent: 14」——**字面读作「模型失败了 14 次」，而模型连那 14 个都没见到**。arm B 更狠：24 轮使每实例 token 约 3 倍，**第 2 个实例之后就耗尽**（2 ok / 17 agent） | 这是缺陷族**再外一层**：不是基础设施故障伪装成业务判定，而是**资源策略**伪装成业务判定 | `VERIFIED`（双修 + 12 条回归） |
+| 20 | **两臂 manifest 除 `run_id` 外逐字节相同** | 没有任何字段记录「本产物出自哪一臂」。`instances.jsonl` 也帮不上：它按设计存**数据集原文**而非增强后的 prompt（避免污染记录），于是「uplift 到底生效了吗」**无法只凭产物回答**——我确认 arm B 时正好撞上这面墙 | 对照实验的溯源漏洞：产物无法回答实验本身要问的问题 | `VERIFIED`（`harness_uplift` 块 + 4 条测试） |
+
+**缺陷 19 的修复也是双层的，理由与缺陷 14 同构**：
+
+1. **归因**：新增 `ERROR_BUDGET` 类别，只收**累计型 run 级池**（tokens、cost）——第 7 个实例失败时这些池已被第 1–6 个抽干，该失败**与第 7 个实例的 agent 无关**。`processes` **故意保留 `ERROR_AGENT`**：那是**每实例瞬时上限**，确实是 agent 自己的行为撞上去的。此处有一条既有测试直接抓住了我的第一版——我当时把所有 budget kind 一律移出 agent，它证伪了这个偷懒。
+2. **定额**：默认预算改为「每实例额度 × 实例数」。runaway 保护是**单个实例行为**的性质，不是「一共要跑几个」的性质。实例在预算定额之前加载；显式 `EVAL_BUDGET_*` 仍按**硬总额**原样生效。
+
+有一条测试钉的是**推理而非常量**：实测的 542,854 tokens 仍然突破 flat 500k，而在按 20 实例定额后通过。
 
 **缺陷 14 的修复是双层的，两层互不依赖**：
 
