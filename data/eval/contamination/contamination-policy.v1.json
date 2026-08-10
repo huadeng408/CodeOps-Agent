@@ -37,12 +37,13 @@
   },
 
   "input_pins": {
+    "line_ending_note": "Re-pinned 2026-08-10 to canonical LF bytes. The original queries/qrels pins (faf3fb19… / 19756 and 6539d3ff… / 47847) were computed against a working tree that core.autocrlf=true had already rewritten to CRLF, so they pinned a local Git-filter artifact rather than the committed bytes and could only ever verify on a Windows clone. The proof this is a representation change and not a content change: LF-normalising each file reproduces its committed blob byte-for-byte (verified across all 25 affected data/ artifacts). The same policy already pinned split_policy_sha256 against LF, so the file was internally inconsistent about line endings. .gitattributes now marks data/ artifacts -text so the conversion cannot recur; the SLA and thresholds below are untouched.",
     "queries_file": "data/eval/techdocs/queries.text.jsonl",
-    "queries_sha256": "faf3fb19adedb1369fff8009728faaee9982820a045ddcf018153c1d62a7a243",
-    "queries_bytes": 19756,
+    "queries_sha256": "15d549e61cbfcceb183dc087aeb1a749230c9d8b6c12acc1f229a3730d17a454",
+    "queries_bytes": 19576,
     "qrels_file": "data/eval/techdocs/qrels.text.jsonl",
-    "qrels_sha256": "6539d3ffd11814418a1e589e929599105ffbce7f25fc7f0cfc80cbb2c72873d8",
-    "qrels_bytes": 47847,
+    "qrels_sha256": "bf472829c1a334a7eb624f5d6dc9c09002d562573f1b6e0d60e0e6f6b95329ad",
+    "qrels_bytes": 47667,
     "split_policy_file": "data/eval/techdocs/split-policy.v1.json",
     "split_policy_sha256": "c053d3564eacd7d9d18519d9ccbafb308654968c6372fa70803dd894f488e5f9"
   },

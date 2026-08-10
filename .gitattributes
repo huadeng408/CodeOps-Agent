@@ -1,0 +1,34 @@
+# Line-ending policy.
+#
+# Why this file exists: with `core.autocrlf=true` (the Windows default, and what
+# this repo was cloned with) Git rewrites LF to CRLF on checkout.  For ordinary
+# source that is harmless.  For the evaluation artifacts under `data/` it is
+# not: their *bytes* are the evidence.  Each policy file is pinned by a
+# `.sha256` sidecar, and qrels/queries bytes feed `qrels_hash` and the
+# provenance claims in `split-manifest.v1.json`.
+#
+# Left unguarded, a fresh clone on Windows fails 78 tests with
+# `POLICY_HASH_MISMATCH` — which reads as "the policy was tampered with" when
+# the truth is "Git changed the line endings on checkout".  That is the same
+# defect shape this project keeps finding: an infrastructure fault wearing a
+# business verdict's clothes.  Marking the artifacts `-text` makes Git store and
+# emit them byte-for-byte, so the hash pin means what it claims to mean.
+
+# Evaluation data artifacts: byte-pinned evidence, never line-ending converted.
+data/**/*.json    -text
+data/**/*.jsonl   -text
+data/**/*.sha256  -text
+data/**/*.rc      -text
+
+# Test fixtures compared or hashed as bytes (e.g. MinerU middle.json).
+tests/fixtures/**/*.json  -text
+tests/fixtures/**/*.jsonl -text
+
+# Normalize source to LF in the repository; checkout may localise it freely.
+*.py   text eol=lf
+*.go   text eol=lf
+*.md   text
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.proto text eol=lf
