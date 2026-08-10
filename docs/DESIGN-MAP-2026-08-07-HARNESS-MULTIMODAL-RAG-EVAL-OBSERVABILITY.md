@@ -2440,6 +2440,7 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：每个实例照样 clone astropy、照样起镜像、照样调官方 scorer，产出的数字描述的是**凭证**而不是 Agent | 12 分钟算力换一堆无意义判定 | `VERIFIED`（1 次请求即闸断） |
 | 19 | **run 级 token 预算固定 500k，且耗尽被分类为 `agent`** | 预算是**全 run 累计**的，固定默认值必然截断任何比「选定它时」更大的 run。20 实例 run 在第 6 个之后耗尽，其余 14 个全部死于 `budget tokens exceeded: 542854 > 500000`，并被记为 `ERROR_AGENT`。产物摘要写的是「20 total, 5 ok, 15 failed, agent: 14」——**字面读作「模型失败了 14 次」，而模型连那 14 个都没见到**。arm B 更狠：24 轮使每实例 token 约 3 倍，**第 2 个实例之后就耗尽**（2 ok / 17 agent） | 这是缺陷族**再外一层**：不是基础设施故障伪装成业务判定，而是**资源策略**伪装成业务判定 | `VERIFIED`（双修 + 12 条回归） |
 | 20 | **两臂 manifest 除 `run_id` 外逐字节相同** | 没有任何字段记录「本产物出自哪一臂」。`instances.jsonl` 也帮不上：它按设计存**数据集原文**而非增强后的 prompt（避免污染记录），于是「uplift 到底生效了吗」**无法只凭产物回答**——我确认 arm B 时正好撞上这面墙 | 对照实验的溯源漏洞：产物无法回答实验本身要问的问题 | `VERIFIED`（`harness_uplift` 块 + 4 条测试） |
+| 21 | **官方 scorer 的 transport flake 被记成「未测到」** | 官方 harness 在跑任何测试**之前**先从 `raw.githubusercontent.com` 取每实例的 environment spec。该请求以 `SSLEOFError` 每 run 死一个实例；同一 URL 手动经同一代理重试 **6/6 返回 200**。这是传输抖动，不是 patch 的性质，但该实例就此无判定 | 重试 transport **不等于**重摇测量：prediction 文件未变、尚无任何测试执行过。signature 清单**故意窄**，并有测试断言「patch 应用失败 / 镜像构建失败 / KeyError / `Instances resolved: 0`」**一律不重试**——放宽它就会把不稳定的测量变成看起来稳定的 | `VERIFIED`（1 次重试 + 4 条测试） |
 
 **缺陷 19 的修复也是双层的，理由与缺陷 14 同构**：
 
@@ -2490,6 +2491,7 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 | 唯一变量 | `SWEBENCH_HARNESS_UPLIFT`（A 臂不设，B 臂设为 1） |
 | 统计 | McNemar 不一致对计数（A 过 B 挂 / A 挂 B 过），**不报 p 值**：N=20 上的 p 值是装饰 |
 | 报告口径 | **只能写「astropy-20 subset 上 k/20」**，**不得**写成 SWE-bench Verified 分数。subset 是单仓库、dev 口径，且含已污染实例 `12907`（见 §31.8 第 4 条） |
+| **两臂间已知的一处非受控差异** | **A 臂在 scorer 重试（缺陷 21）落地之前启动，B 臂之后。**必须声明，不得隐去。对结论无偏的理由：配对只取**两臂都测到**的实例交集，A 臂因 transport flake 未测到的实例对两臂**同时**剔除；而网络抖动与 patch 质量独立，故剔除不偏向任一臂。**代价是 N 变小，不是方向变偏。**若 A 臂 scorer 失败数 > 3，则 N 太小、必须整臂重跑，不得靠「样本少一点」糊过去 |
 | 消融 | `SWEBENCH_UPLIFT_LOCALIZATION` / `_EDIT_MANDATE` / `_TOOL_ROUNDS` 可单独关闭，用于把增益归因到**部件**而非**整包** |
 
 **必须提前声明的一条**：baseline 的空 patch 主因是 turn 预算与交付形态（缺陷 15、16），而这两项的修复**近乎必然**会把分数从「几乎 0」抬起来。因此若 B 臂显著更高，**诚实的归因是「预算 + 交付契约 + 定位」三者之和，其中前两项是基础工程缺陷的修复，而不是精妙架构的胜利**。把这个数字整包记到「分层定位」头上就是自欺——消融开关就是为了让这句话可被检验，而不是只是一句谦辞。
