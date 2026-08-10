@@ -666,6 +666,12 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
             "max_processes": harness.budget.max_processes,
         },
         "seed": config.get("seed", 42),
+        # Which arm of a paired experiment produced this artifact. Without it the
+        # two arms' manifests are byte-identical apart from the run_id, so an
+        # artifact could not answer the one question the experiment is about.
+        # Recorded from the environment at manifest time, which is the same
+        # source the solve path reads, so the two cannot disagree.
+        "harness_uplift": _uplift_manifest_block(),
         "start_time": config.get("start_time", ""),
         # "disabled" must never be claimed while a remote host was reachable:
         # that would misstate the conditions the measurement was taken under.
@@ -682,6 +688,22 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
             "skipped": summary.get("skipped", summary.get("resumed_skipped", 0)),
         },
     }
+
+
+def _uplift_manifest_block() -> dict[str, Any]:
+    """Describe the active optimization arm for the manifest.
+
+    Degrades to ``{"enabled": False, "unavailable": ...}`` rather than raising:
+    an unreadable optimization config must not stop a run from recording what it
+    could determine, and a manifest that says "I could not tell" is more useful
+    than a manifest that says nothing.
+    """
+    try:
+        from eval.harness.uplift import uplift_config
+
+        return uplift_config().as_manifest_block()
+    except Exception as exc:  # pragma: no cover - defensive by intent
+        return {"enabled": False, "unavailable": f"{type(exc).__name__}: {exc}"}
 
 
 def _mark_workspace_preserved(workspace: Path, category: str, message: str) -> None:

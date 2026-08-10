@@ -320,3 +320,49 @@ def test_uplift_source_never_mentions_answer_fields():
     source = inspect.getsource(uplift)
     for field in ("test_patch", "FAIL_TO_PASS", "PASS_TO_PASS", "hints_text", "gold_patch"):
         assert field not in source, f"{field} must not be reachable from the uplift path"
+
+
+# ------------------------------------------------- manifest provenance (arm ID)
+
+
+def test_manifest_block_records_the_baseline_arm():
+    """An arm A manifest must say so, not merely omit the field."""
+    from eval.harness.runner import _uplift_manifest_block
+
+    block = _uplift_manifest_block()
+    assert block["enabled"] is False
+    assert block["components"] == []
+    assert block["tool_rounds"] == uplift.BASELINE_TOOL_ROUNDS
+
+
+def test_manifest_block_records_the_optimized_arm(monkeypatch):
+    from eval.harness.runner import _uplift_manifest_block
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    block = _uplift_manifest_block()
+    assert block["enabled"] is True
+    assert "localization" in block["components"]
+    assert block["tool_rounds"] == uplift.UPLIFT_TOOL_ROUNDS
+
+
+def test_manifest_block_distinguishes_the_two_arms(monkeypatch):
+    """The property that makes an artifact attributable to an arm."""
+    from eval.harness.runner import _uplift_manifest_block
+
+    monkeypatch.delenv(uplift.UPLIFT_ENV, raising=False)
+    arm_a = _uplift_manifest_block()
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    arm_b = _uplift_manifest_block()
+    assert arm_a != arm_b
+
+
+def test_manifest_block_degrades_instead_of_raising(monkeypatch):
+    from eval.harness import runner
+
+    def boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr("eval.harness.uplift.uplift_config", boom)
+    block = runner._uplift_manifest_block()
+    assert block["enabled"] is False
+    assert "unavailable" in block
