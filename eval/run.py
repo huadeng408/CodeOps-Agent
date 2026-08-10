@@ -412,15 +412,52 @@ def main(argv: list[str] | None = None) -> int:
 
     adapter = create_driver(model=model, base_url=base_url, use_runner=use_runner)
 
+    # ---- Load instances (benchmark MUST expose load_instances) ----
+    # Done before the budget is sized: the budget is enforced across the whole
+    # run, so a fixed default silently truncates any run larger than the one it
+    # was chosen for. A 500k token cap let 6 of 20 instances through and the
+    # remaining 14 were recorded as failures.
+    subset_ids, subset_meta = _load_subset(subset_path)
+    if subset_ids:
+        instances = benchmark_mod.load_instances(limit=None, instance_ids=subset_ids)
+        print(
+            f"[eval] subset    : {subset_meta.get('subset_id', subset_path)} "
+            f"({len(subset_ids)} instances, sha256 "
+            f"{subset_meta.get('_sha256', '')[:12]})"
+        )
+    else:
+        instances = benchmark_mod.load_instances(limit=limit)
+
     # ---- Create HarnessRun (the ONLY execution path) ----
     from eval.harness import HarnessRun, Budget, RunArtifacts
 
     artifacts = RunArtifacts(run_id=run_id, root=str(output_dir))
+    instance_count = max(1, len(instances))
+    # Per-instance allowances, multiplied by the instance count. The point of the
+    # budget is to stop a runaway, and "runaway" is a property of one instance's
+    # behaviour, not of how many instances were requested. An explicit
+    # EVAL_BUDGET_* value is still honoured verbatim as a hard total.
     budget = Budget(
-        wall_clock_seconds=float(os.environ.get("EVAL_BUDGET_SECONDS", "3600")),
-        max_tokens=int(os.environ.get("EVAL_BUDGET_TOKENS", "500000")),
-        max_cost=float(os.environ.get("EVAL_BUDGET_COST", "10.0")),
-        max_output_bytes=int(os.environ.get("EVAL_BUDGET_OUTPUT_BYTES", "5000000")),
+        wall_clock_seconds=float(
+            os.environ.get("EVAL_BUDGET_SECONDS")
+            or 900.0 * instance_count
+        ),
+        max_tokens=int(
+            os.environ.get("EVAL_BUDGET_TOKENS")
+            or 250_000 * instance_count
+        ),
+        max_cost=float(
+            os.environ.get("EVAL_BUDGET_COST") or 2.0 * instance_count
+        ),
+        max_output_bytes=int(
+            os.environ.get("EVAL_BUDGET_OUTPUT_BYTES")
+            or 5_000_000 * instance_count
+        ),
+    )
+    print(
+        f"[eval] budget    : {instance_count} instance(s) × "
+        f"(250k tokens, 900s, $2.00) = {budget.max_tokens:,} tokens, "
+        f"{budget.wall_clock_seconds:.0f}s, ${budget.max_cost:.2f}"
     )
     harness = HarnessRun(
         run_id=run_id,
@@ -458,19 +495,7 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
 
-    # ---- Load instances (benchmark MUST expose load_instances) ----
-    subset_ids, subset_meta = _load_subset(subset_path)
-    if subset_ids:
-        instances = benchmark_mod.load_instances(
-            limit=None, instance_ids=subset_ids
-        )
-        print(
-            f"[eval] subset    : {subset_meta.get('subset_id', subset_path)} "
-            f"({len(subset_ids)} instances, sha256 "
-            f"{subset_meta.get('_sha256', '')[:12]})"
-        )
-    else:
-        instances = benchmark_mod.load_instances(limit=limit)
+    # Instances were loaded above, before the budget was sized from their count.
 
     print(f"[eval] benchmark : {benchmark_name}")
     print(f"[eval] model     : {model}")

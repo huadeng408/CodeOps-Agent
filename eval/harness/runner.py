@@ -49,6 +49,15 @@ ERROR_OOM = "oom"
 ERROR_INFRA = "infra"
 ERROR_AGENT = "agent"
 ERROR_SCORER = "scorer"
+#: The harness stopped the agent to protect a budget. This is emphatically NOT
+#: ``ERROR_AGENT``: the agent did not try and fail, it was cut off. Routing token
+#: exhaustion to ``ERROR_AGENT`` produced a 20-instance run that reported
+#: "5 ok, 15 failed, agent: 14" when what actually happened was that a run-level
+#: 500k token cap — sized for a single instance — ran out after the sixth. Read
+#: literally, that summary said the model failed 14 times; it never saw 14 of
+#: them. Same shape as every other defect in this family: a harness-side
+#: condition wearing a verdict's clothing.
+ERROR_BUDGET = "budget"
 
 # Reserved key a scorer callback may return to hand the harness the official
 # harness's raw output as ``{filename: content}``.  It is popped from the
@@ -84,7 +93,18 @@ def classify_error(exc: BaseException) -> str:
         if exc.kind == "wall-clock":
             return ERROR_TIMEOUT
         if exc.kind == "output":
+            # Kept as OOM for continuity with existing artifacts: an output-byte
+            # blowout is at least named after a resource rather than blamed on
+            # the model.
             return ERROR_OOM
+        if exc.kind in ("tokens", "cost"):
+            # Cumulative, run-wide pools. By the time instance 7 fails on these,
+            # they were drained by instances 1-6, so the failure says nothing
+            # about instance 7's agent. See ERROR_BUDGET.
+            return ERROR_BUDGET
+        # Everything else, notably "processes": a per-instance, instantaneous cap
+        # that the agent's own behaviour hit. Attributing that to the agent is
+        # correct — it really did try to spawn past the limit.
         return ERROR_AGENT
     if isinstance(exc, subprocess.TimeoutExpired) or isinstance(exc, TimeoutError):
         return ERROR_TIMEOUT
@@ -222,6 +242,7 @@ class HarnessRun:
                 ERROR_INFRA: 0,
                 ERROR_AGENT: 0,
                 ERROR_SCORER: 0,
+                ERROR_BUDGET: 0,
             },
         }
 
