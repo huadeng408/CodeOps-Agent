@@ -55,7 +55,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 **这条能说什么**：统一 Harness 的 `prepare → solve → score` 生命周期在一个真实实例上跑到了官方判定，`FAIL_TO_PASS` 2/2、`PASS_TO_PASS` 13/13。
 **这条不能说什么**：n=1，不是能力分数；这条实例在修 `namespace` 的过程中被反复使用，已属 **development set**，永久不得进 holdout。
 
-## 3. 十三个缺陷，一个形状
+## 3. 十八个缺陷，两个形状
 
 | # | 缺陷 | 为什么它是「基础设施故障伪装成业务判定」 | 状态 |
 |---|---|---|---|
@@ -66,14 +66,70 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 5 | 官方原始输出从来不是发布证据 | 真报告留在 `logs/run_evaluation/`，**在产物树外、因而在 `checksums.sha256` 外**；判定只以 harness 自己那条被截断的转述存在 | `VERIFIED`（本轮真实 run 产出 `scorer/` 4 文件并入 pin） |
 | 6 | `error` 字段记的是「模型还在用工具」，不是「出错了」 | `done.success` 回答的是「模型自己干净收尾了吗」，工具轮次用尽也记 `False`。于是产物自相矛盾：`error='runner completed with done.success=False'` 与 `resolved=True`、`ok:1` 并存 | `VERIFIED`（代码已修 + 12 tests） |
 | 7 | 下游 scorer 谓词把**正确** patch 记为 unresolved 并标 `ERROR` | `run_swebench_honest_10.py:246` 用 `r.get("model_patch") and not r.get("error")` 当 resolved。缺陷 6 一污染 `error`，这条正确 patch 就被记成失败。**该脚本任何历史 10 实例数字都按轮次耗尽的条数低估** | `VERIFIED`（该脚本未跟踪，属探索期产物） |
-| 8 | harness 转述结构性有损：`detail = result.stdout[-200:]` | 200 字符尾切片会从中间切断官方 summary。修掉编码故障后，`h5-full` 的 `scorer_status` 里 `Instances resolved` **仍然缺失**。判定之所以可信，是因为 `_read_official_resolution()` 读官方 `report.json`，**不是**因为这条转述——这正说明转述永远不能当证据 | `VERIFIED`（本轮新发现，**未修**） |
-| 9 | 关键 pin 为空值仍能通过 preflight | 本轮 `run-manifest.json` 的 `model_revision`、`prompt_hash`、`qrels_hash`、`physical_index` **全是空字符串**，preflight 照样放行。所以这次 run 依然带着 `MODEL_IDENTITY_UNVERIFIED` | `VERIFIED`（本轮新发现，**未修**） |
+| 8 | harness 转述结构性有损：`detail = result.stdout[-200:]` | 200 字符尾切片会从中间切断官方 summary。修掉编码故障后，`h5-full` 的 `scorer_status` 里 `Instances resolved` **仍然缺失**。判定之所以可信，是因为 `_read_official_resolution()` 读官方 `report.json`，**不是**因为这条转述——这正说明转述永远不能当证据 | `VERIFIED`（**已修**：`_summarise_official_stdout()` 逐条提取官方 7 个计数标签，原始 stdout 落 `scorer/`） |
+| 9 | 关键 pin 为空值仍能通过 preflight | 本轮 `run-manifest.json` 的 `model_revision`、`prompt_hash`、`qrels_hash`、`physical_index` **全是空字符串**，preflight 照样放行。所以这次 run 依然带着 `MODEL_IDENTITY_UNVERIFIED` | `VERIFIED`（**已修**：`pin_contract.py` 三档 REQUIRED / CAPABILITY / DEGRADABLE，空值 pin 不再放行） |
 | 10 | 污染扫描的取数故障映射成「发现污染」 | 形状不符时 `AttributeError` 逃到解释器 → 退出码 1 = 冻结 policy 的 `BLOCKING` = **「发现了污染」**。同一形状的第 8 例。已改为显式验形 + rc 2（取数故障） | `VERIFIED`（设计地图 §30.1） |
 | 11 | `numpy` 被两个模块 import 却从未声明 | 普通缺陷，不属本形状。已补进 `eval` extra | `VERIFIED` |
 | 12 | 契约把 `invoke_agent`/`execute_tool` 归给 `go-agent`，而这条路径根本没有 Go agent | headless 驱动在 Python 进程内执行 Read/Write/Edit/Bash/Glob/Grep。缺失时报 `go-agent`，会把下一个人指去启一个这条路径永不联系的服务——**producer 字段本身就是为消除「不可行动判定」而存在的，它却给出了不可行动的判定**。同时暴露一个更隐蔽的诱惑：把 Go agent 做成可声明能力就能让判定变绿，而那会豁免掉唯一能证明工具真的执行过的 span。修法只能是去真实站点补 span | `VERIFIED`（`4a673590`，真实 run 判定 `PASS`） |
 | 13 | `core.autocrlf=true` 改写字节，被记成「策略被篡改」 | `data/` 下 25 个 JSON/JSONL 的**字节就是证据**：策略由 `.sha256` 旁挂文件钉住，queries/qrels 字节写在 `contamination-policy.v1.json` 里。Windows 检出把 LF 换成 CRLF 后，测试报 `POLICY_HASH_MISMATCH` 和 `bytes changed since the freeze`——读起来是「有人动了金标」，真相是「Git 换了行尾」。合并分支时一次性触发 **78 个测试失败，全部同一个原因**。更糟的是同一份策略内部就不自洽：split-policy 按 LF 钉、queries/qrels 按 CRLF 钉，说明这些 pin 记录的是**某台机器上 Git 过滤器的产物**，而非提交的字节，在 Linux CI 上必然失败 | `VERIFIED`（`736e1964`，`.gitattributes` + 重钉 + 29 个回归测试） |
 
-**计数口径**：11 条里 **8 条**（1、2、3、4、6、7、9、10）是「基础设施故障 → 业务判定」；**2 条**（5、8）是「判定没有原始证据」；**1 条**（11）是普通缺陷。第 8、9 条是本轮新发现且**尚未修复**，写在这里是因为未修的已知缺陷也是证据。
+| 14 | 官方 scorer 的 `run_id` 只按实例命名（`f"swebench-{instance_id}"`），**跨 run 恒定** | 官方 harness 用 `run_id` 派生 `logs/run_evaluation/<run_id>/…`，于是同一实例的每次 run **共用同一棵日志树**。一个 **0 字节 patch 的实例读到 8.4 小时前另一次 run 的 `report.json`，记为 `resolved=True`**——而同一条记录里的官方 summary 明写 `empty_patch_ids: [12907]`、`resolved_ids: []`。这是第二个形状：**不是基础设施故障伪装成业务判定，而是另一次 run 的判定伪装成这次的**。对 before/after 对照实验致命：两臂可静默共用判定 | `VERIFIED`（双层修复 + 11 条回归） |
+| 15 | `max_tool_rounds=8` 硬编码 | 对 astropy 规模的 repo，「搜索→读→改→验」四步做不完，**预算耗尽点恰好落在编辑之前**。于是分数近乎 0，而失败方向再次一致指向「模型弱」 | `VERIFIED`（已参数化） |
+| 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说「评分只读 `git diff`」。模型按对话直觉输出代码块。`astropy-13236` 的回复是**针对该 issue 正确的修复**，`git diff` 为空 → 判 fail。**已解决的问题被记成没解决** | `VERIFIED`（已加 grading contract） |
+| 17 | `_compact_messages` 的 tool 邻接修复用了**反向守卫** `if orphan_start > 0` | 该分支只在「已经有 anchor」时才修，**恰好跳过唯一真正坏的 `orphan_start == 0`**——窗口第一条就是 tool 结果、前面根本没有 assistant(tool_calls)。**守卫上方的注释描述的正是 `== 0`，代码测的是它的补集。**DeepSeek 直接拒绝整个请求（`HTTP 400`），实例 solve 中途死亡 | `VERIFIED`（已修 + 11 条回归） |
+| 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：照样 clone astropy、照样起镜像、照样调官方 scorer，**产出的数字描述的是凭证而不是 Agent**。与缺陷 4 同源：能失败的检查必须真的能失败 | `VERIFIED`（1 次请求即闸断） |
+
+**计数口径**：18 条里 **10 条**（1、2、3、4、6、7、9、10、15、16）是「基础设施/配置故障 → 业务判定」；**2 条**（5、8）是「判定没有原始证据」；**1 条**（14）是新形状「另一次 run 的判定伪装成这次的」；**1 条**（17）是守卫写反；**1 条**（18）是缺失的 preflight；其余为普通缺陷。缺陷 8、9 此前记为「未修」，**现已修复**，上表已就地更新。
+
+## 3.5 一个平庸的 Harness 为什么平庸：先量机理，再改架构
+
+这是本项目最完整的一次「诊断 → 设计 → 对照」闭环，也是我最愿意被追问的一段。
+
+### 症状
+
+自研 Harness 在 astropy-20 subset 上几乎拿不到分。最省事的解释是「模型不够强」，而且所有表面证据都支持它：`resolved=False` 连成一片。
+
+### 我实际做的事：不看分数，看 trace
+
+一次真实 run 的 `traces/trace-summary.json`（233 spans）按 `eval.instance_id` 聚合后：
+
+| 事实 | 数值 |
+|---|---|
+| 工具调用构成 | Grep 42 / Read 30 / Glob 9 / Bash 15 = **96 次搜索类**，**Edit 仅 2 次** |
+| 零编辑实例 | **11 个已评分实例中 9 个 `edits=0`** |
+| 轮次 | 几乎每个实例 `chats=9`，而 `max_tool_rounds=8` |
+| 空 patch | 9/10 实例 `model_patch` 为 **0 字节**，`tokens_out` 却是 1251–20091 |
+
+**决定性的那条证据**：`astropy-13236` 的 `answer` 字段里是一段**针对该 issue 正确的修复代码**（`NdarrayMixin` 的 `AstropyFutureWarning`）。它只存在于回复文本里，`git diff` 为空，因此判 fail。
+
+而唯一两个 `edits≥1` 的实例（`13033`、`14365`），**正是唯一产出非空 patch 的实例**。
+
+### 机理
+
+8 轮预算在「找 bug」阶段被搜索类调用耗尽，模型在最后一轮被迫把修复**写成回复**而不是**写进文件**；而 scorer 只读 `git diff`。
+
+所以低分与推理能力无关——**瓶颈在预算分配与交付形态**。这也解释了为什么换更强的模型救不回分数。
+
+### 按机理对症的四项改动
+
+| 组件 | 对症 | 设计要点 |
+|---|---|---|
+| **分层定位**（BM25 两级：文件 → 函数） | 96:2 的搜索/编辑比 | 文件级用 `ast` 抽 module docstring + 类/函数名做 profile，**不用全文**——否则长模块靠词频压过短而精确的模块。粒度**停在函数级而非行级**：一个自信但错误的行号，比一个诚实的函数区间更有害 |
+| **轮次预算** `8 → 24` | 预算耗尽点落在编辑之前 | 不设无限：无限预算只把「卡住的 agent」变成「卡住且昂贵的 agent」，并让增益无法归因 |
+| **交付契约**（prompt） | 模型不知道评分读什么 | 明写「评分读 `git diff`，不读你的回复」「回复里的修复得 0 分」「不要改测试」。**单独列为一个组件而不是混进定位里，是为了让写作时无法把它的效果记到机器上** |
+| **验证 + 一次反馈重试** | 9/10 空 patch | 证据带**方向**：`DISQUALIFYING`/`REGRESSION`/`WEAK_POSITIVE`/`NO_EVIDENCE`，**绝不把弱证据升格为判定**。空 patch / 只改测试直接失格 → 触发**一次**重试。不循环：反馈针对提交形态，第三次也改不了 |
+
+架构借鉴 Agentless 的 localize→repair 分层；粒度选择依据是仓库级修复的粒度研究（函数级优于文件级与行级）。best-of-N 选择也已实现，末位 tie-break 用 `sha256(diff)` 升序——**任意但固定**，因为公开的 test-time-compute 结果记录了在采样预算 8 上的**倒退**，成因之一正是随机 tie-break。它默认关闭：开启会让运行时间三倍，而实测损失不在这里。
+
+### 我会主动说出口的三件事
+
+1. **定位用词法 BM25 而不是向量检索**，因为项目现有 ES 索引装的是 techdocs 语料（24,877 chunk），**不含仓库源码**，接不上；为每实例现建 embedding 索引，成本高于它省下的轮次。这是约束下的选择，不是最优解。
+2. **对照实验做之前，我先修掉了一个会让实验彻底失效的缺陷**（缺陷 14）：官方 scorer 的 `run_id` 跨 run 恒定，两臂会静默共用判定。如果没先发现它，我会拿到一个「涨了」的数字而完全不知道它是假的。
+3. **归因必须诚实**：空 patch 的主因是轮次预算与交付形态，这两项的修复**近乎必然**把分数从「几乎 0」抬起来。所以若优化臂显著更高，诚实的说法是「**预算 + 交付契约 + 定位三者之和，其中前两项是基础工程缺陷的修复，不是精妙架构的胜利**」。为了让这句话可被检验而不只是一句谦辞，每个组件都有独立的消融开关。
+
+### 报告口径
+
+结果只能写成「**astropy-20 subset 上 k/20**」，**不是** SWE-bench Verified 分数：单仓库、dev 口径、含一个用于调试因而不独立的实例。不报 p 值（N=20 上是装饰），报 **McNemar 不一致对计数**。
 
 ## 4. 为什么这个形状值得当作方法论
 
@@ -97,7 +153,10 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | `scorer/` 原始输出落盘并 pin | 4 文件（`report.json` 2,165B / `run-summary.json` 17,749B / `run_instance.log` 4,403B / `test_output.txt` 302,799B）；`checksums.sha256` 覆盖全树 10 文件；`verify_checksums()` 返回空列表 | `VERIFIED` |
 | 缺陷 1/2/3/4/6/10/11 修复 | 各自 focused tests + 上述受控产物；Python 全量 **805 passed, exit 0**（65.76s，实测于 HEAD `092692f8`，在下方 O1/O2 未提交改动落入工作树**之前**） | `VERIFIED` |
 | 缺陷 5 落盘实现 | 由本轮真实 run 产出，不再只是「若存在则会被哈希」 | `VERIFIED` |
-| 缺陷 8/9 | 本轮新发现，代码未改 | `IMPLEMENTED` 之前的阶段：仅 `DESIGNED`（已定位，未修） |
+| 缺陷 8/9 修复 | 缺陷 8：`_summarise_official_stdout()` + `_SUMMARY_LABELS` 逐条提取官方 7 个计数标签，原始 stdout 落 `scorer/`；缺陷 9：`pin_contract.py` 三档 REQUIRED / CAPABILITY / DEGRADABLE，空值 pin 不再放行 | `VERIFIED`（此前记为「未修」，**已闭环**） |
+| 缺陷 14–18 修复 | 14：per-process `_SCORING_SESSION` + `not_before` 双层守卫（11 条回归）；15/16：轮次预算参数化 + grading contract（29 条）；17：tool 邻接反向守卫（11 条回归）；18：凭证 preflight | `VERIFIED`（Python 全量 **1116 passed**，81s） |
+| 分层定位 / 验证 / 选择 | `localize.py` 28 条、`validate.py` 20 条、`select.py` 20 条（含全排列下胜者唯一）、对照报告工具 14 条 | `IMPLEMENTED`（真实 run 未产出，不签 `VERIFIED`） |
+| **两臂对照实验** | A 臂运行中（`arm-a-baseline/…-be6d049d`，约 4.3 min/实例）；旧 run 受缺陷 14 污染，已移入 `_discarded-arm-a-contaminated/`（未删除，供复核），**其数字不得引用** | `BLOCKED`（A 臂未跑完，B 臂未开始） |
 | **H5 官方 1 实例门禁** | 五项**同时**满足于 `h5-full-traces-20260810-join/…-6c6eeac0`（161.0s）：manifest、prediction、官方 `scorer/` 四文件、`traces/` 两文件、`checksums.sha256` 12 条**逐条重算全部匹配**。trace 判定 `PASS`，`problems: 0`，20 span 同属一个 trace、0 悬空父节点、单一根 `eval.run`；链路 `eval.run → eval.instance → invoke_agent → 9×chat + 7×execute_tool（Read×3/Glob×2/Edit/Bash）`，`scorer.official` 挂 `eval.instance`；20 个 span 全带 `eval.run_id`，且只有一个取值。官方判定 `resolved=true`、`FAIL_TO_PASS` 2/2 | `VERIFIED`（n=1，非分数）。**口径限制**：该 `PASS` 依赖 SWE-bench 以 `TRACE_CAPABILITIES = ()` 声明的 `rag.retrieve`/`embedding` 豁免（豁免已写入产物、可审计）。RAG 基准仍必须产出这两类 span |
 | 生产 trace instrumentation（O1–O3） | 已提交（`4a673590`、`5e002b96`、`64f9299c`）。两处修的都是「契约本身错了」而非 run 错了：① `invoke_agent`/`execute_tool` 归给 `go-agent`，但 headless 驱动在 Python 进程内跑 Read/Write/Edit/Bash/Glob/Grep，链路里没有 Go agent——报 `go-agent` 会把人指去启一个这条路径永不联系的服务，正是 producer 字段本该消除的「不可行动判定」。改为 `agent-runtime` 并在真实站点补 span；**没有**把 Go agent 做成可声明能力，那会豁免掉唯一能证明工具真的跑了的 span。② `chat` span 缺 `eval.run_id`。用 OTel baggage 传播，**context 作用域而非时间作用域**——「capture 打开期间创建的都盖章」会把 run id 盖到无关后台线程的 span 上，契约的 join 检查就会接受伪造证据；`test_trace_join.py` 用「context 外创建的 span 必须不被盖章」这条对照组把差别钉死 | `VERIFIED`（926 tests） |
 | SWE-bench 10 实例 | 10/10 非空 patch，`resolved` 未知；官方评分从未在这 10 条上完成 | 探索结果，非分数 |
@@ -110,7 +169,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 多模态 RAG（M1–M5） | `data/eval/multimodal` 只有 `README.md` | `DESIGNED`，未开始 |
 | dev/holdout 防火墙（E3） | `split-manifest.v1.json`：`dev_size=180`、`holdout_size=0`、`holdout_status=BLOCKED` | `BLOCKED` |
 | 统一 Harness 旁路 | legacy `benchmark_mod.run()` 旁路已删除并经 AST 断言（0 call node） | `IMPLEMENTED` |
-| DeepSeek key 历史 | **已公开**（见 §7） | `BLOCKED`（需密钥所有者轮换） |
+| DeepSeek key 历史 | 曾公开于 `origin/main`（见 §7）。**工程侧已闭环**：仓库置为 private 后才推送含该 blob 的历史 | `BLOCKED`（**密钥轮换仍需密钥所有者操作**；轮换前禁止转 public / 分享 bundle） |
 
 ## 6. RAG 数字为什么不可发布（此前的口径是错的）
 
