@@ -1482,7 +1482,7 @@ Phase 0-1 声明 vs 真相逐项对照：
 | H1-H2 HarnessRun 唯一执行路径 | `IMPLEMENTED` | AST 断言 legacy `benchmark_mod.run()` 0 call node |
 | H3 全量递归 checksums + 可验证 | `IMPLEMENTED` | `TestH3ChecksumTreeCoverage`；`scorer/`、`traces/` 已进 `checksums.sha256` |
 | H4 执行约束（含可达的 max_processes） | `IMPLEMENTED` | `TestH4MaxProcessesReachable`；`tests/eval/test_h4_constraints.py` 5 tests |
-| H5 官方 1 实例 smoke | **`BLOCKED`** | 从未执行。需 Go server :8081 + embedding :8009 + Phoenix :6006 |
+| H5 官方 1 实例 smoke | ~~`BLOCKED`~~ → **`VERIFIED`（见 §31、§32）** | 原文「从未执行」及所列依赖均已过时：headless driver 在进程内跑工具，**不需要** Go server :8081；Phoenix :6006 亦非门禁项（in-process span capture 即可） |
 
 **Phase 1 Gate = H0-H4 `IMPLEMENTED`，H5 `BLOCKED`。**
 按 §20.2 反作弊协议，H0-H4 只能标 `IMPLEMENTED` 不能标 `VERIFIED`：
@@ -2334,10 +2334,10 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | 完整 manifest | **不干净** | `run-manifest.json` 存在且 `git_sha` + `dirty_hash` 已绑，但 `model_revision` / `prompt_hash` / `qrels_hash` / `physical_index` 为空（缺陷 9） |
 | prediction | 满足 | `predictions.jsonl`，506B patch |
 | official scorer raw output | 满足 | `scorer/` 4 文件逐字节存盘 |
-| production trace | **缺失** | 至今无任何 run 产出 `traces/` 目录（`find eval_results -type d -name traces` 为空）。O1/O2 代码本轮末在工作树内出现但**未提交、未验收**，见 §31.9 |
+| production trace | ~~**缺失**~~ → **已产出（本条已修复，见 §32）** | 原文「至今无任何 run 产出 `traces/`」**已不成立**：`arm-a-baseline/<run>/traces/trace-summary.json` 实测 233 spans / 1 trace_id，每 span 带 `eval.run_id` + `eval.instance_id` |
 | 通过校验的 `checksums.sha256` | 满足 | `verify_checksums()` 空列表 |
 
-**H5 = `BLOCKED`，5 项中 4 项。** 阻塞在 `traces/` 子树，依赖 O1/O2 生产 instrumentation。Phase 1 Gate 因此仍未通过；H0–H4 维持 §24.3 的 `IMPLEMENTED`，不得升 `VERIFIED`。
+~~**H5 = `BLOCKED`，5 项中 4 项。**~~ → **本条已修复：H5 = `VERIFIED`（5/5），见 §32。** 原阻塞项 `traces/` 已由 O1/O2 真实产出（233 spans）。Phase 1 Gate 随之通过。**H0–H4 仍维持 §24.3 的 `IMPLEMENTED`**——H5 过关只解锁门禁，不替 H0–H4 签发验收。
 
 ### 31.6 `INTERVIEW-PORTFOLIO.md` 两处口径修正
 
@@ -2362,7 +2362,7 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | 缺陷 8 转述有损、缺陷 9 空值 pin | **`DESIGNED`** | 本轮新发现，代码未改 |
 | 缺陷 10 取数故障 rc 映射、缺陷 11 numpy | `VERIFIED` | §30.1；pyproject 解析 + import |
 | 官方 scorer 在无 gold patch 条件下真出 `resolved=True` | `VERIFIED`（n=1，非分数） | `scorer/report.json` + `verify_checksums()` 空 |
-| **H5 1-instance 门禁** | **`BLOCKED`（4/5）** | `traces/` 缺失，依赖 O1/O2 |
+| **H5 1-instance 门禁** | ~~`BLOCKED`（4/5）~~ → **`VERIFIED`（5/5）** | 本条已修复，见 §32；`traces/` 已真实产出 |
 | Phase 1 Gate | **未通过** | H5 未满足 |
 | O1–O3 生产 instrumentation | **进行中，未提交、未验收**（见 §31.9） | 工作树内 `trace_contract.py`/`trace_capture.py` + 3 测试为未跟踪新增；`runner.py`/`artifacts.py` 有未提交改动。**零 run 产出 `traces/`** |
 | M1–M5 多模态 | `DESIGNED`，未开始 | `data/eval/multimodal` 仅 `README.md` |
@@ -2374,11 +2374,13 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 
 ### 31.8 本节遗留风险
 
-1. **缺陷 8、9 未修**：`scorer_status` 仍在承担证据职责；空值 pin 仍能通过 preflight。两者都属本节缺陷族，**未修的已知缺陷仍是缺陷**。
-2. **`traces/` 无人写** → H5 最后一项，O1/O2 未开始。在此之前不得扩大实例数：H5 未过就从 1 提到 50，只会放大不可信数字。
-3. **缺陷 6 的修复尚未经真实 run 验证**：现有 `h5-full` 产物仍带旧 `error` 字符串。
-4. **astropy-12907 已污染**：属 dev set，永久不得进 holdout；本条判定不可复用为 holdout 证据。
-5. **key 已公开**，轮换在工程侧无法闭环；在此之前禁止公开 push / PR / release / 分享 bundle。
+> **口径更新（2026-08-10 23:xx，见 §32）**：本小节 6 条中的 1、2、3、5 已闭环，逐条标注于下；4 仍成立且在 §32 的实验里被再次触发；6 不变。**本小节此后只作为历史记录读，不再作为当前状态读。**
+
+1. ~~**缺陷 8、9 未修**~~ → **本条已修复**。缺陷 8 由 `_summarise_official_stdout()` + `_SUMMARY_LABELS` 闭环（官方 7 个计数标签逐条提取，不再让 `scorer_status` 承担证据职责，原始 stdout 落 `scorer/`）；缺陷 9 由 `eval/harness/pin_contract.py` 闭环（REQUIRED / CAPABILITY / DEGRADABLE 三档，空值 pin 不再能通过 preflight）。
+2. ~~**`traces/` 无人写** → H5 最后一项，O1/O2 未开始~~ → **本条已修复并已真实验收**。`eval_results/harness-uplift-20260810/arm-a-baseline/<run>/traces/trace-summary.json` 实测 **233 spans / 1 trace_id**，且每个 span 都带 `eval.run_id` + `eval.instance_id`（由 `BaggageJoinSpanProcessor` 注入）。**H5 五项全过，判定由 `BLOCKED (4/5)` 改为 `VERIFIED`。**
+3. ~~**缺陷 6 的修复尚未经真实 run 验证**~~ → **本条已修复**：`arm-a-baseline` 真实 run 的 `predictions.jsonl` 已带新 `error` 语义（infra traceback 与业务判定分离）。
+4. **astropy-12907 已污染**：属 dev set，永久不得进 holdout；本条判定不可复用为 holdout 证据。**（仍成立，且 §32 中它再次成为唯一被污染判定的实例——见 §32.2 缺陷 14。它在 `subset-astropy-20.json` 内，故该 subset 只能作 dev 口径报告，不得当 holdout。）**
+5. ~~**key 已公开**，轮换在工程侧无法闭环~~ → **本条已按工程侧可做的方式闭环**：仓库 `huadeng408/CodeOps-Agent` 已置为 **private**，随后才推送含该 blob 的历史。**密钥轮换仍需密钥所有者操作**，在轮换完成前禁止转 public、禁止分享 bundle。
 6. `:8009` embedding、`:8081` Go server、`:6006` Phoenix 本轮未起。
 7. 本轮 Go 回归未跑，`go test ./...` 无新鲜证据。
 8. 本轮**未提交、未 push、未重写历史**；未删除任何 Docker volume、ES 索引、MySQL 数据或 MinIO 对象。
@@ -2399,5 +2401,101 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 
 1. **§31.1 的回归数字只对 `092692f8` 成立。**当前工作树含未提交改动，其回归状态本节**未测量**，不作任何声明。
 2. **「O1/O2 未开始」这一表述已不再成立**，本节相关行已改为「进行中，未提交、未验收」。
-3. **但 H5 判定不变，仍为 `BLOCKED`（4/5）。**依据不是 grep 命中数，而是更硬的事实：`find eval_results -type d -name traces` 为**空**——至今没有任何 run 产出过 `traces/` 子树。按 §20.2，**代码存在只能证明 `IMPLEMENTED` 的前置条件，产出 artifact 才是门禁**。O1/O2 代码尚未提交、未经本节验证，连 `IMPLEMENTED` 都不由本节签发。
+3. ~~**但 H5 判定不变，仍为 `BLOCKED`（4/5）。**~~ → **本条已被后续事实取代（见 §32）。**写作当时的依据（`find eval_results -type d -name traces` 为空）在当时为真；此后 O1/O2 已提交并由真实 run 产出 `traces/`（233 spans / 1 trace_id / 每 span 带 join key），按 §20.2 的同一把尺子——**产出 artifact 才是门禁**——H5 现为 `VERIFIED`。保留本条原文，是因为它记录的判定方法本身是对的：当时拒绝用「代码存在」代替「artifact 存在」，正是后来能拿到真实证据的原因。
 4. 本节**未修改、未回退、未提交**上述任何文件，它们保持原样留在工作树。
+
+---
+
+## 32. 2026-08-10 Harness 优化路线：先量出「平庸」的机理，再按机理改架构
+
+本节做三件事：**（1）** 用一次 20 实例真实 baseline 量出当前 Harness 为什么几乎拿不到分——**结论不是「模型不行」**；**（2）** 记录本轮新挖出的 3 个缺陷，其中 1 个（缺陷 14）足以让任何 before/after 对照实验彻底失效；**（3）** 给出按机理设计的优化方案与对照实验口径。
+
+本节**取代** §31.8 的第 1、2、3、5 条，**取代** §24.3 / §25 / §31.6 中 H5 的 `BLOCKED` 行（已逐条就地标注）。
+
+### 32.1 baseline 的真实机理：turn 预算被定位吃光，修复以聊天文本交付
+
+一次真实 run（`eval_results/harness-uplift-20260810/arm-a-baseline/`，deepseek-v4-pro，astropy-20 subset，官方 WSL2 scorer）的 trace 与 prediction 交叉读出的事实：
+
+| 事实 | 数值 | 来源 |
+|---|---|---|
+| 工具调用构成 | Grep 42 / Read 30 / Glob 9 / Bash 15 = **96 次搜索类**，**Edit 仅 2 次** | `traces/trace-summary.json`（233 spans） |
+| 零编辑实例 | **11 个已评分实例中 9 个 `edits=0`** | 同上，按 `eval.instance_id` 聚合 |
+| 轮次 | 几乎每个实例 `chats=9`，而 `max_tool_rounds=8` | `driver_headless.py:601`（改前） |
+| 空 patch | 9 / 10 实例 `model_patch` 为 **0 字节**，但 `tokens_out` 为 1251–20091 | `predictions.jsonl` |
+| 关键反证 | `astropy-13236` 的 `answer` 是一段**针对该 issue 正确的修复代码**（NdarrayMixin 的 `AstropyFutureWarning`），但它只存在于回复文本里，`git diff` 为空 → 判 fail | `predictions.jsonl` |
+| 正对照 | 唯一两个 `edits≥1` 的实例（`13033`、`14365`）**正是唯一产出非空 patch 的实例**（945 字节） | 同上 |
+
+**因此 baseline 的低分有明确机理，且与推理能力无关**：8 轮预算在「找 bug」阶段就被搜索类调用耗尽，模型在最后一轮被迫把修复**写成回复**而不是**写进文件**；而 scorer 只读 `git diff`。一个描述正确却未落盘的修复，在评分口径下与「没修」同型——**这是 §31 缺陷族的镜像形态：不是基础设施故障伪装成业务判定，而是「已解决的问题」被记成「没解决」。**
+
+这条机理同时解释了为什么单纯换更强的模型不会救回分数：瓶颈在预算分配与交付形态，不在模型。
+
+### 32.2 本轮新增缺陷（编号续 §31 的 13 条）
+
+| # | 缺陷 | 机理 | 影响 | 状态 |
+|---|---|---|---|---|
+| 14 | **官方 scorer 的 `run_id` 只按实例命名**（`f"swebench-{instance_id}"`），跨 run 恒定 | 官方 harness 用 `run_id` 派生 `logs/run_evaluation/<run_id>/…` 路径 → **同一实例的每次 run 共用同一棵日志树**。于是本轮一个 **0 字节 patch 的实例读到了 8.4 小时前另一次 run 的 `report.json`，记为 `resolved=True`**；而同一条记录里的官方 summary 明写 `empty_patch_ids: [astropy__astropy-12907]`、`resolved_ids: []` | **对照实验致命**：两臂可静默共用判定，A 臂的成功会算进 B 臂。任何 before/after 数字都不可信 | `VERIFIED`（已修 + 11 条回归） |
+| 15 | `max_tool_rounds=8` 硬编码，且未按 benchmark 区分 | 对 astropy 这种规模的 repo，「搜索→读→改→验」四步做不完；预算耗尽点恰好落在编辑之前 | baseline 近乎 0 分，且**归因错误方向**（看起来像模型弱） | `VERIFIED`（已参数化） |
+| 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说明「评分只读 `git diff`」。模型按对话直觉输出代码块 | 正确修复被判 fail（见 `13236`） | `VERIFIED`（已加 grading contract） |
+
+**缺陷 14 的修复是双层的，两层互不依赖**：
+
+1. **路径隔离**：`_SCORING_SESSION = uuid4().hex[:8]`，`_scoring_run_id()` 把它拼进 `run_id`，使每个进程的评分树互不相交。
+2. **时效校验**：`_read_official_resolution(..., not_before=<发起评分的时刻>)`，早于本次请求的 report 一律不读（2 秒松弛吸收文件系统时间戳粒度与 WSL/Windows 时钟边界；陈旧 report 是小时级，不可能被这个容差放回来）。
+
+只做第 1 层，则任何人日后把 `run_id` 改回稳定值就会静默失去保护；只做第 2 层，则两臂仍写进同一棵树、互相覆盖原始证据。**两层都留，是因为它们失效的方式不同。**
+
+> **口径修正**：`astropy-12907` 在本轮 baseline 中的 `resolved=True` 是**缺陷 14 的产物，不是一次成功**。正确判定为 `False`（空 patch）。本节及后续任何报告都不得引用那条 `True`。
+
+### 32.3 优化方案：按机理逐项对症，单一开关切换
+
+全部优化收在 `eval/harness/uplift.py` 一个模块、一个环境变量 `SWEBENCH_HARNESS_UPLIFT` 之后。**开关关闭时 A 臂跑的是与产出 baseline 完全相同的代码路径**（不是「等价」，是同一条），这是对照实验成立的前提。
+
+| 组件 | 对症缺陷 | 设计 | 借鉴来源 |
+|---|---|---|---|
+| **C2 分层定位** `localize.py` | 32.1 的 96:2 搜索/编辑比 | 两级 BM25：**文件级**用 `ast` 抽 module docstring + 类/函数名做 profile（**不用全文**，否则长模块靠词频压过短而精确的模块）；**函数级**对 top-K 文件的每个函数用「签名 + docstring + body」再排。输出带行号区间的候选，`## Candidate edit locations` 前置到任务描述 | Agentless 的 localize→repair 分层（file → class/function → edit location）；粒度停在**函数级**而非行级，依据是仓库级修复的粒度研究结论（函数级优于文件级与行级）——**一个自信但错误的行号比一个诚实的函数区间更有害** |
+| **C6 轮次预算** | 缺陷 15 | `8 → 24`，上限夹在 64 | 不设无限：无限预算只会把「卡住的 agent」变成「卡住且昂贵的 agent」，且会让增益无法归因 |
+| **C7 交付契约** | 缺陷 16 | prompt 明写「评分读 `git diff`，不读你的回复」「回复里的修复得 0 分」「不要改测试」「结束前用 `git diff` 自查，为空就补上」 | 单独列为一个组件而非混进 C2，**是为了让写作时无法把它的效果记到机器上**——它只是 prompt 文本 |
+| **C3 复现验证** `validate.py` | 未落地（下一步） | 仅凭 issue 文本写复现测试，patch 前跑（**期望 FAIL**）/ patch 后跑（期望 PASS）/ 跑邻近回归测试。**patch 前就通过的复现测试是「无证据」，不是「通过」** | 测试时计算研究中「执行反馈」一路；同时避开其记录的低覆盖复现测试 + 随机 tie-break 导致的**退化** |
+| **C4 best-of-N 选择** `select.py` | 未落地（下一步） | 温度 0.0/0.4/0.8 采样，严格全序 + **确定性 tie-break**（diff 体积 → sha256） | 同上；随机 tie-break 是上述退化的直接来源之一 |
+
+**为什么定位用词法 BM25 而不是向量检索**：项目现有 ES 索引装的是 techdocs 语料（24,877 chunk 的 Docker/Git/Go/K8s/PostgreSQL/Python 文档），**根本不含仓库源码**，接不上；而为每个实例现建 embedding 索引，成本高于它省下的 agent 轮次，且在 16GB 宿主上会与评分容器争内存。BM25 走 stdlib `ast`，无服务依赖、无模型下载、确定性、可离线。
+
+**确定性是硬要求**：`BM25.score()` 的排序键是 `(-score, key)`，同一 repo + 同一 issue 必产出同一 prompt。此处的非确定性会直接让配对实验的两臂不可比。
+
+### 32.4 防作弊边界（与 `CLAUDE.md`「诚实评测」条对齐）
+
+优化路径**只能**读两样东西：**issue 文本**、**`base_commit` 处的仓库**——与真人拿到的输入一致。
+
+`eval/harness/leakage.py` 用 allow-list + AST 结构性断言把这条钉住：`test_patch` / `patch` / `gold_patch` / `FAIL_TO_PASS` / `PASS_TO_PASS` / `hints_text` / `hints_to_generated_patch` 这些名字**不得出现在优化模块的可执行代码里**。`tests/eval/test_no_answer_leakage.py` 另有一条元测试，扫描 `eval/harness/` 下所有名为 `localize|uplift|validate|select` 的模块，**新增模块若未登记即 fail**——本轮 `uplift.py` 落地时它确实立刻报了 fail，随后才登记。这就是它存在的意义：守卫要能挡住**未来的自己**。
+
+BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参**——对着答案调超参是另一种形式的泄题。
+
+### 32.5 对照实验口径
+
+| 项 | 值 |
+|---|---|
+| 设计 | **N=20 两臂配对对照**，同一 subset、同一模型、同一 scorer |
+| subset | `data/eval/swebench/subset-astropy-20.json`，sha256 `21625df518486907…`（`eval/run.py` 启动时校验，不匹配即 `SystemExit`） |
+| 唯一变量 | `SWEBENCH_HARNESS_UPLIFT`（A 臂不设，B 臂设为 1） |
+| 统计 | McNemar 不一致对计数（A 过 B 挂 / A 挂 B 过），**不报 p 值**：N=20 上的 p 值是装饰 |
+| 报告口径 | **只能写「astropy-20 subset 上 k/20」**，**不得**写成 SWE-bench Verified 分数。subset 是单仓库、dev 口径，且含已污染实例 `12907`（见 §31.8 第 4 条） |
+| 消融 | `SWEBENCH_UPLIFT_LOCALIZATION` / `_EDIT_MANDATE` / `_TOOL_ROUNDS` 可单独关闭，用于把增益归因到**部件**而非**整包** |
+
+**必须提前声明的一条**：baseline 的空 patch 主因是 turn 预算与交付形态（缺陷 15、16），而这两项的修复**近乎必然**会把分数从「几乎 0」抬起来。因此若 B 臂显著更高，**诚实的归因是「预算 + 交付契约 + 定位」三者之和，其中前两项是基础工程缺陷的修复，而不是精妙架构的胜利**。把这个数字整包记到「分层定位」头上就是自欺——消融开关就是为了让这句话可被检验，而不是只是一句谦辞。
+
+### 32.6 本节状态口径
+
+| 项 | 状态 | 依据 |
+|---|---|---|
+| 缺陷 14 修复 | `VERIFIED` | `tests/eval/test_scorer_verdict_isolation.py` 11 条通过；含「陈旧 `resolved=True` 不得作为本次判定」与「`error_ids` 仍须抛异常而非报 False」 |
+| 缺陷 15、16 修复 | `IMPLEMENTED` | `tests/eval/test_uplift.py` 21 条通过；**真实 run 尚未产出**，故不签 `VERIFIED` |
+| C2 定位 | `IMPLEMENTED` | `tests/eval/test_localize.py` 28 条通过（含降级不抛异常、非 UTF-8、语法错误文件、确定性） |
+| C5 泄题守卫 | `VERIFIED` | 15 条通过，且**已实测拦住本轮新模块** |
+| H5 五项门禁 | **`VERIFIED`（5/5）** | 最后一项 `traces/` 已由真实 run 产出：233 spans / 1 trace_id / 每 span 带 join key |
+| A 臂 baseline | **`BLOCKED`** | 机理已量出（32.1），但**分数不可用**：该 run 受缺陷 14 污染（`12907` 假 True）且未跑满 20 实例。**修复后须重跑，不得引用旧数字** |
+| B 臂 | 未开始 | 依赖 A 臂重跑 |
+| C3 / C4 | `DESIGNED` | 仅有设计，无代码 |
+| Python 全量回归 | **732 passed**（`tests/eval`，实测于本节写作时的工作树） | 含本轮新增 60 条 |
+| Go 回归 | 本轮**未执行**，不作声明 | — |
+
+**本轮未删除任何容器、volume、ES 索引、MySQL 数据或 MinIO 对象；未重写历史。**

@@ -589,6 +589,16 @@ class HeadlessDriver(DefaultAgentAdapter):
         memory_mgr = MemoryManager(str(Path(working_dir) / ".agent" / "memory"))
         skills_mgr = SkillManager()
 
+        # Turn budget. The baseline's 8 rounds was measured to be the binding
+        # constraint on SWE-bench: across the astropy-20 baseline the agent spent
+        # its rounds on search (81 Grep/Read/Glob calls against 2 edits) and hit
+        # the ceiling before editing anything, then emitted the fix as chat text
+        # that ``git diff`` could not see. The optimized arm raises it; arm A
+        # keeps 8 exactly, so the arms differ by this and the prompt only.
+        from eval.harness.uplift import uplift_config
+
+        max_rounds = uplift_config().tool_rounds
+
         runner = ConversationRunner(
             graph=graph,
             llm=llm,
@@ -598,7 +608,7 @@ class HeadlessDriver(DefaultAgentAdapter):
             skills=skills_mgr,
             project_root=working_dir,
             working_dir=working_dir,
-            max_tool_rounds=8,
+            max_tool_rounds=max_rounds,
         )
 
         # ---- Queue-based tool result bridge ----

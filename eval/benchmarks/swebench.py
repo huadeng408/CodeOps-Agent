@@ -55,7 +55,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -273,6 +274,27 @@ def _build_issue_text(inst: dict[str, Any]) -> str:
     title = inst.get("issue_title", "")
     body = inst.get("issue_body", "")
     return f"# {title}\n\n{body}" if title else body
+
+
+def _augment_for_uplift(instance: EvalInstance, workdir: str) -> EvalInstance:
+    """Return *instance* with the optimized arm's prompt additions, if enabled.
+
+    A no-op in the baseline arm, which is the property that makes the two arms
+    comparable.  Inputs are the issue text and the checked-out repository only —
+    the same two things a human would have — so this cannot become a channel for
+    the answer fields; :mod:`eval.harness.leakage` asserts that structurally.
+    """
+    from eval.harness.uplift import augment_task_description, uplift_config
+
+    config = uplift_config()
+    if not config.enabled:
+        return instance
+    augmented = augment_task_description(
+        instance.task_description, workdir, config=config
+    )
+    if augmented == instance.task_description:
+        return instance
+    return replace(instance, task_description=augmented)
 
 
 def load_synthetic_instances() -> list[EvalInstance]:
@@ -996,6 +1018,7 @@ def _apply_hinted_fix(
 
 def load_instances(
     limit: int | None = None,
+    instance_ids: "Sequence[str] | None" = None,
     **kwargs: Any,
 ) -> list[EvalInstance]:
     """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
@@ -1006,6 +1029,12 @@ def load_instances(
 
     Args:
         limit: If set, return at most this many instances.
+        instance_ids: If set, return exactly these instances, in the order
+            given.  Used to run a pinned subset so two arms of a paired
+            experiment are measured on identical instances.  A requested id that
+            the dataset does not contain is an error rather than a silent
+            omission: a paired comparison whose two arms quietly ran different
+            denominators is worse than no comparison.
 
     Returns:
         List of :class:`EvalInstance` objects.
@@ -1013,11 +1042,25 @@ def load_instances(
     Raises:
         ImportError: ``datasets`` is not installed.
         RuntimeError: The dataset could not be loaded.
+        ValueError: *instance_ids* names an instance the dataset lacks.
     """
-    return load_swebench_instances(
-        max_instances=limit,
+    instances = load_swebench_instances(
+        max_instances=None if instance_ids else limit,
         allow_synthetic=False,
     )
+    if instance_ids:
+        by_id = {inst.instance_id: inst for inst in instances}
+        missing = [iid for iid in instance_ids if iid not in by_id]
+        if missing:
+            raise ValueError(
+                "requested instance_ids not present in SWE-bench Verified: "
+                f"{missing}"
+            )
+        instances = [by_id[iid] for iid in instance_ids]
+        if limit is not None:
+            instances = instances[:limit]
+        print(f"[swebench] Restricted to {len(instances)} pinned instance(s).")
+    return instances
 
 
 # ---------------------------------------------------------------------------
@@ -1604,6 +1647,11 @@ class SWEBenchAdapter(AgentBenchmark):
         worktree via :func:`_capture_git_diff`.
         """
         workdir = _instance_workdir(instance, workspace)
+        # Arm B only: prepend BM25 localization candidates and the grading
+        # contract.  Done here rather than in load_instances because it needs the
+        # prepared worktree, and done by replacing the field on a copy so the
+        # instance the artifacts recorded stays the dataset's own text.
+        instance = _augment_for_uplift(instance, str(workdir))
         result = adapter.solve_instance(
             instance, working_dir=str(workdir), **kwargs
         )
@@ -1654,7 +1702,11 @@ class SWEBenchAdapter(AgentBenchmark):
         if not available:
             raise OfficialScorerUnavailable(f"unavailable: {reason}")
 
-        run_id = f"swebench-{instance.instance_id.replace('/', '__')}"
+        run_id = _scoring_run_id(instance.instance_id)
+        # Recorded before the scorer is invoked, so ``_read_official_resolution``
+        # can reject any report that predates this request.  See
+        # :data:`_SCORING_SESSION` for why both guards exist.
+        requested_at = time.time()
         ok, detail = _run_official_scoring(
             str(predictions_path),
             str(workspace),
@@ -1669,6 +1721,7 @@ class SWEBenchAdapter(AgentBenchmark):
             instance_id=result.instance_id or instance.instance_id,
             run_id=run_id,
             model_name=model_name,
+            not_before=requested_at,
         )
         if resolved is None:
             raise OfficialScorerUnavailable(
@@ -1767,10 +1820,29 @@ def _collect_official_raw_output(
     return collected
 
 
+#: Per-process token mixed into every official scoring ``run_id``.
+#:
+#: The official harness derives its output paths from ``run_id``, so a ``run_id``
+#: that depends only on the instance makes ``logs/run_evaluation/`` a location two
+#: different runs *share*.  Sharing it is what let an empty-patch run read an
+#: earlier run's ``resolved=True``.  This token makes each process's scoring tree
+#: disjoint; :func:`_read_official_resolution`'s ``not_before`` check is the
+#: second, independent guard, kept because path isolation alone would silently
+#: stop protecting anything the moment someone reintroduces a stable run_id.
+_SCORING_SESSION: str = uuid.uuid4().hex[:8]
+
+
+def _scoring_run_id(instance_id: str) -> str:
+    """Return the official scorer's ``run_id`` for *instance_id*, per process."""
+    safe = instance_id.replace("/", "__")
+    return f"swebench-{safe}-{_SCORING_SESSION}"
+
+
 def _read_official_resolution(
     instance_id: str,
     run_id: str,
     model_name: str,
+    not_before: float | None = None,
 ) -> bool | None:
     """Read the instance resolution from the official scorer's reports.
 
@@ -1783,12 +1855,35 @@ def _read_official_resolution(
     Returns ``True``/``False`` when official evidence is found and ``None``
     when no report exists (the caller treats missing evidence as
     unresolved — fail-closed).
+
+    *not_before* is the wall-clock time at which this run asked for the verdict.
+    Any report older than that is evidence about a **different** run and is
+    ignored.  Before this existed the scoring ``run_id`` was
+    ``f"swebench-{instance_id}"`` — constant across runs — so every run of an
+    instance read and overwrote the same ``logs/run_evaluation`` directory, and a
+    run whose agent produced *nothing* inherited an earlier run's success:
+    ``astropy__astropy-12907`` was recorded ``resolved=True`` with a zero-byte
+    patch from a report written hours earlier, while the official summary in the
+    same record said ``empty_patch_ids: [12907]``.  For a before/after
+    experiment that is fatal, not cosmetic: the arms silently share verdicts.
     """
     model_safe = model_name.replace("/", "__")
     roots = [
         Path.cwd(),
         Path(__file__).resolve().parent.parent.parent,  # repo root
     ]
+
+    def _fresh(path: Path) -> bool:
+        """Whether *path* was written for the request now in flight."""
+        if not_before is None:
+            return True
+        try:
+            # 2s of slack absorbs filesystem timestamp granularity and the
+            # WSL/Windows clock boundary; a stale report is hours old, so this
+            # tolerance cannot readmit one.
+            return path.stat().st_mtime >= (not_before - 2.0)
+        except OSError:
+            return False
 
     # Per-instance report — the authoritative source.
     for root in roots:
@@ -1797,7 +1892,7 @@ def _read_official_resolution(
             root / "logs" / "run_evaluation" / run_id / instance_id,
         ):
             report_path = candidate / "report.json"
-            if not report_path.is_file():
+            if not report_path.is_file() or not _fresh(report_path):
                 continue
             try:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -1810,7 +1905,7 @@ def _read_official_resolution(
     # Run summary fallback.
     for root in roots:
         summary_path = root / f"{model_safe}.{run_id}.json"
-        if not summary_path.is_file():
+        if not summary_path.is_file() or not _fresh(summary_path):
             continue
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
