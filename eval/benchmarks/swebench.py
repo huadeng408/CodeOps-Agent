@@ -611,20 +611,24 @@ def _setup_workdir(
         )
 
     print(f"[swebench] Cloning https://github.com/{repo_url}.git at {base_commit}...")
-    # Full clone — base_commit is typically an old SHA that a shallow
-    # clone of the default-branch tip cannot resolve.
-    subprocess.run(
-        ["git", "clone", f"https://github.com/{repo_url}.git", workdir],
-        check=True,
-        capture_output=True,
-        timeout=600,
-    )
-    subprocess.run(
-        ["git", "-C", workdir, "checkout", base_commit],
-        check=True,
-        capture_output=True,
-        timeout=60,
-    )
+    # Still a full clone in the worst case — base_commit is typically an old SHA
+    # that a shallow clone of the default-branch tip cannot resolve — but served
+    # from a local mirror when one is available.  Without the mirror this cost
+    # recurred per instance (~60-90s for astropy), which is most of the wall
+    # clock of an N-instance run and made a paired two-arm experiment
+    # impractical.  A cache failure degrades to the original clone rather than
+    # failing the run; the outcome is printed so a degraded run is visible
+    # instead of just being slow for unexplained reasons.
+    from eval.harness.repo_cache import clone_at_commit
+
+    outcome = clone_at_commit(repo_url, base_commit, workdir)
+    if outcome.degraded:
+        print(
+            f"[swebench] repo cache not used ({outcome.fallback_reason}); "
+            "fell back to a full clone"
+        )
+    elif outcome.mirror_created:
+        print(f"[swebench] created local mirror for {repo_url}")
     return workdir
 
 
