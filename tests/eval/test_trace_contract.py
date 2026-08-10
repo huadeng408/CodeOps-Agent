@@ -132,10 +132,20 @@ def test_rerank_is_conditional_not_required() -> None:
 
 def test_every_span_kind_declares_a_producer() -> None:
     """Diagnostics: when a kind is missing we must be able to say *which*
-    process failed to emit it (harness / go-agent / orchestrator), otherwise
-    'INCOMPLETE' gives the next window nothing to act on."""
+    process failed to emit it, otherwise 'INCOMPLETE' gives the next window
+    nothing to act on.
+
+    ``invoke_agent``/``execute_tool`` are attributed to ``agent-runtime``, not
+    ``go-agent``: the headless eval driver runs those tools in-process, so
+    naming the Go agent sent the reader to start a server that path never
+    contacts — an unactionable verdict of exactly the kind this field prevents.
+    """
     for kind in span_kinds():
-        assert kind.producer in {"harness", "go-agent", "orchestrator"}
+        assert kind.producer in {
+            "harness",
+            "agent-runtime",
+            "orchestrator",
+        }
         assert isinstance(kind, SpanKind)
 
 
@@ -194,8 +204,13 @@ def test_missing_required_kinds_are_named_and_incomplete() -> None:
         "rag.retrieve",
         "embedding",
     }
-    # The producer of each missing kind must be attributed.
-    assert report["missing_by_producer"]["go-agent"]
+    # The producer of each missing kind must be attributed.  ``invoke_agent``
+    # and ``execute_tool`` belong to whichever runtime ran the agent loop, which
+    # on the headless path is this Python process rather than the Go agent.
+    assert report["missing_by_producer"]["agent-runtime"] == [
+        "invoke_agent",
+        "execute_tool",
+    ]
     assert report["missing_by_producer"]["orchestrator"]
 
 

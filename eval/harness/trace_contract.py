@@ -99,6 +99,16 @@ PRODUCER_HARNESS = "harness"
 PRODUCER_GO_AGENT = "go-agent"
 PRODUCER_ORCHESTRATOR = "orchestrator"
 
+#: The process that actually ran the agent loop and its tools.  ``invoke_agent``
+#: and ``execute_tool`` were previously attributed to ``go-agent``, which is only
+#: true for the gRPC path: the headless eval driver executes Read/Write/Edit/
+#: Bash/Glob/Grep in-process via ``eval.driver_headless.LocalToolExecutor``.
+#: Naming the Go agent there sends the next window to start a server that this
+#: path never contacts, which is the same "unactionable verdict" defect the
+#: producer field exists to prevent.  Waiving the two kinds instead would be
+#: worse: they are the only evidence that tool work happened at all.
+PRODUCER_AGENT_RUNTIME = "agent-runtime"
+
 
 # Capabilities a run may or may not exercise.  A SWE-bench instance is fixed by
 # reading and patching a checked-out repository: it performs no retrieval at
@@ -152,13 +162,13 @@ _SPAN_KINDS: tuple[SpanKind, ...] = (
     ),
     SpanKind(
         name=SPAN_INVOKE_AGENT,
-        producer=PRODUCER_GO_AGENT,
-        description="Go agent root",
+        producer=PRODUCER_AGENT_RUNTIME,
+        description="agent loop root (Go agent, or the headless driver in-process)",
     ),
     SpanKind(
         name=SPAN_EXECUTE_TOOL,
-        producer=PRODUCER_GO_AGENT,
-        description="one tool invocation",
+        producer=PRODUCER_AGENT_RUNTIME,
+        description="one tool invocation, wherever the tool actually ran",
     ),
     SpanKind(
         name=SPAN_CHAT,

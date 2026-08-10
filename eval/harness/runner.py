@@ -39,6 +39,7 @@ from eval.harness.trace_contract import (
     SPAN_SCORER_OFFICIAL,
     evaluate_trace_contract,
 )
+from eval.harness.trace_join import eval_join_context
 
 # Error taxonomy — infra failures are never counted as model failures and are
 # never silently removed from the denominator.
@@ -394,9 +395,14 @@ class HarnessRun:
         if not self.network_allowed:
             _block_network(workspace, self.network_allowlist)
 
-        # Call adapter
+        # Call adapter.  The join context is attached around the call so spans
+        # created *inside* the adapter — the driver's tool spans, and the
+        # orchestrator's ``chat`` — inherit ``eval.run_id``/``eval.instance_id``
+        # without the orchestrator having to import anything from eval.  See
+        # eval/harness/trace_join.py for what this does and does not prove.
         if self.adapter is not None:
-            result = self.adapter.solve_instance(instance, str(workspace))
+            with eval_join_context(self.run_id, instance_id):
+                result = self.adapter.solve_instance(instance, str(workspace))
             # H4: enforce the process cap on whatever the adapter
             # reported while it was running (fail closed, never
             # silently over-subscribe the machine).

@@ -53,7 +53,7 @@ def main() -> int:
     env.setdefault("SWEBENCH_NAMESPACE", "swebench")
     env["PYTHONIOENCODING"] = "utf-8"
 
-    out_dir = REPO_ROOT / "eval_results" / "h5-full-traces-20260810"
+    out_dir = REPO_ROOT / "eval_results" / "h5-full-traces-20260810-join"
     cmd = [
         sys.executable, "-u", "-m", "eval.run",
         "--benchmark", "swebench",

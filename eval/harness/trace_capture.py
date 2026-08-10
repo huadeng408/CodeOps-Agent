@@ -158,6 +158,20 @@ class TraceCapture:
         except Exception:  # noqa: BLE001 - telemetry must never break the run
             return False
         self._attached = True
+
+        # Stamp the eval join keys onto spans created by code that knows
+        # nothing about the harness (orchestrator ``chat``, driver tool spans).
+        # Registered as its own processor so the capture stays a pure observer:
+        # the component that writes the artifact is not also the component that
+        # makes the artifact pass.  Failure here is non-fatal — an unstamped
+        # span is reported as a missing join attribute, which is the honest
+        # outcome, rather than aborting the run.
+        try:
+            from eval.harness.trace_join import BaggageJoinSpanProcessor
+
+            add(BaggageJoinSpanProcessor())
+        except Exception:  # noqa: BLE001 - telemetry must never break the run
+            pass
         return True
 
     def install(self) -> bool:
