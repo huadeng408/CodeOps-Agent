@@ -212,3 +212,45 @@ def test_error_ids_still_raise_rather_than_reporting_false(tmp_path, monkeypatch
         assert INSTANCE in str(exc)
     else:  # pragma: no cover - the guard regressed
         raise AssertionError("error_ids must not be reported as a verdict")
+
+
+# ------------------------------------------------- transient transport retries
+
+
+def test_ssl_eof_is_recognised_as_transient():
+    """The exact signature that lost an instance mid-run."""
+    output = (
+        "requests.exceptions.SSLError: HTTPSConnectionPool(host='raw.githubusercontent.com', "
+        "port=443): Max retries exceeded ... SSLEOFError(8, '[SSL: "
+        "UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol')"
+    )
+    assert swebench._is_transient_network(output) is True
+    assert swebench._first_network_signature(output) in swebench._TRANSIENT_NETWORK_SIGNATURES
+
+
+def test_a_real_scoring_failure_is_not_transient():
+    """A retry here would turn a flaky measurement into a stable-looking one."""
+    for output in (
+        "AssertionError: patch failed to apply",
+        "docker.errors.BuildError: image build failed",
+        "KeyError: 'astropy__astropy-12907'",
+        "Instances resolved: 0",
+        "",
+    ):
+        assert swebench._is_transient_network(output) is False
+
+
+def test_transient_signature_list_is_narrow_and_non_empty():
+    """Vacuous either way would break the distinction the retry depends on."""
+    signatures = swebench._TRANSIENT_NETWORK_SIGNATURES
+    assert 5 <= len(signatures) <= 20
+    # None of them may match a normal successful scorer summary.
+    normal = (
+        "Instances submitted: 1; Instances completed: 1; Instances resolved: 1; "
+        "Instances with empty patches: 0; Instances with errors: 0"
+    )
+    assert not swebench._is_transient_network(normal)
+
+
+def test_unknown_signature_reports_unknown():
+    assert swebench._first_network_signature("nothing familiar here") == "unknown"

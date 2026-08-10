@@ -1607,25 +1607,48 @@ def _run_official_scoring_wsl(
         f"report_dir='{wsl_output}')\""
     )
 
-    try:
-        result = subprocess.run(
-            ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
-            # Pin UTF-8: this call's stdout becomes ``scorer_status`` evidence.
-            # With bare ``text=True`` a zh-CN Windows decodes it as gbk, and the
-            # official harness emits ✔/✗ and box-drawing characters, so the
-            # reader thread raised UnicodeDecodeError and the verdict text was
-            # lost -- an encoding fault masquerading as a scorer failure.
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout + 600,
-        )
+    attempts = 2  # one retry, for transport faults only -- see _is_transient_network
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
+                # Pin UTF-8: this call's stdout becomes ``scorer_status`` evidence.
+                # With bare ``text=True`` a zh-CN Windows decodes it as gbk, and the
+                # official harness emits ✔/✗ and box-drawing characters, so the
+                # reader thread raised UnicodeDecodeError and the verdict text was
+                # lost -- an encoding fault masquerading as a scorer failure.
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout + 600,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"WSL2 scoring timed out after {timeout}s"
+        except Exception as exc:
+            return False, f"WSL2 scoring error: {exc}"
         if result.returncode == 0:
             return True, f"WSL2 official scoring completed: {_summarise_official_stdout(result.stdout)}"
-        else:
-            return False, f"WSL2 scoring failed (exit {result.returncode}): {result.stderr[-500:]}"
-    except subprocess.TimeoutExpired:
-        return False, f"WSL2 scoring timed out after {timeout}s"
-    except Exception as e:
-        return False, f"WSL2 scoring error: {e}"
+        combined = f"{result.stderr}\n{result.stdout}"
+        if attempt < attempts and _is_transient_network(combined):
+            # The official harness fetches each instance's environment spec from
+            # raw.githubusercontent.com before any test runs. That fetch died on
+            # `SSLEOFError` on one instance per run while the same URL returned
+            # 200 six times out of six when retried by hand -- a transport
+            # flake, not a property of the patch.
+            #
+            # Retrying transport is not re-rolling a measurement: the prediction
+            # file is unchanged, no test has executed yet, and the alternative is
+            # an instance recorded as unmeasured for reasons that have nothing to
+            # do with the agent. A non-network failure is never retried, so a
+            # genuinely failing scorer still fails once and loudly.
+            print(
+                f"[scorer] transient network failure, retrying once: "
+                f"{_first_network_signature(combined)}"
+            )
+            continue
+        return False, f"WSL2 scoring failed (exit {result.returncode}): {result.stderr[-500:]}"
+    # Unreachable: the loop either returns or continues, and the final attempt
+    # cannot continue. Present so a future edit to `attempts` cannot fall through
+    # to an implicit None return, which the caller would unpack and crash on.
+    return False, "WSL2 scoring produced no result"
 
 
 # ---------------------------------------------------------------------------
@@ -1884,6 +1907,36 @@ def _collect_official_raw_output(
             continue
 
     return collected
+
+
+#: Signatures of a transport fault, i.e. the scorer never reached the point of
+#: running a test. Deliberately narrow: anything not listed here is treated as a
+#: real scorer failure and reported once, without a retry. Widening this list
+#: converts real failures into silently-retried ones, which is how a flaky
+#: measurement starts looking like a stable one.
+_TRANSIENT_NETWORK_SIGNATURES: tuple[str, ...] = (
+    "SSLEOFError",
+    "SSLError",
+    "UNEXPECTED_EOF_WHILE_READING",
+    "Max retries exceeded",
+    "ConnectionResetError",
+    "ConnectionError",
+    "Temporary failure in name resolution",
+    "Connection aborted",
+    "RemoteDisconnected",
+)
+
+
+def _is_transient_network(output: str) -> bool:
+    """Whether *output* shows a transport fault rather than a scoring result."""
+    return any(sig in output for sig in _TRANSIENT_NETWORK_SIGNATURES)
+
+
+def _first_network_signature(output: str) -> str:
+    for sig in _TRANSIENT_NETWORK_SIGNATURES:
+        if sig in output:
+            return sig
+    return "unknown"
 
 
 #: Per-process token mixed into every official scoring ``run_id``.
