@@ -692,6 +692,27 @@ class HeadlessDriver(DefaultAgentAdapter):
         # recorded prediction, corrupting the artifact that IS the evidence.
         final_text = "".join(final_text_parts)
 
+        # ``done.success`` answers "did the model end its own turn cleanly?",
+        # not "did the task succeed".  ConversationRunner emits _done(True) in
+        # exactly two places -- when the model returns no tool calls, and in the
+        # fallback path -- so every other exit, tool-round-limit exhaustion
+        # included, reports False even when the work was correct.
+        #
+        # Recording that as ``error`` produced artifacts that contradicted
+        # themselves: the H5 run carried error='runner completed with
+        # done.success=False' next to resolved=True and ok:1.  It also corrupted
+        # a scorer: run_swebench_honest_10.py counts
+        # ``r.get("model_patch") and not r.get("error")`` as resolved, so a
+        # correct patch was tallied as unresolved and labelled ERROR.
+        #
+        # So only claim an error when the runner ended without success AND left
+        # nothing usable behind.  A patch or answer is evidence that it did.
+        produced_output = bool(model_patch.strip() or final_text.strip())
+        if success or produced_output:
+            error = ""
+        else:
+            error = "runner ended without success and produced no patch or answer"
+
         return EvalResult(
             instance_id=instance.instance_id,
             model_patch=model_patch,
@@ -700,7 +721,7 @@ class HeadlessDriver(DefaultAgentAdapter):
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             trace_id=trace_id,
-            error="" if success else "runner completed with done.success=False",
+            error=error,
         )
 
     # ------------------------------------------------------------------
