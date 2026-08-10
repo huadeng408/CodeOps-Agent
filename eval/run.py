@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -48,6 +49,7 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         "use_runner": True,
         "dry_run": False,
         "smoke": False,
+        "subset": "",
     }
 
     i = 0
@@ -74,6 +76,13 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
             i += 2
         elif flag in ("--base-url") and i + 1 < len(argv):
             args["base_url"] = argv[i + 1]
+            i += 2
+        elif flag == "--subset" and i + 1 < len(argv):
+            # Path to a pinned subset JSON. Running two arms against the same
+            # pinned list is what makes a before/after comparison paired; a
+            # comparison whose arms drew different instances is not a
+            # comparison.
+            args["subset"] = argv[i + 1]
             i += 2
         elif flag in ("--no-runner", "--direct-only"):
             args["use_runner"] = False
@@ -160,6 +169,37 @@ def _system_prompt_hash() -> str:
     from eval.harness.pin_contract import system_prompt_pin
 
     return system_prompt_pin()
+
+
+def _load_subset(path: str) -> tuple[list[str], dict[str, Any]]:
+    """Load a pinned instance subset, verifying its sha256 sidecar.
+
+    Returns ``([], {})`` when *path* is empty.  A sidecar mismatch raises: the
+    whole point of pinning the list is that both arms of a paired experiment ran
+    the same instances, and an unverified list cannot support that claim.
+    """
+    if not path:
+        return [], {}
+    subset_file = Path(path)
+    if not subset_file.is_file():
+        raise SystemExit(f"--subset file not found: {subset_file}")
+    raw = subset_file.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    sidecar = Path(str(subset_file) + ".sha256")
+    if sidecar.is_file():
+        recorded = sidecar.read_text(encoding="utf-8").split()[0].strip().lower()
+        if recorded != digest:
+            raise SystemExit(
+                f"subset sha256 mismatch: {subset_file} hashes to {digest} "
+                f"but its sidecar records {recorded}. Refusing to run: a paired "
+                "comparison needs a verified instance list."
+            )
+    payload = json.loads(raw.decode("utf-8"))
+    ids = list(payload.get("instance_ids") or [])
+    if not ids:
+        raise SystemExit(f"--subset file {subset_file} lists no instance_ids")
+    payload["_sha256"] = digest
+    return ids, payload
 
 
 def _git_dirty_hash() -> str:
@@ -261,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     dry_run: bool = args.get("dry_run", False)
     smoke: bool = args.get("smoke", False)
     cache_dir: str = args.get("cache", "")
+    subset_path: str = args.get("subset", "")
 
     # ---- List available benchmarks ----
     if benchmark_name == "list":
@@ -418,12 +459,29 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # ---- Load instances (benchmark MUST expose load_instances) ----
-    instances = benchmark_mod.load_instances(limit=limit)
+    subset_ids, subset_meta = _load_subset(subset_path)
+    if subset_ids:
+        instances = benchmark_mod.load_instances(
+            limit=None, instance_ids=subset_ids
+        )
+        print(
+            f"[eval] subset    : {subset_meta.get('subset_id', subset_path)} "
+            f"({len(subset_ids)} instances, sha256 "
+            f"{subset_meta.get('_sha256', '')[:12]})"
+        )
+    else:
+        instances = benchmark_mod.load_instances(limit=limit)
 
     print(f"[eval] benchmark : {benchmark_name}")
     print(f"[eval] model     : {model}")
     print(f"[eval] base_url  : {base_url}")
-    print(f"[eval] limit     : {limit}")
+    # When a pinned subset is in play the limit did not apply, and printing it
+    # anyway invited exactly the wrong reading: the baseline log said
+    # "limit : 10" above a 20-instance pinned run, which looked like the run had
+    # been silently truncated.
+    print(
+        f"[eval] limit     : {'n/a (pinned subset)' if subset_ids else limit}"
+    )
     print(f"[eval] use_runner: {use_runner}")
     print(f"[eval] output    : {output_dir.resolve()}")
     print("[eval] harness   : HarnessRun (only path)")

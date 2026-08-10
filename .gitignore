@@ -129,3 +129,10 @@ eval/swebench_work/run_swebench_honest_10.py
 eval/swebench_work/run_terminalbench_honest_5.py
 eval/swebench_work/run_tau2bench_honest_5.py
 deepseek-chat-honest-20s.honest-test-v1.json
+
+# Official SWE-bench scorer output written relative to its working directory.
+# Regenerable per run and keyed by a per-process run_id, so it would otherwise
+# accumulate one file per instance per run in the repository root.
+code-agent-*.swebench-*.json
+logs/run_evaluation/
+logs/build_images/
