@@ -74,7 +74,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 13 | `core.autocrlf=true` 改写字节，被记成「策略被篡改」 | `data/` 下 25 个 JSON/JSONL 的**字节就是证据**：策略由 `.sha256` 旁挂文件钉住，queries/qrels 字节写在 `contamination-policy.v1.json` 里。Windows 检出把 LF 换成 CRLF 后，测试报 `POLICY_HASH_MISMATCH` 和 `bytes changed since the freeze`——读起来是「有人动了金标」，真相是「Git 换了行尾」。合并分支时一次性触发 **78 个测试失败，全部同一个原因**。更糟的是同一份策略内部就不自洽：split-policy 按 LF 钉、queries/qrels 按 CRLF 钉，说明这些 pin 记录的是**某台机器上 Git 过滤器的产物**，而非提交的字节，在 Linux CI 上必然失败 | `VERIFIED`（`736e1964`，`.gitattributes` + 重钉 + 29 个回归测试） |
 
 | 14 | 官方 scorer 的 `run_id` 只按实例命名（`f"swebench-{instance_id}"`），**跨 run 恒定** | 官方 harness 用 `run_id` 派生 `logs/run_evaluation/<run_id>/…`，于是同一实例的每次 run **共用同一棵日志树**。一个 **0 字节 patch 的实例读到 8.4 小时前另一次 run 的 `report.json`，记为 `resolved=True`**——而同一条记录里的官方 summary 明写 `empty_patch_ids: [12907]`、`resolved_ids: []`。这是第二个形状：**不是基础设施故障伪装成业务判定，而是另一次 run 的判定伪装成这次的**。对 before/after 对照实验致命：两臂可静默共用判定 | `VERIFIED`（双层修复 + 11 条回归） |
-| 15 | `max_tool_rounds=8` 硬编码 | 对 astropy 规模的 repo，「搜索→读→改→验」四步做不完，**预算耗尽点恰好落在编辑之前**。于是分数近乎 0，而失败方向再次一致指向「模型弱」 | `VERIFIED`（已参数化） |
+| 15 | `max_tool_rounds=8` 硬编码 | 对 astropy 规模的 repo，「搜索→读→改→验」四步做不完，**预算耗尽点恰好落在编辑之前**。~~于是分数近乎 0~~ → **实测更正：A 臂 16 判定中 `resolved=3`，不是「近乎 0」**；缺陷本身成立（10/16 空 patch），但正确说法是「**大量实例卡在编辑之前**」。而失败方向再次一致指向「模型弱」这一半仍然成立 | `VERIFIED`（已参数化） |
 | 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说「评分只读 `git diff`」。模型按对话直觉输出代码块。`astropy-13236` 的回复是**针对该 issue 正确的修复**，`git diff` 为空 → 判 fail。**已解决的问题被记成没解决** | `VERIFIED`（已加 grading contract） |
 | 17 | `_compact_messages` 的 tool 邻接修复用了**反向守卫** `if orphan_start > 0` | 该分支只在「已经有 anchor」时才修，**恰好跳过唯一真正坏的 `orphan_start == 0`**——窗口第一条就是 tool 结果、前面根本没有 assistant(tool_calls)。**守卫上方的注释描述的正是 `== 0`，代码测的是它的补集。**DeepSeek 直接拒绝整个请求（`HTTP 400`），实例 solve 中途死亡 | `VERIFIED`（已修 + 11 条回归） |
 | 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：照样 clone astropy、照样起镜像、照样调官方 scorer，**产出的数字描述的是凭证而不是 Agent**。与缺陷 4 同源：能失败的检查必须真的能失败 | `VERIFIED`（1 次请求即闸断） |
@@ -130,7 +130,8 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 
 1. **定位用词法 BM25 而不是向量检索**，因为项目现有 ES 索引装的是 techdocs 语料（24,877 chunk），**不含仓库源码**，接不上；为每实例现建 embedding 索引，成本高于它省下的轮次。这是约束下的选择，不是最优解。
 2. **对照实验做之前，我先修掉了一个会让实验彻底失效的缺陷**（缺陷 14）：官方 scorer 的 `run_id` 跨 run 恒定，两臂会静默共用判定。如果没先发现它，我会拿到一个「涨了」的数字而完全不知道它是假的。
-3. **归因必须诚实**：空 patch 的主因是轮次预算与交付形态，这两项的修复**近乎必然**把分数从「几乎 0」抬起来。所以若优化臂显著更高，诚实的说法是「**预算 + 交付契约 + 定位三者之和，其中前两项是基础工程缺陷的修复，不是精妙架构的胜利**」。为了让这句话可被检验而不只是一句谦辞，每个组件都有独立的消融开关。
+3. **归因必须诚实**：空 patch 的主因是轮次预算与交付形态，这两项的修复**近乎必然**把分数抬起来。所以若优化臂显著更高，诚实的说法是「**预算 + 交付契约 + 定位三者之和，其中前两项是基础工程缺陷的修复，不是精妙架构的胜利**」。为了让这句话可被检验而不只是一句谦辞，每个组件都有独立的消融开关。
+4. **我自己写错过一次基线口径，并且改了回来。** 我原本写「baseline 几乎 0 分」，依据是早期只跑了几个实例的观察。A 臂跑到 16 个已判定时实测 **`resolved=3`**（三个 patch 各 1102B / 586B / 727B，官方 summary 内部自洽，与缺陷 14 的污染形状正好相反；并已核对 A 臂 `localization` 记录 0 条、prompt 无 grading contract，即未误开优化）。**这处更正让故事变弱**——增益必须对着 3+ 讲，不能对着 0 讲，「从零到有」不成立。但不更正就等于拿一个样本不足的早期快照去撑一个更好听的结论，而那正是这个项目一路在修的那类错误。
 
 ### 报告口径
 

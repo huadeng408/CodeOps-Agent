@@ -2443,7 +2443,7 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | # | 缺陷 | 机理 | 影响 | 状态 |
 |---|---|---|---|---|
 | 14 | **官方 scorer 的 `run_id` 只按实例命名**（`f"swebench-{instance_id}"`），跨 run 恒定 | 官方 harness 用 `run_id` 派生 `logs/run_evaluation/<run_id>/…` 路径 → **同一实例的每次 run 共用同一棵日志树**。于是本轮一个 **0 字节 patch 的实例读到了 8.4 小时前另一次 run 的 `report.json`，记为 `resolved=True`**；而同一条记录里的官方 summary 明写 `empty_patch_ids: [astropy__astropy-12907]`、`resolved_ids: []` | **对照实验致命**：两臂可静默共用判定，A 臂的成功会算进 B 臂。任何 before/after 数字都不可信 | `VERIFIED`（已修 + 11 条回归） |
-| 15 | `max_tool_rounds=8` 硬编码，且未按 benchmark 区分 | 对 astropy 这种规模的 repo，「搜索→读→改→验」四步做不完；预算耗尽点恰好落在编辑之前 | baseline 近乎 0 分，且**归因错误方向**（看起来像模型弱） | `VERIFIED`（已参数化） |
+| 15 | `max_tool_rounds=8` 硬编码，且未按 benchmark 区分 | 对 astropy 这种规模的 repo，「搜索→读→改→验」四步做不完；预算耗尽点恰好落在编辑之前 | ~~baseline 近乎 0 分~~ → **就地更正（见 §32.5 末）**：A 臂实测 16 判定中 `resolved=3`，**不是「近乎 0」**。缺陷本身成立（10/16 空 patch、`chats=9` 撞 8 轮上限），但影响的正确说法是「**大量实例卡在编辑之前**」，而非「一分不得」。且**归因错误方向**（看起来像模型弱）这一半仍然成立 | `VERIFIED`（已参数化） |
 | 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说明「评分只读 `git diff`」。模型按对话直觉输出代码块 | 正确修复被判 fail（见 `13236`） | `VERIFIED`（已加 grading contract） |
 | 17 | **`_compact_messages` 的 tool 邻接修复用了反向的守卫**：`if orphan_start > 0` | 该分支只在「已经有 anchor」的情况下才走修复，**恰好跳过唯一真正坏的情况** `orphan_start == 0`——窗口第一条就是 tool 结果、前面根本没有 assistant(tool_calls)。守卫上方的注释描述的正是 `== 0`，代码测的是它的补集 | DeepSeek 直接拒绝整个请求（`HTTP 400: Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`），**实例在 solve 中途死亡**。本轮 arm A 重跑时实时观测到 | `VERIFIED`（已修 + 11 条回归） |
 | 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：每个实例照样 clone astropy、照样起镜像、照样调官方 scorer，产出的数字描述的是**凭证**而不是 Agent | 12 分钟算力换一堆无意义判定 | `VERIFIED`（1 次请求即闸断） |
@@ -2503,7 +2503,12 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 | **两臂间已知的一处非受控差异** | **A 臂在 scorer 重试（缺陷 21）落地之前启动，B 臂之后。**必须声明，不得隐去。对结论无偏的理由：配对只取**两臂都测到**的实例交集，A 臂因 transport flake 未测到的实例对两臂**同时**剔除；而网络抖动与 patch 质量独立，故剔除不偏向任一臂。**代价是 N 变小，不是方向变偏。**若 A 臂 scorer 失败数 > 3，则 N 太小、必须整臂重跑，不得靠「样本少一点」糊过去 |
 | 消融 | `SWEBENCH_UPLIFT_LOCALIZATION` / `_EDIT_MANDATE` / `_TOOL_ROUNDS` 可单独关闭，用于把增益归因到**部件**而非**整包** |
 
-**必须提前声明的一条**：baseline 的空 patch 主因是 turn 预算与交付形态（缺陷 15、16），而这两项的修复**近乎必然**会把分数从「几乎 0」抬起来。因此若 B 臂显著更高，**诚实的归因是「预算 + 交付契约 + 定位」三者之和，其中前两项是基础工程缺陷的修复，而不是精妙架构的胜利**。把这个数字整包记到「分层定位」头上就是自欺——消融开关就是为了让这句话可被检验，而不是只是一句谦辞。
+**必须提前声明的一条**：baseline 的空 patch 主因是 turn 预算与交付形态（缺陷 15、16），而这两项的修复**近乎必然**会把分数抬起来。因此若 B 臂显著更高，**诚实的归因是「预算 + 交付契约 + 定位」三者之和，其中前两项是基础工程缺陷的修复，而不是精妙架构的胜利**。把这个数字整包记到「分层定位」头上就是自欺——消融开关就是为了让这句话可被检验，而不是只是一句谦辞。
+
+> **2026-08-11 01:55 就地更正：「几乎 0」这个基线口径是错的。**
+> 原文写「把分数从『几乎 0』抬起来」，依据是早期只跑了几个实例的观察。A 臂第三代 run 跑到 16 个已判定时，**`resolved=3`**（`14096` / `14309` / `14995`，patch 分别 1102B / 586B / 727B，各自官方 summary 内部自洽：`submitted:1, resolved:1, empty patches:0`，与缺陷 14 的污染形状正好相反）。
+> 已核对 A 臂**未误开 uplift**：`instances.jsonl` 里 `localization` 记录 **0 条**，任务描述中**无** grading contract 文本，即 baseline prompt 未被改动。
+> **这处更正对结论的影响**：B 臂的增益必须对着 **3+** 讲，不能对着 0 讲。分母不变，但「从零到有」的叙事不成立——baseline 本来就能解出一部分。**这个更正让故事变弱，但那是它该有的强度**；如果我不更正，就会拿一个早期的、样本不足的观察去撑一个更好听的结论，而这正是本项目一路在修的那类错误（用当时为真的快照冒充当前事实）。
 
 ### 32.6 本节状态口径
 
