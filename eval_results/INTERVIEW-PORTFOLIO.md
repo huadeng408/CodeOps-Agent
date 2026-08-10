@@ -1,17 +1,19 @@
-# 面试 Portfolio：一次真实 SWE-bench 跑通，挖出十一个缺陷
+# 面试 Portfolio：一次真实 SWE-bench 跑通，挖出十三个缺陷
 
 > 状态：**非定稿。三个 Agent 基准仍无可发布分数。**本文档的价值不在覆盖面，在于一条被证据钉住的缺陷猎捕链。
-> 分支 `push-clean`。**本文全部证据基线为 commit `092692f8`（2026-08-10）**；写作期间 `8577fd48` 已落地并有 O1/O2 未提交改动进入工作树，均未触及本文所引产物（见 §5「生产 trace instrumentation」行）。唯一权威口径：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`（§20.4 / §20.7 / §20.8 / §22–§26 / §30 / §31）。本文与设计地图冲突时以设计地图为准。
+> 分支 `main`。**证据基线 commit `4a4ed30b`（2026-08-10）**，`push-clean` 已合入 main 并推送。唯一权威口径：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`（§20.4 / §20.7 / §20.8 / §22–§26 / §30 / §31）。本文与设计地图冲突时以设计地图为准。
 > 状态词只用 `DESIGNED` / `IMPLEMENTED` / `VERIFIED` / `BLOCKED`（§2 定义）。测试存在 ≠ `VERIFIED`。
 
 ## 1. 一句话
 
-把**一条** SWE-bench 实例的官方评分从头驱动到真出判定，过程中挖出 **11 个缺陷**，其中 **8 个是同一个形状**：
+把**一条** SWE-bench 实例的官方评分从头驱动到真出判定，过程中挖出 **13 个缺陷**，其中 **10 个是同一个形状**：
 
 > **一次基础设施故障，被当成一条业务判定报了出来。**
 > 于是「什么都没测到」和「Agent 没修对」在产物里长得一模一样。
 
 再加 2 个「判定没有原始证据」的同族缺陷，和 1 个普通缺陷。这套评测管线此前从未真正评过一次分——**而它每次都以 exit 0 告诉我一切正常。**
+
+这个形状还有一个镜像版本，是在修契约时才看清的：**一个 PASS 不可达的门禁同样不携带信息。**SWE-bench 不做检索，却被无条件要求 `rag.retrieve`/`embedding`，于是它能拿到的最好结果永远是 `INCOMPLETE`——判定恒定，观察它就什么也没说。「不可能失败的 preflight 不是 preflight」和「不可能通过的门禁不是门禁」，是同一条原则的两面。
 
 这就是我想在面试里讲的东西：不是「模型能拿多少分」，是**「一个数字凭什么算证据」**。
 
@@ -53,7 +55,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 **这条能说什么**：统一 Harness 的 `prepare → solve → score` 生命周期在一个真实实例上跑到了官方判定，`FAIL_TO_PASS` 2/2、`PASS_TO_PASS` 13/13。
 **这条不能说什么**：n=1，不是能力分数；这条实例在修 `namespace` 的过程中被反复使用，已属 **development set**，永久不得进 holdout。
 
-## 3. 十一个缺陷，一个形状
+## 3. 十三个缺陷，一个形状
 
 | # | 缺陷 | 为什么它是「基础设施故障伪装成业务判定」 | 状态 |
 |---|---|---|---|
@@ -68,6 +70,8 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 9 | 关键 pin 为空值仍能通过 preflight | 本轮 `run-manifest.json` 的 `model_revision`、`prompt_hash`、`qrels_hash`、`physical_index` **全是空字符串**，preflight 照样放行。所以这次 run 依然带着 `MODEL_IDENTITY_UNVERIFIED` | `VERIFIED`（本轮新发现，**未修**） |
 | 10 | 污染扫描的取数故障映射成「发现污染」 | 形状不符时 `AttributeError` 逃到解释器 → 退出码 1 = 冻结 policy 的 `BLOCKING` = **「发现了污染」**。同一形状的第 8 例。已改为显式验形 + rc 2（取数故障） | `VERIFIED`（设计地图 §30.1） |
 | 11 | `numpy` 被两个模块 import 却从未声明 | 普通缺陷，不属本形状。已补进 `eval` extra | `VERIFIED` |
+| 12 | 契约把 `invoke_agent`/`execute_tool` 归给 `go-agent`，而这条路径根本没有 Go agent | headless 驱动在 Python 进程内执行 Read/Write/Edit/Bash/Glob/Grep。缺失时报 `go-agent`，会把下一个人指去启一个这条路径永不联系的服务——**producer 字段本身就是为消除「不可行动判定」而存在的，它却给出了不可行动的判定**。同时暴露一个更隐蔽的诱惑：把 Go agent 做成可声明能力就能让判定变绿，而那会豁免掉唯一能证明工具真的执行过的 span。修法只能是去真实站点补 span | `VERIFIED`（`4a673590`，真实 run 判定 `PASS`） |
+| 13 | `core.autocrlf=true` 改写字节，被记成「策略被篡改」 | `data/` 下 25 个 JSON/JSONL 的**字节就是证据**：策略由 `.sha256` 旁挂文件钉住，queries/qrels 字节写在 `contamination-policy.v1.json` 里。Windows 检出把 LF 换成 CRLF 后，测试报 `POLICY_HASH_MISMATCH` 和 `bytes changed since the freeze`——读起来是「有人动了金标」，真相是「Git 换了行尾」。合并分支时一次性触发 **78 个测试失败，全部同一个原因**。更糟的是同一份策略内部就不自洽：split-policy 按 LF 钉、queries/qrels 按 CRLF 钉，说明这些 pin 记录的是**某台机器上 Git 过滤器的产物**，而非提交的字节，在 Linux CI 上必然失败 | `VERIFIED`（`736e1964`，`.gitattributes` + 重钉 + 29 个回归测试） |
 
 **计数口径**：11 条里 **8 条**（1、2、3、4、6、7、9、10）是「基础设施故障 → 业务判定」；**2 条**（5、8）是「判定没有原始证据」；**1 条**（11）是普通缺陷。第 8、9 条是本轮新发现且**尚未修复**，写在这里是因为未修的已知缺陷也是证据。
 
@@ -94,15 +98,15 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 缺陷 1/2/3/4/6/10/11 修复 | 各自 focused tests + 上述受控产物；Python 全量 **805 passed, exit 0**（65.76s，实测于 HEAD `092692f8`，在下方 O1/O2 未提交改动落入工作树**之前**） | `VERIFIED` |
 | 缺陷 5 落盘实现 | 由本轮真实 run 产出，不再只是「若存在则会被哈希」 | `VERIFIED` |
 | 缺陷 8/9 | 本轮新发现，代码未改 | `IMPLEMENTED` 之前的阶段：仅 `DESIGNED`（已定位，未修） |
-| **H5 官方 1 实例门禁** | 门禁要求单产物**同时**含 manifest / prediction / official score / **trace** / checksums。前 4 项已由真实 run 满足（manifest 存在但关键 pin 为空，见缺陷 9），**`traces/` 子树无人写** | **`BLOCKED`（5 项中 4 项）** |
-| 生产 trace instrumentation（O1–O3） | **工作树内正在进行**（未提交）：`eval/harness/trace_contract.py`、`trace_capture.py` + 3 个测试文件为未跟踪新增，`runner.py`/`artifacts.py` 有未提交改动（`SPAN_SCORER_OFFICIAL`、`record_trace()`）。**但至今没有任何 run 产出过 `traces/` 目录** | 进行中，未验收 |
+| **H5 官方 1 实例门禁** | 五项**同时**满足于 `h5-full-traces-20260810-join/…-6c6eeac0`（161.0s）：manifest、prediction、官方 `scorer/` 四文件、`traces/` 两文件、`checksums.sha256` 12 条**逐条重算全部匹配**。trace 判定 `PASS`，`problems: 0`，20 span 同属一个 trace、0 悬空父节点、单一根 `eval.run`；链路 `eval.run → eval.instance → invoke_agent → 9×chat + 7×execute_tool（Read×3/Glob×2/Edit/Bash）`，`scorer.official` 挂 `eval.instance`；20 个 span 全带 `eval.run_id`，且只有一个取值。官方判定 `resolved=true`、`FAIL_TO_PASS` 2/2 | `VERIFIED`（n=1，非分数）。**口径限制**：该 `PASS` 依赖 SWE-bench 以 `TRACE_CAPABILITIES = ()` 声明的 `rag.retrieve`/`embedding` 豁免（豁免已写入产物、可审计）。RAG 基准仍必须产出这两类 span |
+| 生产 trace instrumentation（O1–O3） | 已提交（`4a673590`、`5e002b96`、`64f9299c`）。两处修的都是「契约本身错了」而非 run 错了：① `invoke_agent`/`execute_tool` 归给 `go-agent`，但 headless 驱动在 Python 进程内跑 Read/Write/Edit/Bash/Glob/Grep，链路里没有 Go agent——报 `go-agent` 会把人指去启一个这条路径永不联系的服务，正是 producer 字段本该消除的「不可行动判定」。改为 `agent-runtime` 并在真实站点补 span；**没有**把 Go agent 做成可声明能力，那会豁免掉唯一能证明工具真的跑了的 span。② `chat` span 缺 `eval.run_id`。用 OTel baggage 传播，**context 作用域而非时间作用域**——「capture 打开期间创建的都盖章」会把 run id 盖到无关后台线程的 span 上，契约的 join 检查就会接受伪造证据；`test_trace_join.py` 用「context 外创建的 span 必须不被盖章」这条对照组把差别钉死 | `VERIFIED`（926 tests） |
 | SWE-bench 10 实例 | 10/10 非空 patch，`resolved` 未知；官方评分从未在这 10 条上完成 | 探索结果，非分数 |
 | Terminal-Bench 4 实例 | 官方 Harness 总结果 `0/4`；最新单任务 `0/1 test_timeout` | `IMPLEMENTED`（heredoc/base64 修复未验收） |
 | tau2-bench 10 实例 | `avg_reward=0.7`；前 5 题经 prompt tuning（0.4→1.0→0.7）= development-set contamination；缺 pins/provenance | 探索结果，非分数 |
 | RAG 三路检索 | nDCG@10 0.5201 / 0.6547 / 0.5636，数值健全（nDCG 全落 [0,1]） | **不可发布**，见 §6 |
 | qrels 仲裁 | 23 `AI_REVIEWED` / 157 `DISPUTED` / **0 `HUMAN_REVIEWED`** | `IMPLEMENTED`（仲裁逻辑已修正） |
 | 四层污染扫描 | 24,822 chunks × 180 queries 四层全跑完、0 命中，verdict `CLEAN`，退出码 0 捕获，71.75s < 600s SLA；层 4 经 4,477,860 对独立复算 max 0.795592 < 0.8 | `VERIFIED`（设计地图 §30） |
-| Phoenix | 6006 + OTLP 4317/4318 可达；trace 为五 span 合成、无 RAG span | 基础连通，生产 E2E 未验证 |
+| Phoenix | 6006 + OTLP 4317/4318 可达。本地 capture 已产出**真实** 20 span 生产 trace（不再是合成），但**尚未验证经 OTLP 导出到 Phoenix 后仍完整**——capture 与 exporter 是同一 provider 上的两个 processor，共存已实现，端到端未验收 | 基础连通 + 本地 trace `VERIFIED`；Phoenix E2E 仍 `IMPLEMENTED`（属 O3） |
 | 多模态 RAG（M1–M5） | `data/eval/multimodal` 只有 `README.md` | `DESIGNED`，未开始 |
 | dev/holdout 防火墙（E3） | `split-manifest.v1.json`：`dev_size=180`、`holdout_size=0`、`holdout_status=BLOCKED` | `BLOCKED` |
 | 统一 Harness 旁路 | legacy `benchmark_mod.run()` 旁路已删除并经 AST 断言（0 call node） | `IMPLEMENTED` |
@@ -204,7 +208,7 @@ PYTHONPATH=. python -c "from eval.harness.artifacts import RunArtifacts; \
 
 ## 10. 下一步（顺序由设计地图 §20.8 决定，不得跳 Gate）
 
-1. **O1/O2 生产 instrumentation**（工作树内进行中，未提交）→ 目标是让真实 run 写出 `traces/`，解除 H5 的最后一项（当前 5 项中 4 项）。**代码存在不等于门禁通过**：必须有一次真实 run 产出 `traces/trace-summary.json` + `span-assertion.json` 并进 checksums。扩规模排在门禁之后：H5 未过就把实例从 1 提到 50，只会放大不可信的数字。
+1. ~~**O1/O2 生产 instrumentation**~~ → **已完成**：真实 run `…-6c6eeac0` 产出 `traces/trace-summary.json` + `span-assertion.json` 并进 `checksums.sha256`，trace 判定 `PASS`，H5 五项全满足。扩规模仍排在门禁之后：H5 过了才谈把实例从 1 提到 50，且 50 实例需要重新验证预算与超时口径，不是把 `--limit` 改个数字。
 2. **修缺陷 8、9**：`scorer_status` 停止承担证据职责；空值 pin 必须让 preflight 失败。
 3. **E2 模型身份**：响应侧 provider/model/revision 落盘，解除 `MODEL_IDENTITY_UNVERIFIED`。
 4. **人工复核**：157 行 DISPUTED + 23 条 `AI_REVIEWED` 分层抽检。没有真人参与，RAG 永远不出发布数字。
