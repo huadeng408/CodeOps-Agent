@@ -54,6 +54,18 @@ class FakeAgentAdapter:
         )
 
 
+def _pinned_config(**overrides: object) -> dict[str, object]:
+    """Minimal valid harness config — mandatory manifest pins (H3)."""
+    config: dict[str, object] = {
+        "git_sha": "a1b2c3d",
+        "dirty_hash": "0" * 64,
+        "model": "test-model",
+        "prompt_hash": "0" * 64,
+    }
+    config.update(overrides)
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Budget tests (unchanged)
 # ---------------------------------------------------------------------------
@@ -148,6 +160,7 @@ def test_harness_resume_skips_completed(tmp_path: Path) -> None:
     harness = HarnessRun(
         run_id="run-1", artifacts=artifacts,
         checkpoint_path=checkpoint, adapter=adapter,
+        config=_pinned_config(),
     )
 
     result = harness.run([
@@ -171,7 +184,10 @@ def test_harness_classifies_failures_eval_instance(tmp_path: Path) -> None:
                 raise TimeoutError()
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    harness = HarnessRun(run_id="run-1", artifacts=artifacts, adapter=FailAdapter())
+    harness = HarnessRun(
+        run_id="run-1", artifacts=artifacts, adapter=FailAdapter(),
+        config=_pinned_config(),
+    )
     result = harness.run([
         EvalInstance(instance_id="good", task_description=""),
         EvalInstance(instance_id="bad", task_description=""),
@@ -195,7 +211,10 @@ def test_harness_network_disabled_by_default(tmp_path: Path) -> None:
             assert Path(working_dir, "NETWORK_DISABLED").exists()
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    harness = HarnessRun(run_id="run-1", artifacts=artifacts, adapter=SpyAdapter())
+    harness = HarnessRun(
+        run_id="run-1", artifacts=artifacts, adapter=SpyAdapter(),
+        config=_pinned_config(),
+    )
     harness.run([EvalInstance(instance_id="i1", task_description="")])
     assert len(workspaces) == 1
 
@@ -209,7 +228,10 @@ def test_missing_instance_id_fail_closed(tmp_path: Path) -> None:
     """Empty instance_id is recorded as failure, not silently skipped."""
     artifacts = RunArtifacts("run-1", tmp_path)
     adapter = FakeAgentAdapter()
-    harness = HarnessRun(run_id="run-1", artifacts=artifacts, adapter=adapter)
+    harness = HarnessRun(
+        run_id="run-1", artifacts=artifacts, adapter=adapter,
+        config=_pinned_config(),
+    )
 
     instances = [
         EvalInstance(instance_id="", task_description="bad — no id"),
@@ -238,6 +260,7 @@ def test_pre_start_budget_check(tmp_path: Path) -> None:
     harness = HarnessRun(
         run_id="run-1", artifacts=artifacts,
         budget=tiny_budget, adapter=adapter,
+        config=_pinned_config(),
     )
 
     result = harness.run([
@@ -258,12 +281,13 @@ def test_scorer_exception_becomes_error_scorer(tmp_path: Path) -> None:
         def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    def bad_scorer(result: EvalResult, instance: EvalInstance) -> dict:
+    def bad_scorer(result: EvalResult, instance: EvalInstance, workspace: Path) -> dict:
         raise RuntimeError("scorer crashed")
 
     harness = HarnessRun(
         run_id="run-1", artifacts=artifacts,
         adapter=OkAdapter(), scorer=bad_scorer,
+        config=_pinned_config(),
     )
     harness.run([EvalInstance(instance_id="s-1", task_description="")])
 
@@ -290,7 +314,10 @@ def test_workspace_preserved_on_failure(tmp_path: Path) -> None:
             workspaces_seen.append(working_dir)
             raise RuntimeError("simulated agent crash")
 
-    harness = HarnessRun(run_id="run-1", artifacts=artifacts, adapter=FailAdapter())
+    harness = HarnessRun(
+        run_id="run-1", artifacts=artifacts, adapter=FailAdapter(),
+        config=_pinned_config(),
+    )
     harness.run([EvalInstance(instance_id="crash-1", task_description="")])
 
     # workspace must still exist
@@ -306,12 +333,13 @@ def test_scorer_success_merges_into_prediction(tmp_path: Path) -> None:
         def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    def good_scorer(result: EvalResult, instance: EvalInstance) -> dict:
+    def good_scorer(result: EvalResult, instance: EvalInstance, workspace: Path) -> dict:
         return {"score": 0.95, "passed": True}
 
     harness = HarnessRun(
         run_id="run-1", artifacts=artifacts,
         adapter=OkAdapter(), scorer=good_scorer,
+        config=_pinned_config(),
     )
     harness.run([EvalInstance(instance_id="s-1", task_description="")])
 

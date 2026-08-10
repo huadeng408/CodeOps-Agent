@@ -6,16 +6,17 @@ Usage::
     python -m eval.run --benchmark swebench  [--model qwen3:4b] [--limit 10] [--output-dir eval_results]
 
 Phase 4 (2026-08-08): CLI is now a thin manifest-validator + HarnessRun launcher.
-For benchmarks that expose load_instances(), instances are fed through HarnessRun
-which handles budget, checkpoint, error classification, scorer dispatch, and the
-canonical artifact tree.  Legacy benchmarks that only expose run(driver, limit)
-continue to work via a compatibility shim.
+Phase 1/H2 (2026-08-09): HarnessRun is the ONLY execution path.  Every
+benchmark must expose module-level load_instances(); instances are fed through
+HarnessRun which handles budget, checkpoint, error classification, scorer dispatch,
+and the canonical artifact tree.  Agent benchmarks (AgentBenchmark subclasses)
+have their official ``score`` wired as HarnessRun's scorer callback; the legacy
+``benchmark_mod.run(driver, limit)`` bypass is removed.
 """
 
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import subprocess
 import sys
@@ -118,7 +119,8 @@ def _print_usage() -> None:
 
 
 def _list_benchmarks() -> list[str]:
-    """Return names of benchmark modules that expose a module-level run()."""
+    """Return names of benchmark modules that expose a module-level
+    ``load_instances()`` — the HarnessRun entry contract."""
     import pkgutil
 
     import eval.benchmarks as pkg
@@ -131,7 +133,7 @@ def _list_benchmarks() -> list[str]:
             mod = importlib.import_module(f"eval.benchmarks.{mod_info.name}")
         except Exception:
             continue
-        if callable(getattr(mod, "run", None)):
+        if callable(getattr(mod, "load_instances", None)):
             names.append(mod_info.name)
     return sorted(names)
 
@@ -166,6 +168,71 @@ def _git_dirty_hash() -> str:
         return ""
 
 
+def _find_agent_benchmark(mod: Any) -> Any | None:
+    """Return an instance of the :class:`AgentBenchmark` subclass exposed by
+    *mod*, or ``None`` when the benchmark has no unified adapter.
+
+    Agent benchmarks (``SWEBenchAdapter``, ``TerminalBenchAdapter``,
+    ``Tau2BenchAdapter``) implement the prepare -> solve -> score lifecycle;
+    their official ``score`` is wired as HarnessRun's scorer callback so the
+    unified manifest/artifact tree covers official scoring.  Benchmarks
+    without an adapter (evalplus, retrieval) score internally — for those the
+    scorer stays ``None``.
+    """
+    from eval.benchmarks.base import AgentBenchmark
+
+    for attr_name in dir(mod):
+        attr = getattr(mod, attr_name)
+        if (
+            isinstance(attr, type)
+            and issubclass(attr, AgentBenchmark)
+            and attr is not AgentBenchmark
+        ):
+            return attr()
+    return None
+
+
+def _model_endpoint_allowlist(base_url: str) -> tuple[str, ...]:
+    """Hosts that must stay reachable for the agent to call its model.
+
+    The harness blocks the network by pinning HTTP(S)_PROXY to a dead proxy
+    with loopback-only NO_PROXY.  A remote model endpoint is therefore
+    unreachable unless it is named explicitly, which silently reduced every
+    remote-API run to zero tokens and an empty patch.
+
+    Only the endpoint host is returned — never a wildcard — so the upstream
+    fix (github.com, pypi) stays blocked.  A loopback endpoint needs no entry
+    because loopback is already exempt.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url).hostname or "").strip()
+    if not host or host in ("127.0.0.1", "localhost", "::1"):
+        return ()
+    return (host,)
+
+
+def _validate_benchmark_pins(agent_bench: Any) -> list[str]:
+    """Validate a benchmark adapter's reproducibility pins BEFORE any run.
+
+    H3 (design map §20.6.1): "缺 pin 时启动前失败" — a run whose dataset,
+    scorer, or benchmark identity is not pinned is not reproducible, so it
+    must abort before an instance is solved rather than emit an artifact
+    tree that only looks complete.
+
+    Returns the list of missing/empty pin keys; empty list means the
+    adapter is fully pinned.  ``None`` adapters (evalplus, retrieval
+    benchmarks that score internally) have no pins to check and pass.
+    """
+    if agent_bench is None:
+        return []
+    if not callable(getattr(agent_bench, "validate_pins", None)):
+        # Adapter predates the AgentBenchmark pin contract: treat the missing
+        # contract itself as an unmet pin so the run refuses to start.
+        return ["validate_pins"]
+    return list(agent_bench.validate_pins())
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -192,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         available = _list_benchmarks()
         print("Available benchmarks:")
         if not available:
-            print("  (none -- create eval/benchmarks/<name>.py with a run() function)")
+            print("  (none -- create eval/benchmarks/<name>.py with a load_instances() function)")
         for name in available:
             print(f"  {name}")
         return 0
@@ -214,9 +281,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if not hasattr(benchmark_mod, "run"):
+    if not hasattr(benchmark_mod, "load_instances"):
         print(
-            f"ERROR: benchmark module {module_name} has no run() function.",
+            f"ERROR: benchmark module {module_name} has no load_instances() "
+            f"function.  The unified HarnessRun lifecycle requires every "
+            f"benchmark to expose module-level load_instances(limit=...).",
             file=sys.stderr,
         )
         return 1
@@ -260,22 +329,41 @@ def main(argv: list[str] | None = None) -> int:
     # ---- Build HarnessRun manifest ----
     run_id = f"{benchmark_name}-{model.replace('/','-').replace(':','-')}-{uuid.uuid4().hex[:8]}"
 
+    if smoke:
+        limit = 1
+
+    # ---- AgentBenchmark adapter (official scorer wiring) ----
+    agent_bench = _find_agent_benchmark(benchmark_mod)
+
+    # ---- H0 pin preflight: fail BEFORE launching on incomplete pins ----
+    # This must also gate --dry-run.  The dry-run branch used to return here
+    # printing "manifest validated" while it had validated nothing: it ran
+    # before the pin check, so an unpinned benchmark exited 0 with a success
+    # message.  A preflight that cannot fail is not a preflight.
+    missing_pins = _validate_benchmark_pins(agent_bench)
+    if missing_pins:
+        print(
+            f"ERROR: benchmark '{benchmark_name}' has incomplete reproducibility "
+            f"pins: {', '.join(missing_pins)}. A run without immutable dataset/"
+            f"scorer pins is not reproducible and must not start.",
+            file=sys.stderr,
+        )
+        return 1
+
     if dry_run:
         print(f"[dry-run] benchmark : {benchmark_name}")
         print(f"[dry-run] model     : {model}")
         print(f"[dry-run] run_id    : {run_id}")
-        print("dry-run OK: manifest validated, no instances will be solved")
+        print("[dry-run] pins      : validated (no missing keys)")
+        print("dry-run OK: pins validated, no instances will be solved")
         return 0
-
-    if smoke:
-        limit = 1
 
     # ---- Create driver (AgentAdapter) ----
     from eval.driver_headless import create_driver
 
     adapter = create_driver(model=model, base_url=base_url, use_runner=use_runner)
 
-    # ---- Create HarnessRun ----
+    # ---- Create HarnessRun (the ONLY execution path) ----
     from eval.harness import HarnessRun, Budget, RunArtifacts
 
     artifacts = RunArtifacts(run_id=run_id, root=str(output_dir))
@@ -290,18 +378,26 @@ def main(argv: list[str] | None = None) -> int:
         artifacts=artifacts,
         budget=budget,
         adapter=adapter,
+        scorer=agent_bench.score if agent_bench is not None else None,
+        # The harness hands the agent a fresh temp dir; only the benchmark
+        # knows how to populate it (SWE-bench clones the repo at base_commit).
+        # Leaving this unwired let the agent run against an EMPTY directory,
+        # so the captured git diff was necessarily empty and the official
+        # scorer was fed model_patch: "" while the run still exited 0.
+        setup_workspace=agent_bench.prepare if agent_bench is not None else None,
+        network_allowlist=_model_endpoint_allowlist(base_url),
+        config={
+            "git_sha": _git_head(),
+            "dirty_hash": _git_dirty_hash(),
+            "model": model,
+            "benchmark": benchmark_name,
+            "mode": "official",
+            "synthetic": False,
+        },
     )
 
-    # ---- Load instances ----
-    instances: list[Any] = []
-    if hasattr(benchmark_mod, "load_instances"):
-        instances = benchmark_mod.load_instances(limit=limit)
-        harness_path = True
-    else:
-        # Legacy: benchmarks with run() but no load_instances().
-        # Fall back to the existing run(driver, limit) contract — the benchmark
-        # handles its own instance loop, scoring, and output writing.
-        harness_path = False
+    # ---- Load instances (benchmark MUST expose load_instances) ----
+    instances = benchmark_mod.load_instances(limit=limit)
 
     print(f"[eval] benchmark : {benchmark_name}")
     print(f"[eval] model     : {model}")
@@ -309,91 +405,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[eval] limit     : {limit}")
     print(f"[eval] use_runner: {use_runner}")
     print(f"[eval] output    : {output_dir.resolve()}")
-    print(f"[eval] harness   : {'HarnessRun (native)' if harness_path else 'legacy benchmark.run()'}")
+    print("[eval] harness   : HarnessRun (only path)")
     print()
 
-    if harness_path:
-        # ---- HarnessRun path ----
-        t0 = time.perf_counter()
-        try:
-            result = harness.run(instances)
-        except Exception as exc:
-            print(f"FATAL: harness run failed: {exc}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            return 2
+    # ---- Run (HarnessRun-only lifecycle) ----
+    t0 = time.perf_counter()
+    try:
+        result = harness.run(instances)
+    except Exception as exc:
+        print(f"FATAL: harness run failed: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 2
 
-        elapsed = time.perf_counter() - t0
-        s = result["summary"]
-        print(f"\n=== {benchmark_name} ===")
-        print(f"  run_id       : {run_id}")
-        print(f"  instances    : {s['total']} total, {s.get('ok',0)} ok, {s.get('failed',0)} failed, {s.get('skipped',0)} skipped")
-        print(f"  categories   : {s.get('by_category', {})}")
-        print(f"  wall_clock   : {elapsed:.1f}s")
-        print(f"  artifacts    : {artifacts.root}")
-        return 0 if s.get("failed", 0) == 0 else 1
-
-    else:
-        # ---- Legacy benchmark.run() path ----
-        t0 = time.perf_counter()
-        try:
-            results: list[Any] = benchmark_mod.run(adapter, limit=limit)
-        except Exception:
-            print(f"ERROR running benchmark: {sys.exc_info()[1]}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            return 1
-
-        elapsed = time.perf_counter() - t0
-        print(f"\n[eval] completed {len(results)} instances in {elapsed:.1f}s")
-
-        # ---- Summary ----
-        total = len(results)
-        errors = sum(1 for r in results if getattr(r, "error", ""))
-        passed = total - errors
-        total_cost = sum(getattr(r, "cost", 0.0) or 0.0 for r in results)
-        total_tokens_in = sum(getattr(r, "tokens_in", 0) or 0 for r in results)
-        total_tokens_out = sum(getattr(r, "tokens_out", 0) or 0 for r in results)
-
-        print(f"  total        : {total}")
-        print(f"  ok           : {passed}")
-        print(f"  errors       : {errors}")
-        print(f"  total cost   : ${total_cost:.4f}")
-        print(f"  tokens in    : {total_tokens_in}")
-        print(f"  tokens out   : {total_tokens_out}")
-
-        # ---- Write output ----
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # JSON
-        json_path = output_dir / f"{benchmark_name}_results.json"
-        json_data = []
-        for r in results:
-            json_data.append({
-                "instance_id": getattr(r, "instance_id", ""),
-                "model_patch": getattr(r, "model_patch", ""),
-                "answer": getattr(r, "answer", ""),
-                "cost": getattr(r, "cost", 0.0),
-                "tokens_in": getattr(r, "tokens_in", 0),
-                "tokens_out": getattr(r, "tokens_out", 0),
-                "trace_id": getattr(r, "trace_id", ""),
-                "error": getattr(r, "error", ""),
-                "wall_time_s": getattr(r, "wall_time_s", 0.0),
-            })
-        json_path.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"  JSON         : {json_path.resolve()}")
-
-        # CSV
-        import csv
-        csv_path = output_dir / f"{benchmark_name}_results.csv"
-        if json_data:
-            with csv_path.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=list(json_data[0].keys()))
-                writer.writeheader()
-                writer.writerows(json_data)
-            print(f"  CSV          : {csv_path.resolve()}")
-
-        return 0
+    elapsed = time.perf_counter() - t0
+    s = result["summary"]
+    print(f"\n=== {benchmark_name} ===")
+    print(f"  run_id       : {run_id}")
+    print(f"  instances    : {s['total']} total, {s.get('ok',0)} ok, {s.get('failed',0)} failed, {s.get('skipped',0)} skipped")
+    print(f"  categories   : {s.get('by_category', {})}")
+    print(f"  wall_clock   : {elapsed:.1f}s")
+    print(f"  artifacts    : {artifacts.root}")
+    return 0 if s.get("failed", 0) == 0 else 1
 
 
 if __name__ == "__main__":

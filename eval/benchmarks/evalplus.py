@@ -775,6 +775,34 @@ def _run_official_evaluate(
 
 
 # ========================================================================
+# Module-level load_instances() -- eval/run.py HarnessRun path
+# ========================================================================
+
+
+def load_instances(
+    limit: Optional[int] = None,
+    dataset: str = "humaneval",
+    **kwargs: Any,
+) -> List[EvalInstance]:
+    """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
+
+    Loads problems from the evalplus package (``humaneval`` or ``mbpp``) and
+    converts them to :class:`EvalInstance` objects.  evalplus has no
+    :class:`AgentBenchmark` adapter — it scores inside its own pipeline, so
+    HarnessRun wires ``scorer=None`` for it.
+
+    Args:
+        limit: If set, return at most this many instances.
+        dataset: ``"humaneval"`` (default) or ``"mbpp"``.
+
+    Returns:
+        List of :class:`EvalInstance` objects.
+    """
+    problems = _load_problems(dataset)
+    return _build_instances(problems, limit)
+
+
+# ========================================================================
 # Module-level run() -- eval/run.py CLI contract
 # ========================================================================
 

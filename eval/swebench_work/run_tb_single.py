@@ -78,7 +78,7 @@ harness = Harness(
     n_attempts=1,
     cleanup=False,
     agent_kwargs={
-        "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),
+        "api_key": os.environ["DEEPSEEK_API_KEY"],  # env-only, no hardcoded key
         "model": "deepseek-chat",
     },
 )

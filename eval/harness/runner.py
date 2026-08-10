@@ -11,16 +11,22 @@ Phase 4 (2026-08-08): Replaced dead ``InstanceRunner(dict)`` protocol with
 EvalResult``.  Added scorer callback, pre-start budget check, fail-closed
 on missing instance_id, workspace preservation on failure, and reachable
 ERROR_SCORER.
+
+H4 (2026-08-09): WORKSPACE_PRESERVED markers on failure, advisory
+max_processes budget enforcement (budget.py), and best-effort
+HTTP(S)_PROXY pinning in :func:`_block_network` (real isolation remains
+the benchmark's Docker/container responsibility).
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
@@ -34,9 +40,22 @@ ERROR_INFRA = "infra"
 ERROR_AGENT = "agent"
 ERROR_SCORER = "scorer"
 
-# Scorer callback: called after each successful solve_instance.
-# Returns a dict that gets merged into the prediction artifact.
-ScorerCallback = Callable[[EvalResult, EvalInstance], dict[str, Any]]
+# Reserved key a scorer callback may return to hand the harness the official
+# harness's raw output as ``{filename: content}``.  It is popped from the
+# scorer result and written under ``scorer/`` so ``checksums.sha256`` pins it;
+# it never appears as a field in ``predictions.jsonl``.
+SCORER_RAW_OUTPUT_KEY = "scorer_raw_output"
+
+# Marker files written into an instance workspace to record execution policy
+# and post-mortem state (post-mortem tooling greps for these by name).
+NETWORK_DISABLED_MARKER = "NETWORK_DISABLED"
+WORKSPACE_PRESERVED_MARKER = "WORKSPACE_PRESERVED"
+
+# Scorer callback: called after each successful solve_instance, receiving
+# the instance workspace as well (where the benchmark adapter writes its own
+# artifacts, e.g. predictions.jsonl / score.json sidecars).  Returns a dict
+# that gets merged into the prediction artifact.
+ScorerCallback = Callable[[EvalResult, EvalInstance, Path], dict[str, Any]]
 
 # Workspace setup callback: called before each solve_instance to populate
 # the working directory (e.g. clone a repo, checkout a commit).  Receives
@@ -45,6 +64,8 @@ WorkspaceSetup = Callable[[EvalInstance, str], None]
 
 
 def classify_error(exc: BaseException) -> str:
+    if isinstance(exc, ScorerError):
+        return ERROR_SCORER
     if isinstance(exc, BudgetExceeded):
         if exc.kind == "wall-clock":
             return ERROR_TIMEOUT
@@ -70,15 +91,40 @@ class HarnessRun:
     adapter: AgentAdapter | None = None
     scorer: ScorerCallback | None = None
     setup_workspace: WorkspaceSetup | None = None  # clone repo, checkout, etc.
+    # Hosts that stay reachable while the rest of the network fails closed.
+    # The agent needs its model endpoint; nothing else is opened, and whatever
+    # is listed here is recorded in the run manifest.
+    network_allowlist: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._completed: set[str] = set()
         self._global_usage = BudgetUsage()
+        # Per-instance usage; rebound at the top of each instance so the
+        # process-lifecycle hooks below always target the live budget.
+        self._current_usage: BudgetUsage = BudgetUsage()
         if self.checkpoint_path is not None and self.checkpoint_path.exists():
             for line in self.checkpoint_path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     self._completed.add(line.strip())
+
+    # -- H4: process-lifecycle hooks -------------------------------------
+    # max_processes is only a real constraint if something reports child
+    # processes into the live BudgetUsage.  Adapters that spawn subprocesses
+    # call these; the post-solve check_budget() then classifies an overrun as
+    # BudgetExceeded("processes") -> ERROR_AGENT instead of silently passing.
+
+    def report_active_processes(self, count: int) -> None:
+        """Set the concurrent child-process count for the running instance."""
+        self._current_usage.active_processes = max(0, int(count))
+
+    def process_started(self) -> None:
+        """Report that the adapter spawned one child process."""
+        self._current_usage.record_process_start()
+
+    def process_ended(self) -> None:
+        """Report that one adapter child process exited."""
+        self._current_usage.record_process_end()
 
     def _mark_completed(self, instance_id: str) -> None:
         self._completed.add(instance_id)
@@ -143,17 +189,26 @@ class HarnessRun:
 
             workspace = Path(tempfile.mkdtemp(prefix=f"eval-{self.run_id}-"))
             usage = BudgetUsage()
+            # H4: expose the per-instance usage so adapters can report their
+            # real concurrent child-process count.  Without this hook the
+            # max_processes branch of check_budget() is unreachable and the
+            # budget is dead configuration.
+            self._current_usage = usage
             try:
                 # Populate workspace (e.g. clone repo) before the agent runs
                 if self.setup_workspace is not None:
                     self.setup_workspace(instance, str(workspace))
 
                 if not self.network_allowed:
-                    _block_network(workspace)
+                    _block_network(workspace, self.network_allowlist)
 
                 # Call adapter
                 if self.adapter is not None:
                     result = self.adapter.solve_instance(instance, str(workspace))
+                    # H4: enforce the process cap on whatever the adapter
+                    # reported while it was running (fail closed, never
+                    # silently over-subscribe the machine).
+                    check_budget(self.budget, usage)
                 else:
                     result = EvalResult(
                         instance_id=instance_id,
@@ -194,7 +249,18 @@ class HarnessRun:
                 # Scorer
                 if self.scorer is not None:
                     try:
-                        scorer_result = self.scorer(result, instance)
+                        scorer_result = self.scorer(result, instance, workspace)
+                        # A benchmark may hand back the official harness's raw
+                        # output under this reserved key.  It is persisted under
+                        # scorer/ (so checksums.sha256 pins it) instead of being
+                        # inlined into the prediction row, which is one JSON
+                        # line per instance and must stay readable.
+                        raw_outputs = scorer_result.pop(SCORER_RAW_OUTPUT_KEY, None)
+                        if isinstance(raw_outputs, dict):
+                            for name, content in raw_outputs.items():
+                                self.artifacts.record_scorer_output(
+                                    name, str(content)
+                                )
                         prediction.update(scorer_result)
                     except Exception as scorer_exc:
                         # scorer exception → ERROR_SCORER (now reachable!)
@@ -217,6 +283,7 @@ class HarnessRun:
                 self.artifacts.record_failure(instance_id, category, str(exc)[:500])
                 self.artifacts.record_event(instance_id, f"failed-{category}")
                 # Preserve workspace on failure for post-mortem
+                _mark_workspace_preserved(workspace, category, str(exc)[:500])
             except BaseException as exc:  # noqa: BLE001 - classify and record
                 category = classify_error(exc)
                 summary["by_category"][category] += 1
@@ -226,18 +293,33 @@ class HarnessRun:
                 )
                 self.artifacts.record_event(instance_id, f"failed-{category}")
                 # Preserve workspace on failure for post-mortem
+                _mark_workspace_preserved(workspace, category, str(exc)[:500])
 
         summary["ok"] = summary["completed"]
         summary["failed"] = sum(summary["by_category"].values())
         summary["skipped"] = summary["resumed_skipped"]
-        path = self.artifacts.write_summary(summary)
-        self.artifacts.write_environment()
 
-        # Write run manifest (Phase 4: RunPin contract)
-        manifest = _build_manifest(self, summary)
-        self.artifacts.write_manifest(manifest)
+        path = _finalize(self, summary)
+        return {"summary": summary, "summary_path": path}
 
-        return {"summary": summary, "summary_path": str(path)}
+
+def _finalize(harness: HarnessRun, summary: dict[str, Any]) -> str:
+    """Write summary, environment, manifest, and checksums; return summary path.
+
+    Order matters (H3, design map §20.7): summary and environment first,
+    then the manifest built from harness config + summary (fail-closed on
+    missing pins via :func:`_build_manifest`), and finally
+    ``checksums.sha256`` pinning every artifact written so far.  A
+    ``ValueError`` from the manifest aborts finalization before any
+    manifest/checksum is emitted — a run without mandatory pins is never
+    reported as reproducible.
+    """
+    path = harness.artifacts.write_summary(summary)
+    harness.artifacts.write_environment()
+    manifest = _build_manifest(harness, summary)
+    harness.artifacts.write_manifest(manifest)
+    harness.artifacts.write_checksums()
+    return str(path)
 
 
 class ScorerError(Exception):
@@ -245,8 +327,20 @@ class ScorerError(Exception):
 
 
 def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, Any]:
-    """Build run-manifest.json from harness config and run summary."""
+    """Build run-manifest.json from harness config and run summary.
+
+    Fail-closed (design map §20.7): ``git_sha`` and ``model`` are mandatory
+    pins — a run without them is not reproducible and must not emit a
+    manifest.  Raises ``ValueError`` naming every missing pin; callers see
+    the run abort before any manifest/checksum is written.
+    """
     config = harness.config
+    missing = [key for key in ("git_sha", "model") if not config.get(key)]
+    if missing:
+        raise ValueError(
+            "refusing to write run-manifest.json: missing mandatory pins: "
+            f"{', '.join(missing)} (a run must pin git commit and model identity)"
+        )
     return {
         "run_id": harness.run_id,
         "mode": config.get("mode", "official"),
@@ -269,7 +363,14 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         },
         "seed": config.get("seed", 42),
         "start_time": config.get("start_time", ""),
-        "network_policy": "disabled" if not harness.network_allowed else "allowed",
+        # "disabled" must never be claimed while a remote host was reachable:
+        # that would misstate the conditions the measurement was taken under.
+        "network_policy": (
+            "allowed"
+            if harness.network_allowed
+            else ("allowlist" if harness.network_allowlist else "disabled")
+        ),
+        "network_allowlist": list(harness.network_allowlist),
         "summary": {
             "total": summary["total"],
             "completed": summary["completed"],
@@ -279,12 +380,56 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
     }
 
 
-def _block_network(workspace: Path) -> None:
+def _mark_workspace_preserved(workspace: Path, category: str, message: str) -> None:
+    """Write a WORKSPACE_PRESERVED marker so post-mortem analysis knows why
+    the workspace was kept (failure category + error message)."""
+    try:
+        (workspace / WORKSPACE_PRESERVED_MARKER).write_text(
+            f"category: {category}\nerror: {message}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        # Workspace may already be gone (cleanup race); marker is best-effort
+        pass
+
+
+def _block_network(workspace: Path, allow_hosts: Sequence[str] = ()) -> None:
     """Best-effort network block for the instance workspace on Windows.
 
-    Full sandboxing is the benchmark's Docker/container responsibility; this
-    marks the run as network-disabled and records the intent in the
-    workspace so infra failures are distinguishable.
+    Two layers, both advisory:
+
+    1. ``NETWORK_DISABLED`` marker file records the granted allowlist, so infra
+       failures on network calls stay distinguishable from agent bugs.
+    2. HTTP(S)_PROXY / NO_PROXY env vars are pinned to a dead proxy so child
+       processes that honor proxy env vars fail loudly instead of silently
+       leaking traffic.  NO_PROXY carries loopback plus *allow_hosts*, so local
+       services stay reachable and named remote endpoints can be reached.
+
+    *allow_hosts* exists because the agent has to call a model endpoint.  With
+    loopback-only NO_PROXY this function silently killed every run against a
+    remote API (the LLM call died with ConnectionRefused, the agent emitted
+    zero tokens and an empty patch, and the run still exited 0).  Hosts must be
+    named explicitly and are recorded in the run manifest: an unlisted host —
+    github.com, pypi, the upstream fix — still fails closed.
+
+    Known limitation: on Windows this is best-effort and cannot stop a child
+    that ignores proxy env vars (raw sockets, DNS, ICMP, non-HTTP protocols)
+    or an in-process call that builds its own transport.  The real isolation
+    boundary is the benchmark's Docker/container network policy; this block
+    only makes the default fail-closed posture real for naive clients.
     """
-    # TODO: real network isolation (H2)
-    (workspace / "NETWORK_DISABLED").write_text("network allowlist not granted\n", encoding="utf-8")
+    dead_proxy = "http://127.0.0.1:9"  # discard port — connections fail fast
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        os.environ[name] = dead_proxy
+    # Loopback plus the explicit allowlist. Must NOT be "*", or the block is
+    # bypassed entirely.
+    no_proxy_entries = ["127.0.0.1", "localhost", "::1", *allow_hosts]
+    for name in ("NO_PROXY", "no_proxy"):
+        os.environ[name] = ",".join(no_proxy_entries)
+    granted = ", ".join(allow_hosts) if allow_hosts else "(none)"
+    (workspace / NETWORK_DISABLED_MARKER).write_text(
+        "HTTP(S)_PROXY pinned to dead proxy; every host outside the allowlist "
+        "fails closed\n"
+        f"allowlist: {granted}\n",
+        encoding="utf-8",
+    )

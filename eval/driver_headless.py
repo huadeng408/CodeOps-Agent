@@ -687,7 +687,10 @@ class HeadlessDriver(DefaultAgentAdapter):
         except Exception:
             pass
 
-        final_text = "\n".join(final_text_parts)
+        # Streaming deltas are fragments of a sentence, not lines: joining them
+        # with "\n" turned "Now I can see" into "Now\nI\ncan\nsee" in the
+        # recorded prediction, corrupting the artifact that IS the evidence.
+        final_text = "".join(final_text_parts)
 
         return EvalResult(
             instance_id=instance.instance_id,

@@ -670,14 +670,14 @@ class TestArbitration:
         b = _make_verdict(pass_id="B", relevance_correct=False)
         rows = arbitrate({"go-q001": a}, {"go-q001": b}, [_SAMPLE_QREL])
         assert rows[0]["review_status"] == "DISPUTED"
-        assert rows[0]["dispute_reason"] == "disagreement"
+        assert "disagreement" in rows[0]["dispute_reason"]
 
     def test_both_reject_qrel_disputed(self):
         a = _make_verdict(relevance_correct=False)
         b = _make_verdict(pass_id="B", relevance_correct=False)
         rows = arbitrate({"go-q001": a}, {"go-q001": b}, [_SAMPLE_QREL])
         assert rows[0]["review_status"] == "DISPUTED"
-        assert rows[0]["dispute_reason"] == "both_reject_qrel"
+        assert "both_false" in rows[0]["dispute_reason"]
 
     def test_low_confidence_disputed(self):
         a = _make_verdict(confidence=0.5)
@@ -698,7 +698,7 @@ class TestArbitration:
         b = _make_verdict(pass_id="B", answerable=False)
         rows = arbitrate({"go-q001": a}, {"go-q001": b}, [_SAMPLE_QREL])
         assert rows[0]["review_status"] == "DISPUTED"
-        assert rows[0]["dispute_reason"] == "unanswerable"
+        assert "both_false" in rows[0]["dispute_reason"]
 
     def test_deterministic(self):
         a = _make_verdict()
@@ -730,12 +730,12 @@ class TestArbitrationParameterized:
             (dict(confidence=0.6), dict(confidence=0.65), "DISPUTED", "low_confidence"),
             # disagreement
             (dict(relevance_correct=True), dict(relevance_correct=False), "DISPUTED", "disagreement"),
-            # both reject
-            (dict(relevance_correct=False), dict(relevance_correct=False), "DISPUTED", "both_reject_qrel"),
+            # both reject relevance
+            (dict(relevance_correct=False), dict(relevance_correct=False), "DISPUTED", "both_false"),
             # pass A failed
             (dict(failed=True, fail_reason="llm_error"), dict(), "DISPUTED", "pass_failed:llm_error"),
-            # unanswerable
-            (dict(answerable=False), dict(answerable=False, pass_id="B"), "DISPUTED", "unanswerable"),
+            # both say not answerable
+            (dict(answerable=False), dict(answerable=False, pass_id="B"), "DISPUTED", "both_false"),
         ],
     )
     def test_arbitration_scenarios(self, a_kw, b_kw, expected_status, expected_reason):
@@ -745,7 +745,7 @@ class TestArbitrationParameterized:
         rows = arbitrate({"go-q001": a}, {"go-q001": b}, [_SAMPLE_QREL])
         assert rows[0]["review_status"] == expected_status
         if expected_reason:
-            assert rows[0]["dispute_reason"] == expected_reason
+            assert expected_reason in rows[0]["dispute_reason"]
 
 
 class TestSummary:

@@ -26,7 +26,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -107,6 +107,10 @@ class PassVerdict:
     confidence: float  # 0.0–1.0; 0.0 when failed
     prompt_hash: str  # sha256 hex[:16]
     evidence_refs: tuple[str, ...]  # "es:<index>:<doc_id>:<source_path>" per chunk
+    # Provider-reported model identity, read from the response body (design map
+    # §20.6.3 task E2).  Never derived from the requested model / --revision:
+    # an input echoed into an artifact is not evidence of what served the call.
+    model_identity: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +123,87 @@ def redact_text(text: str) -> str:
     for pattern in _KEY_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Provider model identity (design map §20.6.3 task E2)
+# ---------------------------------------------------------------------------
+
+IDENTITY_VERIFIED: str = "MODEL_IDENTITY_VERIFIED"
+IDENTITY_UNVERIFIED: str = "MODEL_IDENTITY_UNVERIFIED"
+
+# Only these keys of a provider identity dict may reach an artifact.  An
+# allowlist (not a denylist) keeps a future provider field — or an accidental
+# credential-bearing key — from leaking into a sidecar row.
+_IDENTITY_ARTIFACT_KEYS: tuple[str, ...] = (
+    "reported_model",
+    "system_fingerprint",
+    "response_id",
+)
+
+# The full set of keys a provider identity may carry into a PassVerdict.  Wider
+# than _IDENTITY_ARTIFACT_KEYS because `requested_model` / `created` are useful
+# provenance to keep in memory, but still an allowlist so an unexpected
+# credential-bearing key is dropped at capture time rather than at write time.
+_IDENTITY_CAPTURE_KEYS: tuple[str, ...] = (
+    "requested_model",
+    "reported_model",
+    "response_id",
+    "system_fingerprint",
+    "created",
+    "identity_verified",
+)
+
+
+def resolve_identity_status(identities: "list[dict[str, Any]] | tuple[dict[str, Any], ...]") -> str:
+    """Fold per-call provider identities into one artifact-level status.
+
+    ``MODEL_IDENTITY_VERIFIED`` requires that *every* observed call carried both
+    a provider-reported model name and an immutable build discriminator
+    (``system_fingerprint``).  Anything else — no calls at all, a silent
+    provider, or a single unverified call in a batch — is
+    ``MODEL_IDENTITY_UNVERIFIED``, per the design map: "若 provider 不提供不可变
+    revision，状态必须为 MODEL_IDENTITY_UNVERIFIED".
+
+    Deliberately ignores ``requested_model``: that is a value we chose, and the
+    §20.4 failure was treating it as proof of what served the request.
+    """
+    entries = [e for e in identities if isinstance(e, dict)]
+    if not entries:
+        return IDENTITY_UNVERIFIED
+    for entry in entries:
+        if not str(entry.get("reported_model") or ""):
+            return IDENTITY_UNVERIFIED
+        if not str(entry.get("system_fingerprint") or ""):
+            return IDENTITY_UNVERIFIED
+    return IDENTITY_VERIFIED
+
+
+def sanitize_identity(identity: "dict[str, Any] | None") -> dict[str, Any]:
+    """Keep only the known provider-identity keys, dropping everything else.
+
+    Applied at *capture* time so a credential-bearing key can never enter a
+    :class:`PassVerdict` in the first place — redaction at write time is the
+    second line of defence, not the first.  An allowlist is used deliberately:
+    a denylist would pass through any future key we failed to anticipate.
+    """
+    source = identity if isinstance(identity, dict) else {}
+    return {key: source[key] for key in _IDENTITY_CAPTURE_KEYS if key in source}
+
+
+def _identity_artifact_fields(identity: "dict[str, Any] | None") -> dict[str, Any]:
+    """Project a provider identity onto its artifact-safe subset.
+
+    Returns blank strings when the provider was silent — never a backfill from
+    the requested model or ``--revision``.
+    """
+    source = identity if isinstance(identity, dict) else {}
+    fields = {
+        f"reviewer_{key}": str(source.get(key) or "")
+        for key in _IDENTITY_ARTIFACT_KEYS
+    }
+    fields["reviewer_identity_status"] = resolve_identity_status([source])
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +667,19 @@ async def review_one(
             evidence_refs=evidence_refs,
         )
 
+    # Capture the provider's *own* answer to "what served this request?".
+    # Direct attribute read on purpose (design map §20.6.3 E2): an indirect
+    # getattr chain would let this wire be removed while the gate test in
+    # tests/eval/test_sol_reviewer_identity_capture.py still passed.  The
+    # try/except only tolerates a foreign/legacy response object — it never
+    # substitutes a value, so a silent provider stays blank rather than being
+    # backfilled from the requested model name.
+    try:
+        raw_identity = response.model_identity
+    except AttributeError:
+        raw_identity = None
+    identity = sanitize_identity(raw_identity)
+
     parsed = parse_verdict_json(response.text)
     if parsed is None:
         return PassVerdict(
@@ -599,6 +697,7 @@ async def review_one(
             confidence=0.0,
             prompt_hash=phash,
             evidence_refs=evidence_refs,
+            model_identity=identity,
         )
 
     verdict = validate_verdict_fields(parsed, qid, pass_id)
@@ -618,9 +717,11 @@ async def review_one(
             confidence=0.0,
             prompt_hash=phash,
             evidence_refs=evidence_refs,
+            model_identity=identity,
         )
 
-    # Attach prompt hash and evidence refs (these are set in caller context)
+    # Attach prompt hash, evidence refs and provider identity (all set in
+    # caller context, not by the model).
     return PassVerdict(
         query_id=verdict.query_id,
         pass_id=verdict.pass_id,
@@ -636,6 +737,7 @@ async def review_one(
         confidence=verdict.confidence,
         prompt_hash=phash,
         evidence_refs=evidence_refs,
+        model_identity=identity,
     )
 
 
@@ -651,8 +753,13 @@ def _verdict_to_row(verdict: PassVerdict, qrel: dict[str, Any], model: str, revi
         "language": qrel.get("language", ""),
         "query_type": qrel.get("query_type", ""),
         "review_pass": verdict.pass_id,
+        # `reviewer_model` / `reviewer_revision` are the values we *requested*.
+        # They are kept for reproducibility but are NOT identity evidence — the
+        # `reviewer_reported_model` / `reviewer_system_fingerprint` fields below
+        # come from the provider's own response body (design map §20.6.3 E2).
         "reviewer_model": model,
         "reviewer_revision": revision,
+        **_identity_artifact_fields(verdict.model_identity),
         "review_prompt_hash": verdict.prompt_hash,
         "review_confidence": verdict.confidence,
         "review_evidence": "|".join(verdict.evidence_refs),
@@ -674,6 +781,48 @@ def _verdict_to_row(verdict: PassVerdict, qrel: dict[str, Any], model: str, revi
     else:
         row["review_status"] = "AI_REVIEWED"
     return row
+
+
+def _row_to_verdict(row: dict[str, Any], qid: str, pass_id: str) -> PassVerdict:
+    """Rebuild a :class:`PassVerdict` from a sidecar row — inverse of
+    :func:`_verdict_to_row`.
+
+    Single shared implementation on purpose: this logic previously existed twice
+    (the resume branch of :func:`run_pass` and :func:`_reconstruct_verdicts`),
+    and the provider identity was dropped by *both* copies.  Restoring identity
+    here reads evidence already persisted on disk — it never invents any, so a
+    row written by a silent provider reloads as silent.
+    """
+    verdicts = row.get("verdicts", {}) if isinstance(row.get("verdicts"), dict) else {}
+    disputed = row.get("review_status") == "DISPUTED"
+    identity = sanitize_identity(
+        {
+            "reported_model": row.get("reviewer_reported_model", ""),
+            "system_fingerprint": row.get("reviewer_system_fingerprint", ""),
+            "response_id": row.get("reviewer_response_id", ""),
+        }
+    )
+    # Drop blank keys so a fully silent row reloads as {} — the same value a
+    # transport error produces — instead of a dict of empty strings that reads
+    # like an identity was captured.
+    identity = {k: v for k, v in identity.items() if v}
+    return PassVerdict(
+        query_id=qid,
+        pass_id=pass_id,
+        failed=disputed,
+        fail_reason=(verdicts.get("fail_reason") if disputed else None),
+        answerable=bool(verdicts.get("answerable", False)),
+        language_correct=bool(verdicts.get("language_correct", False)),
+        query_type_correct=bool(verdicts.get("query_type_correct", False)),
+        relevance_correct=bool(verdicts.get("relevance_correct", False)),
+        section_correct=bool(verdicts.get("section_correct", False)),
+        evidence_sufficient=bool(verdicts.get("evidence_sufficient", False)),
+        contamination_risk=str(verdicts.get("contamination_risk", "none")),
+        confidence=float(verdicts.get("confidence", 0.0)),
+        prompt_hash=str(row.get("review_prompt_hash", "")),
+        evidence_refs=tuple((row.get("review_evidence", "") or "").split("|")),
+        model_identity=identity,
+    )
 
 
 async def run_pass(
@@ -705,27 +854,12 @@ async def run_pass(
     for i, qrel in enumerate(worklist):
         qid = str(qrel["query_id"])
         if qid in completed:
-            # Recover result from sidecar (best effort)
+            # Recover result from sidecar (best effort) via the shared inverse of
+            # _verdict_to_row, so the resume path cannot drift from
+            # _reconstruct_verdicts (both previously dropped model_identity).
             sidecar = load_sidecar(out_path)
             row = sidecar.get(qid, {})
-            verdicts = row.get("verdicts", {}) if isinstance(row.get("verdicts"), dict) else {}
-            rp = PassVerdict(
-                query_id=qid,
-                pass_id=pass_id,
-                failed=row.get("review_status") == "DISPUTED",
-                fail_reason=(verdicts.get("fail_reason") if row.get("review_status") == "DISPUTED" else None),
-                answerable=bool(verdicts.get("answerable", False)),
-                language_correct=bool(verdicts.get("language_correct", False)),
-                query_type_correct=bool(verdicts.get("query_type_correct", False)),
-                relevance_correct=bool(verdicts.get("relevance_correct", False)),
-                section_correct=bool(verdicts.get("section_correct", False)),
-                evidence_sufficient=bool(verdicts.get("evidence_sufficient", False)),
-                contamination_risk=str(verdicts.get("contamination_risk", "none")),
-                confidence=float(verdicts.get("confidence", 0.0)),
-                prompt_hash=str(row.get("review_prompt_hash", "")),
-                evidence_refs=tuple((row.get("review_evidence", "") or "").split("|")),
-            )
-            results[qid] = rp
+            results[qid] = _row_to_verdict(row, qid, pass_id)
             print(f"[{pass_id}] resume skip {qid} ({i+1}/{len(worklist)})")
             continue
 
@@ -864,12 +998,32 @@ def arbitrate(
             "review_prompt_hash": a.prompt_hash,
             "review_evidence": "|".join(a.evidence_refs),
             "review_timestamp": _review_timestamp(),
+            # Provider-reported identity across BOTH passes (design map §20.6.3
+            # E2).  Reported alongside the verdict, never folded into it: an
+            # unverifiable reviewer identity is a disclosure obligation, not a
+            # reason to relabel a qrel.
+            "reviewer_identity_status": resolve_identity_status(
+                [a.model_identity, b.model_identity]
+            ),
         }
 
-        # Arbitration logic
+        # Arbitration logic (fixed 2026-08-09 Phase E1):
+        # AI_REVIEWED requires ALL of:
+        #   1. Neither pass failed
+        #   2. Both passes agree on ALL 6 boolean dimensions
+        #   3. ALL 6 dimensions are True on both passes
+        #   4. Contamination risk is "none" on both passes
+        #   5. Min confidence >= threshold
+        #
+        # Any deviation → DISPUTED with specific machine-readable reason.
         reason: str
         review_status: str
         review_confidence: float = 0.0
+
+        BOOL_DIMS = (
+            "answerable", "language_correct", "query_type_correct",
+            "relevance_correct", "section_correct", "evidence_sufficient",
+        )
 
         if a.failed or b.failed:
             review_status = "DISPUTED"
@@ -882,35 +1036,41 @@ def arbitrate(
         elif a.fail_reason == "evidence_fetch_failed" or b.fail_reason == "evidence_fetch_failed":
             review_status = "DISPUTED"
             reason = "evidence_missing"
-        elif not a.answerable or not b.answerable:
-            review_status = "DISPUTED"
-            reason = "unanswerable"
-        elif (
-            a.relevance_correct == b.relevance_correct
-            and a.section_correct == b.section_correct
-            and a.language_correct == b.language_correct
-            and a.query_type_correct == b.query_type_correct
-            and a.evidence_sufficient == b.evidence_sufficient
-        ):
-            # All dimensions agree
-            min_conf = min(a.confidence, b.confidence)
-            if a.relevance_correct is False and b.relevance_correct is False:
-                # Both agree qrel is wrong → still disputed (needs human fix)
-                review_status = "DISPUTED"
-                reason = "both_reject_qrel"
-                review_confidence = round(min_conf, 3)
-            elif min_conf >= confidence_threshold:
-                review_status = "AI_REVIEWED"
-                reason = ""
-                review_confidence = round(min_conf, 3)
-            else:
-                review_status = "DISPUTED"
-                reason = "low_confidence"
-                review_confidence = round(min_conf, 3)
         else:
-            review_status = "DISPUTED"
-            reason = "disagreement"
-            review_confidence = round(min(a.confidence, b.confidence), 3)
+            # Check all 6 boolean dimensions
+            any_both_false = False
+            any_disagree = False
+            both_false_dims: list[str] = []
+            disagree_dims: list[str] = []
+            for dim in BOOL_DIMS:
+                av = getattr(a, dim)
+                bv = getattr(b, dim)
+                if av != bv:
+                    any_disagree = True
+                    disagree_dims.append(dim)
+                elif av is False:  # both False (av == bv == False)
+                    any_both_false = True
+                    both_false_dims.append(dim)
+
+            if any_disagree:
+                review_status = "DISPUTED"
+                reason = f"disagreement:{','.join(disagree_dims)}"
+            elif any_both_false:
+                review_status = "DISPUTED"
+                reason = f"both_false:{','.join(both_false_dims)}"
+            elif a.contamination_risk != "none" or b.contamination_risk != "none":
+                review_status = "DISPUTED"
+                reason = f"contamination:{a.contamination_risk}/{b.contamination_risk}"
+            else:
+                min_conf = min(a.confidence, b.confidence)
+                if min_conf >= confidence_threshold:
+                    review_status = "AI_REVIEWED"
+                    reason = ""
+                    review_confidence = round(min_conf, 3)
+                else:
+                    review_status = "DISPUTED"
+                    reason = "low_confidence"
+                    review_confidence = round(min_conf, 3)
 
         base["review_status"] = review_status
         base["review_confidence"] = review_confidence
@@ -958,6 +1118,22 @@ def summarize(
 
     disputed_qids = [r["query_id"] for r in disputed]
 
+    # Provider-reported identity, folded across every observed call in both
+    # passes (design map §20.6.3 task E2).  One silent call is enough to make
+    # the whole review MODEL_IDENTITY_UNVERIFIED — the artifact must not claim
+    # a model identity it cannot evidence from response bodies.
+    identities = [
+        v.model_identity
+        for v in (*pass_a.values(), *pass_b.values())
+        if isinstance(v.model_identity, dict)
+    ]
+    observed_models = sorted(
+        {str(e.get("reported_model") or "") for e in identities} - {""}
+    )
+    observed_fingerprints = sorted(
+        {str(e.get("system_fingerprint") or "") for e in identities} - {""}
+    )
+
     return {
         "meta": meta,
         "total_queries": len(final_rows),
@@ -970,6 +1146,9 @@ def summarize(
         "per_language": per_language,
         "disputed_query_ids": disputed_qids,
         "ai_reviewed_query_ids": [r["query_id"] for r in ai],
+        "model_identity_status": resolve_identity_status(identities),
+        "observed_models": observed_models,
+        "observed_system_fingerprints": observed_fingerprints,
     }
 
 
@@ -1086,27 +1265,14 @@ def _reconstruct_verdicts(
     sidecar: dict[str, dict[str, Any]],
     pass_id: str,
 ) -> dict[str, PassVerdict]:
-    """Reconstruct PassVerdict dict from loaded sidecar rows."""
-    out: dict[str, PassVerdict] = {}
-    for qid, row in sidecar.items():
-        v = row.get("verdicts", {}) if isinstance(row.get("verdicts"), dict) else {}
-        out[qid] = PassVerdict(
-            query_id=qid,
-            pass_id=pass_id,
-            failed=row.get("review_status") == "DISPUTED",
-            fail_reason=v.get("fail_reason"),
-            answerable=bool(v.get("answerable", False)),
-            language_correct=bool(v.get("language_correct", False)),
-            query_type_correct=bool(v.get("query_type_correct", False)),
-            relevance_correct=bool(v.get("relevance_correct", False)),
-            section_correct=bool(v.get("section_correct", False)),
-            evidence_sufficient=bool(v.get("evidence_sufficient", False)),
-            contamination_risk=str(v.get("contamination_risk", "none")),
-            confidence=float(v.get("confidence", 0.0)),
-            prompt_hash=str(row.get("review_prompt_hash", "")),
-            evidence_refs=tuple((row.get("review_evidence", "") or "").split("|")),
-        )
-    return out
+    """Reconstruct PassVerdict dict from loaded sidecar rows.
+
+    Delegates to the shared :func:`_row_to_verdict` so the provider identity
+    persisted on disk survives an ``--only arbitrate`` run.
+    """
+    return {
+        qid: _row_to_verdict(row, qid, pass_id) for qid, row in sidecar.items()
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -16,10 +16,14 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from eval.adapter import EvalInstance, EvalResult
+from eval.benchmarks.base import AgentBenchmark
 from eval.manifest import ALLOWED_LICENSES
+
+if TYPE_CHECKING:  # import-time only — the AgentAdapter protocol is never used at runtime here
+    from eval.adapter import AgentAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -250,3 +254,277 @@ def _run_with_config(
     logger.info("[tau2bench] summary -> %s", summary_path)
 
     return eval_results
+
+
+# ---------------------------------------------------------------------------
+# AgentBenchmark implementation (unified harness lifecycle)
+# ---------------------------------------------------------------------------
+
+#: Official scorer name; identical to the value written into the
+#: ``_run_with_config`` summary artifact.
+_SCORER_NAME = "tau_bench.run.run"
+
+
+def _as_int(value: Any) -> int | None:
+    """Best-effort int conversion for τ²-bench task ids (JSONL ``id``)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sha256_prefix(path: Path, length: int = 12) -> str:
+    """Short sha256 hex prefix of a file, pinned per run for reproducibility."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:length]
+
+
+class Tau2BenchAdapter(AgentBenchmark):
+    """τ²-bench adapter for the unified :class:`AgentBenchmark` contract.
+
+    Reuses the existing τ²-bench helpers (:func:`_can_score_official`,
+    :func:`load_tasks`, :class:`Tau2BenchConfig`) and defers execution to
+    the OFFICIAL ``tau_bench.run.run(RunConfig)`` black-box:
+
+    - :meth:`prepare` is a no-op — τ²-bench tasks run inside the official
+      domain runner and need no workspace setup.
+    - :meth:`solve` builds a :class:`RunConfig` for the single instance
+      (model config read from env vars, mirroring the module-level
+      :func:`run`), delegates to the official runner and converts the
+      returned :class:`EnvRunResult` into an :class:`EvalResult`.  The
+      official reward is persisted to ``workspace/score.json`` so
+      :meth:`score` can report it without re-running anything.
+    - :meth:`score` returns the official resolution read from that
+      sidecar — the official scorer is never faked.  Missing evidence
+      fails closed to ``resolved: False``.
+
+    The pins reflect exactly what the offline loader (:func:`load_tasks`)
+    and the official runner use: the offline τ²-bench JSONL family under
+    the data dir (sha256-pinned) and ``tau_bench.run.run``.
+    """
+
+    name = "tau2-bench"
+
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        env_name: str | None = None,
+        model_name: str | None = None,
+        num_trials: int | None = None,
+        max_concurrency: int | None = None,
+        task_split: str | None = None,
+    ) -> None:
+        """Configure the adapter from explicit args or env vars.
+
+        Falls back to ``$TAU2_DATA_DIR`` (offline data dir), ``$TAU2_ENV``
+        (default ``airline``) and ``$TAU2_MODEL`` (default ``deepseek-v4``)
+        — the same env-var contract as the module-level :func:`run`.
+        """
+        raw_dir = data_dir or os.environ.get(DATA_DIR_ENV) or str(
+            Path(__file__).resolve().parent.parent / "benchmark_data" / "tau2bench"
+        )
+        self.data_dir = Path(raw_dir).resolve() if raw_dir else None
+        self.env_name = env_name or os.environ.get("TAU2_ENV", "airline")
+        self.model_name = model_name or os.environ.get("TAU2_MODEL", "deepseek-v4")
+        self.num_trials = int(num_trials or 1)
+        self.max_concurrency = int(max_concurrency or 1)
+        self.task_split = task_split or "test"
+
+    # ------------------------------------------------------------------
+    # AgentBenchmark contract
+    # ------------------------------------------------------------------
+
+    def prepare(self, instance: EvalInstance, workspace: Path) -> None:
+        """No-op: τ²-bench runs inside the official domain runner and
+        requires no workspace setup."""
+
+    def solve(
+        self,
+        instance: EvalInstance,
+        workspace: Path,
+        adapter: "AgentAdapter",
+        **kwargs: Any,
+    ) -> EvalResult:
+        """Run the single instance through the official runner.
+
+        Builds a :class:`RunConfig` for the instance (mirroring
+        :func:`_run_with_config`, but per-instance so the official reward
+        is preserved), delegates to ``tau_bench.run.run`` and converts the
+        :class:`EnvRunResult` into an :class:`EvalResult`.  The official
+        outcome is written to ``workspace/score.json`` so :meth:`score`
+        can report it without re-running anything.
+
+        Never returns ``None``: unavailable official runner, missing data
+        dir and missing task records all produce fail-closed
+        ``EvalResult`` with a non-empty ``error``.
+        """
+        workspace = Path(workspace)
+        task_id = _as_int(instance.metadata.get("id", instance.instance_id.rsplit("/", 1)[-1]))
+
+        can_score, reason = _can_score_official()
+        if not can_score:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error=f"ERROR_INFRA: {reason}",
+            )
+        if task_id is None:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error=f"ERROR_SETUP: cannot parse task id from {instance.instance_id!r}",
+            )
+        if self.data_dir is None:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error=(
+                    f"ERROR_SETUP: no data dir "
+                    f"(set {DATA_DIR_ENV} or pass data_dir=...)"
+                ),
+            )
+
+        config = Tau2BenchConfig(data_dir=self.data_dir, env_name=self.env_name)
+        issues = config.validate()
+        if issues:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error=f"ERROR_SETUP: {'; '.join(issues)}",
+            )
+
+        tasks = [t for t in load_tasks(config.data_dir) if t.get("_env") == config.env_name]
+        task = next(
+            (t for t in tasks if _as_int(t.get("id", t.get("task_id"))) == task_id),
+            None,
+        )
+        if task is None:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error=(
+                    f"ERROR_SETUP: task {task_id} not found in {config.data_dir} "
+                    f"(env {config.env_name!r})"
+                ),
+            )
+
+        output_dir = workspace / "tau2_runs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        from tau_bench.run import run as tau_run
+        from tau_bench.types import EnvRunResult, RunConfig
+
+        run_config = RunConfig(
+            model_provider="deepseek",
+            user_model_provider="deepseek",
+            model=self.model_name,
+            user_model=self.model_name,
+            num_trials=self.num_trials,
+            env=config.env_name,
+            task_split=self.task_split,
+            task_ids=[task_id],
+            log_dir=str(output_dir),
+            max_concurrency=self.max_concurrency,
+        )
+
+        logger.info(
+            "[tau2bench-adapter] solving %s via %s (env=%s, model=%s)",
+            instance.instance_id,
+            _SCORER_NAME,
+            config.env_name,
+            self.model_name,
+        )
+        env_results: list[EnvRunResult] = tau_run(run_config)
+
+        if not env_results:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error="ERROR_RUN: official runner returned no results",
+            )
+
+        er = env_results[0]
+        error = ""
+        if er.reward < 1.0:
+            error = f"reward={er.reward:.2f}"
+
+        result = EvalResult(
+            instance_id=instance.instance_id,
+            error=error,
+        )
+
+        # Persist the official outcome for score(); reward is resolved the
+        # same way tau_bench.run.display_metrics defines success.
+        resolved = er.reward >= 1.0 - 1e-6
+        sidecar = {
+            "resolved": resolved,
+            "reward": er.reward,
+            "failure_mode": None,
+            "info": er.info,
+        }
+        (workspace / "score.json").write_text(
+            json.dumps(sidecar, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return result
+
+    def score(
+        self,
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """Return the official resolution embedded in :meth:`solve`.
+
+        Reads the per-run ``workspace/score.json`` sidecar written by
+        :meth:`solve` from the official :class:`EnvRunResult`.  Missing
+        sidecar means no official evidence -> fail-closed ``resolved: False``
+        (the official scorer is never faked).
+        """
+        workspace = Path(workspace)
+        sidecar_path = workspace / "score.json"
+        if sidecar_path.exists():
+            try:
+                sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                return {
+                    "resolved": bool(sidecar.get("resolved", False)),
+                    "reward": float(sidecar.get("reward", 0.0)),
+                    "scorer": _SCORER_NAME,
+                    "failure_mode": sidecar.get("failure_mode"),
+                    "scorer_status": "official: reward embedded in solve()",
+                }
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+        return {
+            "resolved": False,
+            "reward": 0.0,
+            "scorer": _SCORER_NAME,
+            "failure_mode": None,
+            "scorer_status": "no official run record (sidecar missing)",
+        }
+
+    # ------------------------------------------------------------------
+    # Pins
+    # ------------------------------------------------------------------
+
+    @property
+    def pins(self) -> dict[str, str]:
+        """Reproducibility pins for benchmark/dataset/scorer.
+
+        ``dataset_revision`` is the sha256 prefix of the offline JSONL
+        family actually consumed, so every run is pinned to the exact
+        offline snapshot on disk.
+        """
+        revision = ""
+        dataset_name = f"tau2-bench offline (env {self.env_name})"
+        if self.data_dir is not None:
+            jsonl = self.data_dir / f"{self.env_name}.jsonl"
+            if jsonl.exists():
+                revision = _sha256_prefix(jsonl)
+                dataset_name = f"tau2-bench offline {self.env_name}.jsonl"
+        return {
+            "benchmark": self.name,
+            "dataset_name": dataset_name,
+            "dataset_revision": revision,
+            "scorer_name": _SCORER_NAME,
+            "env_name": self.env_name,
+            "model_name": self.model_name,
+        }

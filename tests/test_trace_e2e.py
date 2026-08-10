@@ -322,13 +322,16 @@ def test_runner_disables_fast_model_routing():
 def test_trace_e2e_extra_declares_python_telemetry_dependencies():
     pyproject_path = Path(__file__).parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    dependencies = pyproject["project"]["optional-dependencies"]["trace-e2e"]
-
-    assert any(dependency.startswith("grpcio") for dependency in dependencies)
-    assert any(dependency.startswith("opentelemetry-sdk") for dependency in dependencies)
+    # grpcio/protobuf moved to core dependencies (required by protobuf codegen)
+    core_deps = pyproject["project"]["dependencies"]
+    assert any(dependency.startswith("grpcio") for dependency in core_deps)
+    assert any(dependency.startswith("protobuf") for dependency in core_deps)
+    # trace-e2e carries OTel extras only
+    trace_e2e = pyproject["project"]["optional-dependencies"]["trace-e2e"]
+    assert any(dependency.startswith("opentelemetry-sdk") for dependency in trace_e2e)
     assert any(
         dependency.startswith("opentelemetry-exporter-otlp-proto-http")
-        for dependency in dependencies
+        for dependency in trace_e2e
     )
 
 

@@ -14,9 +14,12 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from eval.retrieval.metrics import RetrievalHit, RetrievalQrel
+
+if TYPE_CHECKING:  # import-time only — avoids circular imports with eval.adapter
+    from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 
 
 @dataclass
@@ -96,3 +99,75 @@ class RetrievalBenchmark(ABC):
 
 def cache_root() -> Path:
     return Path(os.environ.get("CODE_AGENT_EVAL_CACHE", "eval/cache"))
+
+
+# ---------------------------------------------------------------------------
+# Agent benchmarks (unified harness lifecycle: prepare -> solve -> score)
+# ---------------------------------------------------------------------------
+
+
+class AgentBenchmark(ABC):
+    """Base class for agent-based benchmarks (SWE-bench, terminal-bench, ...).
+
+    The unified lifecycle per instance is:
+
+        1. ``prepare(instance, workspace)``         - set up the workspace
+           (clone the repo, install deps, ...).
+        2. ``solve(instance, workspace, adapter)``   - run the agent and
+           produce an :class:`EvalResult`; never returns ``None``.
+        3. ``score(result, instance, workspace)``    - invoke the OFFICIAL
+           scorer and return the metrics dict merged into the prediction
+           artifact.
+
+    Concrete subclasses must override :attr:`pins` so every run is pinned to
+    an exact dataset revision and scorer.
+    """
+
+    name: str = ""
+
+    @abstractmethod
+    def prepare(self, instance: "EvalInstance", workspace: Path) -> None:
+        """Prepare the workspace for one instance (clone repo, checkout, ...)."""
+
+    @abstractmethod
+    def solve(
+        self,
+        instance: "EvalInstance",
+        workspace: Path,
+        adapter: "AgentAdapter",
+    ) -> "EvalResult":
+        """Run the agent on the prepared workspace and return the result."""
+
+    @abstractmethod
+    def score(
+        self,
+        result: "EvalResult",
+        instance: "EvalInstance",
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """Invoke the official scorer; returns the metrics dict for the artifact."""
+
+    @property
+    def pins(self) -> dict[str, str]:
+        """Immutable benchmark pins for reproducibility.
+
+        Subclasses override with the exact ``dataset_name``,
+        ``dataset_revision`` and ``scorer_name`` used by the run.
+        """
+        return {
+            "benchmark": self.name,
+            "dataset_name": "",
+            "dataset_revision": "",
+            "scorer_name": "",
+        }
+
+    def validate_pins(self) -> list[str]:
+        """Return the list of required pin keys that are missing or empty.
+
+        An empty list means the pins are complete.
+        """
+        missing: list[str] = []
+        for key in ("benchmark", "dataset_name", "dataset_revision", "scorer_name"):
+            if not (self.pins.get(key) or "").strip():
+                missing.append(key)
+        return missing

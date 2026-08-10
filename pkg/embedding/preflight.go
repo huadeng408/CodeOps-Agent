@@ -120,8 +120,32 @@ func (c *openAICompatibleClient) checkHealth(ctx context.Context) error {
 	if advertised == "" {
 		advertised = health.Revision
 	}
-	if advertised != "" && advertised != c.cfg.ModelRevision {
-		return fmt.Errorf("embedding health revision mismatch: expected %s, got %s", c.cfg.ModelRevision, advertised)
+	if advertised != "" {
+		// The configured pin is always fully qualified ("model@commit") because
+		// ValidateEmbeddingContract rejects floating tags, while a real service
+		// commonly advertises only the bare commit. Raw string equality would
+		// report a mismatch between two pins that name the same weights, so the
+		// comparison is on the commit component, with the model prefix checked
+		// only when both sides carry one.
+		wantPrefix, wantCommit := splitModelRevision(c.cfg.ModelRevision)
+		gotPrefix, gotCommit := splitModelRevision(advertised)
+		mismatch := gotCommit == "" || gotCommit != wantCommit
+		if !mismatch && gotPrefix != "" && wantPrefix != "" && gotPrefix != wantPrefix {
+			mismatch = true
+		}
+		if mismatch {
+			return fmt.Errorf("embedding health revision mismatch: expected %s, got %s", c.cfg.ModelRevision, advertised)
+		}
 	}
 	return nil
+}
+
+// splitModelRevision splits a "model@commit" pin into its model prefix and
+// commit component. A bare commit (no "@") yields an empty prefix, and a
+// trailing "@" yields an empty commit so it can never be read as a match.
+func splitModelRevision(value string) (prefix, commit string) {
+	if idx := strings.LastIndex(value, "@"); idx >= 0 {
+		return value[:idx], value[idx+1:]
+	}
+	return "", value
 }

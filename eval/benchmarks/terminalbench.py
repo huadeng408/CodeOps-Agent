@@ -19,10 +19,14 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from eval.adapter import EvalInstance, EvalResult
+from eval.benchmarks.base import AgentBenchmark
 from eval.manifest import ALLOWED_LICENSES
+
+if TYPE_CHECKING:  # import-time only — the AgentAdapter protocol is never used at runtime here
+    from eval.adapter import AgentAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -419,3 +423,340 @@ def _run_with_harness(
     logger.info("[terminalbench] summary -> %s", summary_path)
 
     return eval_results
+
+
+# ---------------------------------------------------------------------------
+# AgentBenchmark implementation (unified prepare -> solve -> score lifecycle)
+# ---------------------------------------------------------------------------
+
+#: Existing terminal_bench BaseAgent driven by the official harness.
+_DEFAULT_AGENT_IMPORT_PATH = "eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent"
+#: Official runner black-box that executes AND scores the agent.
+_SCORER_NAME = "terminal_bench.Harness"
+
+
+class TerminalBenchAdapter(AgentBenchmark):
+    """Terminal-Bench adapter for the unified :class:`AgentBenchmark`
+    contract (prepare -> solve -> score).
+
+    Reuses the existing Terminal-Bench helpers:
+
+    - :meth:`prepare` materializes the harness-required per-task layout
+      (TB 2.0 -> ``terminal_bench.Harness``) via
+      :func:`_materialize_task_dir`.
+    - :meth:`solve` delegates execution to the OFFICIAL
+      ``terminal_bench.Harness`` black-box with ``agent_import_path``
+      pointing at an existing terminal_bench agent (default
+      ``DeepSeekTBAgent``); the harness runs the agent inside Docker and
+      embeds the official score (``trial.is_resolved``) in the run.
+      The ``adapter`` argument exists for interface compatibility only —
+      the official harness drives its own agent, it never calls
+      ``adapter.solve_instance``.
+    - :meth:`score` returns the resolution embedded in :meth:`solve`
+      (read from the per-run ``score.json`` sidecar), never faking the
+      official scorer.
+
+    The pins reflect exactly what the offline loader (:func:`load_instances`)
+    and the official runner use: the offline terminal-bench v2 JSONL family
+    under the data dir (sha256-pinned) and ``terminal_bench.Harness``.
+    """
+
+    name = "terminal-bench"
+
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        agent_import_path: str | None = None,
+        agent_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Configure the adapter.
+
+        Parameters
+        ----------
+        data_dir:
+            Offline Terminal-Bench data dir (contains ``tasks/`` plus one
+            JSONL per task family).  Falls back to ``$TERMINALBENCH_DATA_DIR``,
+            then to the repo-standard ``eval/benchmark_data/terminalbench``.
+        agent_import_path:
+            Import path of the ``terminal_bench`` agent to run, in
+            ``module:ClassName`` form.  Defaults to the existing
+            :class:`~eval.swebench_work.deepseek_tb_agent.DeepSeekTBAgent`.
+        agent_kwargs:
+            Constructor kwargs forwarded to the agent (e.g. ``api_key``,
+            ``model``).  Callers must supply any credentials themselves.
+        """
+        self._data_dir = self._resolve_data_dir(data_dir)
+        self._agent_import_path = agent_import_path or _DEFAULT_AGENT_IMPORT_PATH
+        self._agent_kwargs = dict(agent_kwargs or {})
+
+    # ------------------------------------------------------------------
+    # AgentBenchmark contract
+    # ------------------------------------------------------------------
+
+    def prepare(self, instance: EvalInstance, workspace: Path) -> None:
+        """Materialize the harness-required layout for the instance's task.
+
+        Converts the TB 2.0 task directory (Dockerfile under
+        ``environment/``, tests under ``tests/test.sh``) to the layout
+        ``terminal_bench.Harness`` expects (``docker-compose.yaml``,
+        ``run-tests.sh``, ``solution.sh`` at the task root).  Idempotent —
+        only writes the files that are missing.
+
+        A missing task dir is logged, not raised; :meth:`solve` then
+        fails closed with an ``ERROR_SETUP`` result.
+        """
+        task_dir = self._task_dir(instance)
+        if task_dir is None:
+            logger.warning(
+                "[terminalbench-adapter] no task dir for %s (data_dir=%s)",
+                instance.instance_id,
+                self._data_dir,
+            )
+            return
+        if not task_dir.is_dir():
+            logger.warning(
+                "[terminalbench-adapter] task dir missing for %s: %s",
+                instance.instance_id,
+                task_dir,
+            )
+            return
+        for fname in _materialize_task_dir(task_dir):
+            logger.info(
+                "[terminalbench-adapter] materialized %s/%s", task_dir.name, fname
+            )
+
+    def solve(
+        self,
+        instance: EvalInstance,
+        workspace: Path,
+        adapter: "AgentAdapter",
+        **kwargs: Any,
+    ) -> EvalResult:
+        """Run the agent through the official harness and convert the result.
+
+        Creates a ``terminal_bench.Harness`` with ``agent_import_path``
+        pointing at an existing agent, runs it (Docker containers), and
+        converts the official trial into an :class:`EvalResult`.  The
+        official resolution is written to ``workspace/score.json`` so
+        :meth:`score` can report it without re-running anything.
+
+        Never returns ``None``: unavailable official runner, missing task
+        dir, and harness failures all produce fail-closed ``EvalResult``
+        with a non-empty ``error``.
+        """
+        workspace = Path(workspace)
+        task_id = self._task_id(instance)
+        output = workspace / "tb_runs"
+        output.mkdir(parents=True, exist_ok=True)
+
+        # 1. Official runner availability (graceful ImportError handling).
+        can_score, reason = _can_score_official()
+        if not can_score:
+            return EvalResult(
+                instance_id=task_id,
+                error=f"ERROR_INFRA: {reason}",
+            )
+
+        # 2. Task dir must exist after prepare().
+        task_dir = self._task_dir(instance)
+        if task_dir is None or not task_dir.is_dir():
+            return EvalResult(
+                instance_id=task_id,
+                error=f"ERROR_SETUP: task dir missing: {task_dir}",
+            )
+
+        # 3. Make the agent importable: the harness imports the module by
+        #    dotted path in its own process, so the repo root must be on
+        #    sys.path (mirrors eval/swebench_work/run_tb_single.py).
+        repo_root = Path(__file__).resolve().parents[2]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+
+        # 4. Windows host fixes + UTF-8 console (see _run_with_harness).
+        _patch_terminal_bench_windows()
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                enc = (stream.encoding or "").lower().replace("-", "")
+                if stream is not None and enc not in ("", "utf8"):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
+
+        # 5. Official runner black-box: run the agent, let the harness score.
+        try:
+            from terminal_bench.harness import Harness
+
+            harness = Harness(
+                output_path=output,
+                run_id=f"tb-adapter-{task_id}",
+                agent_import_path=self._agent_import_path,
+                agent_kwargs=self._agent_kwargs or None,
+                dataset_path=task_dir.parent,
+                task_ids=[task_id],
+                n_concurrent_trials=1,
+                n_attempts=1,
+                cleanup=False,
+            )
+            results = harness.run()
+        except Exception as e:  # noqa: BLE001 — fail closed, never raise out
+            logger.exception("[terminalbench-adapter] harness run failed for %s", task_id)
+            return EvalResult(instance_id=task_id, error=f"ERROR_RUNTIME: {e}")
+
+        if not results.results:
+            return EvalResult(
+                instance_id=task_id,
+                error="ERROR_RUNTIME: harness returned no trials",
+            )
+
+        # 6. Convert the official trial -> EvalResult (+ score sidecar).
+        trial = results.results[0]
+        resolved = bool(trial.is_resolved)
+        error = ""
+        if not resolved:
+            error = f"unresolved (failure_mode={trial.failure_mode})"
+        eval_result = EvalResult(
+            instance_id=trial.task_id or task_id,
+            error=error,
+            tokens_in=trial.total_input_tokens or 0,
+            tokens_out=trial.total_output_tokens or 0,
+        )
+        sidecar = {
+            "instance_id": eval_result.instance_id,
+            "resolved": resolved,
+            "failure_mode": getattr(trial, "failure_mode", None),
+            "scorer": _SCORER_NAME,
+            "official_runner": "terminal_bench.Harness",
+            "task_id": task_id,
+            "tokens_in": eval_result.tokens_in,
+            "tokens_out": eval_result.tokens_out,
+        }
+        (workspace / "score.json").write_text(
+            json.dumps(sidecar, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info(
+            "[terminalbench-adapter] %s resolved=%s failure_mode=%s",
+            task_id,
+            resolved,
+            sidecar["failure_mode"],
+        )
+        return eval_result
+
+    def score(
+        self,
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """Return the official resolution embedded in :meth:`solve`.
+
+        Reads the per-run ``workspace/score.json`` sidecar written by
+        :meth:`solve` from the official trial.  Missing sidecar means no
+        official evidence -> fail-closed ``resolved: False`` (the official
+        scorer is never faked).
+        """
+        workspace = Path(workspace)
+        sidecar_path = workspace / "score.json"
+        if sidecar_path.exists():
+            try:
+                sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                return {
+                    "resolved": bool(sidecar.get("resolved", False)),
+                    "scorer": _SCORER_NAME,
+                    "failure_mode": sidecar.get("failure_mode"),
+                    "scorer_status": "official: score embedded in solve()",
+                }
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {
+            "resolved": False,
+            "scorer": _SCORER_NAME,
+            "failure_mode": None,
+            "scorer_status": "no official trial record (sidecar missing)",
+        }
+
+    # ------------------------------------------------------------------
+    # Pins
+    # ------------------------------------------------------------------
+
+    @property
+    def pins(self) -> dict[str, str]:
+        """Reproducibility pins for benchmark/dataset/scorer.
+
+        ``dataset_revision`` is the sha256 prefix of the offline JSONL
+        family actually consumed, so every run is pinned to the exact
+        offline snapshot on disk.
+        """
+        family = self._data_family()
+        revision = ""
+        if self._data_dir is not None and family:
+            jsonl = self._data_dir / f"{family}.jsonl"
+            if jsonl.exists():
+                revision = _sha256_prefix(jsonl)
+        return {
+            "benchmark": self.name,
+            "dataset_name": (
+                f"terminal-bench-v2 offline family {family!r}"
+                if family
+                else "terminal-bench-v2 (offline)"
+            ),
+            "dataset_revision": revision,
+            "scorer_name": _SCORER_NAME,
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _data_dir_for(self, instance: EvalInstance) -> Path | None:
+        """Data dir for *instance*: per-instance metadata wins over config."""
+        meta_dir = instance.metadata.get("data_dir")
+        if meta_dir:
+            return Path(str(meta_dir))
+        return self._data_dir
+
+    def _task_id(self, instance: EvalInstance) -> str:
+        """Task id: metadata wins, else the name part of the instance id."""
+        tid = instance.metadata.get("task_id") or instance.metadata.get("name")
+        if tid:
+            return str(tid)
+        return str(instance.instance_id).rsplit("/", 1)[-1]
+
+    def _task_dir(self, instance: EvalInstance) -> Path | None:
+        """Task directory for *instance*, or ``None`` when unresolvable."""
+        data_dir = self._data_dir_for(instance)
+        if data_dir is None:
+            return None
+        dataset = data_dir / "tasks"
+        if not dataset.is_dir():
+            dataset = data_dir
+        return dataset / self._task_id(instance)
+
+    def _data_family(self) -> str:
+        """JSONL family stem in the data dir, or ``""`` when unresolvable."""
+        if self._data_dir is None:
+            return ""
+        for path in sorted(self._data_dir.glob("*.jsonl")):
+            return path.stem
+        return ""
+
+    @staticmethod
+    def _resolve_data_dir(explicit: str | Path | None) -> Path | None:
+        """Resolve the offline data dir: arg > env > repo-standard location."""
+        if explicit:
+            return Path(str(explicit))
+        env_dir = os.environ.get(DATA_DIR_ENV, "")
+        if env_dir:
+            return Path(env_dir)
+        standard = Path(__file__).resolve().parents[2] / "eval" / "benchmark_data" / "terminalbench"
+        return standard if standard.is_dir() else None
+
+
+def _sha256_prefix(path: Path, length: int = 12) -> str:
+    """Short sha256 hex prefix of a file, pinned per run for reproducibility."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:length]

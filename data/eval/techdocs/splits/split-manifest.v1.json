@@ -1,0 +1,13 @@
+{
+  "dev_qids_sha256": "1d475c27b2c9913a3ce6cfbfe00e3233a33da60217b904c38b1979ca36d67262",
+  "dev_size": 180,
+  "format_version": "e3-split-manifest-v1",
+  "generated_utc": "2026-08-09T11:13:56Z",
+  "holdout_qids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "holdout_size": 0,
+  "holdout_status": "BLOCKED",
+  "policy_id": "e3-split-policy",
+  "policy_sha256": "c053d3564eacd7d9d18519d9ccbafb308654968c6372fa70803dd894f488e5f9",
+  "policy_version": "v1",
+  "seed": 20260809
+}
