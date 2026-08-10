@@ -20,17 +20,25 @@ the benchmark's Docker/container responsibility).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
 from eval.harness.budget import Budget, BudgetExceeded, BudgetUsage, check_budget
+from eval.harness.trace_capture import TraceCapture
+from eval.harness.trace_contract import (
+    SPAN_EVAL_INSTANCE,
+    SPAN_EVAL_RUN,
+    SPAN_SCORER_OFFICIAL,
+    evaluate_trace_contract,
+)
 
 # Error taxonomy — infra failures are never counted as model failures and are
 # never silently removed from the denominator.
@@ -50,6 +58,10 @@ SCORER_RAW_OUTPUT_KEY = "scorer_raw_output"
 # and post-mortem state (post-mortem tooling greps for these by name).
 NETWORK_DISABLED_MARKER = "NETWORK_DISABLED"
 WORKSPACE_PRESERVED_MARKER = "WORKSPACE_PRESERVED"
+
+# O2 (design map §20.6.4): trace artifact filenames under ``traces/``.
+TRACE_SUMMARY_FILENAME = "trace-summary.json"
+SPAN_ASSERTION_FILENAME = "span-assertion.json"
 
 # Scorer callback: called after each successful solve_instance, receiving
 # the instance workspace as well (where the benchmark adapter writes its own
@@ -81,6 +93,53 @@ def classify_error(exc: BaseException) -> str:
     return ERROR_AGENT
 
 
+def _get_tracer():
+    """Return an OTel tracer, or ``None`` when telemetry is unavailable.
+
+    Mirrors ``orchestrator/runtime/conversation.py``'s defensive pattern: a
+    benchmark run must never fail because the OTel SDK is missing (§9.3 — the
+    business path degrades normally when the exporter is off).
+    """
+    try:
+        from opentelemetry import trace as trace_api
+
+        return trace_api.get_tracer(__name__)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        return None
+
+
+@contextlib.contextmanager
+def _span(tracer: Any, name: str, attributes: dict[str, Any]) -> Iterator[Any]:
+    """Start *name* as the current span, or yield ``None`` if that is impossible.
+
+    Exceptions raised inside the body propagate: the SDK's own context manager
+    sets the span status to ERROR and ends it on the way out.  §20.6.4 item 2
+    requires error/timeout/cancel/skipped to *still end the span and record
+    status*, and letting the exception travel through the span is what makes
+    that automatic rather than something each call site must remember.
+    """
+    if tracer is None:
+        yield None
+        return
+    try:
+        manager = tracer.start_as_current_span(name, attributes=attributes)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        yield None
+        return
+    with manager as span:
+        yield span
+
+
+def _set_attribute(span: Any, key: str, value: Any) -> None:
+    """Best-effort ``span.set_attribute`` that tolerates a ``None`` span."""
+    if span is None:
+        return
+    try:
+        span.set_attribute(key, value)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        pass
+
+
 @dataclass
 class HarnessRun:
     run_id: str
@@ -100,6 +159,10 @@ class HarnessRun:
     def __post_init__(self) -> None:
         self._completed: set[str] = set()
         self._global_usage = BudgetUsage()
+        # O2: set by run(); holds the spans this run produced.  ``None`` means
+        # capture was disabled or unavailable, which _finalize records honestly
+        # rather than treating as "no spans were expected".
+        self._capture: TraceCapture | None = None
         # Per-instance usage; rebound at the top of each instance so the
         # process-lifecycle hooks below always target the live budget.
         self._current_usage: BudgetUsage = BudgetUsage()
@@ -159,6 +222,61 @@ class HarnessRun:
                 ERROR_SCORER: 0,
             },
         }
+
+        # O2: install the in-process span capture and open the run root span.
+        # The capture must be installed *before* the first span is created, and
+        # the run span must be closed before _finalize() reads the spans, or the
+        # root would be missing from its own artifact.
+        capture: TraceCapture | None = None
+        tracer = None
+        if self.config.get("trace_capture", True):
+            capture = TraceCapture()
+            if capture.install():
+                tracer = _get_tracer()
+        self._capture = capture
+
+        with _span(tracer, SPAN_EVAL_RUN, self._run_span_attributes()):
+            self._run_instances(instances, summary, tracer)
+
+        summary["ok"] = summary["completed"]
+        summary["failed"] = sum(summary["by_category"].values())
+        summary["skipped"] = summary["resumed_skipped"]
+
+        path = _finalize(self, summary)
+        return {"summary": summary, "summary_path": path}
+
+    def _run_span_attributes(self) -> dict[str, Any]:
+        """Join attributes for the ``eval.run`` root span (§9.2).
+
+        Sourced from ``self.config`` — the same dict ``_build_manifest`` reads —
+        so the trace and the manifest cannot disagree about which commit and
+        model the run used.  ``eval.instance_id`` is present but empty on the
+        root: the contract requires the join *key* on every span, and the root
+        legitimately spans all instances rather than one.
+        """
+        config = self.config
+        return {
+            "eval.run_id": self.run_id,
+            "eval.instance_id": "",
+            "git.commit": str(config.get("git_sha", "")),
+            "eval.benchmark": str(config.get("benchmark", "")),
+            "eval.model": str(config.get("model", "")),
+            "eval.mode": str(config.get("mode", "official")),
+        }
+
+    def _instance_span_attributes(self, instance_id: str) -> dict[str, Any]:
+        return {
+            "eval.run_id": self.run_id,
+            "eval.instance_id": instance_id,
+            "git.commit": str(self.config.get("git_sha", "")),
+        }
+
+    def _run_instances(
+        self,
+        instances: list[EvalInstance],
+        summary: dict[str, Any],
+        tracer: Any,
+    ) -> None:
         for instance in instances:
             instance_id = instance.instance_id
             # Fail closed: missing/empty instance_id is never silently skipped
@@ -169,6 +287,14 @@ class HarnessRun:
                     f"instance_id is empty or missing; instance={instance!r}",
                 )
                 self.artifacts.record_event("", "failed-missing-instance-id")
+                # O2: even a rejected instance gets a span.  §20.1 rule 7 keeps
+                # failures in the denominator, and a trace that silently omits
+                # them would misstate how many instances the run attempted.
+                with _span(
+                    tracer, SPAN_EVAL_INSTANCE, self._instance_span_attributes("")
+                ) as span:
+                    _set_attribute(span, "eval.instance_status", "failed-missing-instance-id")
+                    _set_attribute(span, "eval.error_category", ERROR_AGENT)
                 continue
 
             # Pre-start budget check — fail before creating workspace
@@ -179,12 +305,28 @@ class HarnessRun:
                 summary["by_category"][category] += 1
                 self.artifacts.record_failure(instance_id, category, str(exc)[:500])
                 self.artifacts.record_event(instance_id, f"failed-{category}")
+                with _span(
+                    tracer,
+                    SPAN_EVAL_INSTANCE,
+                    self._instance_span_attributes(instance_id),
+                ) as span:
+                    _set_attribute(span, "eval.instance_status", f"failed-{category}")
+                    _set_attribute(span, "eval.error_category", category)
                 continue
 
             # Resume skip
             if instance_id in self._completed:
                 summary["resumed_skipped"] += 1
                 self.artifacts.record_event(instance_id, "skipped-resume")
+                # §20.6.4 item 2 names "skipped" explicitly: a resumed run must
+                # still be able to show which instances it deliberately did not
+                # re-execute.
+                with _span(
+                    tracer,
+                    SPAN_EVAL_INSTANCE,
+                    self._instance_span_attributes(instance_id),
+                ) as span:
+                    _set_attribute(span, "eval.instance_status", "skipped-resume")
                 continue
 
             workspace = Path(tempfile.mkdtemp(prefix=f"eval-{self.run_id}-"))
@@ -195,87 +337,25 @@ class HarnessRun:
             # budget is dead configuration.
             self._current_usage = usage
             try:
-                # Populate workspace (e.g. clone repo) before the agent runs
-                if self.setup_workspace is not None:
-                    self.setup_workspace(instance, str(workspace))
-
-                if not self.network_allowed:
-                    _block_network(workspace, self.network_allowlist)
-
-                # Call adapter
-                if self.adapter is not None:
-                    result = self.adapter.solve_instance(instance, str(workspace))
-                    # H4: enforce the process cap on whatever the adapter
-                    # reported while it was running (fail closed, never
-                    # silently over-subscribe the machine).
-                    check_budget(self.budget, usage)
-                else:
-                    result = EvalResult(
+                # O2: the instance span is opened *inside* the try so that any
+                # exception below travels out through the span's __exit__, which
+                # records ERROR status and ends it, before the except clauses
+                # classify it.  Opening it outside would leave a failed instance
+                # with an UNSET span.
+                with _span(
+                    tracer,
+                    SPAN_EVAL_INSTANCE,
+                    self._instance_span_attributes(instance_id),
+                ) as instance_span:
+                    self._execute_instance(
+                        instance=instance,
                         instance_id=instance_id,
-                        error="no adapter configured",
+                        workspace=workspace,
+                        usage=usage,
+                        summary=summary,
+                        tracer=tracer,
+                        instance_span=instance_span,
                     )
-
-                # Feed budget from result
-                usage.record_tokens(result.tokens_in + result.tokens_out)
-                usage.record_cost(result.cost)
-                # Wall clock is auto-captured by BudgetUsage.started_at
-
-                # Post-solve budget check
-                check_budget(self.budget, usage)
-                # Update global usage for pre-start checks on next instances
-                self._global_usage.record_tokens(usage.tokens)
-                self._global_usage.record_cost(usage.cost)
-
-                # Record instance
-                self.artifacts.record_instance({
-                    "instance_id": instance_id,
-                    "task_description": instance.task_description,
-                    "metadata": instance.metadata,
-                })
-
-                # Build prediction dict
-                prediction: dict[str, Any] = {
-                    "instance_id": instance_id,
-                    "model_patch": result.model_patch,
-                    "answer": result.answer,
-                    "cost": result.cost,
-                    "tokens_in": result.tokens_in,
-                    "tokens_out": result.tokens_out,
-                    "trace_id": result.trace_id,
-                    "error": result.error,
-                    "wall_time_s": result.wall_time_s,
-                }
-
-                # Scorer
-                if self.scorer is not None:
-                    try:
-                        scorer_result = self.scorer(result, instance, workspace)
-                        # A benchmark may hand back the official harness's raw
-                        # output under this reserved key.  It is persisted under
-                        # scorer/ (so checksums.sha256 pins it) instead of being
-                        # inlined into the prediction row, which is one JSON
-                        # line per instance and must stay readable.
-                        raw_outputs = scorer_result.pop(SCORER_RAW_OUTPUT_KEY, None)
-                        if isinstance(raw_outputs, dict):
-                            for name, content in raw_outputs.items():
-                                self.artifacts.record_scorer_output(
-                                    name, str(content)
-                                )
-                        prediction.update(scorer_result)
-                    except Exception as scorer_exc:
-                        # scorer exception → ERROR_SCORER (now reachable!)
-                        raise ScorerError(str(scorer_exc)) from scorer_exc
-
-                self.artifacts.record_prediction(prediction)
-                self.artifacts.record_event(instance_id, "completed")
-                self._mark_completed(instance_id)
-                summary["completed"] += 1
-
-                # Success — clean up workspace
-                try:
-                    shutil.rmtree(workspace, ignore_errors=True)
-                except Exception:
-                    pass
 
             except ScorerError as exc:
                 category = ERROR_SCORER
@@ -295,12 +375,113 @@ class HarnessRun:
                 # Preserve workspace on failure for post-mortem
                 _mark_workspace_preserved(workspace, category, str(exc)[:500])
 
-        summary["ok"] = summary["completed"]
-        summary["failed"] = sum(summary["by_category"].values())
-        summary["skipped"] = summary["resumed_skipped"]
+    def _execute_instance(
+        self,
+        instance: EvalInstance,
+        instance_id: str,
+        workspace: Path,
+        usage: BudgetUsage,
+        summary: dict[str, Any],
+        tracer: Any,
+        instance_span: Any,
+    ) -> None:
+        """Solve and score one instance; raises on failure for the caller to
+        classify.  Extracted so the instance span can wrap it as a unit."""
+        # Populate workspace (e.g. clone repo) before the agent runs
+        if self.setup_workspace is not None:
+            self.setup_workspace(instance, str(workspace))
 
-        path = _finalize(self, summary)
-        return {"summary": summary, "summary_path": path}
+        if not self.network_allowed:
+            _block_network(workspace, self.network_allowlist)
+
+        # Call adapter
+        if self.adapter is not None:
+            result = self.adapter.solve_instance(instance, str(workspace))
+            # H4: enforce the process cap on whatever the adapter
+            # reported while it was running (fail closed, never
+            # silently over-subscribe the machine).
+            check_budget(self.budget, usage)
+        else:
+            result = EvalResult(
+                instance_id=instance_id,
+                error="no adapter configured",
+            )
+
+        # Feed budget from result
+        usage.record_tokens(result.tokens_in + result.tokens_out)
+        usage.record_cost(result.cost)
+        # Wall clock is auto-captured by BudgetUsage.started_at
+
+        # Post-solve budget check
+        check_budget(self.budget, usage)
+        # Update global usage for pre-start checks on next instances
+        self._global_usage.record_tokens(usage.tokens)
+        self._global_usage.record_cost(usage.cost)
+
+        # Record instance
+        self.artifacts.record_instance({
+            "instance_id": instance_id,
+            "task_description": instance.task_description,
+            "metadata": instance.metadata,
+        })
+
+        # Build prediction dict
+        prediction: dict[str, Any] = {
+            "instance_id": instance_id,
+            "model_patch": result.model_patch,
+            "answer": result.answer,
+            "cost": result.cost,
+            "tokens_in": result.tokens_in,
+            "tokens_out": result.tokens_out,
+            "trace_id": result.trace_id,
+            "error": result.error,
+            "wall_time_s": result.wall_time_s,
+        }
+
+        # Scorer
+        if self.scorer is not None:
+            # O2 (§20.6.4 item 2): the official scorer gets its own span.  The
+            # harness owns the scorer callback, so this is the one call site
+            # every benchmark's official scoring passes through — instrumenting
+            # it here covers SWE-bench, Terminal-Bench and tau2-bench without
+            # each adapter re-implementing it.
+            with _span(
+                tracer,
+                SPAN_SCORER_OFFICIAL,
+                self._instance_span_attributes(instance_id),
+            ) as scorer_span:
+                try:
+                    scorer_result = self.scorer(result, instance, workspace)
+                except Exception as scorer_exc:
+                    # scorer exception → ERROR_SCORER (now reachable!).  Raised
+                    # inside the span's with-block so the span is ended with
+                    # ERROR status rather than left UNSET.
+                    raise ScorerError(str(scorer_exc)) from scorer_exc
+                # A benchmark may hand back the official harness's raw
+                # output under this reserved key.  It is persisted under
+                # scorer/ (so checksums.sha256 pins it) instead of being
+                # inlined into the prediction row, which is one JSON
+                # line per instance and must stay readable.
+                raw_outputs = scorer_result.pop(SCORER_RAW_OUTPUT_KEY, None)
+                if isinstance(raw_outputs, dict):
+                    for name, content in raw_outputs.items():
+                        self.artifacts.record_scorer_output(name, str(content))
+                _set_attribute(
+                    scorer_span, "eval.scorer_keys", ",".join(sorted(scorer_result))
+                )
+                prediction.update(scorer_result)
+
+        self.artifacts.record_prediction(prediction)
+        self.artifacts.record_event(instance_id, "completed")
+        self._mark_completed(instance_id)
+        summary["completed"] += 1
+        _set_attribute(instance_span, "eval.instance_status", "completed")
+
+        # Success — clean up workspace
+        try:
+            shutil.rmtree(workspace, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _finalize(harness: HarnessRun, summary: dict[str, Any]) -> str:
@@ -318,8 +499,60 @@ def _finalize(harness: HarnessRun, summary: dict[str, Any]) -> str:
     harness.artifacts.write_environment()
     manifest = _build_manifest(harness, summary)
     harness.artifacts.write_manifest(manifest)
+    _write_trace_artifacts(harness)
     harness.artifacts.write_checksums()
     return str(path)
+
+
+def _write_trace_artifacts(harness: HarnessRun) -> None:
+    """Write ``traces/trace-summary.json`` and ``traces/span-assertion.json``.
+
+    Must run before ``write_checksums()`` so the recursive pin covers both
+    files (§20.7).  Both files are written unconditionally, including when no
+    spans were captured: an absent trace artifact is indistinguishable from an
+    un-run step, whereas a present artifact reporting ``INCOMPLETE`` with zero
+    spans states the situation and fails the gate honestly.
+    """
+    capture = harness._capture
+    try:
+        if capture is None:
+            trace_summary: dict[str, Any] = {
+                "capture_mode": "disabled",
+                "collector": "none",
+                "phoenix_verified": False,
+                "attached": False,
+                "span_count": 0,
+                "trace_ids": [],
+                "spans": [],
+                "reason": "trace capture disabled or OTel SDK unavailable",
+            }
+            spans: list[Any] = []
+        else:
+            trace_summary = capture.summary()
+            spans = capture.spans()
+
+        assertion = evaluate_trace_contract(spans, run_id=harness.run_id)
+        harness.artifacts.record_trace(TRACE_SUMMARY_FILENAME, trace_summary)
+        harness.artifacts.record_trace(SPAN_ASSERTION_FILENAME, assertion)
+    except Exception as exc:  # noqa: BLE001 - telemetry is never load-bearing
+        # Record the failure instead of silently omitting the subtree, so the
+        # artifact never implies a trace was assessed when it was not.
+        harness.artifacts.record_trace(
+            SPAN_ASSERTION_FILENAME,
+            {
+                "contract_version": "unknown",
+                "run_id": harness.run_id,
+                "verdict": "FAIL",
+                "problems": [f"trace artifact generation failed: {exc}"],
+                "span_count": 0,
+            },
+        )
+    finally:
+        # Stop recording so a long-lived process running several HarnessRuns
+        # does not accumulate live processors, each capturing every subsequent
+        # run's spans.
+        if capture is not None:
+            capture.stop()
 
 
 class ScorerError(Exception):

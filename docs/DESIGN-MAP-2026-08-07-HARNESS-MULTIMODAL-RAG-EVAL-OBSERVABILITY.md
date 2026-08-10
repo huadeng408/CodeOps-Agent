@@ -2250,3 +2250,154 @@ results/contamination/archive/report.2026-08-09-sec29-incomplete.jsonl          
 6. `results/` 被 gitignore、4 个 contamination 测试文件未跟踪：证据只在工作区磁盘，仅靠本节哈希留证。
 7. 未提交、未 push、未重写历史。未删除任何 Docker volume、ES 索引、MySQL 数据或 MinIO 对象。
 8. §29 的 WDDM 假设仍未证实（见 30.4-3）；OTel exporter 版本分裂（§27）本轮未动。
+
+---
+
+## 31. 2026-08-10 官方 scorer 首次真出判定：一个缺陷族「基础设施故障伪装成业务判定」，H5 由 5 项中 4 项
+
+本节记录把**一条** SWE-bench 实例的官方评分从头驱动到真出判定的过程。它挖出 **11 个缺陷**，其中 **8 个共享同一形状**：一次基础设施故障被当成一条业务判定报出来，于是「什么都没测到」与「Agent 没修对」在产物里同型。这个缺陷族解释了一个长期现象：官方评分从未真正完成过，而管线每次都以 exit 0 报告正常，且失败方向一致指向「模型不行」——最容易被接受、最不会被追查的那种结论。
+
+本节同时**取代 §24.3 的 H5 行**（「从未执行」）与 §20.4 中 SWE official 一行的适用范围，并修正 `INTERVIEW-PORTFOLIO.md` 的两处误导性口径。
+
+### 31.1 基线
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `push-clean` |
+| 本轮提交 | `dd62f972`（5 缺陷）、`66c6dfa2`（真实 run + `scorer/` 落盘）、`092692f8`（`error` 语义）、`f31db059`（并回 `origin/main`） |
+| Python 全量回归 | **805 passed, exit 0**（65.76s，实测于 18:07:14 / HEAD `092692f8`；793 → +12）。**仅描述该 commit，不描述当前工作树**，见 §31.9 |
+| Go 回归 | 本轮**未执行**，不作声明 |
+| 备份 | `backup/push-clean-20260810-1430`、`backup/main-20260810-1430`、`../localcode-backups/localcode-20260810-1430.bundle` |
+
+`f31db059` 的必要性单独记一笔：`origin/main` 上有 2 个 commit 不在 `push-clean`，其中 `06e4d38c` 是真实代码（`terminalbench.py` +169 行，接官方 runner）。**先并后推，否则强推静默丢代码。**
+
+### 31.2 缺陷族清单（8 条同形 + 2 条同族 + 1 条普通）
+
+| # | 缺陷 | 机理 | 状态 |
+|---|---|---|---|
+| 1 | 两处评分调用点硬写 `namespace=None`，覆盖上游默认 `"swebench"` | `None` = 本地构建每个镜像 → 必跑 `setup_repo.sh` → **在构建容器内 `git clone` 全部历史**。astropy 真的连上 GitHub、流了 10 分钟，死在 `curl 92 HTTP/2 stream 0 was not closed cleanly: CANCEL`。镜像没建成 → 判定不存在 → 记为「没修好」 | `VERIFIED` |
+| 2 | scorer 崩溃后仍记 `ok:1`、进程退 0 | 未测量的运行报告成功。改为抛 `OfficialScorerUnavailable` → `ERROR_SCORER`，不把 `resolved:False` 并进 prediction | `VERIFIED` |
+| 3 | 裸 `text=True` → scorer stdout 按 locale（gbk）解码 | reader thread 在 byte `0x93` 抛 `UnicodeDecodeError` 后死掉，`communicate()` 返回残缺缓冲，调用方**收不到异常**。落盘判定为 `official: resolved=False (… : 0`，`Instances resolved` 标签被吃掉 | `VERIFIED` |
+| 4 | `--dry-run` 在 H0/H3 pin preflight **之前**返回并打印 `manifest validated` | 对 pin 完全缺失的 benchmark 也退 0。**一个不可能失败的 preflight 不是 preflight** | `VERIFIED` |
+| 5 | 官方原始输出从来不是发布证据 | 真报告留在 `logs/run_evaluation/`，在产物树外 → 在 `checksums.sha256` 外；判定只以 harness 截断转述存在 | `VERIFIED`（本轮真实 run 产出 `scorer/`） |
+| 6 | `error` 字段记的是「模型还在用工具」 | `done.success` 回答「模型是否自己干净收尾」，工具轮次用尽也记 `False`。产物自相矛盾：`error='runner completed with done.success=False'` 与 `resolved=True`、`ok:1` 并存 | `VERIFIED`（+12 tests） |
+| 7 | 下游 scorer 谓词把正确 patch 记为 unresolved 并标 `ERROR` | `run_swebench_honest_10.py:246` 以 `r.get("model_patch") and not r.get("error")` 当 resolved。缺陷 6 一污染 `error`，正确 patch 即被计为失败。**该脚本任何历史 10 实例数字按轮次耗尽条数低估** | `VERIFIED`（脚本未跟踪，探索期产物） |
+| 8 | harness 转述结构性有损：`detail = result.stdout[-200:]` | 200 字符尾切片会从中间切断官方 summary。修掉编码故障后 `h5-full` 的 `scorer_status` 里 `Instances resolved` **仍缺失**；判定可信仅因 `_read_official_resolution()` 读官方 `report.json` | `DESIGNED`（本轮新发现，**未修**） |
+| 9 | 关键 pin 为空字符串仍通过 preflight | 本轮 `run-manifest.json` 的 `model_revision` / `prompt_hash` / `qrels_hash` / `physical_index` 全为空，preflight 放行 → 本次 run 仍带 `MODEL_IDENTITY_UNVERIFIED` | `DESIGNED`（本轮新发现，**未修**） |
+| 10 | 污染扫描取数故障映射成「发现污染」 | 形状不符时 `AttributeError` 逃到解释器 → rc 1 = 冻结 policy 的 `BLOCKING`。已改显式验形 + rc 2 | `VERIFIED`（§30.1） |
+| 11 | `numpy` 被两模块 import 却未声明 | 普通缺陷，不属本形状。补进 `eval` extra（`>=1.26,<2`） | `VERIFIED` |
+
+计数口径：8 条同形（1、2、3、4、6、7、9、10）+ 2 条「判定无原始证据」（5、8）+ 1 条普通（11）。
+
+### 31.3 受控对照：四份产物，只动一个变量
+
+同一实例 `astropy__astropy-12907`、同一 506 字节 patch：
+
+| 产物 | 官方 stdout 关键行 | `resolved` | harness 自报 |
+|---|---|---|---|
+| `h5-smoke-20260810-014712/…-369d7a52` | scorer 未运行（`requests.exceptions.ConnectionError`，exit 1） | `False` | **`ok:1 / failed:0`** |
+| `h5-smoke-20260810-122909/…-c09bbb49` | `completed: : 0` / `empty patches: 1` | `False` | `ok:1`（patch 空） |
+| `h5-smoke-20260810-123749/…-bfad8522` | `Instances with errors: **1**` | `False` | `ok:1`（patch 506B） |
+| **`h5-full-20260810/…-3b0569f2`** | `Instances with errors: **0**` | **`True`** | `ok:1` |
+
+第 1 行是本轮最重要的反面证据：**scorer 抛异常、零字节测量，产物写 `ok:1`、进程退 0。** 第 3 → 第 4 行是 `namespace` 修复的单变量前后对照。另有 `h5-smoke-20260810-121356/…-b5fe347d` 记录 fail-closed 正确工作：`ok:0 / failed:1` + `failures.jsonl`，无 `predictions.jsonl`。
+
+单变量重评分产物 `deepseek-v4-pro.h5-rescore-namespace-v1.json`：`resolved_instances=1`、`error_instances=0`、`unresolved_instances=0`（未花模型 token）。
+
+### 31.4 官方判定与产物树（实测）
+
+`eval_results/h5-full-20260810/swebench-deepseek-v4-pro-3b0569f2/`，10 文件全部进 `checksums.sha256`，`RunArtifacts.verify_checksums()` 返回 **空列表**：
+
+```text
+checksums.sha256  environment.txt  events.jsonl  instances.jsonl
+predictions.jsonl  run-manifest.json  summary.json
+scorer/report.json (2,165B)  scorer/run-summary.json (17,749B)
+scorer/run_instance.log (4,403B)  scorer/test_output.txt (302,799B)
+```
+
+官方 `scorer/report.json`：`patch_successfully_applied: true`、`resolved: true`、`FAIL_TO_PASS` success 2 / failure 0、`PASS_TO_PASS` success 13 / failure 0。prediction 行：`resolved=True`、`model_patch` 506 字节、`wall_time_s=116.25`、tokens 76,493/5,725。
+
+Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright[-right.shape[0]:, -right.shape[1]:] = 1` → `= right`。因此本条**不是** `SCORER_CONNECTIVITY_ONLY`——§20.4 中「SWE official `1/1 resolved` 系嵌入 ground-truth patch」的结论只适用于 2026-08-09 那次 smoke，不适用于本条。
+
+两条必须写明的限制：
+
+1. **n=1，不是能力分数。** 该实例在修 `namespace` 期间被反复使用，已属 **development set**，按 §20.9-4 永久不得进 holdout。
+2. **`error` 字段的旧值仍在产物里。** 本 run 早于 `092692f8`，故 `error='runner completed with done.success=False'` 与 `resolved=True` 并存。修复已有测试覆盖，但**该修复尚未经过一次真实 run 产出**。
+3. 提交信息记的 `wall_clock 375.8s` **不在产物中**（`summary.json` 无该字段），本节只采信 `wall_time_s=116.25`（实例级）。
+
+### 31.5 H5 门禁真实判定（取代 §24.3 的 H5 行）
+
+门禁（§20.6.1 行 1065 / Phase 1 Gate）要求单一真实产物**同时**含 manifest、prediction、official score、trace、checksums。
+
+| 门禁项 | 状态 | 绑定证据 |
+|---|---|---|
+| 完整 manifest | **不干净** | `run-manifest.json` 存在且 `git_sha` + `dirty_hash` 已绑，但 `model_revision` / `prompt_hash` / `qrels_hash` / `physical_index` 为空（缺陷 9） |
+| prediction | 满足 | `predictions.jsonl`，506B patch |
+| official scorer raw output | 满足 | `scorer/` 4 文件逐字节存盘 |
+| production trace | **缺失** | 至今无任何 run 产出 `traces/` 目录（`find eval_results -type d -name traces` 为空）。O1/O2 代码本轮末在工作树内出现但**未提交、未验收**，见 §31.9 |
+| 通过校验的 `checksums.sha256` | 满足 | `verify_checksums()` 空列表 |
+
+**H5 = `BLOCKED`，5 项中 4 项。** 阻塞在 `traces/` 子树，依赖 O1/O2 生产 instrumentation。Phase 1 Gate 因此仍未通过；H0–H4 维持 §24.3 的 `IMPLEMENTED`，不得升 `VERIFIED`。
+
+### 31.6 `INTERVIEW-PORTFOLIO.md` 两处口径修正
+
+| 原表述 | 问题 | 改为 |
+|---|---|---|
+| RAG 三行标「可重算探索实验」 | **误导**：把问题说成「还没锁定、重算即可」，而真实问题是**标签本身未仲裁** | **不可发布：金标底座 87.2% 未仲裁**。机检 `e5-release-report.json` verdict `NOT_RELEASE_ELIGIBLE`（rc 3）：`TOO_MANY_DISPUTED` 157/180=0.872 > 0.2；`GOLDEN_SET_TOO_SMALL` 23 < 60；`GOLDEN_SET_ALL_POSITIVE`（23 条全正例、0 负例 → precision / FPR **无定义**）；`SOURCE_COVERAGE_INCOMPLETE`（`docker`、`kubernetes` 零金标）；`PURE_NEGATIVE_SET_UNREVIEWED` 17 条 |
+| key「为公司提供不可轮换，目标是永不在 GitHub 暴露」 | **前提已被 §A.6 证伪**：`f278daee` 已在 `origin/main`，`origin` 为公开仓库 | **已公开，吊销并轮换是唯一补救**。重写历史救不回已推送对象（悬空 commit 仍可按 SHA 访问）。泄露面大于旧记录：本地 `main` 6 commit、`push-clean` 4 commit |
+
+同时明确：`AI_REVIEWED` **不是**人工复核，复核器不产生真人 `reviewer_hash`、永不签发 `HUMAN_REVIEWED`；复核模型身份维持 `MODEL_IDENTITY_UNVERIFIED`（请求名 `gpt-5.6-sol`，`revision=unknown`，`OPENAI_BASE_URL` 指向 DeepSeek）。
+
+### 31.7 状态口径
+
+| 项 | 状态 | 依据 |
+|---|---|---|
+| 缺陷 1 `namespace` 根因与修复 | `VERIFIED` | 15 tests + 四份产物受控对照 + 镜像实测落地 3.92GB |
+| 缺陷 2 scorer 不可用 fail-closed | `VERIFIED` | `OfficialScorerUnavailable` → `ERROR_SCORER`；`h5-smoke-…-121356` 实测 `ok:0/failed:1` |
+| 缺陷 3 subprocess 编码整类 | `VERIFIED` | 4 tests（AST 守整类 + 真实 `0x93` 行为） |
+| 缺陷 4 `--dry-run` pin 门禁 | `VERIFIED` | 6 tests（含驱动真实 adapter）；`_validate_benchmark_pins` 已前移至 `dry_run` 分支之前 |
+| 缺陷 5 `scorer/` 原始输出落盘 | `VERIFIED`（由 `IMPLEMENTED` 升级） | 本轮真实 run 产出 4 文件并入 pin；不再只是「若存在则会被哈希」 |
+| 缺陷 6 `error` 语义 | `VERIFIED` | 12 tests（含下游谓词逐字复现 + 旧字符串回归守卫） |
+| 缺陷 7 下游 scorer 误计 | `VERIFIED`（已定位，脚本未跟踪） | `run_swebench_honest_10.py:246` |
+| 缺陷 8 转述有损、缺陷 9 空值 pin | **`DESIGNED`** | 本轮新发现，代码未改 |
+| 缺陷 10 取数故障 rc 映射、缺陷 11 numpy | `VERIFIED` | §30.1；pyproject 解析 + import |
+| 官方 scorer 在无 gold patch 条件下真出 `resolved=True` | `VERIFIED`（n=1，非分数） | `scorer/report.json` + `verify_checksums()` 空 |
+| **H5 1-instance 门禁** | **`BLOCKED`（4/5）** | `traces/` 缺失，依赖 O1/O2 |
+| Phase 1 Gate | **未通过** | H5 未满足 |
+| O1–O3 生产 instrumentation | **进行中，未提交、未验收**（见 §31.9） | 工作树内 `trace_contract.py`/`trace_capture.py` + 3 测试为未跟踪新增；`runner.py`/`artifacts.py` 有未提交改动。**零 run 产出 `traces/`** |
+| M1–M5 多模态 | `DESIGNED`，未开始 | `data/eval/multimodal` 仅 `README.md` |
+| E3 hidden holdout | `BLOCKED` | `split-manifest.v1.json`：`dev_size=180`、`holdout_size=0`、`holdout_status=BLOCKED` |
+| E5 RAG 发布报告 | `BLOCKED` | `NOT_RELEASE_ELIGIBLE`，6 条 failed_codes |
+| E6 统一重跑 | 未开始 | 依赖 H5 |
+| qrels 人工复核 | `BLOCKED`（需真人） | 157 行工作表 + 23 条 `AI_REVIEWED` 抽检未做 |
+| DeepSeek key | **`BLOCKED`（需密钥所有者轮换）** | 已公开于 `origin/main` |
+
+### 31.8 本节遗留风险
+
+1. **缺陷 8、9 未修**：`scorer_status` 仍在承担证据职责；空值 pin 仍能通过 preflight。两者都属本节缺陷族，**未修的已知缺陷仍是缺陷**。
+2. **`traces/` 无人写** → H5 最后一项，O1/O2 未开始。在此之前不得扩大实例数：H5 未过就从 1 提到 50，只会放大不可信数字。
+3. **缺陷 6 的修复尚未经真实 run 验证**：现有 `h5-full` 产物仍带旧 `error` 字符串。
+4. **astropy-12907 已污染**：属 dev set，永久不得进 holdout；本条判定不可复用为 holdout 证据。
+5. **key 已公开**，轮换在工程侧无法闭环；在此之前禁止公开 push / PR / release / 分享 bundle。
+6. `:8009` embedding、`:8081` Go server、`:6006` Phoenix 本轮未起。
+7. 本轮 Go 回归未跑，`go test ./...` 无新鲜证据。
+8. 本轮**未提交、未 push、未重写历史**；未删除任何 Docker volume、ES 索引、MySQL 数据或 MinIO 对象。
+
+### 31.9 本节记录期间工作树发生的并发改动（口径声明）
+
+本节写作过程中，工作树出现了**不属于本节工作**的 O1/O2 instrumentation 改动，必须单独声明，否则本节的两处测量会被误读：
+
+| 项 | 事实 |
+|---|---|
+| 新增未跟踪文件 | `eval/harness/trace_contract.py`（含 `SPAN_SCORER_OFFICIAL = "scorer.official"`）、`eval/harness/trace_capture.py`、`tests/eval/test_trace_contract.py`、`test_trace_capture.py`、`test_harness_trace_artifacts.py` |
+| 未提交改动 | `eval/harness/artifacts.py` 新增 `record_trace()`；`eval/harness/runner.py` 新增 `_get_tracer()` / `_span()` / `TRACE_SUMMARY_FILENAME` / `SPAN_ASSERTION_FILENAME` 并 import trace 契约 |
+| 落盘时间 | 18:13:53 – 18:18:32 |
+| 并发提交 | 本节写作期间 HEAD 由 `092692f8` 前进到 `8577fd48`（`chore: adopt main's newer tb agent prompt + 2 main-only scripts`）。经核对：`092692f8` 仍是 HEAD 祖先，该提交**未触及**本节引用的任何产物或本文档 |
+| **本节 `805 passed` 的测量时刻** | **18:07:14**，即在上述改动落入工作树**之前**。该数字描述 HEAD `092692f8`，**不描述当前工作树** |
+
+因此：
+
+1. **§31.1 的回归数字只对 `092692f8` 成立。**当前工作树含未提交改动，其回归状态本节**未测量**，不作任何声明。
+2. **「O1/O2 未开始」这一表述已不再成立**，本节相关行已改为「进行中，未提交、未验收」。
+3. **但 H5 判定不变，仍为 `BLOCKED`（4/5）。**依据不是 grep 命中数，而是更硬的事实：`find eval_results -type d -name traces` 为**空**——至今没有任何 run 产出过 `traces/` 子树。按 §20.2，**代码存在只能证明 `IMPLEMENTED` 的前置条件，产出 artifact 才是门禁**。O1/O2 代码尚未提交、未经本节验证，连 `IMPLEMENTED` 都不由本节签发。
+4. 本节**未修改、未回退、未提交**上述任何文件，它们保持原样留在工作树。

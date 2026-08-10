@@ -77,6 +77,27 @@ class RunArtifacts:
         path.write_text(content, encoding="utf-8")
         return path
 
+    def record_trace(self, name: str, payload: Any) -> Path:
+        """Persist trace evidence under ``traces/`` (design map §20.6.4/§20.7).
+
+        The canonical tree requires ``traces/trace-summary.json`` (what spans the
+        run actually produced) and ``traces/span-assertion.json`` (the verdict
+        from ``eval.harness.trace_contract``).  Both live under ``traces/`` so
+        the recursive :meth:`_iter_artifact_files` pins them in
+        ``checksums.sha256`` — unpinned trace evidence is not evidence.
+
+        Mirrors :meth:`record_scorer_output`'s subtree pattern, but takes a
+        payload rather than raw text: unlike an official scorer's output, these
+        two files are produced by this repository, so there are no foreign bytes
+        to preserve verbatim.
+        """
+        path = self.root / "traces" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return path
+
     def record_event(self, instance_id: str, status: str, detail: str = "") -> None:
         self.append_line(
             "events.jsonl",
