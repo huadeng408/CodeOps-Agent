@@ -35,6 +35,18 @@ class FakeDriver:
         )
 
 
+def _pinned_config(**overrides: object) -> dict[str, object]:
+    """Minimal valid harness config — mandatory manifest pins (H3)."""
+    config: dict[str, object] = {
+        "git_sha": "a1b2c3d",
+        "dirty_hash": "0" * 64,
+        "model": "test-model",
+        "prompt_hash": "0" * 64,
+    }
+    config.update(overrides)
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Module contract: every benchmark exposes a callable run()
 # ---------------------------------------------------------------------------
@@ -282,6 +294,7 @@ def test_evalplus_through_harness_run(tmp_path: Path) -> None:
         artifacts=artifacts,
         budget=Budget(wall_clock_seconds=60, max_tokens=10_000),
         adapter=adapter,
+        config=_pinned_config(),
     )
 
     instances = [
@@ -337,7 +350,10 @@ def test_harness_run_missing_instance_id_fail_closed(tmp_path: Path) -> None:
 
     adapter = OkAdapter()
     artifacts = RunArtifacts(run_id=run_id, root=str(tmp_path / "eval_results"))
-    harness = HarnessRun(run_id=run_id, artifacts=artifacts, adapter=adapter)
+    harness = HarnessRun(
+        run_id=run_id, artifacts=artifacts, adapter=adapter,
+        config=_pinned_config(),
+    )
 
     instances = [
         EvalInstance(instance_id="", task_description="bad — no id"),

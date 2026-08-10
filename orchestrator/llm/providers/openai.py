@@ -94,7 +94,9 @@ class OpenAIClient(LLMClient):
         )
         body = body_bytes.decode("utf-8")
         try:
-            return self._parse_response(json.loads(body))
+            return self._parse_response(
+                json.loads(body), requested_model=request.model or self.model
+            )
         except Exception as exc_inner:
             raise RuntimeError(
                 f"OpenAI response parse error: {exc_inner}"
@@ -374,7 +376,43 @@ class OpenAIClient(LLMClient):
         return blocks
 
     @staticmethod
-    def _parse_response(payload: dict[str, Any]) -> ChatResponse:
+    def _model_identity(
+        payload: dict[str, Any], requested_model: str = ""
+    ) -> dict[str, Any]:
+        """Extract provider-reported model identity from a response body.
+
+        Design map §20.6.3 task E2.  The *requested* model name is an input we
+        chose; it can never testify to which model actually served the request.
+        Only fields the provider wrote into its own response body count as
+        evidence, so a silent provider yields blank strings here rather than a
+        backfill from ``requested_model`` — that backfill is precisely the
+        false-identity failure §20.4 recorded.
+
+        ``identity_verified`` is True only when the provider both names the
+        serving model *and* returns an immutable build discriminator
+        (``system_fingerprint``).  Without the fingerprint the caller must
+        report ``MODEL_IDENTITY_UNVERIFIED``.
+        """
+        reported_model = str(payload.get("model") or "")
+        system_fingerprint = str(payload.get("system_fingerprint") or "")
+        created_raw = payload.get("created")
+        try:
+            created = int(created_raw) if created_raw is not None else 0
+        except (TypeError, ValueError):
+            created = 0
+        return {
+            "requested_model": str(requested_model or ""),
+            "reported_model": reported_model,
+            "response_id": str(payload.get("id") or ""),
+            "system_fingerprint": system_fingerprint,
+            "created": created,
+            "identity_verified": bool(reported_model and system_fingerprint),
+        }
+
+    @staticmethod
+    def _parse_response(
+        payload: dict[str, Any], requested_model: str = ""
+    ) -> ChatResponse:
         choice = payload.get("choices", [{}])[0]
         message = choice.get("message", {}) or {}
         usage_payload = payload.get("usage", {}) or {}
@@ -408,6 +446,9 @@ class OpenAIClient(LLMClient):
                     )
                     or 0
                 ),
+            ),
+            model_identity=OpenAIClient._model_identity(
+                payload, requested_model=requested_model
             ),
         )
 

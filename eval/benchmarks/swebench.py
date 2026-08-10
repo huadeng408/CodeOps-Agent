@@ -59,6 +59,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+# The harness owns the scorer contract; the adapter implements it.  Verified
+# acyclic: eval/harness/ imports nothing from eval/benchmarks/.
+from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
+
+#: Trace capabilities this benchmark exercises (see
+#: ``eval.harness.trace_contract.ALL_CAPABILITIES``).  Solving a SWE-bench
+#: instance means reading and patching an already-checked-out repository: there
+#: is no retrieval and no reranking anywhere in the path, so requiring
+#: ``rag.retrieve``/``embedding`` spans of this benchmark would make the trace
+#: contract's PASS unreachable and its verdict uninformative.  Declared here,
+#: next to the implementation that either does or does not retrieve, rather
+#: than by whoever reports the results.
+TRACE_CAPABILITIES: tuple[str, ...] = ()
+
 # ---------------------------------------------------------------------------
 # Graceful import from eval.adapter (created in parallel by core agent).
 # Falls back to local definitions when eval/ is a standalone benchmark harness.
@@ -99,6 +113,12 @@ except ImportError:
         def solve_instance(
             self, instance: EvalInstance, working_dir: str, **kwargs: Any
         ) -> EvalResult: ...
+
+
+# AgentBenchmark base class (unified prepare -> solve -> score lifecycle).
+# Imported at module level here — eval.benchmarks.base only imports
+# eval.retrieval.metrics at runtime, so there is no import cycle.
+from eval.benchmarks.base import AgentBenchmark
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +563,7 @@ def _setup_workdir(
     base_dir: str,
     *,
     dry_run: bool = False,
+    nest: bool = True,
 ) -> str:
     """Prepare the working directory for *instance*.
 
@@ -551,14 +572,23 @@ def _setup_workdir(
 
     Args:
         instance: The evaluation instance.
-        base_dir: Parent directory for the per-instance working directory.
+        base_dir: Parent directory for the per-instance working directory,
+            or the working directory itself when *nest* is False.
         dry_run: If True, force synthetic repo creation.
+        nest: When True (the legacy CLI, which shares one base dir across
+            instances) the repo is created at ``base_dir/<instance_id>``.
+            When False the repo is created directly in *base_dir*, which is
+            what the unified Harness needs: it allocates a fresh temp
+            workspace per instance and passes that exact path to the agent as
+            ``working_dir``.  Nesting there put the repo one level below the
+            agent's working_dir, so ``git diff HEAD`` ran outside the
+            repository and every captured patch was empty.
 
     Returns:
         Absolute path to the instance working directory.
     """
     meta: dict[str, Any] = instance.metadata
-    workdir = os.path.join(base_dir, instance.instance_id)
+    workdir = os.path.join(base_dir, instance.instance_id) if nest else base_dir
     os.makedirs(workdir, exist_ok=True)
 
     if dry_run or meta.get("synthetic"):
@@ -633,16 +663,26 @@ def _init_git_repo(path: str) -> None:
 
 
 def _capture_git_diff(workdir: str) -> str:
-    """Capture the unified diff of all uncommitted changes in *workdir*."""
+    """Capture the unified diff of all uncommitted changes in *workdir*.
+
+    The encoding is pinned to UTF-8 rather than left to ``text=True``, which
+    would decode with the locale codec: on a zh-CN Windows that is gbk, and a
+    diff containing a smart quote or CJK text raised ``UnicodeDecodeError`` in
+    the subprocess reader thread.  The bare ``except`` below then returned an
+    empty string, so an encoding fault was indistinguishable from an agent that
+    produced no patch.  ``errors="replace"`` keeps one undecodable byte from
+    costing the whole diff.
+    """
     try:
         result = subprocess.run(
             ["git", "-C", workdir, "diff", "--no-color", "HEAD"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )
-        return result.stdout.strip()
+        return (result.stdout or "").strip()
     except Exception:
         return ""
 
@@ -1200,7 +1240,8 @@ def _can_score_official() -> tuple[bool, str]:
             result = subprocess.run(
                 ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c",
                  "python3 -c 'import docker; print(\"ok\")' 2>/dev/null || echo 'no-docker'"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30,
             )
             if "ok" in result.stdout:
                 return True, "Windows + WSL2 Ubuntu-24.04 + Docker available"
@@ -1212,6 +1253,36 @@ def _can_score_official() -> tuple[bool, str]:
     return False, f"unsupported platform: {platform.system()}"
 
 
+# "Caller said nothing", which must stay distinguishable from an explicit
+# ``namespace=None`` (a deliberate request to build images locally).
+_UNSET = object()
+
+
+def _resolve_namespace() -> "str | None":
+    """Which Docker namespace the official harness should take images from.
+
+    ``None`` means "build every instance image locally".  Both scoring call
+    sites used to hardcode that, silently overriding upstream's own default of
+    ``"swebench"``, and it is why scoring failed on the first instance that ever
+    reached it: a local build runs ``setup_repo.sh``, which must ``git clone``
+    the project's entire history *inside the build container*.  For astropy that
+    transfer ran ten minutes and then died on ``curl 92 HTTP/2 stream 0 was not
+    closed cleanly: CANCEL``, so the image never built and no verdict existed.
+
+    Pulling the maintainers' prebuilt image skips that clone entirely.  It is
+    also the more canonical choice: those images are what the official harness
+    uses by default, published by the same project as the ``swebench`` package
+    we already execute, so it adds no new trust boundary.
+
+    Override with ``SWEBENCH_NAMESPACE``; ``none`` or an empty value restores
+    local building for an air-gapped host.
+    """
+    raw = os.environ.get("SWEBENCH_NAMESPACE", "swebench").strip()
+    if not raw or raw.lower() == "none":
+        return None
+    return raw
+
+
 def _run_official_scoring(
     predictions_path: str,
     output_dir: str,
@@ -1220,21 +1291,24 @@ def _run_official_scoring(
     max_workers: int = 4,
     run_id: str = "code-agent-eval",
     timeout: int = 3600,
+    namespace: "str | None | object" = _UNSET,
 ) -> tuple[bool, str]:
     """Invoke the official swebench scoring harness.
 
     On Linux, runs directly. On Windows, delegates to WSL2. Returns
     (success, detail).
     """
+    if namespace is _UNSET:
+        namespace = _resolve_namespace()
     if platform.system() == "Windows":
         return _run_official_scoring_wsl(
             predictions_path, output_dir, dataset_name, split,
-            max_workers, run_id, timeout,
+            max_workers, run_id, timeout, namespace,
         )
     else:
         return _run_official_scoring_local(
             predictions_path, output_dir, dataset_name, split,
-            max_workers, run_id, timeout,
+            max_workers, run_id, timeout, namespace,
         )
 
 
@@ -1246,6 +1320,7 @@ def _run_official_scoring_local(
     max_workers: int,
     run_id: str,
     timeout: int,
+    namespace: "str | None" = None,
 ) -> tuple[bool, str]:
     """Run swebench.harness.run_evaluation locally (Linux only)."""
     import resource  # noqa: F401
@@ -1264,7 +1339,7 @@ def _run_official_scoring_local(
             open_file_limit=4096,
             run_id=run_id,
             timeout=timeout,
-            namespace=None,
+            namespace=namespace,
             rewrite_reports=False,
             modal=False,
             report_dir=output_dir,
@@ -1272,6 +1347,51 @@ def _run_official_scoring_local(
         return True, f"official scoring completed for {run_id}"
     except Exception as e:
         return False, f"official scoring failed: {e}"
+
+
+_WSL_REPO_ROOT = "/mnt/d/vscode/localcode"
+
+
+def _to_wsl_path(path: "str | Path") -> str:
+    """Translate a host path into the WSL2 path that names the same file.
+
+    The previous implementation blindly prefixed ``/mnt/d/vscode/localcode/``
+    onto whatever it was handed.  That is only correct for a path relative to
+    the repo root; the unified Harness passes an **absolute** workspace path,
+    which produced nonsense such as
+    ``/mnt/d/vscode/localcode/D:\\vscode\\localcode\\...`` and made the
+    official scorer either fail or report on nothing.
+
+    Handled cases:
+
+    - absolute Windows path (``D:\\a\\b`` or ``D:/a/b``) -> ``/mnt/d/a/b``
+    - already-POSIX absolute path (``/mnt/d/...``, ``/home/...``) -> unchanged
+    - repo-relative path (``eval_results/run/x.jsonl``, ``./x``) -> anchored
+      under the repo root inside WSL
+
+    Raises :class:`ValueError` on an empty path rather than guessing.
+    """
+    raw = str(path).strip()
+    if not raw:
+        raise ValueError("cannot translate an empty path to a WSL path")
+
+    normalized = raw.replace("\\", "/")
+
+    # Already a POSIX absolute path (/mnt/..., /home/..., /tmp/...).
+    if normalized.startswith("/"):
+        return normalized
+
+    # Absolute Windows path with a drive letter: D:/a/b -> /mnt/d/a/b
+    if len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha():
+        drive = normalized[0].lower()
+        remainder = normalized[2:].lstrip("/")
+        return f"/mnt/{drive}/{remainder}" if remainder else f"/mnt/{drive}"
+
+    # Repo-relative path: anchor it under the repo root inside WSL.
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    return f"{_WSL_REPO_ROOT}/{normalized}"
 
 
 def _run_official_scoring_wsl(
@@ -1282,13 +1402,31 @@ def _run_official_scoring_wsl(
     max_workers: int,
     run_id: str,
     timeout: int,
+    namespace: "str | None" = None,
 ) -> tuple[bool, str]:
     """Run official scoring via WSL2 Ubuntu-24.04."""
-    wsl_preds = f"/mnt/d/vscode/localcode/{predictions_path}"
-    wsl_output = f"/mnt/d/vscode/localcode/{output_dir}"
+    wsl_preds = _to_wsl_path(predictions_path)
+    wsl_output = _to_wsl_path(output_dir)
+
+    # WSL inherits no Windows proxy variables (WSLENV is empty), so a proxy the
+    # scorer needs has to be exported inside the WSL command.  On a mirrored-mode
+    # WSL with DNS tunneling, raw.githubusercontent.com can resolve to "::" and
+    # refuse instantly, which fails the official scorer while it fetches the
+    # environment requirements; through the host proxy the same URL returns 200.
+    # Read from the environment rather than hardcoded, and omitted entirely when
+    # unset so a working-DNS environment is untouched.  Loopback stays direct so
+    # the Docker socket and local services are not routed through the proxy.
+    proxy = os.environ.get("SWEBENCH_WSL_PROXY", "").strip()
+    proxy_prefix = ""
+    if proxy:
+        proxy_prefix = (
+            f"export http_proxy={proxy} https_proxy={proxy} "
+            f"no_proxy=127.0.0.1,localhost,::1 && "
+        )
 
     cmd = (
         f"cd /mnt/d/vscode/localcode && "
+        f"{proxy_prefix}"
         f"python3 -c \""
         f"import sys; sys.path.insert(0, '.'); "
         f"from swebench.harness.run_evaluation import main; "
@@ -1296,7 +1434,7 @@ def _run_official_scoring_wsl(
         f"instance_ids=[], predictions_path='{wsl_preds}', "
         f"max_workers={max_workers}, force_rebuild=False, "
         f"cache_level='env', clean=False, open_file_limit=4096, "
-        f"run_id='{run_id}', timeout={timeout}, namespace=None, "
+        f"run_id='{run_id}', timeout={timeout}, namespace={namespace!r}, "
         f"rewrite_reports=False, modal=False, "
         f"report_dir='{wsl_output}')\""
     )
@@ -1304,7 +1442,13 @@ def _run_official_scoring_wsl(
     try:
         result = subprocess.run(
             ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=timeout + 600,
+            # Pin UTF-8: this call's stdout becomes ``scorer_status`` evidence.
+            # With bare ``text=True`` a zh-CN Windows decodes it as gbk, and the
+            # official harness emits ✔/✗ and box-drawing characters, so the
+            # reader thread raised UnicodeDecodeError and the verdict text was
+            # lost -- an encoding fault masquerading as a scorer failure.
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout + 600,
         )
         if result.returncode == 0:
             return True, f"WSL2 official scoring completed: {result.stdout[-200:]}"
@@ -1314,6 +1458,323 @@ def _run_official_scoring_wsl(
         return False, f"WSL2 scoring timed out after {timeout}s"
     except Exception as e:
         return False, f"WSL2 scoring error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# AgentBenchmark implementation (unified harness lifecycle)
+# ---------------------------------------------------------------------------
+
+
+class OfficialScorerUnavailable(RuntimeError):
+    """The official scorer did not produce a verdict.
+
+    Raised when the scorer could not run (no Docker/WSL), crashed, or ran but
+    left no report.  It must NOT be used for a scorer that ran and reported
+    ``resolved=False`` — that is a real measurement.
+
+    This is an exception rather than a ``resolved: False`` return value on
+    purpose: the harness merges a returned dict into the prediction and counts
+    the instance as completed, so returning here made "nothing was measured"
+    indistinguishable from "the patch did not fix the bug" and let a run whose
+    scorer never executed still exit 0.  Raising routes it through the
+    harness's scorer-callback wrapper into ERROR_SCORER instead.
+    """
+
+
+class SWEBenchAdapter(AgentBenchmark):
+    """SWE-bench Verified adapter for the unified :class:`AgentBenchmark`
+    contract (prepare -> solve -> score).
+
+    Reuses the existing SWE-bench helpers:
+
+    - :meth:`prepare` clones the repo (or seeds a synthetic repo) via
+      :func:`_setup_workdir`; the git worktree lives at
+      ``workspace/<instance_id>``.
+    - :meth:`solve` runs the agent with the repo as ``working_dir`` and
+      falls back to :func:`_capture_git_diff` when the adapter did not fill
+      ``model_patch``.
+    - :meth:`score` writes ``predictions.jsonl`` for the instance and
+      invokes the OFFICIAL swebench scorer when available
+      (:func:`_can_score_official`).  Without official scoring the instance
+      is reported unresolved — the official scorer is never faked.
+
+    The pins reflect exactly what the loader (:func:`load_swebench_instances`)
+    and the official scorer use: the ``test`` split of
+    ``princeton-nlp/SWE-bench_Verified`` and ``swebench.harness.run_evaluation``.
+    """
+
+    name = "swebench"
+
+    #: Dataset consumed by :func:`load_swebench_instances`.
+    _DATASET_NAME = "princeton-nlp/SWE-bench_Verified"
+    #: Split loaded by :func:`load_swebench_instances`.  The loader does not
+    #: pin a dataset git revision, so the split is the honest revision pin.
+    _DATASET_SPLIT = "test"
+    #: Official scorer invoked by :func:`_run_official_scoring`.
+    _SCORER_NAME = "swebench.harness.run_evaluation"
+
+    # ------------------------------------------------------------------
+    # AgentBenchmark contract
+    # ------------------------------------------------------------------
+
+    def prepare(self, instance: EvalInstance, workspace: Path) -> None:
+        """Clone the repo into the workspace (or seed a synthetic repo).
+
+        Delegates to :func:`_setup_workdir` with ``nest=False`` so *workspace*
+        itself becomes the git root.  The Harness allocates a fresh temp
+        workspace per instance and passes that same path to the agent as
+        ``working_dir``, so a nested repo left the agent's ``git diff HEAD``
+        running outside the repository and every captured patch was empty.
+        """
+        _setup_workdir(instance, str(workspace), nest=False)
+
+    def solve(
+        self,
+        instance: EvalInstance,
+        workspace: Path,
+        adapter: AgentAdapter,
+        **kwargs: Any,
+    ) -> EvalResult:
+        """Run the agent on the prepared worktree and return the result.
+
+        The agent receives the git worktree as ``working_dir``.  When the
+        adapter leaves ``model_patch`` empty the patch is captured from the
+        worktree via :func:`_capture_git_diff`.
+        """
+        workdir = _instance_workdir(instance, workspace)
+        result = adapter.solve_instance(
+            instance, working_dir=str(workdir), **kwargs
+        )
+        if not result.model_patch:
+            result.model_patch = _capture_git_diff(str(workdir))
+        if not result.instance_id:
+            result.instance_id = instance.instance_id
+        return result
+
+    def score(
+        self,
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """Write predictions and invoke the official scorer (fail-closed).
+
+        Writes a single-entry ``predictions.jsonl`` for *instance* into
+        *workspace*, then runs the OFFICIAL swebench scorer when
+        :func:`_can_score_official` reports it available.  ``resolved`` is
+        only ever ``True`` when the official scorer's report says so.
+
+        Returns ``{"resolved": bool, "scorer_status": str}`` only when the
+        official scorer actually produced a verdict.  When it could not run,
+        crashed, or left no report, this raises
+        :class:`OfficialScorerUnavailable` so the harness records ERROR_SCORER
+        rather than merging an unmeasured ``resolved: False`` into the
+        prediction and counting the instance as completed.
+        """
+        predictions_path = workspace / "predictions.jsonl"
+        model_name = os.environ.get("SWEBENCH_MODEL_NAME", "code-agent-default")
+        workspace.mkdir(parents=True, exist_ok=True)
+        with predictions_path.open("w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "instance_id": result.instance_id
+                        or instance.instance_id,
+                        "model_name_or_path": model_name,
+                        "model_patch": result.model_patch,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+        available, reason = _can_score_official()
+        if not available:
+            raise OfficialScorerUnavailable(f"unavailable: {reason}")
+
+        run_id = f"swebench-{instance.instance_id.replace('/', '__')}"
+        ok, detail = _run_official_scoring(
+            str(predictions_path),
+            str(workspace),
+            dataset_name=self._DATASET_NAME,
+            split=self._DATASET_SPLIT,
+            run_id=run_id,
+        )
+        if not ok:
+            raise OfficialScorerUnavailable(f"failed: {detail}")
+
+        resolved = _read_official_resolution(
+            instance_id=result.instance_id or instance.instance_id,
+            run_id=run_id,
+            model_name=model_name,
+        )
+        if resolved is None:
+            raise OfficialScorerUnavailable(
+                f"official run ok but report not found: {detail}"
+            )
+        payload: dict[str, Any] = {
+            "resolved": resolved,
+            "scorer_status": f"official: resolved={resolved} ({detail})",
+        }
+        raw = _collect_official_raw_output(
+            instance_id=result.instance_id or instance.instance_id,
+            run_id=run_id,
+            model_name=model_name,
+        )
+        if raw:
+            payload[SCORER_RAW_OUTPUT_KEY] = raw
+        return payload
+
+    # ------------------------------------------------------------------
+    # Pins
+    # ------------------------------------------------------------------
+
+    @property
+    def pins(self) -> dict[str, str]:
+        """Reproducibility pins for this benchmark/dataset/scorer."""
+        return {
+            "benchmark": self.name,
+            "dataset_name": self._DATASET_NAME,
+            "dataset_revision": self._DATASET_SPLIT,
+            "scorer_name": self._SCORER_NAME,
+        }
+
+
+def _instance_workdir(instance: EvalInstance, workspace: Path) -> Path:
+    """Return the git worktree for *instance* under *workspace*.
+
+    :func:`_setup_workdir` always nests the repo at ``<base>/<instance_id>``,
+    so a harness-provided temp *workspace* is the base dir and the worktree
+    is ``workspace/<instance_id>``.  If the driver already passed the
+    instance worktree itself, it is returned unchanged.
+    """
+    nested = workspace / instance.instance_id
+    if nested.is_dir():
+        return nested
+    return workspace
+
+
+def _collect_official_raw_output(
+    instance_id: str,
+    run_id: str,
+    model_name: str,
+) -> dict[str, str]:
+    """Read the official harness's own output files, verbatim.
+
+    H5 requires saving official raw output.  These files are what the verdict
+    is actually derived from, and the swebench harness writes them relative to
+    its working directory rather than into our artifact tree, so without this
+    they stayed unpinned by ``checksums.sha256``.
+
+    Returns ``{filename: text}``, skipping anything unreadable — a missing file
+    must not mask a verdict that was otherwise obtained, and the caller records
+    resolution independently.
+    """
+    model_safe = model_name.replace("/", "__")
+    roots = [Path.cwd(), Path(__file__).resolve().parent.parent.parent]
+    collected: dict[str, str] = {}
+
+    for root in roots:
+        for candidate in (
+            root / "logs" / "run_evaluation" / run_id / model_safe / instance_id,
+            root / "logs" / "run_evaluation" / run_id / instance_id,
+        ):
+            for filename in ("report.json", "run_instance.log", "test_output.txt"):
+                fpath = candidate / filename
+                if filename in collected or not fpath.is_file():
+                    continue
+                try:
+                    collected[filename] = fpath.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    continue
+
+    for root in roots:
+        summary_path = root / f"{model_safe}.{run_id}.json"
+        name = "run-summary.json"
+        if name in collected or not summary_path.is_file():
+            continue
+        try:
+            collected[name] = summary_path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+
+    return collected
+
+
+def _read_official_resolution(
+    instance_id: str,
+    run_id: str,
+    model_name: str,
+) -> bool | None:
+    """Read the instance resolution from the official scorer's reports.
+
+    The swebench harness writes, relative to its working directory:
+
+    - ``logs/run_evaluation/<run_id>/<model>/<instance_id>/report.json``
+      (per-instance, authoritative ``{"resolved": bool, ...}``), and
+    - ``<model>.<run_id>.json`` (run summary with ``resolved_ids``).
+
+    Returns ``True``/``False`` when official evidence is found and ``None``
+    when no report exists (the caller treats missing evidence as
+    unresolved — fail-closed).
+    """
+    model_safe = model_name.replace("/", "__")
+    roots = [
+        Path.cwd(),
+        Path(__file__).resolve().parent.parent.parent,  # repo root
+    ]
+
+    # Per-instance report — the authoritative source.
+    for root in roots:
+        for candidate in (
+            root / "logs" / "run_evaluation" / run_id / model_safe / instance_id,
+            root / "logs" / "run_evaluation" / run_id / instance_id,
+        ):
+            report_path = candidate / "report.json"
+            if not report_path.is_file():
+                continue
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            entry = report.get(instance_id)
+            if isinstance(entry, dict) and "resolved" in entry:
+                return bool(entry["resolved"])
+
+    # Run summary fallback.
+    for root in roots:
+        summary_path = root / f"{model_safe}.{run_id}.json"
+        if not summary_path.is_file():
+            continue
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(summary, dict):
+            continue
+        if instance_id in summary.get("resolved_ids", []):
+            return True
+        # error_ids is NOT a verdict: the harness crashed (image build failure,
+        # container error) before any test ran, so nothing was measured.
+        # Reporting False here claimed the agent's patch had failed when the
+        # evaluation never happened.
+        if instance_id in summary.get("error_ids", []):
+            raise OfficialScorerUnavailable(
+                f"official evaluation errored for {instance_id}: the instance is in "
+                "error_ids, so no verdict exists (check "
+                "logs/run_evaluation/<run_id>/... and logs/build_images/... for the "
+                "underlying failure)"
+            )
+        # These two ARE measurements: the tests ran and the patch did not fix
+        # the bug, or the agent submitted nothing to test.
+        for key in ("unresolved_ids", "empty_patch_ids"):
+            if instance_id in summary.get(key, []):
+                return False
+    return None
 
 
 if __name__ == "__main__":

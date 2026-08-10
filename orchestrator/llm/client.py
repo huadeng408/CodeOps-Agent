@@ -262,6 +262,14 @@ class ChatResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # Provider-reported model identity, read from the response body (design map
+    # §20.6.3 task E2).  A *requested* model name is an input, not evidence;
+    # only the provider's own answer to "what served this request?" can testify
+    # to model identity.  Keys (all optional, blank when the provider is
+    # silent): ``requested_model``, ``reported_model``, ``response_id``,
+    # ``system_fingerprint``, ``created``, ``identity_verified``.
+    # Never contains credentials — it is written verbatim into artifacts.
+    model_identity: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

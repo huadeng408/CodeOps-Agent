@@ -94,7 +94,11 @@ else:
 # 4. Capture git diff.
 patch = subprocess.check_output(
     ["git", "-C", WORKDIR, "diff", "--no-color", "HEAD"],
+    # UTF-8, not the locale codec: a diff with a smart quote or CJK text
+    # raises UnicodeDecodeError under gbk on a zh-CN Windows.
     text=True,
+    encoding="utf-8",
+    errors="replace",
 )
 patch_path = f"{ROOT}/eval/swebench_work/flask5014_v4pro.patch"
 with open(patch_path, "w", encoding="utf-8") as fh:

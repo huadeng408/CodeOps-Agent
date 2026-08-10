@@ -35,6 +35,18 @@ from pathlib import Path
 from typing import Any
 
 from eval.adapter import DefaultAgentAdapter, EvalInstance, EvalResult
+from eval.harness.trace_contract import SPAN_EXECUTE_TOOL, SPAN_INVOKE_AGENT
+from orchestrator.rag.trace import otel_span
+
+
+def _set_span_attribute(span: Any, key: str, value: Any) -> None:
+    """Best-effort ``set_attribute`` tolerating the ``None`` span otel_span yields."""
+    if span is None:
+        return
+    try:
+        span.set_attribute(key, value)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +100,29 @@ class LocalToolExecutor:
     # -- public API ---------------------------------------------------------
 
     def execute(self, tool_name: str, params_json: str) -> _LocalToolResult:
+        """Run one tool, wrapped in an ``execute_tool`` span.
+
+        The span belongs here rather than on the Go side: on this path the tool
+        genuinely runs in this process, and the trace contract requires
+        ``execute_tool`` as the only evidence that tool work happened at all.
+        Emitting it from the Go agent's producer would have been a lie, and
+        waiving it would have removed the evidence.
+
+        ``params_json`` is deliberately *not* recorded — it carries file
+        contents and shell command bodies.  Only the tool name and coarse
+        outcome go on the span.
+        """
+        with otel_span(
+            f"{SPAN_EXECUTE_TOOL} {tool_name}",
+            {"tool.name": tool_name},
+        ) as span:
+            result = self._execute_inner(tool_name, params_json)
+            _set_span_attribute(span, "tool.exit_code", result.exit_code)
+            _set_span_attribute(span, "tool.truncated", result.truncated)
+            _set_span_attribute(span, "tool.failed", bool(result.error))
+            return result
+
+    def _execute_inner(self, tool_name: str, params_json: str) -> _LocalToolResult:
         params: dict[str, Any] = {}
         try:
             params = json.loads(params_json or "{}")
@@ -461,6 +496,21 @@ class HeadlessDriver(DefaultAgentAdapter):
         """
         cancel_event = kwargs.get("cancel_event", None)
 
+        with otel_span(
+            f"{SPAN_INVOKE_AGENT} headless-driver",
+            {"agent.runtime": "headless-driver"},
+        ) as span:
+            result = self._do_solve_inner(instance, working_dir, trace_id, cancel_event)
+            _set_span_attribute(span, "agent.failed", bool(result.error))
+            return result
+
+    def _do_solve_inner(
+        self,
+        instance: EvalInstance,
+        working_dir: str,
+        trace_id: str,
+        cancel_event: Any,
+    ) -> EvalResult:
         # ---- path 1: full ConversationRunner ----
         if self.use_runner:
             try:
@@ -687,7 +737,31 @@ class HeadlessDriver(DefaultAgentAdapter):
         except Exception:
             pass
 
-        final_text = "\n".join(final_text_parts)
+        # Streaming deltas are fragments of a sentence, not lines: joining them
+        # with "\n" turned "Now I can see" into "Now\nI\ncan\nsee" in the
+        # recorded prediction, corrupting the artifact that IS the evidence.
+        final_text = "".join(final_text_parts)
+
+        # ``done.success`` answers "did the model end its own turn cleanly?",
+        # not "did the task succeed".  ConversationRunner emits _done(True) in
+        # exactly two places -- when the model returns no tool calls, and in the
+        # fallback path -- so every other exit, tool-round-limit exhaustion
+        # included, reports False even when the work was correct.
+        #
+        # Recording that as ``error`` produced artifacts that contradicted
+        # themselves: the H5 run carried error='runner completed with
+        # done.success=False' next to resolved=True and ok:1.  It also corrupted
+        # a scorer: run_swebench_honest_10.py counts
+        # ``r.get("model_patch") and not r.get("error")`` as resolved, so a
+        # correct patch was tallied as unresolved and labelled ERROR.
+        #
+        # So only claim an error when the runner ended without success AND left
+        # nothing usable behind.  A patch or answer is evidence that it did.
+        produced_output = bool(model_patch.strip() or final_text.strip())
+        if success or produced_output:
+            error = ""
+        else:
+            error = "runner ended without success and produced no patch or answer"
 
         return EvalResult(
             instance_id=instance.instance_id,
@@ -697,7 +771,7 @@ class HeadlessDriver(DefaultAgentAdapter):
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             trace_id=trace_id,
-            error="" if success else "runner completed with done.success=False",
+            error=error,
         )
 
     # ------------------------------------------------------------------

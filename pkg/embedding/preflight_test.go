@@ -104,6 +104,58 @@ func TestPreflightRejectsRevisionMismatch(t *testing.T) {
 	}
 }
 
+// The pinned config revision is always fully qualified ("model@sha") because
+// ValidateEmbeddingContract rejects floating tags. A real service, however,
+// advertises only the bare commit in /health. Both forms describe the same
+// weights, so the comparison must be on the revision component — not on raw
+// string equality, which would report a mismatch between two identical pins.
+const bareRevision = "8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c"
+
+func TestPreflightAcceptsBareRevisionMatchingQualifiedPin(t *testing.T) {
+	srv := embeddingServer(t, "BAAI/bge-m3", bareRevision, 1024, 2, &embeddingRequest{})
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err != nil {
+		t.Fatalf("bare advertised revision equal to the pinned commit must pass, got %v", err)
+	}
+}
+
+func TestPreflightRejectsBareRevisionMismatch(t *testing.T) {
+	// Guards against an over-broad fix that stops comparing revisions at all.
+	srv := embeddingServer(t, "BAAI/bge-m3", "0000000000000000000000000000000000000000", 1024, 2, &embeddingRequest{})
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "revision mismatch") {
+		t.Fatalf("expected revision mismatch for a different bare commit, got %v", err)
+	}
+}
+
+func TestPreflightRejectsAdvertisedRevisionWithDifferentModelPrefix(t *testing.T) {
+	// Same commit, different model prefix is self-contradictory: two models do
+	// not share one weight commit. Fail closed rather than trusting the sha.
+	srv := embeddingServer(t, "BAAI/bge-m3", "BAAI/bge-small-zh-v1.5@"+bareRevision, 1024, 2, &embeddingRequest{})
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "revision mismatch") {
+		t.Fatalf("expected revision mismatch when the advertised model prefix differs, got %v", err)
+	}
+}
+
+func TestPreflightRejectsEmptyAdvertisedRevisionComponent(t *testing.T) {
+	// "BAAI/bge-m3@" carries no commit. It must not be read as "matches",
+	// which is what a naive suffix comparison would do.
+	srv := embeddingServer(t, "BAAI/bge-m3", "BAAI/bge-m3@", 1024, 2, &embeddingRequest{})
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "revision mismatch") {
+		t.Fatalf("expected revision mismatch for an empty advertised commit, got %v", err)
+	}
+}
+
 func TestPreflightRejectsNonNativeDimensions(t *testing.T) {
 	srv := embeddingServer(t, "BAAI/bge-m3", pinnedRevision, 512, 2, &embeddingRequest{})
 	defer srv.Close()

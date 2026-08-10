@@ -27,6 +27,7 @@ class BudgetUsage:
     tokens: int = 0
     cost: float = 0.0
     output_bytes: int = 0
+    active_processes: int = 0
 
     def record_tokens(self, n: int) -> None:
         self.tokens += n
@@ -36,6 +37,14 @@ class BudgetUsage:
 
     def record_output(self, n: int) -> None:
         self.output_bytes += n
+
+    def record_process_start(self) -> None:
+        """Advisory: increment the tracked count of concurrent child processes."""
+        self.active_processes += 1
+
+    def record_process_end(self) -> None:
+        """Decrement the tracked child-process count (floored at zero)."""
+        self.active_processes = max(0, self.active_processes - 1)
 
     def wall_clock(self) -> float:
         return time.perf_counter() - self.started_at
@@ -53,6 +62,11 @@ def check_budget(budget: Budget, usage: BudgetUsage) -> None:
     """Raise BudgetExceeded when any limit is hit (fail loud, never silent)."""
     if usage.wall_clock() > budget.wall_clock_seconds:
         raise BudgetExceeded("wall-clock", f"{usage.wall_clock():.1f}s > {budget.wall_clock_seconds}s")
+    if usage.active_processes > budget.max_processes:
+        raise BudgetExceeded(
+            "processes",
+            f"{usage.active_processes} concurrent processes > {budget.max_processes}",
+        )
     if usage.tokens > budget.max_tokens:
         raise BudgetExceeded("tokens", f"{usage.tokens} > {budget.max_tokens}")
     if usage.cost > budget.max_cost:

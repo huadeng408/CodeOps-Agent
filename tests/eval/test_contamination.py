@@ -41,14 +41,16 @@ def test_exact_match_uses_original_indices() -> None:
 
 
 def test_normalized_ngram_overlap_flagged() -> None:
-    # 大小写与标点不同，规范化后 n-gram 完全重叠，ngram 层必须标记。
+    # 大小写与标点不同，规范化后 n-gram 完全重叠，containment 层必须标记。
+    # 层名以冻结策略 contamination-policy.v1.json 的 layers[1].name 为准：
+    # 该层度量的是 containment_q（方向性），不再是对称的 ngram Jaccard。
     chunk = "The quick brown fox jumps over the lazy dog."
     item = "the quick, brown fox jumps over the lazy dog!"
     report = scan([chunk], [item])
     layers = {layer for _, _, _, layer in report.high_similarity}
-    assert "ngram" in layers
+    assert "containment" in layers
     for _, _, score, layer in report.high_similarity:
-        if layer == "ngram":
+        if layer == "containment":
             assert score >= 0.8
 
 
@@ -150,7 +152,7 @@ def test_report_fields_shape() -> None:
     assert report.blocking is False
     assert isinstance(report.layer_notes, dict)
     # 四个层都需要在 notes 里说明扫描范围或跳过原因。
-    for layer in ("exact", "ngram", "minhash", "embedding"):
+    for layer in ("exact", "containment", "minhash", "embedding"):
         assert layer in report.layer_notes
 
     report = scan(["chunk one"], ["item one", "chunk one"])

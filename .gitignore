@@ -56,6 +56,20 @@ Thumbs.db
 # Eval intermediate artifacts (final SHA-bound results are tracked)
 eval/swebench_work/flask/
 eval/swebench_work/predictions_*.jsonl
+# Repository clones and per-run scratch created by the SWE-bench harness.
+# These are checkouts of upstream projects (astropy alone is 91MB), reproducible
+# from the instance's base_commit, so they are artifacts and never source.
+eval/swebench_work/astropy/
+eval/swebench_work/agent_run/
+eval/swebench_work/repos/
+eval/swebench_work/h5_rescore/
+# Docker layer extracts pulled for inspection (31MB of upstream image content).
+docker-extracts/
+.mnm/
+# Official scorer run summaries land in the harness CWD (repo root).  The
+# authoritative copy now lives under each run's artifact tree via
+# RunArtifacts.record_scorer_output(), where checksums.sha256 pins it.
+/deepseek-*.json
 eval/*.ckpt
 eval/*_output.txt
 eval/eval_final_*_batch*.json

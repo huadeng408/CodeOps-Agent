@@ -1,0 +1,232 @@
+{
+  "policy_id": "e4-contamination-policy",
+  "policy_version": "v1",
+  "authored_by": "main-session (not a subagent); every number below was measured in this session before the policy was frozen",
+  "created_utc": "2026-08-09T12:05:00Z",
+  "design_map_ref": "docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md line 1105",
+  "design_map_task": "E4",
+  "status_note": "Evidence qualifiers such as SCORER_CONNECTIVITY_ONLY are labels only and never promote to VERIFIED (design map line 921). A scan whose fourth layer was skipped is INCOMPLETE, never clean.",
+
+  "measure_before_freeze_note": "The E4 card orders the policy frozen before implementation. It was measured first anyway, because freezing a Jaccard-only threshold would have permanently enshrined a proven structural blindness (see blindness_evidence) and the card also forbids moving a frozen SLA without a new policy version.",
+
+  "reference_hardware": {
+    "note": "Measured on the machine that will run the gate. An SLA is only meaningful against named hardware.",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "physical_cores": 24,
+    "logical_processors": 32,
+    "max_clock_mhz": 2200,
+    "total_ram_gb": 15.7,
+    "os": "Microsoft Windows 11 build 26200",
+    "python": "3.12.7 AMD64",
+    "numpy": "1.26.4",
+    "dependency_note": "datasketch is NOT installed and this policy does not introduce it; MinHash is implemented with stdlib zlib.crc32 plus numpy permutation."
+  },
+
+  "data_scale": {
+    "note": "Measured by scrolling the live index and reading the queries file in this session, not copied from prior prose.",
+    "es_index": "knowledge_base_v2_bge_m3",
+    "chunks": 24877,
+    "total_normalized_chars": 32569694,
+    "chunk_chars": {"min": 13, "p50": 192, "p90": 1228, "p99": 3102, "max": 5868, "mean": 450},
+    "chunk_ngram_set_size_n8": {"p01": 1, "p05": 19, "p10": 42, "p50": 360, "p90": 3675, "max": 5985},
+    "queries": 180,
+    "query_chars": {"min": 14, "p50": 49, "max": 116, "mean": 53},
+    "query_ngram_set_size_n8": {"min": 22, "max": 103},
+    "pair_space": 4477860,
+    "pair_space_note": "24877 chunks x 180 queries; the previous implementation evaluated this full cross product with no pruning."
+  },
+
+  "input_pins": {
+    "queries_file": "data/eval/techdocs/queries.text.jsonl",
+    "queries_sha256": "faf3fb19adedb1369fff8009728faaee9982820a045ddcf018153c1d62a7a243",
+    "queries_bytes": 19756,
+    "qrels_file": "data/eval/techdocs/qrels.text.jsonl",
+    "qrels_sha256": "6539d3ffd11814418a1e589e929599105ffbce7f25fc7f0cfc80cbb2c72873d8",
+    "qrels_bytes": 47847,
+    "split_policy_file": "data/eval/techdocs/split-policy.v1.json",
+    "split_policy_sha256": "c053d3564eacd7d9d18519d9ccbafb308654968c6372fa70803dd894f488e5f9"
+  },
+
+  "corpus_source_pins": {
+    "note": "Real revisions parsed from qrels document_id values, not placeholders. Identical to the E3 split policy pins.",
+    "docker": "bb6ca1cb679394b4e9f7f44cc84a1288f8966247",
+    "git": "a97fcc37c2bc6340a8d7ce78dedf227aac4e9aa7",
+    "go": "5d29d80b6c9960c3fc39e14e3e8b9a0f52041fed",
+    "kubernetes": "b035ea80a2f666e0a60923560984458806788104",
+    "postgresql": "7a0299a1348b563c72a57a2a40462e90af9dfbac",
+    "python": "96ebb20fc2f0542d9387091e49626f9a1132de82"
+  },
+
+  "blindness_evidence": {
+    "note": "The defect this policy version exists to correct. Reproduced on real data before the policy was written.",
+    "probe": "real query go-q001 inserted verbatim into a real 952-char corpus chunk (1046 chars after insertion)",
+    "verbatim_present": true,
+    "old_verdict": {"exact_matches": 0, "high_similarity": 0, "blocking": false},
+    "query_ngrams": 75,
+    "chunk_ngrams": 870,
+    "intersection": 75,
+    "jaccard": 0.0862,
+    "minhash_estimate": 0.1172,
+    "containment_q": 1.0,
+    "threshold_at_the_time": 0.8,
+    "why": "When q is fully inside c, Jaccard is bounded by |q|/|c|. Reaching 0.8 requires the chunk to be at most 1.25x the query. With median chunk 360 n-grams against median query 45, the ceiling is 0.138, so layers 2 and 3 were mathematically incapable of detecting a benchmark query copied into a corpus document. MinHash estimates Jaccard, so it inherited the same blindness."
+  },
+
+  "rejected_metric": {
+    "note": "Recorded so a future reader does not re-introduce it. This was my own error, caught by measurement before the freeze.",
+    "metric": "overlap coefficient with denominator min(|q|,|c|)",
+    "measured_hits_at_0_8": 43,
+    "distinct_queries_touched": 24,
+    "all_pairs_direction": "CHUNK_IN_Q",
+    "flagged_chunk_ngram_size_range": [1, 14],
+    "max_containment_q_among_them": 0.1842,
+    "literal_substring_hits": 0,
+    "verdict": "All 43 were false positives created by the min() denominator on degenerate fragments, not contamination. Directional containment_q yields 0 pairs on the same corpus, so the false positives vanish by construction and no size floor is needed to suppress them."
+  },
+
+  "layers": [
+    {
+      "id": 1,
+      "name": "exact",
+      "metric": "sha256 of raw UTF-8 text",
+      "denominator": "not applicable",
+      "threshold": 1.0,
+      "detects": "a corpus chunk whose full raw bytes equal a benchmark item",
+      "cannot_detect": "any rewording, re-encoding, whitespace change, or a query embedded in a larger document",
+      "prior_result": "0/180 - the only sub-gate that had ever run before this policy"
+    },
+    {
+      "id": 2,
+      "name": "containment",
+      "metric": "containment_q = |q_ngrams AND c_ngrams| / |q_ngrams|",
+      "denominator": "|q_ngrams| (directional, query side only)",
+      "ngram": 8,
+      "threshold": 0.8,
+      "detects": "a benchmark query copied into a corpus document of ANY length - the primary contamination shape",
+      "cannot_detect": "paraphrase that shares no 8-char n-grams; semantic-only overlap (that is layer 4)",
+      "denominator_rationale": "min(|q|,|c|) was measured and rejected; see rejected_metric. |c| in the denominator makes a 1-n-gram fragment trivially score 1.0."
+    },
+    {
+      "id": 3,
+      "name": "minhash",
+      "metric": "Jaccard estimated from a 128-position MinHash signature, LSH-banded for candidate generation",
+      "denominator": "|q_ngrams OR c_ngrams| (symmetric)",
+      "num_hashes": 128,
+      "bands": 32,
+      "threshold": 0.8,
+      "detects": "near-duplicates of COMPARABLE length, e.g. a gold patch or test file copied into the corpus",
+      "cannot_detect": "containment - a short query inside a long document. This is stated explicitly so layer 3 is never mistaken for a containment detector; layer 2 owns that job.",
+      "implementation_note": "Signature values differ from the pre-v1 crc32-keyed family because each shingle is now hashed once and permuted with numpy. Signatures must be returned as Python ints, not numpy uint64, or isinstance(v, int) assertions break."
+    },
+    {
+      "id": 4,
+      "name": "embedding",
+      "metric": "cosine similarity of BAAI/bge-m3 vectors",
+      "denominator": "L2 norms",
+      "threshold": 0.8,
+      "detects": "semantic overlap with no lexical overlap",
+      "cannot_detect": "anything, while the embedding service is unreachable",
+      "batch_size": 64,
+      "ann_note": "180 x 24877 x 1024 is a single BLAS matmul at this scale; no ANN index is required and none is introduced.",
+      "service_status_at_freeze": "http=000 at http://127.0.0.1:8009/embeddings - UNREACHABLE. This layer could not run when the policy was frozen."
+    }
+  ],
+
+  "sla": {
+    "note": "Frozen against reference_hardware and data_scale above. Per the E4 card this cannot be moved without a new policy version.",
+    "max_wall_clock_seconds": 600,
+    "measured_baseline_seconds": 83,
+    "measured_baseline_breakdown": {"es_fetch": 7, "layer2_containment": 65, "layer3_minhash": 10},
+    "measured_old_implementation_seconds": 291,
+    "measured_old_breakdown": {"ngram_set": 1.8, "minhash_signature": 231.5, "jaccard_cross_product": 57.4},
+    "old_unit_costs": {"ngram_set_ms_per_chunk": 0.073, "minhash_signature_ms_per_chunk": 9.307, "jaccard_us_per_pair": 12.82},
+    "new_unit_costs": {"minhash_signature_ms_per_chunk": 0.41, "minhash_speedup": "28x"},
+    "peak_rss_mb": 2048,
+    "peak_rss_measured_mb": 21,
+    "peak_rss_rationale": "Measured Python-level peak for the layer-2 streaming pass was 21 MB; the cap is set generously because layer 4 holds a 24877 x 1024 float32 matrix (about 102 MB) plus numpy transients of 128 x n x 8 bytes per chunk.",
+    "checkpoint_interval_chunks": 2000,
+    "progress_report_interval_chunks": 2000
+  },
+
+  "degenerate_fragment": {
+    "note": "Frozen by explicit user decision in this session: report only, never touch the data.",
+    "definition": "a corpus chunk whose 8-char n-gram set is smaller than min_ngrams",
+    "min_ngrams": 16,
+    "measured_census": {"lt_8": 605, "lt_16": 984, "lt_32": 2005, "lt_64": 3937, "corpus_total": 24877},
+    "measured_census_pct": {"lt_8": 2.43, "lt_16": 3.96, "lt_32": 8.06, "lt_64": 15.83},
+    "handling": "report_only",
+    "never_delete": true,
+    "never_silently_dropped": true,
+    "reported_bucket": "degenerate_fragment",
+    "rationale": "These fragments cannot be retrieved meaningfully and were the source of the rejected metric's 43 false positives. Directional containment already neutralises them, so the floor is hygiene and a data-quality signal for E5, not the correctness fix. They are counted and reported, never removed from the index and never dropped from the scan silently.",
+    "empty_normalization_note": "Some fragments normalize to the empty string. The scanner already skips empty-normalizing chunks from scoring; this policy additionally requires them to be COUNTED and REPORTED so the skip is visible."
+  },
+
+  "skipped_layer_rule": {
+    "note": "The honesty gate. This is the rule the pre-v1 implementation violated.",
+    "rule": "If any of the four layers did not complete, the scan verdict is INCOMPLETE and the run MUST NOT emit clean.",
+    "forbidden_output_when_incomplete": ["clean", "exit code 0"],
+    "required_output_when_incomplete": ["the id of every skipped layer", "the reason each was skipped", "an incomplete manifest on disk"],
+    "clean_requires": "all four layers completed AND zero exact matches AND zero threshold hits",
+    "violation_evidence": "With the embedding service down, the pre-v1 driver printed 'clean: no unreviewed contamination found' and returned 0 while layer_notes recorded 'skipped: embedding_fn not provided'. The behaviour was locked in by a passing test (tests/corpus/test_scan_contamination.py::test_main_clean_exit_0, asserting rc == 0 and 'clean' in stdout)."
+  },
+
+  "manifest": {
+    "format_version": "e4-contamination-manifest-v1",
+    "path": "results/contamination/contamination-manifest.v1.json",
+    "required_fields": [
+      "policy_id",
+      "policy_version",
+      "policy_sha256",
+      "generated_utc",
+      "es_index",
+      "chunks_scanned",
+      "queries_scanned",
+      "layers_completed",
+      "layers_skipped",
+      "verdict",
+      "wall_clock_seconds",
+      "exact_hits",
+      "containment_hits",
+      "minhash_hits",
+      "embedding_hits",
+      "degenerate_fragments"
+    ],
+    "verdict_vocabulary": ["CLEAN", "BLOCKING", "INCOMPLETE"],
+    "incomplete_manifest_on_interrupt": true,
+    "incomplete_manifest_note": "A run killed mid-scan must still leave a manifest with verdict INCOMPLETE and the layers it had finished, so a terminated run can never be mistaken for one that was never started."
+  },
+
+  "exit_codes": {
+    "0": "CLEAN - all four layers completed, no hits",
+    "1": "BLOCKING - unreviewed exact or above-threshold hits found",
+    "2": "parameter or IO error (unreadable queries file, ES unreachable, report write failure)",
+    "3": "INCOMPLETE - at least one layer was skipped or did not finish; never clean",
+    "contract_change_note": "Exit code 3 is new in v1. Any CI job or wrapper calling scripts/corpus/scan_contamination.py must treat 3 as a failure, not as an unknown success."
+  },
+
+  "failure_semantics": [
+    {"code": "POLICY_MISSING", "condition": "policy file absent", "behaviour": "raise", "forbidden_fallback": "implicit or default thresholds"},
+    {"code": "POLICY_HASH_MISMATCH", "condition": "policy bytes do not match the recorded sha256 sidecar", "behaviour": "raise"},
+    {"code": "POLICY_VERSION_UNKNOWN", "condition": "policy_version is not a supported version", "behaviour": "raise"},
+    {"code": "LAYER_SKIPPED_CLEAN_CLAIMED", "condition": "a clean verdict is requested while any layer is skipped", "behaviour": "raise", "forbidden_fallback": "downgrading the skipped layer to a passing layer"},
+    {"code": "EMBEDDING_SERVICE_UNREACHABLE", "condition": "the embedding endpoint cannot be reached", "behaviour": "non_clean", "note": "the scan continues and reports layers 1 to 3, but the verdict is INCOMPLETE, never CLEAN"},
+    {"code": "SLA_WALL_CLOCK_EXCEEDED", "condition": "the scan exceeds max_wall_clock_seconds", "behaviour": "non_clean", "note": "abort, keep the incomplete manifest, never emit a partial clean"},
+    {"code": "DEGENERATE_FRAGMENT_DROPPED_SILENTLY", "condition": "a degenerate fragment is excluded without being counted and reported", "behaviour": "raise"},
+    {"code": "CONTAMINATION_METRIC_SYMMETRIC", "condition": "layer 2 is computed with a symmetric or min() denominator instead of |q_ngrams|", "behaviour": "raise", "note": "guards against re-introducing the rejected metric"},
+    {"code": "MINHASH_SIGNATURE_NOT_INT", "condition": "a signature position is not a Python int", "behaviour": "raise"},
+    {"code": "MANIFEST_MISSING_FIELD", "condition": "the manifest lacks any required field", "behaviour": "raise"},
+    {"code": "MANIFEST_STALE", "condition": "the manifest policy_sha256 does not match the policy on disk", "behaviour": "raise"}
+  ],
+
+  "corpus_verdict_at_freeze": {
+    "note": "The honest statement of what is and is not known about the live corpus at freeze time.",
+    "containment_at_0_8": {"pairs": 0, "distinct_queries": 0},
+    "jaccard_at_0_8": {"pairs": 0},
+    "exact_at_1_0": {"pairs": 0},
+    "embedding": "NEVER RUN - service unreachable",
+    "verdict": "INCOMPLETE",
+    "correct_phrasing": "The text layers show no benchmark query copied into a corpus document. The semantic layer has never run. The corpus is NOT established as clean.",
+    "forbidden_phrasing": "corpus is clean"
+  }
+}

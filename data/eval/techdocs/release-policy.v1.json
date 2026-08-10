@@ -1,0 +1,133 @@
+{
+  "policy_id": "e5-release-policy",
+  "policy_version": "v1",
+  "created_utc": "2026-08-10T04:20:00Z",
+  "design_map_task": "E5",
+  "design_map_ref": "docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md line 1108",
+  "authored_by": "main-session; every number below measured from on-disk artifacts and a live Elasticsearch query in this session",
+
+  "purpose": "Decide whether the technical-documentation retrieval corpus may emit a RELEASE report, and refuse to emit scores when it may not. A release report that scores an inadequate golden set is worse than no report: it launders exploratory numbers into evidence.",
+
+  "status_vocabulary": ["DESIGNED", "IMPLEMENTED", "VERIFIED", "BLOCKED"],
+  "status_note": "Evidence qualifiers such as MODEL_IDENTITY_UNVERIFIED are labels only and never promote to VERIFIED (design map line 921).",
+
+  "provenance": {
+    "note": "Measured 2026-08-10 from data/eval/techdocs/qrels.sol-review.jsonl (180 rows) and index knowledge_base_v2_bge_m3 (24877 chunks, live query).",
+    "qrels_file": "data/eval/techdocs/qrels.sol-review.jsonl",
+    "qrels_rows": 180,
+    "review_status_counts": {"AI_REVIEWED": 23, "DISPUTED": 157},
+    "relevance_counts": {"1.0": 163, "0.0": 17},
+    "ai_reviewed_source_ids": {"git": 9, "postgresql": 6, "go": 5, "python": 3},
+    "ai_reviewed_sources_absent": ["docker", "kubernetes"],
+    "ai_reviewed_relevance_values": ["1.0"],
+    "pure_negative_rows": 17,
+    "pure_negative_review_status": {"DISPUTED": 17},
+    "pure_negative_ai_reviewed": 0,
+    "disputed_parse_failed": 43,
+    "index_name": "knowledge_base_v2_bge_m3",
+    "index_chunks": 24877,
+    "index_parser_version": "native-text-v1",
+    "index_corpus_generation": "techdocs-2026-07-30-v1",
+    "index_model_version": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181"
+  },
+
+  "section_path_defect": {
+    "finding": "178 of 180 qrel section_path values do not exist in the ES section_path set of the document the qrel names. 0 of 180 documents are missing from the index, so this is a label defect, not a corpus gap.",
+    "measurement": "For each qrel row, all chunks with that document_id were fetched and their section_path tuples compared. EXACT match: 2. Prefix match: 0. Absent: 178.",
+    "false_matches": "The 2 exact matches are both ['Release Notes'], a generic heading that collides by coincidence. The true informative match rate is 0 of 180.",
+    "root_cause": "qrel section_path holds a document title or an invented label (e.g. 'What is a container?'), while the parser records the heading hierarchy below the title (e.g. ['Explanation', 'Containers versus virtual machines (VMs)']). The label 'What is a container?' does exist in the index but inside a DIFFERENT document (content/get-started/workshop/_index.md).",
+    "not_version_skew": "The index is homogeneous: one parser_version (native-text-v1), one corpus_generation (techdocs-2026-07-30-v1), one model_version. The mismatch cannot be explained by a re-index.",
+    "consequence": "Section-level retrieval metrics are not computable on this golden set. A scorer that prefix-matches section_path scores near zero for structural reasons that have nothing to do with retrieval quality.",
+    "scorer_divergence": "orchestrator/eval/runner.py::_key() ignores section_path entirely and is why the existing bake-off reports show plausible numbers; orchestrator/eval/metrics.py prefix-matches section_path and would report near zero on identical data. Two scorers, one corpus, incompatible verdicts.",
+    "resolution": "Document-level scoring only, at policy v1. Re-deriving section_path automatically from the index is FORBIDDEN because it would use the retriever to author its own gold labels.",
+    "section_metric_emission": "FORBIDDEN_AT_V1"
+  },
+
+  "release_eligibility": {
+    "verdict": "NOT_RELEASE_ELIGIBLE",
+    "verdict_is_precomputed_expectation": "The implementation must derive this verdict from the gates below at run time, not read it from this field. This field records what the authors measured, so a run that reports RELEASE_ELIGIBLE against this data is a bug in the scorer.",
+    "blocking_reasons": [
+      {"code": "GOLDEN_SET_TOO_SMALL", "detail": "23 of 180 rows (12.8%) passed arbitration; 157 are DISPUTED and never resolved."},
+      {"code": "GOLDEN_SET_ALL_POSITIVE", "detail": "All 23 arbitrated rows carry relevance 1.0. With no negative in the golden set, precision and false-positive rate are undefined, not merely noisy."},
+      {"code": "SOURCE_COVERAGE_INCOMPLETE", "detail": "docker and kubernetes contribute 0 of the 23 arbitrated rows, so no claim may span the 6 declared sources."},
+      {"code": "PURE_NEGATIVE_SET_UNREVIEWED", "detail": "All 17 pure-negative rows are DISPUTED and 0 are AI_REVIEWED, so the required false-positive / empty-rate report has no eligible data."},
+      {"code": "SECTION_PATH_UNRESOLVABLE", "detail": "178 of 180 section_path labels do not resolve against the index; section-level metrics are forbidden at v1."}
+    ]
+  },
+
+  "gates": {
+    "note": "Every gate must pass before a RELEASE report may be emitted. A gate that cannot be evaluated is a FAILED gate, never a skipped one.",
+    "min_golden_rows": 60,
+    "min_golden_fraction": 0.33,
+    "require_negative_in_golden": true,
+    "min_negative_golden_rows": 10,
+    "require_all_declared_sources": true,
+    "declared_sources": ["docker", "git", "go", "kubernetes", "postgresql", "python"],
+    "max_disputed_fraction": 0.2,
+    "require_model_identity": true,
+    "require_section_path_resolvable": false,
+    "require_section_path_resolvable_note": "false at v1 because section metrics are forbidden outright; document-level scoring does not depend on section_path. Setting this true in a future version requires re-authored labels, not re-derived ones.",
+    "gate_rationale": {
+      "min_golden_rows": "60 is the smallest set where a 6-source stratification can carry ~10 rows per source. It is a floor, not a target.",
+      "require_negative_in_golden": "Without a labelled negative, a retriever that returns something for every query cannot be distinguished from one that is correct.",
+      "max_disputed_fraction": "Above 20% unresolved labels the set describes reviewer disagreement more than retrieval quality."
+    }
+  },
+
+  "scoring": {
+    "granularity": "document",
+    "granularity_locked_reason": "section_path is unresolvable for 178 of 180 rows (see section_path_defect)",
+    "eligible_rows_rule": "review_status == AI_REVIEWED only. DISPUTED rows are never scored, never averaged, and never counted in a denominator.",
+    "pure_negative_handling": "Reported separately as false-positive rate and empty-rate. Pure negatives must NEVER enter the macro-average of a relevance metric: a query with no relevant document scores 0.0 by construction and would silently deflate the mean.",
+    "known_prior_defect": "data/eval/techdocs/reports/bm25-report.json scored all 180 rows including 157 DISPUTED, and let the 17 pure negatives score 0.0 inside the macro-average. Those reports are exploratory and are not release evidence.",
+    "required_bindings": [
+      "git_sha",
+      "dirty_hash",
+      "qrels_sha256",
+      "policy_sha256",
+      "scorer_name",
+      "scorer_version",
+      "index_name",
+      "index_corpus_generation",
+      "index_model_version",
+      "predictions_sha256"
+    ],
+    "bootstrap": {"iterations": 1000, "confidence": 0.95, "seed": 20260810},
+    "bootstrap_note": "A CI over 23 all-positive rows is reported only to expose its own width. It does not convert an ineligible set into a releasable one."
+  },
+
+  "forbidden_constructions": [
+    "emitting any metric value (including 0.0) when a gate fails",
+    "scoring DISPUTED rows to reach a larger denominator",
+    "including pure negatives in a macro-averaged relevance metric",
+    "re-deriving section_path from the index and calling the result gold",
+    "reporting a section-level metric at policy v1",
+    "treating the AI_REVIEWED subset as a holdout (it is dev; it was scored and reviewed)",
+    "marking any row HUMAN_REVIEWED without real human participation",
+    "generating a real-person reviewer_hash for an AI review pass",
+    "promoting AI_REVIEWED to VERIFIED on the strength of confidence values alone"
+  ],
+
+  "failure_semantics": [
+    {"code": "POLICY_MISSING", "condition": "policy file absent", "behaviour": "raise", "exit_code": 2, "forbidden_fallback": "implicit or default policy"},
+    {"code": "POLICY_HASH_MISMATCH", "condition": "policy bytes do not match the recorded sha256 sidecar", "behaviour": "raise", "exit_code": 2},
+    {"code": "POLICY_VERSION_UNKNOWN", "condition": "policy_version is not a version this code understands", "behaviour": "raise", "exit_code": 2, "forbidden_fallback": "silently accept a newer version"},
+    {"code": "QRELS_MISSING", "condition": "qrels file absent or unreadable", "behaviour": "raise", "exit_code": 2},
+    {"code": "QRELS_SCHEMA_INVALID", "condition": "a qrel row lacks review_status, relevance, source_id, or document_id", "behaviour": "raise", "exit_code": 2},
+    {"code": "PREDICTIONS_MISSING", "condition": "predictions file absent when a metric is requested", "behaviour": "raise", "exit_code": 2},
+    {"code": "METRIC_REQUESTED_WHILE_INELIGIBLE", "condition": "any caller asks for a release metric while a gate fails", "behaviour": "raise", "exit_code": 2, "forbidden_fallback": "return 0.0, 1.0, None, or an empty report that reads like a measurement"},
+    {"code": "SECTION_METRIC_REQUESTED", "condition": "any caller asks for a section-level metric at policy v1", "behaviour": "raise", "exit_code": 2},
+    {"code": "PURE_NEGATIVE_IN_MACRO_AVERAGE", "condition": "a pure-negative qid reaches the macro-average of a relevance metric", "behaviour": "raise", "exit_code": 2},
+    {"code": "DISPUTED_ROW_SCORED", "condition": "a DISPUTED row reaches the scorer", "behaviour": "raise", "exit_code": 2},
+    {"code": "BINDING_MISSING", "condition": "any required_bindings entry is absent or empty in the report", "behaviour": "raise", "exit_code": 2},
+    {"code": "NOT_RELEASE_ELIGIBLE", "condition": "gates evaluated successfully and at least one failed", "behaviour": "report and exit 3", "exit_code": 3, "note": "This is an honest completed verdict, not an error. It is deliberately NOT exit 1."}
+  ],
+
+  "exit_codes": {
+    "0": "RELEASE_ELIGIBLE: every gate passed and the report carries all required bindings",
+    "1": "RESERVED_UNUSED",
+    "2": "data fault or contract violation (any raise above); nothing was measured",
+    "3": "NOT_RELEASE_ELIGIBLE: gates evaluated, at least one failed; no metric emitted",
+    "reserved_unused_rationale": "In the contamination scanner, exit 1 means the BLOCKING business verdict 'contamination found', so an escaping exception there makes a data fault masquerade as a verdict. E5 leaves 1 unused so a crash can never be read as a release decision: 2 always means 'nothing was measured' and 3 always means 'measured, refused'."
+  }
+}

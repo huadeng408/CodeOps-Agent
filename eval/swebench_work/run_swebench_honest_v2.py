@@ -11,7 +11,14 @@ PRED_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(ROOT))
 
-DEEPSEEK_API_KEY = "sk-ccdf276c22824536bd97a011dcd27102"
+# Never inline the key: this file is tracked in a public repo.  Supply it via
+# the environment (DEEPSEEK_API_KEY) at call time.
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+if not DEEPSEEK_API_KEY:
+    raise SystemExit(
+        "DEEPSEEK_API_KEY is not set. Export it before running this script; "
+        "it must never be hardcoded here."
+    )
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 MODEL = "deepseek-chat"
 
