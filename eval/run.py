@@ -16,6 +16,7 @@ have their official ``score`` wired as HarnessRun's scorer callback; the legacy
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import subprocess
@@ -152,6 +153,13 @@ def _git_head() -> str:
         return out.stdout.strip() if out.returncode == 0 else "unknown"
     except Exception:
         return "unknown"
+
+
+def _system_prompt_hash() -> str:
+    """The run's prompt pin.  Delegates to the single definition in the pin contract."""
+    from eval.harness.pin_contract import system_prompt_pin
+
+    return system_prompt_pin()
 
 
 def _git_dirty_hash() -> str:
@@ -400,6 +408,12 @@ def main(argv: list[str] | None = None) -> int:
             "trace_capabilities": getattr(
                 benchmark_mod, "TRACE_CAPABILITIES", None
             ),
+            # Pins the prompt scaffold the run was measured under.  Per-instance
+            # task text cannot be a run-level pin (it differs per instance), but
+            # the base system-prompt template is shared by every instance and
+            # changes whenever someone edits the agent's instructions — which is
+            # exactly the comparability question a prompt pin has to answer.
+            "prompt_hash": _system_prompt_hash(),
         },
     )
 

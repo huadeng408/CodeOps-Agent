@@ -22,6 +22,10 @@ from eval.adapter import EvalInstance, EvalResult
 from eval.benchmarks.base import AgentBenchmark
 from eval.manifest import ALLOWED_LICENSES
 
+#: tau2-bench is a tool-using conversation benchmark over its own domain
+#: runner: no retrieval, no reranking, no corpus.
+TRACE_CAPABILITIES: tuple[str, ...] = ()
+
 if TYPE_CHECKING:  # import-time only — the AgentAdapter protocol is never used at runtime here
     from eval.adapter import AgentAdapter
 

@@ -20,6 +20,11 @@ from typing import Any
 
 from eval.retrieval.multimodal_metrics import Hit, Qrel, aggregate, bbox_hit_rate, mrr_at_k, ndcg_at_k, recall_at_k
 
+#: ViDoRe is visual document retrieval, and its bake-off compares three
+#: retrieval paths on the same qrels — so pinning the qrels and the physical
+#: index is what makes the three arms comparable at all.
+TRACE_CAPABILITIES: tuple[str, ...] = ("rag",)
+
 
 @dataclass(frozen=True)
 class ViDoReManifest:

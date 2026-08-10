@@ -16,6 +16,12 @@ from typing import Any
 
 from eval.retrieval.metrics import RetrievalHit, RetrievalQrel
 
+#: Trace/pin capabilities this benchmark exercises.  BEIR *is* retrieval, so the
+#: RAG spans and the corpus/qrels/index pins are all genuinely required: a
+#: retrieval score that does not pin the gold set and the physical index it
+#: searched is not reproducible and not comparable to anything.
+TRACE_CAPABILITIES: tuple[str, ...] = ("rag",)
+
 
 @dataclass
 class BeirDataset:

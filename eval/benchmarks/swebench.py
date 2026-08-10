@@ -1394,6 +1394,64 @@ def _to_wsl_path(path: "str | Path") -> str:
     return f"{_WSL_REPO_ROOT}/{normalized}"
 
 
+#: Labels the official SWE-bench harness prints in its closing summary.  These
+#: are the lines a human looks for; a blind tail slice is what used to lose them.
+_SUMMARY_LABELS: tuple[str, ...] = (
+    "Instances submitted",
+    "Instances completed",
+    "Instances incomplete",
+    "Instances resolved",
+    "Instances unresolved",
+    "Instances with empty patches",
+    "Instances with errors",
+    "Unstopped containers",
+    "Unremoved images",
+)
+
+
+def _summarise_official_stdout(stdout: str, limit: int = 800) -> str:
+    """Extract whole labelled summary lines instead of slicing bytes.
+
+    Defect 8 in the portfolio: this used to be ``stdout[-200:]``, a tail slice
+    that cut the official summary mid-line.  After the encoding fault was fixed
+    the ``Instances resolved`` label was *still* missing from ``scorer_status``,
+    because 200 characters of tail simply did not reach it.
+
+    This string is a convenience label and nothing more.  The verdict is read
+    from the official ``report.json`` by ``_read_official_resolution()``, and
+    the raw output is pinned verbatim under ``scorer/``.  A paraphrase must
+    never be the evidence — that is the whole lesson of defects 3, 5 and 8.  So
+    when the labels cannot be found this says so explicitly rather than
+    returning a plausible-looking fragment.
+    """
+    if not stdout:
+        return "no stdout captured"
+    matched = [
+        line.strip()
+        for line in stdout.splitlines()
+        if any(label in line for label in _SUMMARY_LABELS)
+    ]
+    if not matched:
+        tail = stdout.strip().splitlines()[-3:]
+        return (
+            "official summary labels not found; last lines: "
+            + " | ".join(part.strip() for part in tail if part.strip())
+        )[:limit]
+    summary = "; ".join(matched)
+    if len(summary) > limit:
+        # Truncate on a line boundary and say so, rather than silently cutting.
+        kept: list[str] = []
+        used = 0
+        for line in matched:
+            if used + len(line) + 2 > limit - 40:
+                break
+            kept.append(line)
+            used += len(line) + 2
+        omitted = len(matched) - len(kept)
+        summary = "; ".join(kept) + f"; [+{omitted} more summary lines omitted]"
+    return summary
+
+
 def _run_official_scoring_wsl(
     predictions_path: str,
     output_dir: str,
@@ -1451,7 +1509,7 @@ def _run_official_scoring_wsl(
             timeout=timeout + 600,
         )
         if result.returncode == 0:
-            return True, f"WSL2 official scoring completed: {result.stdout[-200:]}"
+            return True, f"WSL2 official scoring completed: {_summarise_official_stdout(result.stdout)}"
         else:
             return False, f"WSL2 scoring failed (exit {result.returncode}): {result.stderr[-500:]}"
     except subprocess.TimeoutExpired:

@@ -40,6 +40,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
+#: EvalPlus generates code from a self-contained prompt: no retrieval, no
+#: reranking, no corpus.  Declaring that here waives the RAG spans and pins
+#: rather than making this benchmark's manifest impossible to satisfy.
+TRACE_CAPABILITIES: tuple[str, ...] = ()
+
 # ---------------------------------------------------------------------------
 # Graceful fallback: when the core eval framework (eval/adapter.py) is not yet
 # available (it is being built in parallel), define the minimal dataclasses and

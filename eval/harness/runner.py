@@ -39,6 +39,7 @@ from eval.harness.trace_contract import (
     SPAN_SCORER_OFFICIAL,
     evaluate_trace_contract,
 )
+from eval.harness.pin_contract import evaluate_pins, system_prompt_pin
 from eval.harness.trace_join import eval_join_context
 
 # Error taxonomy — infra failures are never counted as model failures and are
@@ -570,22 +571,60 @@ class ScorerError(Exception):
     """Raised when the scorer callback fails; classified as ERROR_SCORER."""
 
 
+
+
 def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, Any]:
     """Build run-manifest.json from harness config and run summary.
 
-    Fail-closed (design map §20.7): ``git_sha`` and ``model`` are mandatory
-    pins — a run without them is not reproducible and must not emit a
-    manifest.  Raises ``ValueError`` naming every missing pin; callers see
-    the run abort before any manifest/checksum is written.
+    Fail-closed (design map §20.7) via :mod:`eval.harness.pin_contract`.  This
+    previously required only ``git_sha`` and ``model``, so ``prompt_hash``,
+    ``qrels_hash`` and ``physical_index`` could all be empty strings and the
+    manifest was written regardless — an unpinned run was indistinguishable
+    from a pinned one (portfolio defect 9).
+
+    The contract does *not* simply require everything: RAG pins are waived for
+    benchmarks that perform no retrieval (demanding them would make a correct
+    SWE-bench manifest impossible), and an absent ``model_revision`` is
+    recorded as ``MODEL_IDENTITY_UNVERIFIED`` rather than aborting, because
+    §20.6.3 E2 mandates exactly that status when the provider reports no
+    immutable revision.  Both the waivers and the statuses are written into the
+    manifest so a reader can audit them instead of trusting this docstring.
     """
     config = harness.config
-    missing = [key for key in ("git_sha", "model") if not config.get(key)]
-    if missing:
+    capabilities = config.get("trace_capabilities")
+    pin_values = {
+        "git_sha": config.get("git_sha", ""),
+        "model": config.get("model", ""),
+        # Computed here when the caller supplies nothing, rather than demanded
+        # from every caller.  The prompt scaffold is a property of the checked-out
+        # code, so the harness can always answer "which prompt was this measured
+        # under?" itself.  Requiring callers to remember would recreate the defect
+        # class this contract exists to close: a pin that is missing because
+        # somebody forgot, recorded as though nothing were wrong.
+        "prompt_hash": config.get("prompt_hash") or system_prompt_pin(),
+        "model_revision": config.get("model_revision", ""),
+        "corpus_generation": config.get("corpus_generation", ""),
+        "qrels_hash": config.get("qrels_hash", ""),
+        "physical_index": config.get("index_name", ""),
+    }
+    pin_report = evaluate_pins(pin_values, capabilities=capabilities)
+    if pin_report["missing"]:
         raise ValueError(
             "refusing to write run-manifest.json: missing mandatory pins: "
-            f"{', '.join(missing)} (a run must pin git commit and model identity)"
+            f"{', '.join(pin_report['missing'])} "
+            f"(declared capabilities: {pin_report['declared_capabilities']})"
+        )
+    if pin_report["contradictions"]:
+        raise ValueError(
+            "refusing to write run-manifest.json: pin/capability contradiction: "
+            + "; ".join(pin_report["contradictions"])
         )
     return {
+        "pin_contract": {
+            "declared_capabilities": pin_report["declared_capabilities"],
+            "waived_pins": pin_report["waived"],
+            "statuses": pin_report["statuses"],
+        },
         "run_id": harness.run_id,
         "mode": config.get("mode", "official"),
         "synthetic": config.get("synthetic", False),

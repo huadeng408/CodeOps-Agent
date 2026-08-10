@@ -13,6 +13,10 @@ from eval.benchmarks.base import RetrievalBenchmark
 from eval.benchmarks.beir import load_offline as _load_beir_offline
 from eval.retrieval.metrics import RetrievalQrel
 
+#: BRIGHT is reasoning-intensive retrieval: RAG spans and corpus/qrels/index
+#: pins are required for the same reason as BEIR.
+TRACE_CAPABILITIES: tuple[str, ...] = ("rag",)
+
 
 class BrightBenchmark(RetrievalBenchmark):
     def __init__(self) -> None:
