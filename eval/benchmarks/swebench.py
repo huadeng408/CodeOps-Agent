@@ -1723,8 +1723,27 @@ class SWEBenchAdapter(AgentBenchmark):
         workspace per instance and passes that same path to the agent as
         ``working_dir``, so a nested repo left the agent's ``git diff HEAD``
         running outside the repository and every captured patch was empty.
+
+        Arm B's prompt augmentation happens here, not in :meth:`solve`.
+        ``HarnessRun`` calls ``adapter.solve_instance()`` on the *driver* and
+        uses this class only for ``prepare`` and ``score`` — so :meth:`solve` is
+        never invoked on the runner path, and an augmentation placed there ran
+        for nobody.  The first arm B run produced a complete artifact tree with
+        zero localization records: a second baseline wearing the optimized arm's
+        directory name.  ``prepare`` is the earliest hook the runner does call
+        that already has the populated worktree, which is what localization
+        needs to read.
+
+        Mutating *instance* in place rather than returning a copy, because the
+        runner ignores this method's return value and hands its own reference to
+        the driver.  ``EvalInstance`` is a non-frozen dataclass, so the driver
+        and the artifacts both observe the change.
         """
         _setup_workdir(instance, str(workspace), nest=False)
+        workdir = _instance_workdir(instance, workspace)
+        augmented = _augment_for_uplift(instance, str(workdir))
+        if augmented.task_description != instance.task_description:
+            instance.task_description = augmented.task_description
 
     def solve(
         self,
