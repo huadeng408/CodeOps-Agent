@@ -34,10 +34,18 @@ if str(REPO_ROOT) not in sys.path:
 EXPERIMENT_DIR = REPO_ROOT / "eval_results" / "harness-uplift-20260810"
 ARMS = {"baseline": "arm-a-baseline", "optimized": "arm-b-optimized"}
 
-#: Instances whose verdict must never be reused as evidence, with the reason.
-#: 12907 was recorded resolved=True from an 8.4h-old report by the cross-run
-#: contamination defect; it is also on the dev side of the split.
-CONTAMINATED = {"astropy__astropy-12907": "dev-side + historical verdict contamination"}
+#: Instances excluded from the pairing, with the reason each is excluded.
+#:
+#: astropy-12907 was used for debugging during harness development (design map
+#: §31.8 item 4), so it sits on the dev side and its outcome partly reflects
+#: work done while looking at it. Note what this is *not*: under the fixed
+#: scorer it produces a real 506-byte patch and a real verdict. The exclusion is
+#: about provenance, not about that verdict being fake — the earlier
+#: contaminated ``resolved=True`` came from the cross-run report bug and is a
+#: separate matter, now fixed.
+CONTAMINATED = {
+    "astropy__astropy-12907": "dev-side: used for harness debugging, outcome not independent"
+}
 
 
 @dataclass

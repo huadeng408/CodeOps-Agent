@@ -2436,6 +2436,8 @@ Agent 输入只有 problem statement，**无 gold patch**，自行产出 `cright
 | 14 | **官方 scorer 的 `run_id` 只按实例命名**（`f"swebench-{instance_id}"`），跨 run 恒定 | 官方 harness 用 `run_id` 派生 `logs/run_evaluation/<run_id>/…` 路径 → **同一实例的每次 run 共用同一棵日志树**。于是本轮一个 **0 字节 patch 的实例读到了 8.4 小时前另一次 run 的 `report.json`，记为 `resolved=True`**；而同一条记录里的官方 summary 明写 `empty_patch_ids: [astropy__astropy-12907]`、`resolved_ids: []` | **对照实验致命**：两臂可静默共用判定，A 臂的成功会算进 B 臂。任何 before/after 数字都不可信 | `VERIFIED`（已修 + 11 条回归） |
 | 15 | `max_tool_rounds=8` 硬编码，且未按 benchmark 区分 | 对 astropy 这种规模的 repo，「搜索→读→改→验」四步做不完；预算耗尽点恰好落在编辑之前 | baseline 近乎 0 分，且**归因错误方向**（看起来像模型弱） | `VERIFIED`（已参数化） |
 | 16 | 任务描述从不声明交付形态 | prompt 只给 issue 文本，不说明「评分只读 `git diff`」。模型按对话直觉输出代码块 | 正确修复被判 fail（见 `13236`） | `VERIFIED`（已加 grading contract） |
+| 17 | **`_compact_messages` 的 tool 邻接修复用了反向的守卫**：`if orphan_start > 0` | 该分支只在「已经有 anchor」的情况下才走修复，**恰好跳过唯一真正坏的情况** `orphan_start == 0`——窗口第一条就是 tool 结果、前面根本没有 assistant(tool_calls)。守卫上方的注释描述的正是 `== 0`，代码测的是它的补集 | DeepSeek 直接拒绝整个请求（`HTTP 400: Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`），**实例在 solve 中途死亡**。本轮 arm A 重跑时实时观测到 | `VERIFIED`（已修 + 11 条回归） |
+| 18 | `run_arm.py` 无凭证 preflight | 首次实验用一个每次调用都 401 的 key 跑满 20 实例：每个实例照样 clone astropy、照样起镜像、照样调官方 scorer，产出的数字描述的是**凭证**而不是 Agent | 12 分钟算力换一堆无意义判定 | `VERIFIED`（1 次请求即闸断） |
 
 **缺陷 14 的修复是双层的，两层互不依赖**：
 
@@ -2495,7 +2497,10 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 | A 臂 baseline | **`BLOCKED`** | 机理已量出（32.1），但**分数不可用**：该 run 受缺陷 14 污染（`12907` 假 True）且未跑满 20 实例。**修复后须重跑，不得引用旧数字** |
 | B 臂 | 未开始 | 依赖 A 臂重跑 |
 | C3 / C4 | `DESIGNED` | 仅有设计，无代码 |
-| Python 全量回归 | **732 passed**（`tests/eval`，实测于本节写作时的工作树） | 含本轮新增 60 条 |
+| C3 验证 + 反馈重试 | `IMPLEMENTED` | `tests/eval/test_validate.py` 20 条 + `test_uplift.py` 重试段 9 条通过。**真实 run 未产出，不签 `VERIFIED`** |
+| C4 best-of-N 选择 | `IMPLEMENTED`，**默认关闭** | `tests/eval/test_select.py` 20 条通过（含全排列下胜者唯一）。开启会让 arm B 运行时间三倍，而实测损失不在这里 |
+| 对照报告工具 | `IMPLEMENTED` | `eval/swebench_work/compare_arms.py` + 14 条测试。单臂时拒绝出数、实例集不一致时拒绝平均 |
+| Python 全量回归 | **1116 passed**（`python -m pytest tests`，81s；其中 `tests/eval` 797） | 本轮新增约 105 条 |
 | Go 回归 | 本轮**未执行**，不作声明 | — |
 
 **本轮未删除任何容器、volume、ES 索引、MySQL 数据或 MinIO 对象；未重写历史。**
