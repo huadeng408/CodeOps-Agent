@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import contextvars
+import hashlib
 import logging
 import time
 import uuid
+from typing import Any, Iterator
 
 
 _trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("paismart_trace_id", default="")
@@ -87,6 +90,74 @@ class TraceSpan:
 
     def attributes(self) -> dict[str, object]:
         return dict(self._attributes)
+
+
+#: Length of the truncated query digest recorded as ``rag.query_hash``.  16 hex
+#: chars (64 bits) is enough to correlate identical queries across spans while
+#: keeping the attribute short; it is a correlation key, not a commitment.
+QUERY_HASH_LENGTH = 16
+
+
+def query_hash(query: str) -> str:
+    """Return a stable, non-reversible digest of *query*.
+
+    §9.2 forbids recording the full query in a span, but correlating the same
+    query across retrieve/rerank spans requires *something* stable, so the
+    digest is that something.  An empty query returns an empty string rather
+    than the hash of ``""``: a missing query must stay visibly missing instead
+    of appearing as a plausible constant digest in the trace.
+
+    No canonical cross-language algorithm is defined — the Go side
+    (``internal/telemetry/genai/semconv.go``) accepts a caller-supplied hash
+    string too.  If Go and Python ever need to agree on a digest for the same
+    query, this function is the Python end of that contract.
+    """
+    if not query:
+        return ""
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()[:QUERY_HASH_LENGTH]
+
+
+def get_tracer():
+    """Return an OTel tracer, or ``None`` when telemetry is unavailable."""
+    try:
+        from opentelemetry import trace as trace_api
+
+        return trace_api.get_tracer(__name__)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        return None
+
+
+@contextlib.contextmanager
+def otel_span(
+    name: str,
+    attributes: dict[str, Any] | None = None,
+    tracer: Any = None,
+) -> Iterator[Any]:
+    """Start *name* as the current OTel span, or yield ``None``.
+
+    Yielding ``None`` instead of raising is what §9.3 requires: "OTel exporter
+    关闭时业务路径必须正常退化".  Retrieval must not fail because telemetry is
+    misconfigured, so every failure mode here (no SDK, broken tracer, bad
+    attributes) degrades to an un-traced but working call.
+
+    Exceptions from the body propagate through the SDK context manager, which
+    sets ERROR status and ends the span — §20.6.4 item 2's requirement that
+    error/timeout/cancel still end the span with a recorded status.
+
+    *tracer* is injectable so tests can drive an isolated ``TracerProvider``
+    without mutating the global one.
+    """
+    resolved = tracer if tracer is not None else get_tracer()
+    if resolved is None:
+        yield None
+        return
+    try:
+        manager = resolved.start_as_current_span(name, attributes=attributes or {})
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        yield None
+        return
+    with manager as span:
+        yield span
 
 
 def configure_logging() -> None:

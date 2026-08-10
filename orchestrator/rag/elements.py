@@ -122,8 +122,9 @@ def _read_json(path: Path) -> Any:
 
 
 def _parser_version(payload: Any) -> str:
+    # MinerU 3.4.4 writes `_version_name`; older/other shapes use `version`.
     if isinstance(payload, dict):
-        for key in ("version", "mineru_version", "parser_version"):
+        for key in ("version", "mineru_version", "parser_version", "_version_name"):
             if payload.get(key):
                 return str(payload[key])
         model = payload.get("model")
@@ -133,8 +134,9 @@ def _parser_version(payload: Any) -> str:
 
 
 def _backend(payload: Any) -> str:
+    # MinerU 3.4.4 writes `_backend`; older/other shapes use `backend`/`method`.
     if isinstance(payload, dict):
-        for key in ("backend", "backend_name", "method"):
+        for key in ("backend", "backend_name", "method", "_backend"):
             if payload.get(key):
                 return str(payload[key])
     return ""

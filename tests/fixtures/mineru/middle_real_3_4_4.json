@@ -1,0 +1,14 @@
+{
+  "pdf_info": [
+    {
+      "preproc_blocks": [],
+      "page_idx": 0,
+      "page_size": [
+        1152.0,
+        1584.0
+      ]
+    }
+  ],
+  "_backend": "pipeline",
+  "_version_name": "3.4.4"
+}

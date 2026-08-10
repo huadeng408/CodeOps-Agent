@@ -34,7 +34,7 @@ from .retrievers import (
     document_to_context_snippet,
     rrf_fuse_documents,
 )
-from .trace import elapsed_ms, log_request
+from .trace import elapsed_ms, log_request, otel_span, query_hash
 
 PLANNER_PROMPT = """你是企业知识库问答系统的查询规划器。
 请基于当前问题和最近历史，输出一个 JSON 对象，字段包括：
@@ -286,14 +286,36 @@ def build_graph(settings: Settings, backend: GoBackendClient):
                 "citations": [],
             }
 
-        response = await backend.rerank_context(
-            RerankContextRequestPayload(
-                query=state["query"],
-                topK=max(1, int(state.get("context_top_k", settings.context_top_k))),
-                items=[document_to_context_snippet(doc) for doc in fused_docs],
+        top_k = max(1, int(state.get("context_top_k", settings.context_top_k)))
+        # O2 (design map §20.6.4 item 2): rerank span at the real reranker call
+        # site.  §9.2's target tree wants model/revision/input_count here;
+        # input/output counts and the query hash are known Python-side, but the
+        # reranker model identity is not (the ranking happens behind
+        # ``backend.rerank_context`` in Go), so it is left to the Go span rather
+        # than guessed — a fabricated model revision would be worse than none.
+        with otel_span(
+            "rerank",
+            {
+                "gen_ai.operation.name": "rerank",
+                "rag.reranker_applied": True,
+                "rag.query_hash": query_hash(state["query"]),
+                "rag.top_n": top_k,
+                "rag.rerank_input_count": len(fused_docs),
+            },
+        ) as span:
+            response = await backend.rerank_context(
+                RerankContextRequestPayload(
+                    query=state["query"],
+                    topK=top_k,
+                    items=[document_to_context_snippet(doc) for doc in fused_docs],
+                )
             )
-        )
-        reranked_docs = [context_snippet_to_document(item) for item in response.items]
+            reranked_docs = [context_snippet_to_document(item) for item in response.items]
+            if span is not None:
+                try:
+                    span.set_attribute("rag.rerank_output_count", len(reranked_docs))
+                except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+                    pass
         context_text = _build_context_text(reranked_docs)
         emit_trace("rerank_context", latency_ms=elapsed_ms(start), docs=len(reranked_docs))
         return {

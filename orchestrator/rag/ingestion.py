@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import mimetypes
 import os
 import re
+import signal
+import subprocess
 import tempfile
+import threading
 import time
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 
@@ -330,11 +335,7 @@ def _elements_to_text(elements: list[Element]) -> str:
     return "\n\n".join(parts)
 
 
-async def _run_mineru(
-    command: str,
-    *args: str,
-    timeout_seconds: int,
-) -> tuple[bytes, bytes]:
+def _mineru_child_env() -> dict[str, str]:
     env = os.environ.copy()
     bypass = [value.strip() for value in env.get("NO_PROXY", "").split(",") if value.strip()]
     for required in ("127.0.0.1", "localhost", "::1"):
@@ -342,26 +343,137 @@ async def _run_mineru(
             bypass.append(required)
     env["NO_PROXY"] = ",".join(bypass)
     env["no_proxy"] = env["NO_PROXY"]
+    return env
 
-    process = await asyncio.create_subprocess_exec(
-        command,
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill the child and everything it spawned.
+
+    MinerU forks its own workers, so killing only the direct child would leak
+    OCR processes on timeout or cancellation.
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(Exception):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.kill()
+
+
+class _BlockingMinerUCommand:
+    """Launch MinerU with the blocking ``subprocess`` API inside a worker thread.
+
+    Windows asyncio can only spawn subprocesses on a Proactor loop, and the
+    running loop is chosen by whoever hosts this code, not by this module:
+    uvicorn selects ``asyncio.SelectorEventLoop`` whenever ``--reload`` or
+    ``--workers>1`` is used, and importing ``modal`` (pulled in transitively by
+    ``phoenix``) installs ``WindowsSelectorEventLoopPolicy`` process-wide. A
+    policy change cannot repair an already-running loop, so the child is
+    launched off-loop instead. This keeps one identical code path for
+    Selector/Proactor/uvloop, FastAPI and grpc.aio.
+    """
+
+    def __init__(self, command: str, args: tuple[str, ...], *, timeout_seconds: int) -> None:
+        self._argv = [command, *args]
+        self._timeout_seconds = max(1, timeout_seconds)
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[bytes] | None = None
+        self._cancelled = False
+
+    def run(self) -> tuple[bytes, bytes, int]:
+        popen_kwargs: dict[str, object] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": _mineru_child_env(),
+        }
+        if os.name != "nt":
+            # Own process group so the whole OCR tree can be signalled.
+            popen_kwargs["start_new_session"] = True
+
+        with self._lock:
+            if self._cancelled:
+                raise asyncio.CancelledError("MinerU PDF parsing cancelled before start")
+            self._process = subprocess.Popen(self._argv, **popen_kwargs)  # type: ignore[arg-type]
+            process = self._process
+
+        try:
+            stdout, stderr = process.communicate(timeout=self._timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(process)
+            with contextlib.suppress(Exception):
+                process.communicate(timeout=30)
+            raise TimeoutError(
+                f"MinerU PDF parsing timed out after {self._timeout_seconds}s"
+            ) from None
+        return stdout, stderr, int(process.returncode or 0)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            process = self._process
+        if process is not None:
+            _kill_process_tree(process)
+
+
+_MINERU_EXECUTOR_LOCK = threading.Lock()
+_MINERU_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _mineru_executor() -> ThreadPoolExecutor:
+    """Bounded pool so concurrent OCR cannot starve the server's thread pool."""
+    global _MINERU_EXECUTOR
+    with _MINERU_EXECUTOR_LOCK:
+        if _MINERU_EXECUTOR is None:
+            try:
+                max_workers = int(os.getenv("CODE_AGENT_MINERU_MAX_WORKERS", "4"))
+            except ValueError:
+                max_workers = 4
+            _MINERU_EXECUTOR = ThreadPoolExecutor(
+                max_workers=max(1, max_workers),
+                thread_name_prefix="mineru",
+            )
+        return _MINERU_EXECUTOR
+
+
+def _discard_future_result(future: Future[object]) -> None:
+    def _swallow(done: Future[object]) -> None:
+        if not done.cancelled():
+            with contextlib.suppress(BaseException):
+                done.exception()
+
+    future.add_done_callback(_swallow)
+
+
+async def _run_mineru(
+    command: str,
+    *args: str,
+    timeout_seconds: int,
+) -> tuple[bytes, bytes]:
+    runner = _BlockingMinerUCommand(command, args, timeout_seconds=timeout_seconds)
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_mineru_executor(), runner.run)
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=max(1, timeout_seconds),
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise TimeoutError(f"MinerU PDF parsing timed out after {timeout_seconds}s") from None
-    if process.returncode != 0:
+        # Shield so caller cancellation surfaces immediately; a running
+        # executor future is otherwise uncancellable and would block the
+        # harness budget/cancel path until MinerU finished on its own.
+        stdout, stderr, returncode = await asyncio.shield(future)
+    except asyncio.CancelledError:
+        runner.cancel()
+        _discard_future_result(future)
+        raise
+    if returncode != 0:
         detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"MinerU PDF parsing failed ({process.returncode}): {detail}")
+        raise RuntimeError(f"MinerU PDF parsing failed ({returncode}): {detail}")
     return stdout, stderr
 
 

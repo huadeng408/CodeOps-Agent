@@ -24,6 +24,14 @@ from urllib.parse import quote
 
 import urllib.request
 
+from eval.harness.trace_contract import (
+    SPAN_CHAT,
+    SPAN_EXECUTE_TOOL,
+    SPAN_INVOKE_AGENT,
+    SPAN_RAG_RETRIEVE,
+    SPAN_SCORER_OFFICIAL,
+)
+
 
 def _get_json(url: str) -> dict:
     with urllib.request.urlopen(url, timeout=15) as response:
@@ -37,8 +45,32 @@ def _spans_url(phoenix_url: str, project: str, start_time: str) -> str:
 
 
 def required_span_kinds() -> list[str]:
-    """The span names that must be present in a joined run trace."""
-    return ["invoke_agent", "chat", "rag.retrieve", "execute_tool", "scorer"]
+    """The span names that must be present in a joined run trace.
+
+    O1 (design map §20.6.4) made ``eval.harness.trace_contract`` the single
+    authority for span names, so these are derived from it rather than spelled
+    out a second time.  §20.6.4 records the problem this fixes: this module's
+    five kinds were "又是另一套契约" — a third, independent definition alongside
+    ``tests/integration/trace_e2e.py`` and the contract itself.  Names now move
+    in one place.
+
+    This is the *live-Phoenix-query profile*, deliberately narrower than
+    :data:`~eval.harness.trace_contract.REQUIRED_SPAN_KINDS`: it omits
+    ``eval.run`` / ``eval.instance``, which the harness emits in-process.
+    Extending the live query to assert those too belongs to O3, which owns the
+    Phoenix E2E and its gate.
+
+    ``scorer`` is the prefix of ``scorer.official``; :func:`assert_span_kinds`
+    matches kinds as substrings, so the prefix accepts the fully-qualified name.
+    """
+    scorer_prefix = SPAN_SCORER_OFFICIAL.split(".")[0]
+    return [
+        SPAN_INVOKE_AGENT,
+        SPAN_CHAT,
+        SPAN_RAG_RETRIEVE,
+        SPAN_EXECUTE_TOOL,
+        scorer_prefix,
+    ]
 
 
 def find_run_trace(
