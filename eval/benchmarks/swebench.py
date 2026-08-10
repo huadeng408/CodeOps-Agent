@@ -63,6 +63,16 @@ from typing import Any, Protocol, Sequence
 # acyclic: eval/harness/ imports nothing from eval/benchmarks/.
 from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
 
+#: Trace capabilities this benchmark exercises (see
+#: ``eval.harness.trace_contract.ALL_CAPABILITIES``).  Solving a SWE-bench
+#: instance means reading and patching an already-checked-out repository: there
+#: is no retrieval and no reranking anywhere in the path, so requiring
+#: ``rag.retrieve``/``embedding`` spans of this benchmark would make the trace
+#: contract's PASS unreachable and its verdict uninformative.  Declared here,
+#: next to the implementation that either does or does not retrieve, rather
+#: than by whoever reports the results.
+TRACE_CAPABILITIES: tuple[str, ...] = ()
+
 # ---------------------------------------------------------------------------
 # Graceful import from eval.adapter (created in parallel by core agent).
 # Falls back to local definitions when eval/ is a standalone benchmark harness.

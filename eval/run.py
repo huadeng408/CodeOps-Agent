@@ -393,6 +393,13 @@ def main(argv: list[str] | None = None) -> int:
             "benchmark": benchmark_name,
             "mode": "official",
             "synthetic": False,
+            # Which trace span kinds this benchmark can legitimately omit.  Read
+            # from the benchmark module so the declaration lives with the code
+            # that either retrieves or does not; a benchmark that stays silent
+            # gets None, which keeps every kind required.
+            "trace_capabilities": getattr(
+                benchmark_mod, "TRACE_CAPABILITIES", None
+            ),
         },
     )
 

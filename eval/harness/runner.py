@@ -531,7 +531,12 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
             trace_summary = capture.summary()
             spans = capture.spans()
 
-        assertion = evaluate_trace_contract(spans, run_id=harness.run_id)
+        # A benchmark that declares nothing gets ``None``, which keeps every
+        # span kind required: silence can only make the contract stricter.
+        capabilities = harness.config.get("trace_capabilities")
+        assertion = evaluate_trace_contract(
+            spans, run_id=harness.run_id, capabilities=capabilities
+        )
         harness.artifacts.record_trace(TRACE_SUMMARY_FILENAME, trace_summary)
         harness.artifacts.record_trace(SPAN_ASSERTION_FILENAME, assertion)
     except Exception as exc:  # noqa: BLE001 - telemetry is never load-bearing

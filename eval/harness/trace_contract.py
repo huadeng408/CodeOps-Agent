@@ -100,6 +100,20 @@ PRODUCER_GO_AGENT = "go-agent"
 PRODUCER_ORCHESTRATOR = "orchestrator"
 
 
+# Capabilities a run may or may not exercise.  A SWE-bench instance is fixed by
+# reading and patching a checked-out repository: it performs no retrieval at
+# all, so demanding ``rag.retrieve``/``embedding`` from it makes ``PASS``
+# unreachable.  An unreachable ``PASS`` is the mirror image of a preflight that
+# cannot fail — both produce a verdict that carries no information.  Gate those
+# kinds on the capability instead, exactly as ``rerank`` was already gated.
+CAPABILITY_RAG = "rag"
+CAPABILITY_RERANK = "rerank"
+
+#: Capabilities assumed when a caller declares nothing.  Deliberately *all* of
+#: them: an omitted declaration must not silently weaken the contract.
+ALL_CAPABILITIES: frozenset[str] = frozenset({CAPABILITY_RAG, CAPABILITY_RERANK})
+
+
 @dataclass(frozen=True)
 class SpanKind:
     """One span kind in the acceptance contract.
@@ -108,6 +122,12 @@ class SpanKind:
     ``rerank``, which both §9.2 and §20.6.4 qualify with "启用时" (when enabled).
     A run with the reranker off must not be marked incomplete for obeying its
     own configuration.
+
+    ``capability`` names the run capability this kind depends on.  When the run
+    does not exercise that capability the kind is waived — but the waiver is
+    recorded in the artifact, and emitting the span anyway while declaring the
+    capability off is reported as a contradiction.  Otherwise "we don't do RAG"
+    would be a free pass that any caller could assert.
     """
 
     name: str
@@ -115,6 +135,7 @@ class SpanKind:
     required: bool = True
     description: str = ""
     required_attributes: tuple[str, ...] = ()
+    capability: str = ""
 
 
 _SPAN_KINDS: tuple[SpanKind, ...] = (
@@ -147,13 +168,15 @@ _SPAN_KINDS: tuple[SpanKind, ...] = (
     SpanKind(
         name=SPAN_RAG_RETRIEVE,
         producer=PRODUCER_ORCHESTRATOR,
-        description="retrieval over a pinned physical index",
+        description="retrieval over a pinned physical index; only when RAG runs",
         required_attributes=RAG_REQUIRED_ATTRIBUTES,
+        capability=CAPABILITY_RAG,
     ),
     SpanKind(
         name=SPAN_EMBEDDING,
         producer=PRODUCER_ORCHESTRATOR,
-        description="query/document embedding",
+        description="query/document embedding; only when RAG runs",
+        capability=CAPABILITY_RAG,
     ),
     SpanKind(
         name=SPAN_RERANK,
@@ -168,7 +191,9 @@ _SPAN_KINDS: tuple[SpanKind, ...] = (
     ),
 )
 
-#: Required kinds in declaration order.  ``rerank`` is absent by construction.
+#: Required kinds in declaration order, assuming every capability is on.
+#: ``rerank`` is absent by construction.  Use :func:`required_span_kinds` when
+#: the run's capabilities are known.
 REQUIRED_SPAN_KINDS: tuple[str, ...] = tuple(
     kind.name for kind in _SPAN_KINDS if kind.required
 )
@@ -177,6 +202,22 @@ REQUIRED_SPAN_KINDS: tuple[str, ...] = tuple(
 def span_kinds() -> tuple[SpanKind, ...]:
     """The full versioned schema, including conditional kinds."""
     return _SPAN_KINDS
+
+
+def required_span_kinds(
+    capabilities: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Kinds a run must emit, given the capabilities it actually exercises.
+
+    ``capabilities=None`` means "not declared" and keeps every kind required, so
+    forgetting to declare can only ever make the contract stricter.
+    """
+    enabled = ALL_CAPABILITIES if capabilities is None else frozenset(capabilities)
+    return tuple(
+        kind.name
+        for kind in _SPAN_KINDS
+        if kind.required and (not kind.capability or kind.capability in enabled)
+    )
 
 
 @dataclass
@@ -267,6 +308,7 @@ def _matches_kind(span_name: str, kind_name: str) -> bool:
 def evaluate_trace_contract(
     spans: Iterable[CapturedSpan],
     run_id: str,
+    capabilities: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate *spans* against the contract; return the span-assertion report.
 
@@ -274,19 +316,52 @@ def evaluate_trace_contract(
     always reports what was observed — including error spans and missing kinds —
     because §20.1 rule 7 keeps failures in the denominator and §20.2 rejects any
     report that hides them.
+
+    *capabilities* declares what this run exercises (see :data:`ALL_CAPABILITIES`).
+    A SWE-bench run performs no retrieval, so requiring ``rag.retrieve`` of it
+    would make ``PASS`` unreachable and the verdict uninformative.  Declaring a
+    capability off waives its kinds, but the waiver is recorded in the artifact
+    and a waived kind that shows up anyway is reported as a contradiction — so
+    the declaration is auditable rather than a free pass.
     """
     span_list = list(spans)
     problems: list[str] = []
+
+    declared = ALL_CAPABILITIES if capabilities is None else frozenset(capabilities)
+    unknown = sorted(declared - ALL_CAPABILITIES)
+    if unknown:
+        problems.append(
+            f"unknown capabilities declared: {unknown}; "
+            f"known capabilities are {sorted(ALL_CAPABILITIES)}"
+        )
 
     present_kinds: list[str] = []
     for kind in _SPAN_KINDS:
         if any(_matches_kind(span.name, kind.name) for span in span_list):
             present_kinds.append(kind.name)
 
+    required_now = set(required_span_kinds(declared))
+    waived_kinds = [
+        kind.name
+        for kind in _SPAN_KINDS
+        if kind.required and kind.name not in required_now
+    ]
+
+    # A kind waived by declaration that nevertheless appears means the
+    # declaration misdescribes the run.  Surface it instead of quietly
+    # accepting both stories.
+    for name in waived_kinds:
+        if name in present_kinds:
+            problems.append(
+                f"span kind {name!r} was waived because its capability was "
+                "declared off, but the run emitted it anyway; the capability "
+                "declaration does not match the run"
+            )
+
     missing_required = [
         kind.name
         for kind in _SPAN_KINDS
-        if kind.required and kind.name not in present_kinds
+        if kind.name in required_now and kind.name not in present_kinds
     ]
     missing_by_producer: dict[str, list[str]] = {}
     for kind in _SPAN_KINDS:
@@ -365,6 +440,10 @@ def evaluate_trace_contract(
         "conditional_kinds": [
             kind.name for kind in _SPAN_KINDS if not kind.required
         ],
+        # What the run said it does, and which required kinds that waived.  A
+        # reader can re-derive the verdict from these two fields alone.
+        "declared_capabilities": sorted(declared),
+        "waived_required_kinds": waived_kinds,
         "join_attributes": list(JOIN_ATTRIBUTES),
         "problems": problems,
     }
