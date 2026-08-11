@@ -1740,7 +1740,7 @@ class SWEBenchAdapter(AgentBenchmark):
         and the artifacts both observe the change.
         """
         _setup_workdir(instance, str(workspace), nest=False)
-        workdir = _instance_workdir(instance, workspace)
+        workdir = _instance_workdir(instance, Path(workspace))
         augmented = _augment_for_uplift(instance, str(workdir))
         if augmented.task_description != instance.task_description:
             instance.task_description = augmented.task_description

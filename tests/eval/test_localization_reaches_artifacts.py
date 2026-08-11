@@ -199,3 +199,37 @@ def test_localization_failure_never_fails_the_instance(tmp_path: Path, monkeypat
     instance = _instance()
     returned = _augment_for_uplift(instance, str(tmp_path / "missing"))
     assert TASK in returned.task_description
+
+
+# ---- defect 22: runner passes str(workspace); Path() needed before / operator
+
+
+def test_prepare_called_with_str_workspace_still_records_localization(
+    repo: Path, monkeypatch
+):
+    """The runner passes str(workspace) to setup_workspace, not a Path.
+
+    _instance_workdir uses the / operator, which requires a Path on the left
+    side.  Without the Path(workspace) fix in prepare, _instance_workdir raised
+    TypeError, which propagated to the runner's BaseException handler — but
+    arm B completed with 8/20 resolved because _setup_workdir had already
+    cloned the repo before the crash.  The crash meant localization never ran,
+    so instances.jsonl showed only dataset metadata: zero localization records
+    in the arm that was supposed to generate them.
+
+    After the fix the record survives end-to-end.
+    """
+    monkeypatch.setenv(UPLIFT_ENV, "1")
+    from eval.benchmarks.swebench import _instance_workdir
+
+    instance = _instance()
+    # Simulate the runner: str(workspace), not Path.
+    workdir = _instance_workdir(instance, Path(str(repo)))
+    _augment_for_uplift(instance, str(workdir))
+
+    assert "localization" in instance.metadata, (
+        "localization record missing — Path(workspace) fix may have been reverted"
+    )
+    assert instance.metadata["localization"].get("files"), (
+        "localization ran but found nothing in the test repo"
+    )
