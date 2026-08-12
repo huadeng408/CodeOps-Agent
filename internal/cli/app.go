@@ -133,6 +133,15 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		UserID:        cfg.RAGUserID,
 		OrgTag:        cfg.RAGOrgTag,
 		IngestPublic:  cfg.RAGIngestPublic,
+		IngestProvenance: rag.IngestProvenanceConfig{
+			SourceID:         cfg.RAGSourceID,
+			SourcePathPrefix: cfg.RAGSourcePathPrefix,
+			SourceURL:        cfg.RAGSourceURL,
+			SourceCommit:     cfg.RAGSourceCommit,
+			TargetIndex:      cfg.RAGTargetIndex,
+			CorpusGeneration: cfg.RAGCorpusGeneration,
+			RunID:            cfg.RAGIngestRunID,
+		},
 	})
 	executor.SetRAGSearcher(ragClient)
 	skillsManager := skills.NewManager()

@@ -25,7 +25,14 @@ $trackedEnvironmentNames = @(
     "CODE_AGENT_RAG_SERVER_URL",
     "CODE_AGENT_RAG_INTERNAL_SECRET",
     "CODE_AGENT_RAG_USER_ID",
-    "CODE_AGENT_RAG_ORG_TAG"
+    "CODE_AGENT_RAG_ORG_TAG",
+    "CODE_AGENT_RAG_SOURCE_ID",
+    "CODE_AGENT_RAG_SOURCE_PATH_PREFIX",
+    "CODE_AGENT_RAG_SOURCE_URL",
+    "CODE_AGENT_RAG_SOURCE_COMMIT",
+    "CODE_AGENT_RAG_TARGET_INDEX",
+    "CODE_AGENT_RAG_CORPUS_GENERATION",
+    "CODE_AGENT_RAG_RUN_ID"
 )
 $trackedEnvironment = @{}
 foreach ($name in $trackedEnvironmentNames) {
@@ -99,6 +106,18 @@ function Resolve-InternalSecret {
     $match = Select-String -Path $configPath -Pattern '^\s+shared_secret:\s*["'']?([^"''#]+)' | Select-Object -Last 1
     if ($null -eq $match -or $match.Matches.Count -eq 0) {
         throw "internal shared secret is not configured; set CODE_AGENT_RAG_INTERNAL_SECRET"
+    }
+    return $match.Matches[0].Groups[1].Value.Trim()
+}
+
+function Resolve-CorpusSetting {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $configPath = Join-Path $repoRoot "configs/server.yaml"
+    $pattern = '^\s+{0}:\s*["'']?([^"''#]+)' -f [Regex]::Escape($Name)
+    $match = Select-String -Path $configPath -Pattern $pattern | Select-Object -Last 1
+    if ($null -eq $match -or $match.Matches.Count -eq 0) {
+        throw "corpus setting $Name is not configured"
     }
     return $match.Matches[0].Groups[1].Value.Trim()
 }
@@ -201,6 +220,17 @@ try {
     Invoke-GoTest @("test", "./pkg/mineru", "-run", "TestRealMinerUOCR", "-count=1", "-v")
 
 	$internalSecret = Resolve-InternalSecret
+	$loaderUser = Resolve-CorpusSetting "loader_user"
+	$corpusGeneration = Resolve-CorpusSetting "generation"
+	$targetIndex = Resolve-CorpusSetting "text_index"
+	$sourceCommit = (& git rev-parse HEAD).Trim()
+	if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+		throw "cannot resolve an auditable source commit from git HEAD"
+	}
+	$sourceUrl = (& git remote get-url origin).Trim()
+	if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceUrl)) {
+		throw "cannot resolve an auditable source URL from git remote origin"
+	}
     if (-not (Test-HttpEndpoint "$ServerUrl/healthz")) {
         Write-Host "Starting Go server for this E2E run..."
         & go build -o $serverExecutable ./cmd/server
@@ -216,27 +246,18 @@ try {
     }
 	Invoke-RAGInternalProbe -ServerUrl $ServerUrl -InternalSecret $internalSecret
 
-    $username = "rag_e2e_{0}_{1}" -f (Get-Date -Format "yyyyMMddHHmmss"), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
-    $password = "RagE2E!" + [Guid]::NewGuid().ToString("N")
-    $credentials = @{ username = $username; password = $password } | ConvertTo-Json -Compress
-
-    Invoke-RestMethod -Method Post -Uri "$ServerUrl/api/v1/users/register" -ContentType "application/json" -Body $credentials | Out-Null
-    $login = Invoke-RestMethod -Method Post -Uri "$ServerUrl/api/v1/users/login" -ContentType "application/json" -Body $credentials
-    $accessToken = $login.data.token
-    if ([string]::IsNullOrWhiteSpace($accessToken)) {
-        throw "login response did not contain an access token"
-    }
-    $profile = Invoke-RestMethod -Method Get -Uri "$ServerUrl/api/v1/users/me" -Headers @{ Authorization = "Bearer $accessToken" }
-    $userId = [uint64]$profile.data.id
-    if ($userId -eq 0) {
-        throw "profile response did not contain a positive user ID"
-    }
-
     $env:CODE_AGENT_RUN_RAG_E2E = "1"
     $env:CODE_AGENT_RAG_SERVER_URL = $ServerUrl
     $env:CODE_AGENT_RAG_INTERNAL_SECRET = $internalSecret
-    $env:CODE_AGENT_RAG_USER_ID = "$userId"
-    $env:CODE_AGENT_RAG_ORG_TAG = "$($profile.data.primaryOrg)"
+    $env:CODE_AGENT_RAG_USER_ID = "$loaderUser"
+    $env:CODE_AGENT_RAG_ORG_TAG = ""
+    $env:CODE_AGENT_RAG_SOURCE_ID = "localcode-rag-e2e-$runId"
+    $env:CODE_AGENT_RAG_SOURCE_PATH_PREFIX = "e2e/$runId"
+    $env:CODE_AGENT_RAG_SOURCE_URL = $sourceUrl
+    $env:CODE_AGENT_RAG_SOURCE_COMMIT = $sourceCommit
+    $env:CODE_AGENT_RAG_TARGET_INDEX = $targetIndex
+    $env:CODE_AGENT_RAG_CORPUS_GENERATION = $corpusGeneration
+    $env:CODE_AGENT_RAG_RUN_ID = "rag-e2e-$runId"
 
     Write-Host "Running real RAG ingest and SearchKnowledge integrations..."
     Invoke-GoTest @("test", "./internal/rag", "./internal/cli", "-run", "TestRealRAGIngestThenSearchKnowledge|TestRealNewAppRAGIngestThenSearchKnowledge", "-count=1", "-v")

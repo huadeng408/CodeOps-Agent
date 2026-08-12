@@ -3,13 +3,17 @@ package rag
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,15 +44,42 @@ type OpenFileIngester interface {
 	IngestFile(context.Context, *os.File, string) (*IngestResult, error)
 }
 
+// OpenFileOptionsIngester streams an already-open regular file with explicit
+// per-document provenance.
+type OpenFileOptionsIngester interface {
+	IngestFileWithOptions(context.Context, *os.File, string, IngestOptions) (*IngestResult, error)
+}
+
 // Config configures the RAG HTTP client.
 type Config struct {
-	Enabled       bool
-	BaseURL       string
-	InternalToken string
-	UserID        uint
-	OrgTag        string
-	IngestPublic  bool
-	HTTPClient    *http.Client
+	Enabled          bool
+	BaseURL          string
+	InternalToken    string
+	UserID           uint
+	OrgTag           string
+	IngestPublic     bool
+	IngestProvenance IngestProvenanceConfig
+	HTTPClient       *http.Client
+}
+
+// IngestProvenanceConfig pins the corpus identity and server routing selected
+// by configuration. These values are never guessed by the HTTP client.
+type IngestProvenanceConfig struct {
+	SourceID         string
+	SourcePathPrefix string
+	SourceURL        string
+	SourceCommit     string
+	TargetIndex      string
+	CorpusGeneration string
+	RunID            string
+}
+
+// IngestOptions carries the document-specific, auditable source identity.
+// Non-empty SourceURL and RunID values override their configured defaults.
+type IngestOptions struct {
+	SourcePath string
+	SourceURL  string
+	RunID      string
 }
 
 // SearchOptions controls one knowledge search.
@@ -177,6 +208,11 @@ func (c *Client) Search(ctx context.Context, options SearchOptions) ([]SearchRes
 
 // Ingest streams one regular file to the internal ingestion endpoint.
 func (c *Client) Ingest(ctx context.Context, path string) (*IngestResult, error) {
+	return c.IngestWithOptions(ctx, path, IngestOptions{SourcePath: c.deriveSourcePath(path)})
+}
+
+// IngestWithOptions streams one regular file with explicit document provenance.
+func (c *Client) IngestWithOptions(ctx context.Context, path string, options IngestOptions) (*IngestResult, error) {
 	if err := c.validateAvailable(); err != nil {
 		return nil, err
 	}
@@ -185,11 +221,20 @@ func (c *Client) Ingest(ctx context.Context, path string) (*IngestResult, error)
 		return nil, fmt.Errorf("open RAG ingestion file %q: %w", path, err)
 	}
 	defer file.Close()
-	return c.IngestFile(ctx, file, filepath.Base(path))
+	if strings.TrimSpace(options.SourcePath) == "" {
+		options.SourcePath = c.deriveSourcePath(path)
+	}
+	return c.IngestFileWithOptions(ctx, file, filepath.Base(path), options)
 }
 
 // IngestFile streams a caller-owned regular file from offset zero.
 func (c *Client) IngestFile(ctx context.Context, file *os.File, name string) (*IngestResult, error) {
+	return c.IngestFileWithOptions(ctx, file, name, IngestOptions{SourcePath: c.deriveSourcePath(name)})
+}
+
+// IngestFileWithOptions streams a caller-owned regular file from offset zero
+// after hashing the exact bytes that will be uploaded.
+func (c *Client) IngestFileWithOptions(ctx context.Context, file *os.File, name string, options IngestOptions) (*IngestResult, error) {
 	if err := c.validateAvailable(); err != nil {
 		return nil, err
 	}
@@ -206,6 +251,17 @@ func (c *Client) IngestFile(ctx context.Context, file *os.File, name string) (*I
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("rewind RAG ingestion file handle: %w", err)
 	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return nil, fmt.Errorf("hash RAG ingestion file: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind hashed RAG ingestion file handle: %w", err)
+	}
+	provenance, runID, err := c.resolveIngestProvenance(options, hex.EncodeToString(hash.Sum(nil)))
+	if err != nil {
+		return nil, err
+	}
 
 	reader, writer := io.Pipe()
 	multipartWriter := multipart.NewWriter(writer)
@@ -220,7 +276,7 @@ func (c *Client) IngestFile(ctx context.Context, file *os.File, name string) (*I
 
 	writeDone := make(chan error, 1)
 	go func() {
-		writeDone <- writeMultipart(multipartWriter, writer, file, filepath.Base(name), c.config)
+		writeDone <- writeMultipart(multipartWriter, writer, file, filepath.Base(name), c.config, provenance, runID)
 	}()
 
 	resp, requestErr := c.httpClient.Do(req)
@@ -253,6 +309,83 @@ func (c *Client) IngestFile(ctx context.Context, file *os.File, name string) (*I
 	}
 	envelope.Data.Message = envelope.Message
 	return envelope.Data, nil
+}
+
+type resolvedIngestProvenance struct {
+	SourceID         string
+	SourcePath       string
+	SourceURL        string
+	SourceCommit     string
+	SourceSHA256     string
+	TargetIndex      string
+	CorpusGeneration string
+}
+
+func (c *Client) resolveIngestProvenance(options IngestOptions, sourceSHA256 string) (resolvedIngestProvenance, string, error) {
+	configured := c.config.IngestProvenance
+	provenance := resolvedIngestProvenance{
+		SourceID:         strings.TrimSpace(configured.SourceID),
+		SourcePath:       strings.TrimSpace(options.SourcePath),
+		SourceURL:        strings.TrimSpace(options.SourceURL),
+		SourceCommit:     strings.TrimSpace(configured.SourceCommit),
+		SourceSHA256:     sourceSHA256,
+		TargetIndex:      strings.TrimSpace(configured.TargetIndex),
+		CorpusGeneration: strings.TrimSpace(configured.CorpusGeneration),
+	}
+	if provenance.SourceURL == "" {
+		provenance.SourceURL = deriveSourceURL(configured.SourceURL, provenance.SourcePath)
+	}
+	for field, value := range map[string]string{
+		"sourceId": provenance.SourceID, "sourcePath": provenance.SourcePath,
+		"sourceCommit": provenance.SourceCommit, "targetIndex": provenance.TargetIndex,
+		"corpusGeneration": provenance.CorpusGeneration,
+	} {
+		if value == "" {
+			return resolvedIngestProvenance{}, "", NewUnavailableError("rag ingestion " + field + " is empty")
+		}
+	}
+	if !isLowerHex(provenance.SourceCommit, 40) {
+		return resolvedIngestProvenance{}, "", NewUnavailableError("rag ingestion sourceCommit must be 40 lowercase hex chars")
+	}
+	runID := strings.TrimSpace(options.RunID)
+	if runID == "" {
+		runID = strings.TrimSpace(configured.RunID)
+	}
+	return provenance, runID, nil
+}
+
+func isLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for i := range value {
+		if (value[i] < '0' || value[i] > '9') && (value[i] < 'a' || value[i] > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) deriveSourcePath(filePath string) string {
+	cleaned := filepath.ToSlash(filepath.Clean(filePath))
+	prefix := strings.Trim(strings.TrimSpace(c.config.IngestProvenance.SourcePathPrefix), "/\\")
+	if prefix == "" {
+		return cleaned
+	}
+	return pathpkg.Join(filepath.ToSlash(prefix), filepath.Base(cleaned))
+}
+
+func deriveSourceURL(baseURL, sourcePath string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" {
+		return baseURL
+	}
+	parsed.Path = pathpkg.Join(parsed.Path, filepath.ToSlash(sourcePath))
+	return parsed.String()
 }
 
 func (c *Client) validateAvailable() error {
@@ -289,15 +422,23 @@ func isSupportedMode(mode string) bool {
 	}
 }
 
-func writeMultipart(multipartWriter *multipart.Writer, pipeWriter *io.PipeWriter, file *os.File, name string, config Config) error {
+func writeMultipart(multipartWriter *multipart.Writer, pipeWriter *io.PipeWriter, file *os.File, name string, config Config, provenance resolvedIngestProvenance, runID string) error {
 	fail := func(err error) error {
 		_ = pipeWriter.CloseWithError(err)
 		return err
 	}
 	for field, value := range map[string]string{
-		"userId":   strconv.FormatUint(uint64(config.UserID), 10),
-		"orgTag":   config.OrgTag,
-		"isPublic": strconv.FormatBool(config.IngestPublic),
+		"userId":           strconv.FormatUint(uint64(config.UserID), 10),
+		"orgTag":           config.OrgTag,
+		"isPublic":         strconv.FormatBool(config.IngestPublic),
+		"sourceId":         provenance.SourceID,
+		"sourcePath":       provenance.SourcePath,
+		"sourceUrl":        provenance.SourceURL,
+		"sourceCommit":     provenance.SourceCommit,
+		"sourceSha256":     provenance.SourceSHA256,
+		"targetIndex":      provenance.TargetIndex,
+		"corpusGeneration": provenance.CorpusGeneration,
+		"runId":            runID,
 	} {
 		if err := multipartWriter.WriteField(field, value); err != nil {
 			return fail(err)
@@ -331,3 +472,4 @@ func requireHTTPSuccess(resp *http.Response) error {
 var _ Searcher = (*Client)(nil)
 var _ Ingester = (*Client)(nil)
 var _ OpenFileIngester = (*Client)(nil)
+var _ OpenFileOptionsIngester = (*Client)(nil)

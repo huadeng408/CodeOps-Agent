@@ -18,6 +18,7 @@ type recordingRAGIngester struct {
 	files    []*os.File
 	names    []string
 	contents []string
+	options  []rag.IngestOptions
 	legacy   []string
 	result   *rag.IngestResult
 	err      error
@@ -29,8 +30,13 @@ func (r *recordingRAGIngester) Ingest(_ context.Context, path string) (*rag.Inge
 }
 
 func (r *recordingRAGIngester) IngestFile(_ context.Context, file *os.File, name string) (*rag.IngestResult, error) {
+	return r.IngestFileWithOptions(context.Background(), file, name, rag.IngestOptions{})
+}
+
+func (r *recordingRAGIngester) IngestFileWithOptions(_ context.Context, file *os.File, name string, options rag.IngestOptions) (*rag.IngestResult, error) {
 	r.files = append(r.files, file)
 	r.names = append(r.names, name)
+	r.options = append(r.options, options)
 	if file != nil {
 		_, _ = file.Seek(0, io.SeekStart)
 		content, _ := io.ReadAll(file)
@@ -216,6 +222,9 @@ func TestIngestCommandUsesExecutorWorkingDirectoryAndOpenFile(t *testing.T) {
 			}
 			if recorder.names[0] != "report final.pdf" || recorder.contents[0] != "pdf" {
 				t.Fatalf("open-file call = name %q content %q", recorder.names[0], recorder.contents[0])
+			}
+			if recorder.options[0].SourcePath != "docs with spaces/report final.pdf" {
+				t.Fatalf("source path = %q, want workspace-relative auditable path", recorder.options[0].SourcePath)
 			}
 			rendered := out.String()
 			for _, expected := range []string{"report final.pdf", "abc123", "queued"} {

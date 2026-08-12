@@ -21,13 +21,18 @@ func (a *App) handleIngestCommand(ctx context.Context, raw string) {
 		return
 	}
 
-	file, name, err := a.openIngestFile(argument)
+	file, name, sourcePath, err := a.openIngestFile(argument)
 	if err != nil {
 		a.renderer.PrintLine("ingest failed: " + err.Error())
 		return
 	}
 	defer file.Close()
-	result, err := a.ragIngester.IngestFile(ctx, file, name)
+	var result *rag.IngestResult
+	if optionsIngester, ok := a.ragIngester.(rag.OpenFileOptionsIngester); ok {
+		result, err = optionsIngester.IngestFileWithOptions(ctx, file, name, rag.IngestOptions{SourcePath: sourcePath})
+	} else {
+		result, err = a.ragIngester.IngestFile(ctx, file, name)
+	}
 	if err != nil {
 		if errors.Is(err, rag.ErrUnavailable) {
 			a.renderer.PrintLine("ingest failed: RAG ingestion is unavailable")
@@ -51,14 +56,18 @@ func (a *App) handleIngestCommand(ctx context.Context, raw string) {
 	a.renderer.PrintBlock("ingest", lines)
 }
 
-func (a *App) openIngestFile(argument string) (*os.File, string, error) {
+func (a *App) openIngestFile(argument string) (*os.File, string, string, error) {
 	root := strings.TrimSpace(a.cfg.ProjectRoot)
 	if root == "" && a.executor != nil {
 		root = a.executor.Root
 	}
 	canonicalRoot, err := canonicalWorkspacePath(root)
 	if err != nil {
-		return nil, "", errors.New("workspace is unavailable")
+		return nil, "", "", errors.New("workspace is unavailable")
+	}
+	logicalRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, "", "", errors.New("workspace is unavailable")
 	}
 
 	base := strings.TrimSpace(a.cfg.WorkingDir)
@@ -74,22 +83,26 @@ func (a *App) openIngestFile(argument string) (*os.File, string, error) {
 	}
 	candidate, err = filepath.Abs(candidate)
 	if err != nil {
-		return nil, "", errors.New("invalid path")
+		return nil, "", "", errors.New("invalid path")
+	}
+	sourcePath, err := filepath.Rel(logicalRoot, candidate)
+	if err != nil || sourcePath == ".." || strings.HasPrefix(sourcePath, ".."+string(filepath.Separator)) {
+		return nil, "", "", errors.New("path is outside the workspace")
 	}
 	file, err := openVerifiedIngestFile(candidate, canonicalRoot)
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
-			return nil, "", errors.New("file does not exist")
+			return nil, "", "", errors.New("file does not exist")
 		case errors.Is(err, errIngestPathOutsideWorkspace):
-			return nil, "", errors.New("path is outside the workspace")
+			return nil, "", "", errors.New("path is outside the workspace")
 		case errors.Is(err, errIngestPathNotRegular):
-			return nil, "", errors.New("path is not a regular file")
+			return nil, "", "", errors.New("path is not a regular file")
 		default:
-			return nil, "", errors.New("cannot open file")
+			return nil, "", "", errors.New("cannot open file")
 		}
 	}
-	return file, filepath.Base(candidate), nil
+	return file, filepath.Base(candidate), filepath.ToSlash(sourcePath), nil
 }
 
 func pathWithin(root, target string) bool {

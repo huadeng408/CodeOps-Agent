@@ -35,6 +35,13 @@ type Config struct {
 	RAGUserID                       uint             `json:"rag_user_id"`
 	RAGOrgTag                       string           `json:"rag_org_tag"`
 	RAGIngestPublic                 bool             `json:"rag_ingest_public"`
+	RAGSourceID                     string           `json:"rag_source_id"`
+	RAGSourcePathPrefix             string           `json:"rag_source_path_prefix"`
+	RAGSourceURL                    string           `json:"rag_source_url"`
+	RAGSourceCommit                 string           `json:"rag_source_commit"`
+	RAGTargetIndex                  string           `json:"rag_target_index"`
+	RAGCorpusGeneration             string           `json:"rag_corpus_generation"`
+	RAGIngestRunID                  string           `json:"rag_ingest_run_id"`
 	ThinkingEnabled                 bool             `json:"thinking_enabled"`
 }
 
@@ -278,6 +285,27 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if _, ok := raw["rag_ingest_public"]; ok {
 		dst.RAGIngestPublic = patch.RAGIngestPublic
+	}
+	if patch.RAGSourceID != "" {
+		dst.RAGSourceID = patch.RAGSourceID
+	}
+	if patch.RAGSourcePathPrefix != "" {
+		dst.RAGSourcePathPrefix = patch.RAGSourcePathPrefix
+	}
+	if patch.RAGSourceURL != "" {
+		dst.RAGSourceURL = patch.RAGSourceURL
+	}
+	if patch.RAGSourceCommit != "" {
+		dst.RAGSourceCommit = patch.RAGSourceCommit
+	}
+	if patch.RAGTargetIndex != "" {
+		dst.RAGTargetIndex = patch.RAGTargetIndex
+	}
+	if patch.RAGCorpusGeneration != "" {
+		dst.RAGCorpusGeneration = patch.RAGCorpusGeneration
+	}
+	if patch.RAGIngestRunID != "" {
+		dst.RAGIngestRunID = patch.RAGIngestRunID
 	}
 	if _, ok := raw["thinking_enabled"]; ok {
 		dst.ThinkingEnabled = patch.ThinkingEnabled

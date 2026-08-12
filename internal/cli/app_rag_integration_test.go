@@ -114,6 +114,15 @@ func TestRealNewAppRAGIngestThenSearchKnowledge(t *testing.T) {
 		UserID:        wrongUserID,
 		OrgTag:        cfg.RAGOrgTag,
 		IngestPublic:  false,
+		IngestProvenance: rag.IngestProvenanceConfig{
+			SourceID:         cfg.RAGSourceID,
+			SourcePathPrefix: cfg.RAGSourcePathPrefix,
+			SourceURL:        cfg.RAGSourceURL,
+			SourceCommit:     cfg.RAGSourceCommit,
+			TargetIndex:      cfg.RAGTargetIndex,
+			CorpusGeneration: cfg.RAGCorpusGeneration,
+			RunID:            cfg.RAGIngestRunID,
+		},
 	})
 	wrongExecutor := tools.NewExecutor(t.TempDir())
 	wrongExecutor.SetRAGSearcher(wrongClient)
@@ -154,7 +163,23 @@ func realAppRAGConfig(t *testing.T, root string) config.Config {
 	cfg.RAGUserID = uint(parsedUserID)
 	cfg.RAGOrgTag = strings.TrimSpace(os.Getenv("CODE_AGENT_RAG_ORG_TAG"))
 	cfg.RAGIngestPublic = false
+	cfg.RAGSourceID = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_ID")
+	cfg.RAGSourcePathPrefix = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_PATH_PREFIX")
+	cfg.RAGSourceURL = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_URL")
+	cfg.RAGSourceCommit = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_COMMIT")
+	cfg.RAGTargetIndex = requiredAppRAGEnv(t, "CODE_AGENT_RAG_TARGET_INDEX")
+	cfg.RAGCorpusGeneration = requiredAppRAGEnv(t, "CODE_AGENT_RAG_CORPUS_GENERATION")
+	cfg.RAGIngestRunID = requiredAppRAGEnv(t, "CODE_AGENT_RAG_RUN_ID")
 	return cfg
+}
+
+func requiredAppRAGEnv(t *testing.T, name string) string {
+	t.Helper()
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		t.Fatalf("%s is required", name)
+	}
+	return value
 }
 
 func cleanupIntegrationApp(t *testing.T, app *App) {

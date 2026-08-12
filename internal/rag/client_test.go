@@ -339,12 +339,13 @@ func TestClientIngestSendsMultipartAndDecodesEnvelope(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(Config{
-		Enabled:       true,
-		BaseURL:       server.URL,
-		InternalToken: "test-secret",
-		UserID:        42,
-		OrgTag:        "engineering",
-		IngestPublic:  true,
+		Enabled:          true,
+		BaseURL:          server.URL,
+		InternalToken:    "test-secret",
+		UserID:           42,
+		OrgTag:           "engineering",
+		IngestPublic:     true,
+		IngestProvenance: testIngestProvenance(),
 	})
 	result, err := client.Ingest(context.Background(), path)
 	if err != nil {
@@ -358,6 +359,104 @@ func TestClientIngestSendsMultipartAndDecodesEnvelope(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result, want) {
 		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+}
+
+func TestClientIngestWithOptionsSendsAuditableProvenanceAndRawBytesSHA256(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("original knowledge bytes\n")
+	path := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantFields := map[string]string{
+		"sourceId":         "pilot-corpus",
+		"sourcePath":       "fixtures/reports/report.txt",
+		"sourceUrl":        "https://example.invalid/corpus/report.txt",
+		"sourceCommit":     "0123456789abcdef0123456789abcdef01234567",
+		"sourceSha256":     "03c7c6b5dac2c0e98da804b77290d755ae00b1ad943a5550dda0fcd4815155cd",
+		"targetIndex":      "knowledge_pilot_v1",
+		"corpusGeneration": "pilot-20260813",
+		"runId":            "pilot-run-20260813-001",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		for field, want := range wantFields {
+			if got := r.FormValue(field); got != want {
+				t.Errorf("%s = %q, want %q", field, got, want)
+			}
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		got, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, content) {
+			t.Fatalf("uploaded bytes = %q, want %q", got, content)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"code":202,"data":{"fileMd5":"abc","fileName":"report.txt"},"message":"queued"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		Enabled:       true,
+		BaseURL:       server.URL,
+		InternalToken: "secret",
+		UserID:        42,
+		IngestProvenance: IngestProvenanceConfig{
+			SourceID:         "pilot-corpus",
+			SourceURL:        "https://example.invalid/corpus",
+			SourceCommit:     "0123456789abcdef0123456789abcdef01234567",
+			TargetIndex:      "knowledge_pilot_v1",
+			CorpusGeneration: "pilot-20260813",
+			RunID:            "configured-run-must-be-overridden",
+		},
+	})
+	_, err := client.IngestWithOptions(context.Background(), path, IngestOptions{
+		SourcePath: "fixtures/reports/report.txt",
+		SourceURL:  "https://example.invalid/corpus/report.txt",
+		RunID:      "pilot-run-20260813-001",
+	})
+	if err != nil {
+		t.Fatalf("IngestWithOptions: %v", err)
+	}
+}
+
+func TestClientIngestRejectsMalformedPinnedProvenanceWithoutDialing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(path, []byte("knowledge"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	transport := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected dial")
+	})
+	config := Config{
+		Enabled:          true,
+		BaseURL:          "http://rag.invalid",
+		InternalToken:    "secret",
+		UserID:           42,
+		HTTPClient:       &http.Client{Transport: transport},
+		IngestProvenance: testIngestProvenance(),
+	}
+	config.IngestProvenance.SourceCommit = "main"
+
+	_, err := NewClient(config).IngestWithOptions(context.Background(), path, IngestOptions{SourcePath: "reports/report.txt"})
+	if err == nil || !strings.Contains(err.Error(), "sourceCommit") {
+		t.Fatalf("error = %v, want sourceCommit validation failure", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("HTTP calls = %d, want zero", calls.Load())
 	}
 }
 
@@ -400,7 +499,7 @@ func TestClientIngestFileRewindsAndKeepsCallerHandleOpen(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 9})
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 9, IngestProvenance: testIngestProvenance()})
 	if _, err := client.IngestFile(context.Background(), file, "display name.txt"); err != nil {
 		t.Fatalf("IngestFile: %v", err)
 	}
@@ -465,7 +564,7 @@ func TestClientIngestRejectsHTTPAndEnvelopeFailures(t *testing.T) {
 				_, _ = io.WriteString(w, tt.body)
 			}))
 			defer server.Close()
-			client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 9})
+			client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 9, IngestProvenance: testIngestProvenance()})
 			if _, err := client.Ingest(context.Background(), path); err == nil {
 				t.Fatal("Ingest returned nil error")
 			}
@@ -491,11 +590,12 @@ func TestClientIngestReturnsWhenServerRespondsWithoutReadingBody(t *testing.T) {
 		}, nil
 	})
 	client := NewClient(Config{
-		Enabled:       true,
-		BaseURL:       "http://rag.invalid",
-		InternalToken: "secret",
-		UserID:        9,
-		HTTPClient:    &http.Client{Transport: transport},
+		Enabled:          true,
+		BaseURL:          "http://rag.invalid",
+		InternalToken:    "secret",
+		UserID:           9,
+		IngestProvenance: testIngestProvenance(),
+		HTTPClient:       &http.Client{Transport: transport},
 	})
 
 	done := make(chan error, 1)
@@ -514,6 +614,15 @@ func TestClientIngestReturnsWhenServerRespondsWithoutReadingBody(t *testing.T) {
 		_ = requestBody.Close()
 		err := <-done
 		t.Fatalf("Ingest blocked after the server returned an early response; cleanup result: %v", err)
+	}
+}
+
+func testIngestProvenance() IngestProvenanceConfig {
+	return IngestProvenanceConfig{
+		SourceID:         "unit-test-corpus",
+		SourceCommit:     "0123456789abcdef0123456789abcdef01234567",
+		TargetIndex:      "knowledge_unit_test",
+		CorpusGeneration: "unit-test-generation",
 	}
 }
 

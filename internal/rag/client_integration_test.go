@@ -99,7 +99,25 @@ func realRAGConfig(t *testing.T) rag.Config {
 		UserID:        uint(parsedUserID),
 		OrgTag:        strings.TrimSpace(os.Getenv("CODE_AGENT_RAG_ORG_TAG")),
 		IngestPublic:  false,
+		IngestProvenance: rag.IngestProvenanceConfig{
+			SourceID:         requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_ID"),
+			SourcePathPrefix: requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_PATH_PREFIX"),
+			SourceURL:        requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_URL"),
+			SourceCommit:     requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_COMMIT"),
+			TargetIndex:      requiredRAGEnv(t, "CODE_AGENT_RAG_TARGET_INDEX"),
+			CorpusGeneration: requiredRAGEnv(t, "CODE_AGENT_RAG_CORPUS_GENERATION"),
+			RunID:            requiredRAGEnv(t, "CODE_AGENT_RAG_RUN_ID"),
+		},
 	}
+}
+
+func requiredRAGEnv(t *testing.T, name string) string {
+	t.Helper()
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		t.Fatalf("%s is required", name)
+	}
+	return value
 }
 
 func newRAGMarker(t *testing.T) string {
