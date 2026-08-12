@@ -120,38 +120,62 @@ def test_mechanism_report_can_read_what_the_runner_wrote(
     instance = _instance()
     _augment_for_uplift(instance, str(repo))
 
+    from types import MappingProxyType
+
     from eval.swebench_work import mechanism_report as M
+    from eval.swebench_work.report_gate import FinalizedRun
 
-    run = tmp_path / "arm-b-optimized" / "run"
-    run.mkdir(parents=True)
-    (run / "instances.jsonl").write_text(
-        json.dumps(
-            {
-                "instance_id": instance.instance_id,
-                "task_description": instance.task_description,
-                "metadata": instance.metadata,
-            }
-        )
-        + "\n",
+    run_dir = tmp_path / "arm-b-optimized" / "run"
+    run_dir.mkdir(parents=True)
+    instance_row = {
+        "instance_id": instance.instance_id,
+        "task_description": instance.task_description,
+        "metadata": instance.metadata,
+    }
+    prediction_row = {
+        "instance_id": instance.instance_id,
+        "model_patch": (
+            "diff --git a/separable.py b/separable.py\n"
+            "--- a/separable.py\n+++ b/separable.py\n"
+            "@@ -1 +1,2 @@\n def separability_matrix(t):\n+    pass\n"
+        ),
+    }
+    (run_dir / "instances.jsonl").write_text(
+        json.dumps(instance_row) + "\n",
         encoding="utf-8",
     )
-    (run / "predictions.jsonl").write_text(
-        json.dumps(
-            {
-                "instance_id": instance.instance_id,
-                "model_patch": (
-                    "diff --git a/separable.py b/separable.py\n"
-                    "--- a/separable.py\n+++ b/separable.py\n"
-                    "@@ -1 +1,2 @@\n def separability_matrix(t):\n+    pass\n"
-                ),
-            }
-        )
-        + "\n",
+    (run_dir / "predictions.jsonl").write_text(
+        json.dumps(prediction_row) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(M, "EXPERIMENT_DIR", tmp_path)
+    empty = MappingProxyType({})
+    finalized = FinalizedRun(
+        arm="optimized",
+        run_id="run",
+        run_dir=run_dir,
+        manifest=empty,
+        summary=empty,
+        manifest_sha256="manifest",
+        checksums_sha256="checksums",
+        cohort_path=tmp_path / "cohort.json",
+        cohort_sha256="cohort",
+        source_ids=(instance.instance_id,),
+        eligible_ids=frozenset({instance.instance_id}),
+        instances=(json.loads((run_dir / "instances.jsonl").read_text(encoding="utf-8")),),
+        predictions=(json.loads((run_dir / "predictions.jsonl").read_text(encoding="utf-8")),),
+        events=(),
+        failures=(),
+        trace_summary={"spans": ()},
+        span_assertion=empty,
+        official_verdicts=empty,
+        outcomes=empty,
+        unmeasured_by_reason=empty,
+        failures_by_reason=empty,
+        excluded_contaminated=empty,
+        scorer_evidence_scope="last-invocation-only",
+    )
 
-    arm = M.load_arm("optimized")
+    arm = M.load_arm(finalized)
     assert arm.localization_available == {instance.instance_id}
     # The patch touches the top-ranked file, so this must read as a hit at 1.
     assert arm.localization_hit_rank == {instance.instance_id: 1}

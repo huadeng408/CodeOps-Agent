@@ -1,321 +1,277 @@
-"""Tests for the arm verification gate.
-
-This gate exists because both of its failure modes are silent: an arm B that ran
-with the uplift off, and an arm A that ran with it on, each produce a complete
-artifact tree that the comparison tools read happily. So the tests here are
-mostly about the gate *failing* when it should — a verifier that cannot fail is
-the defect it was written to catch.
-"""
-
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 import pytest
 
 from eval.swebench_work import verify_arms as V
+from eval.swebench_work.report_gate import FinalizedRun
 
 
+SOURCE_IDS = tuple(f"repo__case-{index}" for index in range(20))
 MANDATE = "## How this task is graded\n\nThe grader reads `git diff`."
 RANKING = {"files": ["pkg/separable.py"], "file_scores": {"pkg/separable.py": 4.2}}
-
-
-def _write_arm(
-    root: Path,
-    arm_dir: str,
-    *,
-    uplift: bool | None,
-    instances: list[dict],
-    run_id: str = "run",
-) -> Path:
-    run = root / arm_dir / run_id
-    run.mkdir(parents=True, exist_ok=True)
-    if uplift is not None:
-        run.joinpath("run-manifest.json").write_text(
-            json.dumps(
-                {
-                    "harness_uplift": {
-                        "enabled": uplift,
-                        "components": ["localization", "edit_mandate"] if uplift else [],
-                        "tool_rounds": 24 if uplift else 8,
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-    with run.joinpath("instances.jsonl").open("w", encoding="utf-8") as handle:
-        for row in instances:
-            handle.write(json.dumps(row) + "\n")
-    return run
 
 
 def _instance(
     instance_id: str,
     *,
-    localization: dict | None = None,
+    localization: Any | None = None,
     mandate: bool = False,
-    metadata: dict | None = None,
-) -> dict:
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     meta = dict(metadata or {})
     if localization is not None:
         meta["localization"] = localization
-    task = "Separability matrix is wrong"
+    description = "Fix the defect"
     if mandate:
-        task = f"{task}\n\n{MANDATE}"
-    return {"instance_id": instance_id, "task_description": task, "metadata": meta}
+        description += f"\n\n{MANDATE}"
+    return {
+        "instance_id": instance_id,
+        "task_description": description,
+        "metadata": meta,
+    }
 
 
-def _baseline(root: Path, **kwargs) -> Path:
-    return _write_arm(
-        root, "arm-a-baseline", uplift=False,
-        instances=[_instance("i-1")], **kwargs
+def _run(
+    arm: str,
+    *,
+    instances: list[dict[str, Any]] | None = None,
+    enabled: bool | None = None,
+    components: list[str] | None = None,
+    tool_rounds: int | None = None,
+) -> FinalizedRun:
+    if instances is None:
+        instances = [
+            _instance(
+                source_id,
+                localization=RANKING if arm == "optimized" else None,
+                mandate=arm == "optimized",
+            )
+            for source_id in SOURCE_IDS
+        ]
+    if enabled is None:
+        enabled = arm == "optimized"
+    if components is None:
+        components = (
+            ["localization", "tool_rounds", "edit_mandate", "validation"]
+            if arm == "optimized"
+            else []
+        )
+    if tool_rounds is None:
+        tool_rounds = 24 if arm == "optimized" else 8
+    manifest = {
+        "run_id": f"{arm}-run",
+        "harness_uplift": {
+            "enabled": enabled,
+            "components": components,
+            "tool_rounds": tool_rounds,
+        },
+    }
+    empty = MappingProxyType({})
+    return FinalizedRun(
+        arm=arm,
+        run_id=f"{arm}-run",
+        run_dir=Path(arm),
+        manifest=manifest,
+        summary=empty,
+        manifest_sha256="m",
+        checksums_sha256="c",
+        cohort_path=Path("cohort.json"),
+        cohort_sha256="h",
+        source_ids=SOURCE_IDS,
+        eligible_ids=frozenset(SOURCE_IDS),
+        instances=tuple(instances),
+        predictions=(),
+        events=(),
+        failures=(),
+        trace_summary=empty,
+        span_assertion=empty,
+        official_verdicts=empty,
+        outcomes=empty,
+        unmeasured_by_reason=empty,
+        failures_by_reason=empty,
+        excluded_contaminated=empty,
+        scorer_evidence_scope="last-invocation-only",
     )
 
 
-def _optimized(root: Path, **kwargs) -> Path:
-    return _write_arm(
-        root, "arm-b-optimized", uplift=True,
-        instances=[_instance("i-1", localization=RANKING, mandate=True)], **kwargs
-    )
-
-
-@pytest.fixture()
-def experiment(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(V, "EXPERIMENT_DIR", tmp_path)
-    return tmp_path
-
-
-# ------------------------------------------------------------------ happy path
-
-
-def test_correctly_configured_arms_pass(experiment: Path):
-    _baseline(experiment)
-    _optimized(experiment)
-    audits = {arm: V.audit(V.load_evidence(arm)) for arm in V.ARMS}
+def test_complete_frozen_identity_passes() -> None:
+    audits = {arm: V.audit_run(_run(arm)) for arm in V.ARMS}
     assert audits["baseline"]["ok"]
     assert audits["optimized"]["ok"]
-    assert "may be read" in V.render(audits)
+    assert audits["optimized"]["with_localization"] == 20
+    assert audits["optimized"]["with_mandate"] == 20
+    assert "VERDICT: VERIFIED" in V.render(audits)
 
 
-def test_manifest_details_are_surfaced(experiment: Path):
-    _optimized(experiment)
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["manifest_tool_rounds"] == 24
-    assert "localization" in data["manifest_components"]
-
-
-# ------------------------------------------------- the two silent failure modes
-
-
-def test_optimized_arm_without_the_uplift_fails(experiment: Path):
-    """Arm B as a second baseline: the comparison would measure noise."""
-    _baseline(experiment)
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=False, instances=[_instance("i-1")]
+@pytest.mark.parametrize(
+    ("arm", "enabled", "components", "rounds"),
+    [
+        ("baseline", True, [], 8),
+        ("baseline", False, ["localization"], 8),
+        ("baseline", False, [], 24),
+        ("optimized", False, ["localization", "tool_rounds", "edit_mandate", "validation"], 24),
+        ("optimized", True, ["localization", "edit_mandate"], 24),
+        ("optimized", True, ["localization", "tool_rounds", "edit_mandate", "validation"], 8),
+    ],
+)
+def test_manifest_identity_must_match_exactly(
+    arm: str,
+    enabled: bool,
+    components: list[str],
+    rounds: int,
+) -> None:
+    audit = V.audit_run(
+        _run(arm, enabled=enabled, components=components, tool_rounds=rounds)
     )
-    audits = {arm: V.audit(V.load_evidence(arm)) for arm in V.ARMS}
-    assert not audits["optimized"]["ok"]
-    assert V.audit(V.load_evidence("optimized"))["mismatches"]
-    assert "DO NOT READ THE COMPARISON" in V.render(audits)
+    assert not audit["ok"]
+    assert audit["mismatches"]
 
 
-def test_baseline_arm_with_the_uplift_fails(experiment: Path):
-    """A contaminated baseline understates the gain by an unknown amount."""
-    _write_arm(
-        experiment, "arm-a-baseline", uplift=True,
-        instances=[_instance("i-1", localization=RANKING, mandate=True)],
+def test_optimized_requires_all_twenty_source_ids() -> None:
+    audit = V.audit_run(_run("optimized", instances=_run("optimized").instances[:-1]))
+    assert not audit["ok"]
+    assert audit["missing_instance_ids"] == [SOURCE_IDS[-1]]
+    assert SOURCE_IDS[-1] in audit["missing_localization_ids"]
+    assert SOURCE_IDS[-1] in audit["missing_mandate_ids"]
+
+
+def test_optimized_requires_localization_on_every_retry_row() -> None:
+    instances = list(_run("optimized").instances)
+    instances.append(_instance(SOURCE_IDS[0], mandate=True))
+    audit = V.audit_run(_run("optimized", instances=instances))
+    assert not audit["ok"]
+    assert audit["missing_localization_rows"] == [f"{SOURCE_IDS[0]}#2"]
+
+
+def test_optimized_requires_mandate_on_every_retry_row() -> None:
+    instances = list(_run("optimized").instances)
+    instances.append(_instance(SOURCE_IDS[0], localization=RANKING))
+    audit = V.audit_run(_run("optimized", instances=instances))
+    assert not audit["ok"]
+    assert audit["missing_mandate_rows"] == [f"{SOURCE_IDS[0]}#2"]
+
+
+def test_baseline_missing_pre_record_row_still_proves_no_uplift() -> None:
+    audit = V.audit_run(_run("baseline", instances=list(_run("baseline").instances[1:])))
+    assert audit["ok"]
+    assert audit["missing_instance_ids"] == [SOURCE_IDS[0]]
+
+
+def test_baseline_rejects_any_uplift_evidence() -> None:
+    instances = list(_run("baseline").instances)
+    instances[0] = _instance(SOURCE_IDS[0], localization=RANKING, mandate=True)
+    audit = V.audit_run(_run("baseline", instances=instances))
+    assert not audit["ok"]
+    assert audit["unexpected_localization_rows"] == [f"{SOURCE_IDS[0]}#1"]
+    assert audit["unexpected_mandate_rows"] == [f"{SOURCE_IDS[0]}#1"]
+
+
+def test_answer_field_key_inside_localization_is_rejected() -> None:
+    instances = list(_run("optimized").instances)
+    localization = dict(RANKING)
+    localization["test_patch"] = "diff --git a/tests/test_x.py b/tests/test_x.py"
+    instances[0] = _instance(SOURCE_IDS[0], localization=localization, mandate=True)
+    audit = V.audit_run(_run("optimized", instances=instances))
+    assert audit["answer_field_leaks"] == [f"{SOURCE_IDS[0]}#1: test_patch"]
+    assert not audit["ok"]
+
+
+def test_answer_value_copied_under_benign_key_is_rejected() -> None:
+    gold = "diff --git a/pkg/x.py b/pkg/x.py\n" + "x" * 80
+    localization = dict(RANKING)
+    localization["notes"] = gold
+    instances = list(_run("optimized").instances)
+    instances[0] = _instance(
+        SOURCE_IDS[0],
+        localization=localization,
+        mandate=True,
+        metadata={"test_patch": gold},
     )
-    _optimized(experiment)
-    audits = {arm: V.audit(V.load_evidence(arm)) for arm in V.ARMS}
-    assert not audits["baseline"]["ok"]
-    assert "DO NOT READ THE COMPARISON" in V.render(audits)
+    audit = V.audit_run(_run("optimized", instances=instances))
+    assert audit["answer_field_leaks"] == [f"{SOURCE_IDS[0]}#1: test_patch"]
 
 
-# ----------------------------------------------- intent vs effect disagreement
-
-
-def test_manifest_enabled_but_no_localization_record_fails(experiment: Path):
-    """The manifest records intent; the instances record effect.
-
-    This is the state a broken metadata stash would produce: the run believed
-    the uplift was on, and nothing downstream can prove the localizer ran.
-    """
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[_instance("i-1", mandate=True)],
+def test_answer_fields_in_metadata_alone_are_not_a_leak() -> None:
+    instances = list(_run("optimized").instances)
+    instances[0] = _instance(
+        SOURCE_IDS[0],
+        localization={"files": ["astropy/utils/patches.py"]},
+        mandate=True,
+        metadata={"test_patch": "diff --git a/tests/test_sampled.py b/tests/test_sampled.py"},
     )
-    data = V.audit(V.load_evidence("optimized"))
-    assert not data["ok"]
-    assert any("no instance carries a localization record" in p
-               for p in data["inconsistencies"])
+    audit = V.audit_run(_run("optimized", instances=instances))
+    assert audit["ok"]
+    assert audit["answer_field_leaks"] == []
 
 
-def test_manifest_disabled_but_localization_present_fails(experiment: Path):
-    _write_arm(
-        experiment, "arm-a-baseline", uplift=False,
-        instances=[_instance("i-1", localization=RANKING)],
+def test_gold_patch_marker_in_model_task_description_is_rejected() -> None:
+    instances = list(_run("optimized").instances)
+    instances[0] = _instance(
+        SOURCE_IDS[0], localization=RANKING, mandate=True
     )
-    data = V.audit(V.load_evidence("baseline"))
-    assert not data["ok"]
-    assert any("uplift was disabled" in p for p in data["inconsistencies"])
-
-
-# ------------------------------------------------------------- answer leakage
-
-
-def test_answer_field_inside_a_localization_record_fails(experiment: Path):
-    leaky = dict(RANKING)
-    leaky["test_patch"] = "diff --git a/tests/test_x.py ..."
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[_instance("i-1", localization=leaky, mandate=True)],
+    instances[0]["task_description"] += (
+        "\n\nGOLD PATCH: diff --git a/pkg/x.py b/pkg/x.py\n+secret fix"
     )
-    data = V.audit(V.load_evidence("optimized"))
-    assert not data["ok"]
-    assert data["answer_field_leaks"] == ["i-1: test_patch"]
+
+    audit = V.audit_run(_run("optimized", instances=instances))
+
+    assert audit["answer_field_leaks"] == [
+        f"{SOURCE_IDS[0]}#1: task_description: gold_patch"
+    ]
+    assert not audit["ok"]
 
 
-def test_answer_field_value_copied_under_an_innocuous_key_fails(experiment: Path):
-    """The leak a key check misses: the value, filed under a benign name."""
-    gold = (
-        "diff --git a/astropy/modeling/separable.py "
-        "b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@\n-    cright[-1:]"
+def test_answer_value_with_normalized_line_endings_in_task_description_is_rejected() -> None:
+    gold = "diff --git a/pkg/x.py b/pkg/x.py\n@@ -1 +1 @@\n" + "x" * 80
+    instances = list(_run("optimized").instances)
+    instances[0] = _instance(
+        SOURCE_IDS[0],
+        localization=RANKING,
+        mandate=True,
+        metadata={"test_patch": gold},
     )
-    leaky = dict(RANKING)
-    leaky["notes"] = gold  # innocuous key, answer value
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[
-            _instance(
-                "i-1", localization=leaky, mandate=True,
-                metadata={"test_patch": gold},
-            )
+    instances[0]["task_description"] += "\n\n" + gold.replace("\n", "\r\n")
+
+    audit = V.audit_run(_run("optimized", instances=instances))
+
+    assert audit["answer_field_leaks"] == [
+        f"{SOURCE_IDS[0]}#1: task_description: test_patch"
+    ]
+    assert not audit["ok"]
+
+
+def test_blocked_cli_does_not_touch_receipt_or_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "verified-arms.json"
+    audit_json = tmp_path / "audit.json"
+    receipt.write_bytes(b"keep-receipt")
+    audit_json.write_bytes(b"keep-audit")
+    monkeypatch.setattr(
+        V,
+        "load_finalized_run",
+        lambda arm, run_id: (_ for _ in ()).throw(V.ReportGateError("invalid run")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_arms.py",
+            "--verified-arms",
+            str(receipt),
+            "--json",
+            str(audit_json),
         ],
     )
-    data = V.audit(V.load_evidence("optimized"))
-    assert not data["ok"]
-    assert data["answer_field_leaks"] == ["i-1: test_patch"]
 
-
-def test_a_filename_containing_patch_is_not_a_leak(experiment: Path):
-    """Substring matching on field names failed a valid experiment here.
-
-    ``"patch" in blob`` fires on any ranked path spelled like patches.py, and a
-    guard whose false positives block correct runs gets switched off — which
-    leaves the real check unrun.
-    """
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[
-            _instance(
-                "i-1",
-                localization={
-                    "files": ["astropy/utils/patches.py", "astropy/io/misc/patch.py"],
-                    "file_scores": {"astropy/utils/patches.py": 3.1},
-                },
-                mandate=True,
-                metadata={"test_patch": "diff --git a/tests/test_x.py ..."},
-            )
-        ],
-    )
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["answer_field_leaks"] == []
-    assert data["ok"]
-
-
-def test_leak_is_attributed_to_the_right_field(experiment: Path):
-    """test_patch present must not also be reported as patch."""
-    leaky = dict(RANKING)
-    leaky["test_patch"] = "diff --git a/tests/test_x.py ..."
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[_instance("i-1", localization=leaky, mandate=True)],
-    )
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["answer_field_leaks"] == ["i-1: test_patch"]
-
-
-def test_leak_is_found_at_any_nesting_depth(experiment: Path):
-    leaky = {
-        "files": ["pkg/x.py"],
-        "functions": [{"path": "pkg/x.py", "hints_text": "look at _coord_matrix"}],
-    }
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[_instance("i-1", localization=leaky, mandate=True)],
-    )
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["answer_field_leaks"] == ["i-1: hints_text"]
-
-
-def test_answer_fields_in_metadata_alone_are_fine(experiment: Path):
-    """instances.jsonl legitimately holds the dataset's answer fields."""
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=True,
-        instances=[
-            _instance(
-                "i-1", localization=RANKING, mandate=True,
-                metadata={
-                    "test_patch": "diff --git a/tests/test_sampled.py ...",
-                    "hints_text": "look at _coord_matrix",
-                },
-            )
-        ],
-    )
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["ok"], data["answer_field_leaks"]
-
-
-# ----------------------------------------------------------------- absent arms
-
-
-def test_absent_arm_is_not_ok(experiment: Path):
-    """Absence must not read as success — that is the fail-open shape."""
-    _baseline(experiment)
-    audits = {arm: V.audit(V.load_evidence(arm)) for arm in V.ARMS}
-    assert not audits["optimized"]["ok"]
-    assert "NOT PRESENT" in V.render(audits)
-
-
-def test_missing_manifest_does_not_pass_the_optimized_arm(experiment: Path):
-    """The manifest lands at run end, so a live run has none yet.
-
-    Absent evidence is not evidence of the uplift, so arm B must not pass on the
-    localization records alone.
-    """
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=None,
-        instances=[_instance("i-1", localization=RANKING, mandate=True)],
-    )
-    data = V.audit(V.load_evidence("optimized"))
-    assert data["manifest_uplift"] is None
-    assert not data["ok"]
-
-
-def test_missing_manifest_still_lets_the_baseline_pass(experiment: Path):
-    """For arm A the expectation is "off", and no manifest is consistent with it."""
-    _write_arm(
-        experiment, "arm-a-baseline", uplift=None, instances=[_instance("i-1")]
-    )
-    assert V.audit(V.load_evidence("baseline"))["ok"]
-
-
-# ---------------------------------------------------------------- exit status
-
-
-def test_render_never_claims_readability_when_an_arm_failed(experiment: Path):
-    _baseline(experiment)
-    _write_arm(
-        experiment, "arm-b-optimized", uplift=False, instances=[_instance("i-1")]
-    )
-    text = V.render({arm: V.audit(V.load_evidence(arm)) for arm in V.ARMS})
-    assert "may be read" not in text
-
-
-def test_mandate_marker_survives_a_reflowed_prompt(experiment: Path):
-    """Matched on a short phrase so rewrapping the block is not a false alarm."""
-    row = _instance("i-1", localization=RANKING)
-    row["task_description"] = "Bug\n\n## How this task is graded\n\nwrapped\ndifferently"
-    _write_arm(experiment, "arm-b-optimized", uplift=True, instances=[row])
-    assert V.audit(V.load_evidence("optimized"))["with_mandate"] == 1
+    assert V.main() == 2
+    assert capsys.readouterr().out == "BLOCKED: invalid run\n"
+    assert receipt.read_bytes() == b"keep-receipt"
+    assert audit_json.read_bytes() == b"keep-audit"

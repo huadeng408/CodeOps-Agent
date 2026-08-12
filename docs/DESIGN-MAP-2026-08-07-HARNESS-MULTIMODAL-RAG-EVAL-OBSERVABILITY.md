@@ -998,6 +998,13 @@ Python real MinerU ingestion E2E               FAIL
 Python full pytest                             collection ERROR
 ```
 
+> **2026-08-11 M1 新鲜复验（取代上面两条 MinerU 当前状态，不改写历史快照）**：
+>
+> - Python：`CODE_AGENT_RUN_MINERU_E2E=1` + MinerU 3.4.4，现场生成图片型 PDF，显式 OCR 识别 marker；Tika URL 指向不可达 `127.0.0.1:1` 且 `tika_calls=0`，`1 passed in 92.84s`。
+> - Go：同一 MinerU 3.4.4，`go test ./pkg/mineru -run TestRealMinerUOCR -count=1 -v`，现场图片型 PDF marker 识别成功，`PASS`，package wall time 37.920s（test body 34.88s）。
+> - Python runtime/metadata focused：`tests/test_mineru_subprocess_runtime.py` + `tests/test_mineru_elements.py`，`12 passed in 10.81s`；覆盖 Selector loop 下真实子进程、timeout/cancel 进程树清理、gRPC async 调用、OCR-only contract 与 MinerU 3.4.4 metadata keys。
+> 因而 **M1 = VERIFIED**。本次 M1 步骤未重跑完整 Python suite，不把 focused/E2E 外推为全量；多模态整体仍被 M2–M5 阻断。
+
 原 handoff 没有保存上述 350-test 聚焦套件的精确命令；该数量只能作为带日期的历史证据，下一窗口必须从测试清单重新构造并记录完整命令，不能据此直接复现或发布。commit subject 中的 `push-clean` 也只是提交标题，不表示当前 dirty 工作树 clean。
 
 Python 全量收集被环境依赖阻断：安装的 protobuf 为 `4.25.9`，生成的 `orchestrator_pb2.py` 导入 `google.protobuf.runtime_version`，导致 `test_compactor.py`、`test_server.py`、`test_tools.py` collection error。`pyproject.toml` 只声明 `grpcio>=1.60,<2`，没有锁定兼容的 protobuf/grpcio/grpcio-tools 组合。因此 350 个聚焦测试不得外推成 Python 全量通过。
@@ -1009,7 +1016,7 @@ Python 真实 MinerU ingestion 在 Windows Selector event loop 下执行 `asynci
 | 主线 | 当前资格 | 已确认能力 | 发布阻断 |
 |---|---|---|---|
 | 自研 Agent Harness | core `IMPLEMENTED`；official validation ~~`BLOCKED`~~ → **单实例 `VERIFIED`，20 实例子集进行中** | HarnessRun、预算结构、resume、failure taxonomy、artifact 基础、instance ID fail-closed、scorer callback | ~~统一 CLI 旁路 official runner/scorer；manifest pins 不完整；无合格官方小样本 artifact~~ → **本条三项均已修复**：CLI 现经 WSL2 调官方 scorer 且 `resolved` 只读官方 `report.json`（缺陷 14 修复后按 run 隔离）；manifest 已含 `harness_uplift` 臂溯源；已产出带 `traces/` 的合格 artifact（233 spans）。**剩余阻断只有一项：20 实例子集尚未跑完，故 k/20 未出数** |
-| 多模态 RAG | 整体 `DESIGNED`；历史文本一致性与 Go OCR 均待复验 | 2026-08-09 的 3012/3012 一致性与 Go 真实 OCR 曾通过；PDF 强制 MinerU OCR；已有 element/chunk/visual scaffolding | 快照缺 dirty hash；Python MinerU E2E 失败；无 120 多模态 qrels；无真实视觉 encoder/index/alias；无 ViDoRe/bbox/性能 bake-off |
+| 多模态 RAG | 整体 `DESIGNED`；**M1 Windows MinerU runtime `VERIFIED`** | Python/Go 均以 MinerU 3.4.4 对现场图片型 PDF 做真实 OCR 并识别 marker；Python 在 Tika 不可达时仍通过且 Tika call=0；已有 element/chunk/visual scaffolding | M2–M5 未完成：无 120 多模态 qrels；无真实视觉 encoder/index/alias；无 ViDoRe/bbox/性能 bake-off；M1 通过不等于多模态主线可发布 |
 | 评测集与评分 | scorer 数学修复 `IMPLEMENTED`；release gate `BLOCKED` | 180 queries/qrels、三路预测、双轮 review 产物、部分官方原始文件 | 121/180 disputed；59 AI_REVIEWED 仲裁有漏洞；GPT-5.6 Sol revision 未验证；报告 pins 不全；污染扫描未完成；holdout 污染 |
 | 可观测性 | span 创建点 `IMPLEMENTED`；生产 E2E **部分 `VERIFIED`** | root/tool/chat/retrieve/embedding 创建点、W3C 传播基础、Phoenix 基础连通 | ~~无 run_id+instance_id 生产 join；现有 trace 为无 RAG 的合成链~~ → **join 一项已修复**：真实 SWE-bench run 产出 233 spans / 1 trace_id，**每个 span 都带 `eval.run_id` + `eval.instance_id`**（`BaggageJoinSpanProcessor` 注入），已非合成链。**剩余阻断**：scorer/rerank 生产 span 仍缺失或未验证；RAG 检索链路的生产 trace 仍未产出（Agent 侧 trace 不能替 RAG 侧签收） |
 
@@ -1068,13 +1075,13 @@ Harness gate：统一 CLI 显式集成测试通过；不存在 official runner/s
 
 #### 20.6.2 多模态 RAG
 
-Go/Python 路由契约均要求 PDF 走 MinerU，非 PDF Office 才走 Tika；缺结构化 MinerU 输出必须 fail closed。Go 已通过现场生成图片 PDF 的真实 OCR 测试，Python Windows subprocess 路径仍失败，不能笼统声称“所有 PDF 入口已验证”。
+Go/Python 路由契约均要求 PDF 走 MinerU，非 PDF Office 才走 Tika；缺结构化 MinerU 输出必须 fail closed。**M1 已于 2026-08-11 新鲜复验为 `VERIFIED`**：Python 与 Go 都用 MinerU 3.4.4 对现场生成的图片型 PDF 做真实 OCR 并识别 marker；Python 测试把 Tika URL 指向不可达地址且断言 Tika call=0。
 
 视觉检索尚未落地：`data/eval/multimodal` 只有 README；没有 120 条版本化 qrels、真实 page/crop/bbox assets、ColQwen2/DSE inference、独立视觉物理索引与 gated alias、ViDoRe/自建集 bake-off，亦无 bbox、延迟、吞吐、VRAM、索引大小与成本报告。
 
 按以下任务执行：
 
-1. **M1 修复 Python MinerU Windows runtime**：保留 `tests/integration/mineru_pdf_e2e.py` 当前失败症状，系统比较 Proactor policy、线程封装同步 subprocess 或 MinerU 独立服务；方案必须兼容 gRPC/async server，不能只 patch pytest。验收必须识别现场图片 PDF marker，Tika URL 不可达仍通过，且 Tika call 为零。
+1. ~~**M1 修复 Python MinerU Windows runtime**~~ → **`VERIFIED`（2026-08-11 新鲜复验）**：采用有界线程池封装同步 subprocess，与 Selector/Proactor loop 解耦；timeout/cancel 杀进程树；兼容 gRPC async server，不是只 patch pytest。Python 真实 OCR `1 passed in 92.84s`，Go `-count=1` 真实 OCR PASS（37.920s），Tika 不可达且调用为零。
 2. **M2 版本化多模态评测集**：从许可明确的公开文档与固定 ViDoRe revision 构造至少 120 qrels，覆盖段落、扫描、表格、图、公式、跨页、多栏、旋转、中英混合与低清 OCR；保存 source/page/element/bbox/asset hash、query provenance 与 reviewer 状态。
 3. **M3 真实 encoder 与独立 visual index**：保持文本索引不变；视觉 pilot 使用独立 physical index/alias，先离线 backfill + compare。记录模型 revision、维度、量化、运行硬件与 mapping hash。
 4. **M4 工业 bake-off**：至少比较 text-only、BGE-M3 page text、ColQwen2 late interaction、DSE fallback、late fusion；报告 nDCG@10、Recall@5、MRR@10、bbox hit、OCR failure、p50/p95、pages/s、peak VRAM、index size 与成本。
@@ -1205,7 +1212,7 @@ H5 的 10-instance hidden holdout 扩大运行推迟到 Phase 5；它必须在�
 
 #### Phase 3：多模态真实链路
 
-- [ ] 修复 Python Windows MinerU subprocess。
+- [x] 修复 Python Windows MinerU subprocess。**VERIFIED 2026-08-11**：Python 真实 OCR 92.84s；Go `-count=1` 真实 OCR package 37.920s；Tika 不可达且 Python 路径调用为零。
 - [ ] 创建至少 120 条多模态 qrels 与真实 page/crop assets。
 - [ ] 实现并冻结真实 visual encoder 与独立 index。
 - [ ] 运行 ViDoRe + 自建集 bake-off。
@@ -2519,17 +2526,31 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 | C2 定位 | `IMPLEMENTED` | `tests/eval/test_localize.py` 28 条通过（含降级不抛异常、非 UTF-8、语法错误文件、确定性） |
 | C5 泄题守卫 | `VERIFIED` | 15 条通过，且**已实测拦住本轮新模块** |
 | H5 五项门禁 | **`VERIFIED`（5/5）** | 最后一项 `traces/` 已由真实 run 产出：233 spans / 1 trace_id / 每 span 带 join key |
-| A 臂 baseline | **`BLOCKED`（进行中，非阻死）** | 受污染的旧 run 已移入 `_discarded-arm-a-contaminated/`（未删除，供复核），**其数字不得引用**；受缺陷 19 预算截断的一代已移入 `_discarded-budget-truncated/`（含两臂），同样不得引用。当前第三代 run `arm-a-baseline/swebench-deepseek-v4-pro-a5cb0378` 于 00:28 启动、41 分钟时 8/20 已判定，`resolved=0`，7 个空 patch，1 个 `failed-scorer`（`12907`，瞬时 SSL，其 patch 实为 506B 真实修复、hunk 位置正确）。未跑完，**不得出数** |
-| B 臂 | 未开始（已自动排队） | `chain_arms.py`（PID 33284）等待 A 臂写出 `summary.json` 后启动，判据是 artifact 而非进程名 |
-| 两臂的一处不受控差异 | **已声明，不得事后补叙** | A 臂 00:28 启动，scorer 瞬时重试（缺陷 21）00:38 才提交 → **A 臂跑的是无重试的代码，B 臂有重试**。按交集配对使其在方向上无偏、只让 N 变小；若 A 臂 scorer 失败 **>3 例**，则差异不可忽略，须两臂全部重跑 |
+| A 臂 baseline | **`VERIFIED`** | `arm-a-baseline/swebench-deepseek-v4-pro-a5cb0378`，19/20 判定（1 failed-scorer），**4 resolved**（14096 / 14309 / 14995 / 7336），10 empty patches。scorer 失败为瞬时 SSL（12907），在阈值 >3 之内，不触发重跑。arm 未误开 uplift：instances.jsonl 0 条 localization 记录，任务描述无 grading contract 文本 |
+| B 臂 first run | **存档（缺陷 23，定位记录全 0）** | `arm-b-optimized/swebench-deepseek-v4-pro-e5030846`，8/20 resolved，5 empty patches。str/Path TypeError 使 `_augment_for_uplift` 从未执行 → 0 条定位记录 → 无法归因于 localizer。分数本身有效（agent 在 24 轮下运行，edit mandate 生效），但 mechanism_report 的定位命中列不可用 |
+| B 臂 rerun（冻结） | **`VERIFIED`** | `arm-b-optimized/swebench-deepseek-v4-pro-eea6403e` 已 finalized；20 instance rows / 18 predictions / 20 terminal events / 2 failed-scorer，20/20 attempt rows 都有 localization + grading mandate；`span-assertion=PASS`（769 spans），严格 checksum/identity/receipt 门禁复验通过 |
+| 缺陷 22、23 修复 | `VERIFIED` | 22：augmentation 从 `solve()`（死代码）移到 `prepare()`（runner 真实调用），`verify_arms.py` 是发现工具；23：`Path(workspace)` 一字修正，11 条接线测试（含「str workspace 下定位记录仍然入库」），`2265cdc9` |
 | ~~C3 / C4 `DESIGNED`，仅有设计无代码~~ | **本条已修复** | 两者均已实现并各有 20 条测试，见下两行。原行写作当时为真，现已过时。 |
 | C3 验证 + 反馈重试 | `IMPLEMENTED` | `tests/eval/test_validate.py` 20 条 + `test_uplift.py` 重试段 9 条通过。**真实 run 未产出，不签 `VERIFIED`** |
 | C4 best-of-N 选择 | `IMPLEMENTED`，**默认关闭** | `tests/eval/test_select.py` 20 条通过（含全排列下胜者唯一）。开启会让 arm B 运行时间三倍，而实测损失不在这里 |
-| 对照报告工具 | `IMPLEMENTED` | `eval/swebench_work/compare_arms.py` + 14 条测试。单臂时拒绝出数、实例集不一致时拒绝平均 |
-| 机理归因工具 | `IMPLEMENTED` | `eval/swebench_work/mechanism_report.py` + 16 条测试。回答「因为什么」而非「涨了多少」：turn 去向（search:edit）、是否交付、定位命中排名（hit@1 / hit@3 / 命中均排名） |
+| 对照报告门禁与 receipt | **`VERIFIED`** | `report_gate.py` 只接受显式 finalized、checksum-valid run；`verify_arms.py` 对完整 arm identity 逐 attempt 审计并原子写 `verified-arms.json`；compare/mechanism 只能从 receipt 重新加载和复验 artifact。最终报告见 `paired-comparison-final.json` / `mechanism-report-final.json`；focused 142 passed / 13 skipped，`tests/eval` 983 passed / 13 skipped / 1 个既有 warning |
+| 对照报告工具 | **`VERIFIED`** | source=20、eligible=19；headline A=4/20、B=9/20；eligible A=4/19、B=9/19；paired eligible outcomes A=4/17、B=9/17；McNemar discordant B-only=5、A-only=0，不报 p-value。`12907` 仅作已知污染披露，不进入 numerator、paired 或 mechanism 指标 |
+| 机理归因工具 | **`VERIFIED`** | eligible-only 最终报告：A search/edit=166/10（16.6:1）、empty=10、with-edit=9；B=297/23（12.9:1）、empty=3、with-edit=16。B 的 19 个 eligible 实例均有 ranking；14 个有 patch 可判断，11 hit / 3 miss，hit@1=6、hit@3=11、命中均排名 1.64；Git×11 单列为 validation auxiliary span，不进入 agent search:edit |
 | 定位记录进 artifact | `IMPLEMENTED` | `augment_with_record()` 把排名写进 `instance.metadata['localization']`，由 runner 序列化进 `instances.jsonl`。28 条测试，含**按引用传递不能被破坏**（`_augment_for_uplift` 先改原对象 metadata，`replace` 再共享同一 dict；两句一互换，记录就静默消失而单测全绿）、**json.dumps 必须成立**（runner 会序列化它，不可序列化字段会让实例因报告问题而失败）、**答案字段不得进入记录或 prompt** |
 | 缺陷 19、20、21 修复 | `VERIFIED` | 19：预算按实例数缩放 + 新增 `ERROR_BUDGET` 区分累计/瞬时上限（12 条）；20：manifest 写入 `harness_uplift` 臂溯源块；21：9 类瞬时网络签名 + 单次重试，非瞬时仍 fail-closed |
 | Python 全量回归 | **1180 passed**（`python -m pytest tests`，113s） | 本轮新增约 169 条 |
 | ~~Go 回归 本轮未执行~~ | **本条已修复：`go test ./...` exit 0，全绿** | `pkg/embedding` 2.334s、`tests/go` 9.308s 为本次真实执行，其余为 cache hit |
+
+### 32.7 SWE-bench 双臂冻结与后续边界（2026-08-11）
+
+本轮 SWE-bench 工作到此冻结，不再继续扩大优化、消融或审查循环。三份 canonical 报告输入/输出是：
+
+1. `eval_results/harness-uplift-20260810/verified-arms.json`：双臂身份与 artifact receipt；
+2. `eval_results/harness-uplift-20260810/paired-comparison-final.json`：receipt-bound 配对结果；
+3. `eval_results/harness-uplift-20260810/mechanism-report-final.json`：eligible-only 机理报告。
+
+这里的 `4/20` 与 `9/20` 只能称为 **astropy-20 subset 的 declared-source headline**，不是 SWE-bench Verified score。分母 20 保留，用同行披露区分 1 个已知污染排除和 scorer-unmeasured：A source unmeasured=1（污染实例本身，eligible=0）；B source/eligible unmeasured=2。双臂可比较的 eligible outcome 交集是 17，而不是把无 scorer verdict 静默记成 false。
+
+后续工作按权威路线切回其余主线：M1 MinerU Windows 真实 E2E；O1→O2→O3 真实 RAG 同 trace E2E；再做 net-new hidden holdout 与 Terminal-Bench / tau2-bench 固定小样本验收。C3 validation/retry 仍只标 `IMPLEMENTED`，本次 Arm B 不为它提供真实接线验收。
 
 **本轮未删除任何容器、volume、ES 索引、MySQL 数据或 MinIO 对象；未重写历史。**

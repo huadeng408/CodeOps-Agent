@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"code-agent/internal/skills"
 	"code-agent/internal/tools"
 	"code-agent/internal/undo"
+	"code-agent/internal/worktree"
 )
 
 func TestHandleToolCallPromptsAndApprovesAskSessionTool(t *testing.T) {
@@ -45,8 +47,68 @@ func TestHandleToolCallPromptsAndApprovesAskSessionTool(t *testing.T) {
 	if got := app.permissions.Check("Write", nil); got != permission.Approve {
 		t.Fatalf("Write should be approved for the session, got %v", got)
 	}
-	if !strings.Contains(out.String(), "Permission required") || !strings.Contains(out.String(), "[1] Allow once") || !strings.Contains(out.String(), "[Esc] Deny") {
+	if !strings.Contains(out.String(), "Permission required") || !strings.Contains(out.String(), "[y] Allow session") || !strings.Contains(out.String(), "[n] Deny") {
 		t.Fatalf("permission prompt was not rendered: %q", out.String())
+	}
+}
+
+func TestApprovalAnswerOnlyAcceptsExplicitY(t *testing.T) {
+	for _, answer := range []string{"y", "Y"} {
+		if !isApprovalAnswer(answer) {
+			t.Fatalf("%q should allow the session", answer)
+		}
+	}
+	for _, answer := range []string{"yes", "allow", "approve", "ok", "1", "", "n", "esc"} {
+		if isApprovalAnswer(answer) {
+			t.Fatalf("%q must not be accepted as an approval", answer)
+		}
+	}
+}
+
+func TestConfirmToolApprovalUsesPermissionLevelForPrompt(t *testing.T) {
+	root := t.TempDir()
+	app, out := newPermissionTestApp(root, "y\ny\n")
+
+	if ok, err := app.confirmToolApproval(context.Background(), orchestrator.ToolCall{Name: "Write", ParametersJSON: `{"path":"a.txt"}`}, nil); err != nil || !ok {
+		t.Fatalf("AskSession approval failed: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(out.String(), "[y] Allow session") {
+		t.Fatalf("AskSession prompt should offer session approval: %q", out.String())
+	}
+
+	out.Reset()
+	if ok, err := app.confirmToolApproval(context.Background(), orchestrator.ToolCall{Name: "Bash", ParametersJSON: `{"command":"echo hi"}`}, nil); err != nil || !ok {
+		t.Fatalf("AlwaysAsk approval failed: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(out.String(), "[y] Allow once") || strings.Contains(out.String(), "Allow session") {
+		t.Fatalf("AlwaysAsk prompt should be one-shot: %q", out.String())
+	}
+}
+
+func TestNewAppWiresIdleInterruptHandler(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(config.Config{ProjectRoot: root, WorkingDir: root, SessionDBPath: filepath.Join(root, "sessions.db")}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if app.input == nil || app.input.onInterrupt == nil {
+		t.Fatal("NewApp must wire idle Ctrl+C to App interrupt handling")
+	}
+}
+
+func TestHandleOrchestratorEventPreservesToolCallIDAndError(t *testing.T) {
+	root := t.TempDir()
+	app, out := newPermissionTestApp(root, "")
+	app.renderer = NewStreamRendererWithCapabilities(out, TerminalCapabilities{Interactive: true, Width: 80})
+
+	app.handleOrchestratorEvent(context.Background(), orchestrator.Event{ToolProgress: &orchestrator.ToolProgress{ToolCallID: "call-a", ToolName: "Read", Phase: "start"}})
+	app.handleOrchestratorEvent(context.Background(), orchestrator.Event{ToolProgress: &orchestrator.ToolProgress{ToolCallID: "call-b", ToolName: "Read", Phase: "start"}})
+	app.handleOrchestratorEvent(context.Background(), orchestrator.Event{ToolProgress: &orchestrator.ToolProgress{ToolCallID: "call-b", ToolName: "Read", Phase: "finish", Error: "read failed"}})
+	app.handleOrchestratorEvent(context.Background(), orchestrator.Event{ToolProgress: &orchestrator.ToolProgress{ToolCallID: "call-a", ToolName: "Read", Phase: "finish"}})
+
+	got := out.String()
+	if !strings.Contains(got, "* Read | running\n* Read | running\n") || !strings.Contains(got, "[fail] Read") || !strings.Contains(got, "read failed") {
+		t.Fatalf("progress lifecycle was not durable and attributed: %q", got)
+	}
+	if strings.Index(got, "[fail] Read") > strings.LastIndex(got, "[ok] Read") {
+		t.Fatalf("out-of-order completion order was not preserved: %q", got)
 	}
 }
 
@@ -160,6 +222,38 @@ func TestHandleSlashCommandListsSkills(t *testing.T) {
 	rendered := out.String()
 	if !strings.Contains(rendered, "/review") || !strings.Contains(rendered, "/security-review") || !strings.Contains(rendered, "/init") {
 		t.Fatalf("skills list did not include expected commands: %q", rendered)
+	}
+}
+
+func TestHandleSlashCommandDiffUsesStructuredSummary(t *testing.T) {
+	root := newGitTestRepo(t)
+	path := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", root, "add", "tracked.txt")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, output)
+	}
+	cmd = exec.Command("git", "-C", root, "commit", "-m", "add tracked")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, output)
+	}
+	if err := os.WriteFile(path, []byte("first\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, out := newPermissionTestApp(root, "")
+	app.worktree = worktree.NewManager(root, "HEAD")
+	if !app.handleSlashCommand(context.Background(), "/diff") {
+		t.Fatal("/diff should be handled")
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "Changes | 1 files | +1 -0") || !strings.Contains(rendered, "M tracked.txt") {
+		t.Fatalf("expected deterministic structured diff, got %q", rendered)
+	}
+	if strings.Contains(rendered, "diff\n") {
+		t.Fatalf("legacy generic diff block should not be rendered: %q", rendered)
 	}
 }
 

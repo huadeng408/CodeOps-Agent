@@ -1,4 +1,4 @@
-# Project Instructions
+## Project Instructions
 
 - Keep the Go harness and Python orchestrator boundaries separate.
 - Prefer small, reviewable changes that follow the design document.
@@ -7,12 +7,50 @@
 - Keep `proto/codeagent/orchestrator.proto` and the implementation tree in sync.
 - Avoid adding dependencies unless a module boundary already needs them.
 
+## Waiting and retry discipline
+
+- **Waiting is not token-free.** Every wait/poll tool call starts another model
+  turn over the current conversation context, even when the result is empty or
+  the input is cached. A long context therefore makes repeated polling very
+  expensive without producing progress.
+- Call `functions.wait` only after `functions.exec` has returned the exact text
+  `Script running with cell ID <id>`, and copy that exact `<id>`. Never invent,
+  prefix, increment, guess, or reuse an ID; a completed `functions.exec` call
+  has no cell to wait on.
+- If `functions.wait` reports that a cell is missing, closed, completed, or not
+  found, mark that cell unusable and stop immediately. Do not retry it once,
+  and do not substitute a fabricated ID.
+- A `functions.wait` response beginning with `Script completed` or
+  `Script failed` closes the cell even when its payload contains several
+  parallel command results. Consume that payload directly; never call wait on
+  the same ID to "confirm" completion or request omitted output.
+- Once a cell has returned a terminal result, remove its ID from working
+  context. Do not mention it as a candidate for any later wait; use a fresh
+  synchronous command or the collaboration namespace for subsequent status.
+- Wait for subagents with `collaboration.wait_agent` or inspect them with
+  `collaboration.list_agents`; never route subagent waiting through
+  `functions.wait`.
+- Before calling any wait-like tool, verify both its namespace and argument
+  schema. `functions.wait` requires `cell_id`; `collaboration.wait_agent`
+  requires only `timeout_ms`. If the intended namespace is uncertain, use
+  `collaboration.list_agents` instead of guessing.
+- Use one bounded, meaningful wait instead of frequent short polls. While work
+  runs, do independent useful work; otherwise wait once and check once only
+  after the bounded interval or a state-change notification.
+- Every waiting loop must name its exit condition: process completion, new
+  output, agent state change, user input, or a documented blocker. If a poll
+  returns no state change, do not poll again unless the previously declared
+  interval or event condition has occurred.
+- After any other identical tool/argument error occurs twice, stop retrying,
+  reread the tool contract, identify the root cause, and switch tools before a
+  third attempt.
+
 ## Skill 优先原则
 
-- **涉及前端 UI/视觉设计时，优先调用 `frontend-design` skill**，由它指导配色、字体、布局、动效等设计决策，避免生成千篇一律的 AI 风格界面。
-- **涉及代码架构、后端设计、系统设计时，优先使用 `superpowers` 工作流**（brainstorming → writing-plans → executing-plans → code-review），不要跳过规划直接写代码。
-- **已有 skill 能覆盖的任务，优先用 skill**，不要从头手写 prompt——skill 自带经过验证的最佳实践和质量闸门。
-- **变更代码前先读相关文件**，理解现有风格和命名习惯，保持一致性。
+- **前端 UI/视觉设计优先调用 `frontend-design` skill**，避免千篇一律的 AI 风格界面。
+- **代码架构、后端、系统设计优先走 `superpowers` 工作流**（brainstorming → writing-plans → executing-plans → code-review），不跳过规划直接写代码。
+- **已有 skill 能覆盖的任务用 skill**，不从头手写 prompt。
+- **变更代码前先读相关文件**，保持风格和命名一致。
 - **用中文回复**，代码和注释保持项目原有语言。
 
 ## 通用规则
@@ -20,23 +58,22 @@
 - **诚实评测，严禁作弊**：跑 benchmark 或评测时，Agent 只能获得与真实场景一致的输入（如问题描述和代码仓库），不得在 Prompt 中夹带答案、定位提示、修复方向等任何形式的泄题。评测的目的不是「跑通」，是「真实验收能力」——通过作弊手段让数字好看等于自欺欺人，是对面试官和自己的不尊重。
 - 涉及多文件修改时，先用 EnterPlanMode 出方案，用户确认后再写代码。
 - 能用专用工具（Read/Glob/Grep/Edit/Write）就不用 Shell 命令。
-- 提交代码前跑一下 `git diff --stat` 确认改动范围符合预期。
-- **有意义的进展必须同步写入 `D:\Obsidian\code-autogrowth\私人\localcode`**，包括架构决策、阶段性成果、真实验收、数据状态变化、踩坑记录和重要未完成项，注意使用中文。
-- 进展记录使用按日期命名的 `PROGRESS-YYYY-MM-DD.md`，或更新当天已有的对应文档；至少写明分支/提交、事实证据、执行过的验证、当前数据快照、未完成项和回滚边界。
-- 严格区分 `DESIGNED`、`IMPLEMENTED`、`VERIFIED` 和 `BLOCKED`：存在规格或测试代码不等于实现或真实验收通过，不得把计划写成完成。
-- 在提交或交接前检查从上一份 Obsidian 记录到当前 HEAD 的提交，补录所有尚未沉淀的有意义进展。若当前环境暂时不能写 Obsidian，先在仓库 `docs/` 生成同名待同步文档，并在获得写入权限后完成同步。
-- **需要模型调用来测试 agent 或其他效果时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 API key，模型用 `deepseek-v4`；注意 key 只用于本地测试，不要硬编码或提交进代码仓库。
-- **阶段性任务完成后可以自动 `git commit` 并 `git push`**，不必等用户手动确认；提交信息需概括本轮改动要点，结尾附带 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`。
-- **任何项目需要 Docker 服务时都可直接隐藏启动 Docker Desktop**，无需再次请求确认；该授权不包含删除容器、volume、索引或业务数据。
-- **如果本地网络代理不通（如 WSL 内无法访问 HuggingFace、GitHub），可以用 Clash for Windows 配置网络**：
-  - Clash for Windows 默认监听 `127.0.0.1:7890`（HTTP 代理）
-  - Windows 侧 Python 用代理：`$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`
-  - WSL 侧用代理：`export http_proxy=http://<Windows主机IP>:7890 https_proxy=http://<Windows主机IP>:7890`（Windows 主机 IP 可通过 `ip route show default | awk '{print $3}'` 获取，通常是 WSL 网关地址）
-- **所有超过 15 分钟的工作（如下载大文件、Docker 构建、pip install 等）都必须先检查网络是否可以通过代理走得更快**。优先在代理可达的环境中下载（如 WSL 直连而不是 Docker 容器内），然后将本地文件传入 Docker build context 或目标环境，而不是在受限网络中硬等。
+- 提交前跑 `git diff --stat` 确认改动范围。
+- **有意义的进展必须同步写入 `D:\Obsidian\code-autogrowth\私人\localcode`**，用中文，含架构决策、阶段性成果、真实验收、数据状态变化、踩坑和未完成项。
+- 进展记录用 `PROGRESS-YYYY-MM-DD.md`（或更新当天已有文档），写明分支/提交、事实证据、执行过的验证、数据快照、未完成项、回滚边界。
+- 提交或交接前检查上一份 Obsidian 记录到当前 HEAD 的提交，补录未沉淀的进展。不能写 Obsidian 时先在仓库 `docs/` 生成同名待同步文档，获得权限后补同步。
+- 严格区分 `DESIGNED`、`IMPLEMENTED`、`VERIFIED`、`BLOCKED`：有规格或测试代码不等于实现或验收通过。
+- **需要模型调用测试时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 key，模型用 `deepseek-v4-pro`；key 只用于本地测试，不硬编码、不提交。
+- **阶段性任务完成后可自动 `git commit` 并 `git push`**，提交信息概括本轮要点，结尾附 `Co-Authored-By: Claude <noreply@anthropic.com>`。
+- **需要 Docker 时可直接隐藏启动 Docker Desktop**，无需确认；不含删除容器、volume、索引或业务数据。
+- **本地代理不通或卡顿时用 Clash for Windows**（默认 `127.0.0.1:7890` HTTP 代理）：
+  - Windows 侧：`$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`
+  - WSL 侧：`export http_proxy=http://<Windows主机IP>:7890 https_proxy=http://<Windows主机IP>:7890`（主机 IP 用 `ip route show default | awk '{print $3}'` 取）
+- **超过 15 分钟的工作（下载大文件、Docker 构建、pip install）先确认走代理是否更快**。优先在代理可达的环境下载（如 WSL 直连而非容器内），再把文件传入 Docker build context。
 
 ## RAG continuation memory
 
-- **四目标工作的唯一权威执行地图是 `docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`。** 所有 Agent 在处理自研 Harness、多模态 RAG、评测集或可观测性前必须完整读取该文档，并按其中的 Phase 依赖、统一 artifact/trace 契约、状态口径、任务卡和发布门禁执行；不得另建冲突路线或越过前置门禁。
+- **四目标工作的唯一权威执行地图是 `docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`。** 处理自研 Harness、多模态 RAG、评测集或可观测性前必须完整读取，按其中的 Phase 依赖、artifact/trace 契约、状态口径、任务卡和发布门禁执行，不得另建冲突路线或越过前置门禁。
 - Record every meaningful RAG milestone in both `docs/PROGRESS-YYYY-MM-DD.md` and `D:\Obsidian\code-autogrowth\私人\localcode\PROGRESS-YYYY-MM-DD.md` before handoff or push.
 - State `DESIGNED`, `IMPLEMENTED`, `VERIFIED`, and `BLOCKED` precisely, including commands, current MySQL/ES/MinIO counts, unfinished plans, and rollback boundaries.
 - All PDF entry points use MinerU in explicit OCR mode. Tika is limited to non-PDF office documents such as DOCX, PPTX, and XLSX.

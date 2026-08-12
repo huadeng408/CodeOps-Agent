@@ -1,4 +1,4 @@
-# 面试 Portfolio：一次真实 SWE-bench 跑通，挖出二十一个缺陷
+# 面试 Portfolio：一次真实 SWE-bench 跑通，挖出二十三个缺陷
 
 > 状态：**非定稿。三个 Agent 基准仍无可发布分数。**本文档的价值不在覆盖面，在于一条被证据钉住的缺陷猎捕链。
 > 分支 `main`。**证据基线 commit `4a4ed30b`（2026-08-10）**，`push-clean` 已合入 main 并推送。唯一权威口径：`docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md`（§20.4 / §20.7 / §20.8 / §22–§26 / §30 / §31）。本文与设计地图冲突时以设计地图为准。
@@ -55,7 +55,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 **这条能说什么**：统一 Harness 的 `prepare → solve → score` 生命周期在一个真实实例上跑到了官方判定，`FAIL_TO_PASS` 2/2、`PASS_TO_PASS` 13/13。
 **这条不能说什么**：n=1，不是能力分数；这条实例在修 `namespace` 的过程中被反复使用，已属 **development set**，永久不得进 holdout。
 
-## 3. 二十一个缺陷，三个形状
+## 3. 二十三个缺陷，三个形状
 
 | # | 缺陷 | 为什么它是「基础设施故障伪装成业务判定」 | 状态 |
 |---|---|---|---|
@@ -81,10 +81,24 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 19 | 全局预算按「单实例」尺寸配，跑 20 实例时**中途截断** | `Budget` 的四个上限是常量，与实例数无关。跑到第 7 个实例时 token 累计触顶，剩下 13 个实例带着 `BudgetExceeded` 记成 `ERROR_AGENT`——**读起来是 Agent 自己放弃了**。同时 `classify_error` 把所有 `BudgetExceeded` 都归给 Agent，掩盖了「是 harness 的预算不够，不是 Agent 不行」。两臂 token 消耗天然不同（B 臂轮次多），这条会**系统性地惩罚优化臂** | `VERIFIED`（预算按实例数缩放 + 新增 `ERROR_BUDGET` 类别，区分累计上限与单实例瞬时上限，12 条回归） |
 | 20 | artifact 里没有任何字段说明「这是哪一臂」 | 两臂的 run 目录只靠人为放在 `arm-a-baseline/` / `arm-b-optimized/` 区分，**run-manifest 内部无记录**。目录一改名或一移动，两臂就无法区分，而对照实验的全部结论都建立在「这个数字属于哪一臂」上 | `VERIFIED`（manifest 写入 `harness_uplift` 块，含 enabled/各组件开关/轮次） |
 | 21 | 官方 scorer 遇瞬时网络故障即判 `failed-scorer`，不重试 | 一次 `SSLEOFError` 就让实例记成 scorer 失败并从配对集合中掉出。**丢样本本身不致命，但它不是随机丢**：网络抖动与镜像拉取时长相关，而两臂的镜像拉取量不同 | `VERIFIED`（9 类瞬时网络签名识别 + 单次重试；非瞬时故障仍然 fail-closed） |
+| 22 | **我自己写的优化，装在一个 runner 从不调用的方法里** | `HarnessRun` 调的是 **driver** 的 `solve_instance()`，benchmark 只被用来 `prepare` 和 `score`——**`SWEBenchAdapter.solve()` 在 runner 路径上是死代码**，而我把 arm B 的全部 prompt 增强都写在了 `solve()` 里。B 臂照样跑、照样 clone、照样调官方 scorer、照样产出结构完整的 artifact 树，**其中 0 条定位记录、0 个 prompt 带交付契约**——一个穿着「优化臂」目录名的第二条基线。**比干净的空操作更糟**：`max_tool_rounds` 早已在 driver 内部读 `uplift_config()`，所以那一臂真的在跑 24 轮，只是配着基线 prompt。**部分生效比完全没生效更难发现，因为它的数字确实会动。** 被我自己刚写的 `verify_arms.py` 在第一次真实使用时抓到 | `VERIFIED`（移到 runner 真正会调的 `prepare()`；9 条接线测试，实测回滚后 3 条失败） |
+| 23 | **`str` 传进了需要 `Path` 的 `_instance_workdir`** | `HarnessRun` 调 `setup_workspace(instance, str(workspace))`，所以 `prepare(instance, workspace)` 里的 `workspace` 是字符串。`_instance_workdir` 用 `/` 运算符：`workspace / instance.instance_id`——**字符串的 `/` 是 `TypeError`**，出现在 `_setup_workdir`（clone 仓库）之后，所以 clone 成功、solve 成功、artifact 完整，**只有定位记录静默消失**。`mechanism_report.py` 打出 `NO RANKING RECORDED — unexpected in this arm`，是它把问题逼出来的——没有这个报告，第二次 arm B run 的数字看上去完全正常（8/20 resolved），而「定位到底有没有起作用」根本问不出口。与缺陷 22 是同一个失效形状的两层：第一层是代码放错方法（solve 死代码），第二层是传错类型（str 当 Path 用） | `VERIFIED`（`Path(workspace)` 一字修复；11 条接线测试，含「str workspace 下定位记录仍然入库」） |
 
-**计数口径**：21 条里 **11 条**（1、2、3、4、6、7、9、10、15、16、19）是「基础设施/配置故障 → 业务判定」；**2 条**（5、8）是「判定没有原始证据」；**1 条**（14）是新形状「另一次 run 的判定伪装成这次的」；**1 条**（16）是它的镜像「已解决的问题被记成没解决」；**1 条**（17）是守卫写反；**2 条**（18、20）是缺失的前置检查/缺失的溯源字段；其余为普通缺陷。缺陷 8、9 此前记为「未修」，**现已修复**，上表已就地更新。
+**计数口径**：23 条里 **11 条**（1、2、3、4、6、7、9、10、15、16、19）是「基础设施/配置故障 → 业务判定」；**2 条**（5、8）是「判定没有原始证据」；**1 条**（14）是新形状「另一次 run 的判定伪装成这次的」；**1 条**（16）是它的镜像「已解决的问题被记成没解决」；**1 条**（17）是守卫写反；**2 条**（18、20）是缺失的前置检查/缺失的溯源字段；**2 条**（22、23）是**「优化没接到被测代码路径上」**（先是方法选错，再是类型用错）；其余为普通缺陷。缺陷 8、9 此前记为「未修」，**现已修复**，上表已就地更新。
 
 **19、20、21 的共同点值得单独说**：它们都不是「Harness 跑不动」，而是**「Harness 跑得动，但产出的数字回答不了我要问的问题」**。三条都是在设计对照实验的过程中发现的——正是「我要拿这个数字下什么结论」这个问题把它们逼出来的。缺陷 19 尤其危险：它会系统性地惩罚优化臂（B 臂轮次更多、token 更多），如果没先修，我会得到一个**方向正确但幅度被压低、甚至反向**的结果，并且完全有理由相信它。
+
+### 缺陷 22 是这份清单里我最愿意讲的一条
+
+因为它**是我自己犯的**，而且它证明了前面二十一条不是运气。
+
+我写了 `verify_arms.py`——一个只干一件事的闸门：读 artifact，核对「两臂是否只在预期的那一个开关上不同」。写它的动机很朴素：`compare_arms.py` 和 `mechanism_report.py` 都默认「目录名说的就是真的」，而**没有任何东西检查过这个假设**。它的两种失效都是静默的（B 臂没开优化 → 量的是 run 间噪声；A 臂误开了 → 基线被污染），两种都产出结构完整的 artifact。
+
+**它第一次真实运行，就抓到了我自己的缺陷。**
+
+而在此之前，与 uplift 相关的测试**全部通过**（当时全量 1213 条绿）。原因很直接：每一条测试都直接调 `_augment_for_uplift(...)`，或者直接调 `SWEBenchAdapter.solve()`。**它们验证了功能，没有验证接线**——而「这段代码是否在被测路径上」恰恰是功能单测看不见的东西。所以修复带的 9 条新测试断言的是**接线**而不是行为，并且我把老接线回滚后实测确认 3 条会失败（包括「增强后的 prompt 是否落在 runner 自己那个 instance 上」）。一条不能失败的测试在这里等于没有。
+
+这条也顺手把一个更贵的教训摆出来：**我一度以为 `solve()` 里的 git-diff 兜底也一起失效了**。查了才知道没有——driver 自己就抓 `git diff`，A 臂的 patch 从来没有风险。但同一个方法里的 **C3 校验重试确实仍然只在 `solve()` 里，也就是在 runner 路径上依然没生效**。这一点我按原样记下来，没有顺势写成「已修」——**发现一个缺陷的时候，最容易犯的第二个错误就是顺手把旁边没查清的东西一起宣布修好了。**
 
 ## 3.5 一个平庸的 Harness 为什么平庸：先量机理，再改架构
 
@@ -137,6 +151,24 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 
 结果只能写成「**astropy-20 subset 上 k/20**」，**不是** SWE-bench Verified 分数：单仓库、dev 口径、含一个用于调试因而不独立的实例。不报 p 值（N=20 上是装饰），报 **McNemar 不一致对计数**。
 
+### 冻结双臂的最终可复验结果
+
+最终报告不直接读取“最新目录”，而是先由 `verify_arms.py` 对显式 A/B run 做 finalized、checksum、20-ID arm identity、污染和 failure taxonomy 审计，原子写 `verified-arms.json`；`compare_arms.py` 与 `mechanism_report.py` 再从该 receipt 重新加载并复验真实 artifact。这样 verify 失败后，另外两份脚本无法绕过门禁输出暂态 totals。
+
+| 口径 | baseline | optimized |
+|---|---:|---:|
+| astropy-20 declared-source headline | 4/20 | 9/20 |
+| eligible | 4/19（outcomes 19/19） | 9/19（outcomes 17/19） |
+| paired eligible outcomes | 4/17 | 9/17 |
+| empty patches（eligible） | 10 | 3 |
+| instances with edits（eligible） | 9 | 16 |
+
+不一致对为 **B-only=5 / A-only=0**，不报 p-value。`astropy-12907` 是已知污染：保留在 source cohort 供审计，但不进入 headline numerator、paired 或 mechanism 指标。B 臂另有 2 条 scorer-unmeasured，因此 paired denominator 是 17，而不是把没有官方 verdict 的实例记为 false。
+
+机理上，baseline search:edit 为 **166:10（16.6:1）**；optimized 为 **297:23（12.9:1）**。优化臂 19 个 eligible 实例都有 localization ranking；14 个有 patch 可判断，11 hit / 3 miss，hit@1=6、hit@3=11、命中均排名 1.64。`Git`×11 是 validation harness 的 auxiliary span，单独披露，不计入 agent search:edit。这个结果支持“预算 + 交付契约 + 定位整包改善了交付与编辑行为”，但不支持把全部增益单独归给 localizer；C3 feedback retry 仍未接入 HarnessRun，不能借本轮结果标为 VERIFIED。
+
+Canonical 证据：`eval_results/harness-uplift-20260810/verified-arms.json`、`paired-comparison-final.json`、`mechanism-report-final.json`。Focused 门禁/报告测试 142 passed、13 skipped；完整 `tests/eval` 983 passed、13 skipped、1 个既有 SQLAlchemy warning。
+
 ## 4. 为什么这个形状值得当作方法论
 
 这 8 条缺陷分布在 4 个不同模块、由 4 个人在 4 个时间点写下，却收敛到同一条错误假设：
@@ -162,7 +194,7 @@ Agent 只拿到 problem statement，输入里没有 gold patch，自己产出了
 | 缺陷 8/9 修复 | 缺陷 8：`_summarise_official_stdout()` + `_SUMMARY_LABELS` 逐条提取官方 7 个计数标签，原始 stdout 落 `scorer/`；缺陷 9：`pin_contract.py` 三档 REQUIRED / CAPABILITY / DEGRADABLE，空值 pin 不再放行 | `VERIFIED`（此前记为「未修」，**已闭环**） |
 | 缺陷 14–18 修复 | 14：per-process `_SCORING_SESSION` + `not_before` 双层守卫（11 条回归）；15/16：轮次预算参数化 + grading contract（29 条）；17：tool 邻接反向守卫（11 条回归）；18：凭证 preflight | `VERIFIED`（Python 全量 **1116 passed**，81s） |
 | 分层定位 / 验证 / 选择 | `localize.py` 28 条、`validate.py` 20 条、`select.py` 20 条（含全排列下胜者唯一）、对照报告工具 14 条 | `IMPLEMENTED`（真实 run 未产出，不签 `VERIFIED`） |
-| **两臂对照实验** | A 臂运行中（`arm-a-baseline/…-be6d049d`，约 4.3 min/实例）；旧 run 受缺陷 14 污染，已移入 `_discarded-arm-a-contaminated/`（未删除，供复核），**其数字不得引用** | `BLOCKED`（A 臂未跑完，B 臂未开始） |
+| **两臂对照实验** | 冻结 A=`a5cb0378`、B=`eea6403e` 已通过 finalized/checksum/identity receipt 门禁；canonical：`verified-arms.json`、`paired-comparison-final.json`、`mechanism-report-final.json`。headline A=4/20、B=9/20；eligible A=4/19、B=9/19；paired A=4/17、B=9/17；B-only/A-only=5/0 | `VERIFIED`（astropy-20 subset，**不是** SWE-bench Verified score） |
 | **H5 官方 1 实例门禁** | 五项**同时**满足于 `h5-full-traces-20260810-join/…-6c6eeac0`（161.0s）：manifest、prediction、官方 `scorer/` 四文件、`traces/` 两文件、`checksums.sha256` 12 条**逐条重算全部匹配**。trace 判定 `PASS`，`problems: 0`，20 span 同属一个 trace、0 悬空父节点、单一根 `eval.run`；链路 `eval.run → eval.instance → invoke_agent → 9×chat + 7×execute_tool（Read×3/Glob×2/Edit/Bash）`，`scorer.official` 挂 `eval.instance`；20 个 span 全带 `eval.run_id`，且只有一个取值。官方判定 `resolved=true`、`FAIL_TO_PASS` 2/2 | `VERIFIED`（n=1，非分数）。**口径限制**：该 `PASS` 依赖 SWE-bench 以 `TRACE_CAPABILITIES = ()` 声明的 `rag.retrieve`/`embedding` 豁免（豁免已写入产物、可审计）。RAG 基准仍必须产出这两类 span |
 | 生产 trace instrumentation（O1–O3） | 已提交（`4a673590`、`5e002b96`、`64f9299c`）。两处修的都是「契约本身错了」而非 run 错了：① `invoke_agent`/`execute_tool` 归给 `go-agent`，但 headless 驱动在 Python 进程内跑 Read/Write/Edit/Bash/Glob/Grep，链路里没有 Go agent——报 `go-agent` 会把人指去启一个这条路径永不联系的服务，正是 producer 字段本该消除的「不可行动判定」。改为 `agent-runtime` 并在真实站点补 span；**没有**把 Go agent 做成可声明能力，那会豁免掉唯一能证明工具真的跑了的 span。② `chat` span 缺 `eval.run_id`。用 OTel baggage 传播，**context 作用域而非时间作用域**——「capture 打开期间创建的都盖章」会把 run id 盖到无关后台线程的 span 上，契约的 join 检查就会接受伪造证据；`test_trace_join.py` 用「context 外创建的 span 必须不被盖章」这条对照组把差别钉死 | `VERIFIED`（926 tests） |
 | SWE-bench 10 实例 | 10/10 非空 patch，`resolved` 未知；官方评分从未在这 10 条上完成 | 探索结果，非分数 |

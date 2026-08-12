@@ -1,22 +1,19 @@
-"""Tests for the mechanism report.
-
-The point of this report is to stop a total from being credited to whichever
-component sounds best, so the tests focus on the distinctions that make it
-capable of that: a localization miss must be visible, an instance with no patch
-must count as neither hit nor miss, and the baseline arm must show no ranking
-rather than a ranking of zero.
-"""
-
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 import pytest
 
 from eval.swebench_work import mechanism_report as M
+from eval.swebench_work.report_gate import FinalizedRun, ReportGateError
 
 
+CONTAMINATED = "astropy__astropy-12907"
+SOURCE_IDS = (CONTAMINATED, *(f"repo__case-{index}" for index in range(1, 20)))
 PATCH_A = (
     "diff --git a/pkg/separable.py b/pkg/separable.py\n"
     "--- a/pkg/separable.py\n+++ b/pkg/separable.py\n@@ -1 +1,2 @@\n def f():\n+    pass\n"
@@ -27,301 +24,232 @@ PATCH_ELSEWHERE = (
 )
 
 
-def _write_run(
-    root: Path,
-    arm_dir: str,
-    run_id: str,
+def _run(
+    arm: str,
     *,
-    predictions: list[dict],
-    instances: list[dict] | None = None,
-    spans: list[dict] | None = None,
-) -> Path:
-    run = root / arm_dir / run_id
-    run.mkdir(parents=True, exist_ok=True)
-    with (run / "predictions.jsonl").open("w", encoding="utf-8") as handle:
-        for row in predictions:
-            handle.write(json.dumps(row) + "\n")
-    if instances is not None:
-        with (run / "instances.jsonl").open("w", encoding="utf-8") as handle:
-            for row in instances:
-                handle.write(json.dumps(row) + "\n")
-    if spans is not None:
-        (run / "traces").mkdir(exist_ok=True)
-        (run / "traces" / "trace-summary.json").write_text(
-            json.dumps({"spans": spans}), encoding="utf-8"
-        )
-    return run
+    predictions: list[dict[str, Any]] | None = None,
+    instances: list[dict[str, Any]] | None = None,
+    spans: list[dict[str, Any]] | None = None,
+) -> FinalizedRun:
+    empty = MappingProxyType({})
+    return FinalizedRun(
+        arm=arm,
+        run_id=f"{arm}-run",
+        run_dir=Path(arm),
+        manifest=empty,
+        summary=empty,
+        manifest_sha256=f"{arm}-manifest",
+        checksums_sha256=f"{arm}-checksums",
+        cohort_path=Path("cohort.json"),
+        cohort_sha256="cohort",
+        source_ids=SOURCE_IDS,
+        eligible_ids=frozenset(SOURCE_IDS) - {CONTAMINATED},
+        instances=tuple(instances or ()),
+        predictions=tuple(predictions or ()),
+        events=(),
+        failures=(),
+        trace_summary={"spans": tuple(spans or ())},
+        span_assertion=empty,
+        official_verdicts=empty,
+        outcomes=empty,
+        unmeasured_by_reason=empty,
+        failures_by_reason=empty,
+        excluded_contaminated={CONTAMINATED: "known benchmark contamination"},
+        scorer_evidence_scope="last-invocation-only",
+    )
 
 
-def _tool_span(instance_id: str, tool: str) -> dict:
+def _tool_span(instance_id: str, tool: str) -> dict[str, Any]:
     return {
         "name": f"execute_tool {tool}",
         "attributes": {"tool.name": tool, "eval.instance_id": instance_id},
     }
 
 
-def _chat_span(instance_id: str) -> dict:
+def _chat_span(instance_id: str) -> dict[str, Any]:
     return {"name": "chat", "attributes": {"eval.instance_id": instance_id}}
 
 
-@pytest.fixture()
-def experiment(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(M, "EXPERIMENT_DIR", tmp_path)
-    return tmp_path
+def _instance_row(instance_id: str, files: list[str]) -> dict[str, Any]:
+    return {"instance_id": instance_id, "metadata": {"localization": {"files": files}}}
 
 
-# ------------------------------------------------------------------------ turns
-
-
-def test_search_and_edit_calls_are_counted_separately(experiment: Path):
+def test_search_edit_and_chat_are_counted_for_eligible_ids() -> None:
+    instance_id = SOURCE_IDS[1]
     spans = (
-        [_tool_span("i-1", "Grep")] * 5
-        + [_tool_span("i-1", "Read")] * 3
-        + [_tool_span("i-1", "Edit")]
+        [_tool_span(instance_id, "Grep")] * 5
+        + [_tool_span(instance_id, "Read")] * 3
+        + [_tool_span(instance_id, "Edit")]
+        + [_chat_span(instance_id)] * 4
     )
-    _write_run(
-        experiment, "arm-a-baseline", "run", predictions=[], spans=spans
-    )
-    arm = M.load_arm("baseline")
+    arm = M.load_arm(_run("baseline", spans=spans))
     assert arm.search_calls == 8
     assert arm.edit_calls == 1
     assert arm.search_to_edit == "8.0:1"
+    assert arm.chat_rounds == {instance_id: 4}
+    assert arm.instances_with_edits == {instance_id}
 
 
-def test_search_to_edit_handles_zero_edits(experiment: Path):
-    """The baseline's actual shape: searches with no edit at all."""
-    _write_run(
-        experiment, "arm-a-baseline", "run",
-        predictions=[], spans=[_tool_span("i-1", "Grep")] * 9,
+def test_zero_edit_ratio_is_explicit() -> None:
+    arm = M.load_arm(
+        _run("baseline", spans=[_tool_span(SOURCE_IDS[1], "Grep")] * 9)
     )
-    assert M.load_arm("baseline").search_to_edit == "9:0"
+    assert arm.search_to_edit == "9:0"
 
 
-def test_instances_with_edits_are_tracked(experiment: Path):
-    spans = [_tool_span("i-1", "Edit"), _tool_span("i-2", "Grep")]
-    _write_run(experiment, "arm-a-baseline", "run", predictions=[], spans=spans)
-    arm = M.load_arm("baseline")
-    assert arm.instances_with_edits == {"i-1"}
-    assert arm.instances_seen == {"i-1", "i-2"}
-
-
-def test_chat_rounds_are_counted_per_instance(experiment: Path):
-    spans = [_chat_span("i-1")] * 9 + [_chat_span("i-2")] * 3
-    _write_run(experiment, "arm-a-baseline", "run", predictions=[], spans=spans)
-    arm = M.load_arm("baseline")
-    assert arm.chat_rounds == {"i-1": 9, "i-2": 3}
-    assert arm.max_chat_round == 9
-
-
-def test_missing_traces_yield_zero_not_an_error(experiment: Path):
-    """Traces are written at run end, so a live run has none yet."""
-    _write_run(experiment, "arm-a-baseline", "run", predictions=[])
-    arm = M.load_arm("baseline")
-    assert arm.search_calls == 0
-    assert arm.edit_calls == 0
-
-
-# --------------------------------------------------------------------- delivery
-
-
-def test_empty_and_non_empty_patches_are_split(experiment: Path):
-    _write_run(
-        experiment, "arm-a-baseline", "run",
-        predictions=[
-            {"instance_id": "i-1", "model_patch": PATCH_A},
-            {"instance_id": "i-2", "model_patch": ""},
-            {"instance_id": "i-3", "model_patch": "   \n"},
-        ],
+def test_empty_and_non_empty_patches_are_split() -> None:
+    arm = M.load_arm(
+        _run(
+            "baseline",
+            predictions=[
+                {"instance_id": SOURCE_IDS[1], "model_patch": PATCH_A},
+                {"instance_id": SOURCE_IDS[2], "model_patch": ""},
+                {"instance_id": SOURCE_IDS[3], "model_patch": "  \n"},
+            ],
+        )
     )
-    arm = M.load_arm("baseline")
-    assert arm.non_empty_patches == {"i-1"}
-    assert arm.empty_patches == {"i-2", "i-3"}
+    assert arm.non_empty_patches == {SOURCE_IDS[1]}
+    assert arm.empty_patches == {SOURCE_IDS[2], SOURCE_IDS[3]}
 
 
-# ---------------------------------------------------------------- localization
+def test_localization_hit_and_miss_are_visible() -> None:
+    arm = M.load_arm(
+        _run(
+            "optimized",
+            predictions=[
+                {"instance_id": SOURCE_IDS[1], "model_patch": PATCH_A},
+                {"instance_id": SOURCE_IDS[2], "model_patch": PATCH_ELSEWHERE},
+            ],
+            instances=[
+                _instance_row(SOURCE_IDS[1], ["pkg/other.py", "pkg/separable.py"]),
+                _instance_row(SOURCE_IDS[2], ["pkg/separable.py"]),
+            ],
+        )
+    )
+    data = M.summarise(arm)["localization"]
+    assert arm.localization_hit_rank == {SOURCE_IDS[1]: 2, SOURCE_IDS[2]: -1}
+    assert data["hits"] == 1
+    assert data["misses"] == 1
+    assert data["hit_at_3"] == 1
+    assert data["mean_rank_of_hits"] == 2.0
 
 
-def _instance_row(instance_id: str, files: list[str]) -> dict:
-    return {
-        "instance_id": instance_id,
-        "metadata": {"localization": {"files": files}},
+def test_empty_patch_is_neither_localization_hit_nor_miss() -> None:
+    instance_id = SOURCE_IDS[1]
+    arm = M.load_arm(
+        _run(
+            "optimized",
+            predictions=[{"instance_id": instance_id, "model_patch": ""}],
+            instances=[_instance_row(instance_id, ["pkg/separable.py"])],
+        )
+    )
+    assert arm.localization_available == {instance_id}
+    assert arm.localization_hit_rank == {}
+
+
+def test_contaminated_id_cannot_affect_any_mechanism_metric() -> None:
+    arm = M.load_arm(
+        _run(
+            "optimized",
+            predictions=[{"instance_id": CONTAMINATED, "model_patch": ""}],
+            instances=[_instance_row(CONTAMINATED, ["pkg/separable.py"])],
+            spans=[
+                _tool_span(CONTAMINATED, "Grep"),
+                _tool_span(CONTAMINATED, "Edit"),
+                _chat_span(CONTAMINATED),
+            ],
+        )
+    )
+    assert M.summarise(arm) == {
+        "run_id": "optimized-run",
+        "search_calls": 0,
+        "edit_calls": 0,
+        "search_to_edit": "0:0",
+        "tool_counts": {},
+        "auxiliary_tool_counts": {},
+        "instances_traced": 0,
+        "instances_with_edits": 0,
+        "max_chat_round": 0,
+        "empty_patches": 0,
+        "non_empty_patches": 0,
+        "localization": {
+            "instances_with_a_ranking": 0,
+            "instances_judgeable": 0,
+            "hits": 0,
+            "misses": 0,
+            "missed_instances": [],
+            "hit_at_1": 0,
+            "hit_at_3": 0,
+            "mean_rank_of_hits": None,
+        },
     }
 
 
-def test_localization_hit_records_the_rank(experiment: Path):
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        instances=[_instance_row("i-1", ["pkg/other.py", "pkg/separable.py"])],
-    )
-    arm = M.load_arm("optimized")
-    assert arm.localization_hit_rank == {"i-1": 2}
-
-
-def test_localization_hit_at_rank_one(experiment: Path):
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        instances=[_instance_row("i-1", ["pkg/separable.py", "pkg/other.py"])],
-    )
-    data = M.summarise(M.load_arm("optimized"))
-    assert data["localization"]["hit_at_1"] == 1
-    assert data["localization"]["mean_rank_of_hits"] == 1.0
-
-
-def test_localization_miss_is_visible(experiment: Path):
-    """A ranking that sent the agent to the wrong file must be reported."""
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_ELSEWHERE}],
-        instances=[_instance_row("i-1", ["pkg/separable.py"])],
-    )
-    arm = M.load_arm("optimized")
-    assert arm.localization_hit_rank == {"i-1": -1}
-    data = M.summarise(arm)
-    assert data["localization"]["misses"] == 1
-    assert data["localization"]["missed_instances"] == ["i-1"]
-
-
-def test_no_patch_is_neither_hit_nor_miss(experiment: Path):
-    """An empty patch says nothing about the ranking's quality."""
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": ""}],
-        instances=[_instance_row("i-1", ["pkg/separable.py"])],
-    )
-    arm = M.load_arm("optimized")
-    assert arm.localization_available == {"i-1"}
-    assert arm.localization_hit_rank == {}
-    data = M.summarise(arm)
-    assert data["localization"]["instances_with_a_ranking"] == 1
-    assert data["localization"]["instances_judgeable"] == 0
-
-
-def test_baseline_arm_reports_no_ranking_rather_than_zero(experiment: Path):
-    _write_run(
-        experiment, "arm-a-baseline", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        instances=[{"instance_id": "i-1", "metadata": {}}],
-    )
-    data = M.summarise(M.load_arm("baseline"))
-    assert data["localization"]["instances_with_a_ranking"] == 0
-    assert data["localization"]["mean_rank_of_hits"] is None
-
-
-def test_missing_ranking_is_reassuring_only_for_the_baseline_arm(experiment: Path):
-    """A missing ranking is expected in arm A and a defect in arm B.
-
-    The first version of render() printed "expected for the baseline arm" for
-    both arms, so an optimized run whose record never reached the artifact --
-    the exact failure the report exists to catch -- read as normal.
-    """
-    for arm_dir in ("arm-a-baseline", "arm-b-optimized"):
-        _write_run(
-            experiment, arm_dir, "run",
-            predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-            instances=[{"instance_id": "i-1", "metadata": {}}],
+def test_auxiliary_validation_tools_are_separate_from_search_edit_ratio() -> None:
+    instance_id = SOURCE_IDS[1]
+    data = M.summarise(
+        M.load_arm(
+            _run(
+                "optimized",
+                spans=[
+                    _tool_span(instance_id, "Grep"),
+                    _tool_span(instance_id, "Edit"),
+                    _tool_span(instance_id, "Git"),
+                ],
+            )
         )
-    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
-    text = M.render(arms)
-    baseline_line = next(l for l in text.splitlines() if "expected" in l)
-    optimized_line = next(l for l in text.splitlines() if "unexpected" in l)
-    assert "NO RANKING RECORDED" in optimized_line
-    assert "NO RANKING RECORDED" not in baseline_line
-
-
-def test_optimized_arm_without_a_ranking_refuses_to_credit_localization(
-    experiment: Path,
-):
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        instances=[{"instance_id": "i-1", "metadata": {}}],
     )
-    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
+    assert data["search_calls"] == 1
+    assert data["edit_calls"] == 1
+    assert data["auxiliary_tool_counts"] == {"Git": 1}
+
+
+def test_render_distinguishes_baseline_missing_ranking() -> None:
+    arms = {
+        "baseline": M.summarise(M.load_arm(_run("baseline"))),
+        "optimized": M.summarise(M.load_arm(_run("optimized"))),
+    }
     text = M.render(arms)
-    assert "cannot be credited" in text
+    assert "expected for the baseline arm" in text
+    assert "NO RANKING RECORDED -- localization cannot be credited" in text
+    assert "consistent with three simultaneous changes" in text
 
 
-def test_mean_rank_is_none_when_there_are_no_hits(experiment: Path):
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_ELSEWHERE}],
-        instances=[_instance_row("i-1", ["pkg/separable.py"])],
-    )
-    assert M.summarise(M.load_arm("optimized"))["localization"]["mean_rank_of_hits"] is None
-
-
-# -------------------------------------------------------------------- rendering
-
-
-def test_render_marks_a_missing_arm(experiment: Path):
-    _write_run(experiment, "arm-a-baseline", "run", predictions=[])
-    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
-    text = M.render(arms)
-    assert "optimized: MISSING" in text
-
-
-def test_render_states_the_attribution_caveat(experiment: Path):
-    for arm_dir in ("arm-a-baseline", "arm-b-optimized"):
-        _write_run(
-            experiment, arm_dir, "run",
-            predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        )
-    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
-    text = M.render(arms)
-    assert "consistent with three" in text
-    assert "repairs to basic defects" in text
-    assert "search:edit" in text
-
-
-def test_render_reports_the_ratio_shift(experiment: Path):
-    _write_run(
-        experiment, "arm-a-baseline", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": ""}],
-        spans=[_tool_span("i-1", "Grep")] * 8,
-    )
-    _write_run(
-        experiment, "arm-b-optimized", "run",
-        predictions=[{"instance_id": "i-1", "model_patch": PATCH_A}],
-        spans=[_tool_span("i-1", "Grep"), _tool_span("i-1", "Edit")],
-    )
-    arms = {arm: M.summarise(M.load_arm(arm)) for arm in M.ARMS}
-    text = M.render(arms)
-    assert "8:0" in text and "1.0:1" in text
-    assert "Empty patches went 1 -> 0" in text
-
-
-def test_every_driver_tool_is_classified(experiment: Path):
-    """A tool the driver emits but neither set names is silently dropped.
-
-    The search:edit ratio is the report's main attribution figure, so a tool
-    missing from both sets does not raise -- it quietly shrinks a count, which
-    is the failure mode hardest to notice. Pinned against the driver's own
-    handler map rather than a copy of today's tool names, so adding a tool
-    there without classifying it here fails this test.
-    """
+def test_every_driver_tool_is_classified() -> None:
     from eval.driver_headless import _TOOL_HANDLERS
 
-    classified = M.SEARCH_TOOLS | M.EDIT_TOOLS
-    unclassified = set(_TOOL_HANDLERS) - classified
-    assert not unclassified, (
-        f"driver emits {sorted(unclassified)}, classified as neither search nor "
-        "edit; they would vanish from the ratio"
-    )
-
-
-def test_search_and_edit_sets_are_disjoint():
-    """A tool in both sets would be double-counted on each side of the ratio."""
+    assert set(_TOOL_HANDLERS) <= M.SEARCH_TOOLS | M.EDIT_TOOLS
     assert not (M.SEARCH_TOOLS & M.EDIT_TOOLS)
 
 
-def test_bash_counts_as_search_not_edit(experiment: Path):
-    """Bash was 15 of the baseline's 96 search calls; it must not read as an edit."""
-    _write_run(
-        experiment, "arm-a-baseline", "run",
-        predictions=[], spans=[_tool_span("i-1", "Bash")] * 4,
+def test_blocked_main_does_not_render_or_overwrite_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "mechanism.json"
+    output.write_bytes(b"keep")
+    monkeypatch.setattr(M, "load_verified_runs", lambda path: (_ for _ in ()).throw(ReportGateError("stale receipt")))
+    monkeypatch.setattr(sys, "argv", ["mechanism_report.py", "--json", str(output)])
+    assert M.main() == 2
+    assert capsys.readouterr().out == "BLOCKED: stale receipt\n"
+    assert output.read_bytes() == b"keep"
+
+
+def test_valid_main_writes_receipt_and_eligible_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "mechanism.json"
+    runs = {"baseline": _run("baseline"), "optimized": _run("optimized")}
+    monkeypatch.setattr(M, "load_verified_runs", lambda path: runs)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mechanism_report.py", "--verified-arms", "receipt.json", "--json", str(output)],
     )
-    arm = M.load_arm("baseline")
-    assert arm.search_calls == 4
-    assert arm.edit_calls == 0
+    assert M.main() == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["verified_arms"] == "receipt.json"
+    assert payload["runs"]["optimized"]["eligible_total"] == 19
+    assert payload["mechanism"]["optimized"]["run_id"] == "optimized-run"

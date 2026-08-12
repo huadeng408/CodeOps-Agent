@@ -169,3 +169,23 @@ def test_finalize_writes_all_expected_files(tmp_path: Path) -> None:
             continue
         digest, name = line.split("  ", 1)
         assert digest == hashlib.sha256((root / name).read_bytes()).hexdigest()
+
+
+def test_manifest_persists_the_prompt_hash_used_for_pin_validation(tmp_path: Path) -> None:
+    """An auto-resolved prompt pin must not become an empty manifest field."""
+    artifacts = RunArtifacts("run-auto-prompt-pin", tmp_path)
+    config = _pinned_config()
+    config.pop("prompt_hash")
+    harness = HarnessRun(
+        run_id="run-auto-prompt-pin",
+        artifacts=artifacts,
+        adapter=FakeAdapter(),
+        config=config,
+    )
+
+    harness.run([EvalInstance(instance_id="i1", task_description="task")])
+
+    manifest = json.loads(
+        (artifacts.root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert SHA256_RE.fullmatch(manifest["prompt_hash"])

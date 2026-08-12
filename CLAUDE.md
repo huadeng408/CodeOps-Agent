@@ -28,7 +28,7 @@
 - **需要模型调用测试时**，从 `D:\Obsidian\code-autogrowth\项目进展\api-key.md` 读取 DeepSeek 官方 key，模型用 `deepseek-v4-pro`；key 只用于本地测试，不硬编码、不提交。
 - **阶段性任务完成后可自动 `git commit` 并 `git push`**，提交信息概括本轮要点，结尾附 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`。
 - **需要 Docker 时可直接隐藏启动 Docker Desktop**，无需确认；不含删除容器、volume、索引或业务数据。
-- **本地代理不通时用 Clash for Windows**（默认 `127.0.0.1:7890` HTTP 代理）：
+- **本地代理不通或卡顿时用 Clash for Windows**（默认 `127.0.0.1:7890` HTTP 代理）：
   - Windows 侧：`$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`
   - WSL 侧：`export http_proxy=http://<Windows主机IP>:7890 https_proxy=http://<Windows主机IP>:7890`（主机 IP 用 `ip route show default | awk '{print $3}'` 取）
 - **超过 15 分钟的工作（下载大文件、Docker 构建、pip install）先确认走代理是否更快**。优先在代理可达的环境下载（如 WSL 直连而非容器内），再把文件传入 Docker build context。

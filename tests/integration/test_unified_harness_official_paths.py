@@ -290,7 +290,9 @@ class TestHarnessRunAdapterIsNeverOfficialRunner:
             "BUG: HeadlessDriver references terminal_bench — re-evaluate bypass"
         )
 
-    def test_harness_run_calls_adapter_solve_instance_which_is_agent_not_scorer(self):
+    def test_harness_run_calls_adapter_solve_instance_which_is_agent_not_scorer(
+        self, tmp_path: Path
+    ):
         """HarnessRun.run() calls adapter.solve_instance() to get agent output.
         The result.model_patch is agent-generated, not officially scored."""
         from eval.harness import HarnessRun, RunArtifacts, Budget
@@ -307,7 +309,7 @@ class TestHarnessRunAdapterIsNeverOfficialRunner:
                     model_patch="agent-generated-patch",  # NOT an official score
                 )
 
-        artifacts = RunArtifacts(run_id="spy-test", root="eval_results")
+        artifacts = RunArtifacts(run_id="spy-test", root=tmp_path)
         harness = HarnessRun(
             run_id="spy-test",
             artifacts=artifacts,

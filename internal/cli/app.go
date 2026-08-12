@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,7 +142,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	orchestratorClient.SetTracer(telemetry)
 	executor.SetTracer(telemetry)
 
-	return &App{
+	app := &App{
 		cfg:            cfg,
 		input:          NewInputBuffer(stdin, stdout),
 		renderer:       NewStreamRenderer(stdout),
@@ -167,6 +168,11 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		instructions:   instructions,
 		telemetry:      telemetry,
 	}
+	app.input.SetInterruptHandler(func() bool {
+		return app.handleInterrupt(time.Now(), func() {})
+	})
+	app.input.SetWorkspaceDir(cfg.WorkingDir)
+	return app
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -263,7 +269,7 @@ func (a *App) Run(ctx context.Context) error {
 		if strings.HasPrefix(reply, "[orchestrator") || strings.HasPrefix(reply, "[blocked") {
 			a.renderer.PrintAssistant(reply)
 		}
-		a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
+		a.renderer.PrintStatus(a.status.FormatWidth(a.metrics.Snapshot(), "status", a.renderer.Width()))
 	}
 }
 
@@ -564,7 +570,7 @@ func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCal
 		parametersJSON = truncateForMetadata(parametersJSON, 360)
 	}
 	if a.renderer != nil {
-		a.renderer.PrintPermission(PermissionView{Tool: call.Name, Reason: "requires approval", Parameters: parametersJSON})
+		a.renderer.PrintPermission(PermissionView{Tool: call.Name, Reason: "requires approval", Parameters: parametersJSON, AllowSession: a.permissions.Level(call.Name) == permission.AskSession})
 	}
 
 	answer, err := a.input.ReadLine(ctx)
@@ -576,7 +582,7 @@ func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCal
 
 func isApprovalAnswer(answer string) bool {
 	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "y", "yes", "allow", "approve", "ok":
+	case "y":
 		return true
 	default:
 		return false
@@ -607,9 +613,9 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	if event.ToolProgress != nil {
 		progress := event.ToolProgress
 		if strings.EqualFold(progress.Phase, "start") || strings.EqualFold(progress.Phase, "started") || strings.EqualFold(progress.Phase, "running") {
-			a.renderer.ToolStarted(progress.ToolName, "")
+			a.renderer.ToolStartedWithID(progress.ToolCallID, progress.ToolName, "")
 		} else {
-			a.renderer.ToolCompleted(ToolEvent{Name: progress.ToolName, ExitCode: int(progress.ExitCode), Detail: progress.Error, Truncated: progress.Truncated})
+			a.renderer.ToolCompleted(ToolEvent{ToolCallID: progress.ToolCallID, Name: progress.ToolName, ExitCode: int(progress.ExitCode), Error: progress.Error, Detail: progress.Error, Truncated: progress.Truncated})
 		}
 	}
 
@@ -790,12 +796,12 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.session.SetUndo(sessionUndoEntries(a.undo.List()))
 		a.renderer.PrintLine("reverted: " + entry.Description)
 	case "/diff":
-		lines, err := a.worktree.DiffLines(ctx)
+		summary, err := a.gatherDiffSummary(ctx)
 		if err != nil {
 			a.renderer.PrintLine("diff failed: " + err.Error())
 			return true
 		}
-		a.renderer.PrintBlock("diff", lines)
+		a.renderer.PrintDiff(summary)
 	case "/worktree":
 		a.handleWorktreeCommand(fields)
 	case "/resume":
@@ -853,6 +859,56 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	return true
 }
 
+func (a *App) gatherDiffSummary(ctx context.Context) (DiffSummary, error) {
+	root := strings.TrimSpace(a.cfg.ProjectRoot)
+	if root == "" {
+		root = strings.TrimSpace(a.cfg.WorkingDir)
+	}
+	if root == "" {
+		root = "."
+	}
+
+	numstat, err := runGit(ctx, root, "diff", "HEAD", "--numstat", "--")
+	if err != nil {
+		return DiffSummary{}, err
+	}
+	status, err := runGit(ctx, root, "status", "--short", "--untracked-files=all")
+	if err != nil {
+		return DiffSummary{}, err
+	}
+
+	summary := DiffSummary{}
+	files := map[string]struct{}{}
+	for _, line := range strings.Split(strings.TrimSpace(numstat), "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "\t", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		if added, parseErr := strconv.Atoi(fields[0]); parseErr == nil {
+			summary.Added += added
+		}
+		if removed, parseErr := strconv.Atoi(fields[1]); parseErr == nil {
+			summary.Removed += removed
+		}
+		files[fields[2]] = struct{}{}
+	}
+
+	statusLines := strings.Split(strings.TrimRight(status, "\r\n"), "\n")
+	for _, line := range statusLines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) > 3 {
+			files[strings.TrimSpace(line[3:])] = struct{}{}
+		}
+		summary.Lines = append(summary.Lines, line)
+	}
+	sort.Strings(summary.Lines)
+	summary.Files = len(files)
+	return summary, nil
+}
+
 func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 	if a.skills == nil {
 		a.renderer.PrintLine("skills are not available")
@@ -879,7 +935,7 @@ func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 	if strings.HasPrefix(reply, "[orchestrator") || strings.HasPrefix(reply, "[blocked") {
 		a.renderer.PrintAssistant(reply)
 	}
-	a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
+	a.renderer.PrintStatus(a.status.FormatWidth(a.metrics.Snapshot(), "status", a.renderer.Width()))
 }
 
 func buildSkillInput(skill skills.Skill, args string) string {
@@ -941,7 +997,7 @@ func (a *App) runCommitCommand(ctx context.Context) {
 		return
 	}
 	a.renderer.PrintLine("Suggestion only — review the message and run `git commit` manually.")
-	a.renderer.PrintStatus(a.status.Format(a.metrics.Snapshot()))
+	a.renderer.PrintStatus(a.status.FormatWidth(a.metrics.Snapshot(), "status", a.renderer.Width()))
 }
 
 // gatherCommitDiff 收集提交信息所需的素材：status 用于判定是否存在改动并统计文件数，
