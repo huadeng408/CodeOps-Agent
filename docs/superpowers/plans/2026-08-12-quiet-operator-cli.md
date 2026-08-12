@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `App`, `InputBuffer`, and orchestrator behavior intact. Add injected terminal capabilities and a semantic, mutex-protected renderer that owns text safety, cell-width wrapping, one ephemeral tool row, and compact status layout; migrate only presentation call sites.
 
-**Tech Stack:** Go 1.25, `golang.org/x/term`, `github.com/mattn/go-runewidth`, standard ANSI sequences, existing Go/Python test suites.
+**Tech Stack:** Go 1.25, `golang.org/x/term`, `github.com/mattn/go-runewidth`, `github.com/clipperhouse/uax29/v2` for explicit grapheme iteration, standard ANSI sequences, existing Go/Python test suites.
 
 ---
 
@@ -26,7 +26,8 @@
 - Modify `internal/cli/app_permission_test.go`: integration assertions for permission and AskUser grammar.
 - Create `internal/cli/renderer_integration_test.go`: real OS pipe transcript and cursor-control assertions.
 - Create `cmd/cli-preview/main.go`: deterministic real-renderer states for Windows visual acceptance.
-- Modify `go.mod` and `go.sum`: add `go-runewidth` only.
+- Modify `go.mod` and `go.sum`: add `go-runewidth` and its UAX29 grapheme
+  iterator as direct dependencies of the text boundary.
 - Modify `docs/PROGRESS-2026-08-12.md` and `D:/Obsidian/code-autogrowth/私人/localcode/PROGRESS-2026-08-12.md`: exact implementation and release evidence.
 
 ### Task 1: Terminal capabilities
