@@ -3,12 +3,14 @@ module code-agent
 go 1.25.0
 
 require (
+	github.com/clipperhouse/uax29/v2 v2.2.0
 	github.com/elastic/go-elasticsearch/v8 v8.19.0
 	github.com/gin-gonic/gin v1.11.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/mattn/go-runewidth v0.0.19
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/segmentio/kafka-go v0.4.49
 	github.com/spf13/viper v1.21.0
