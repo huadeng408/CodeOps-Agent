@@ -45,7 +45,7 @@ func TestHandleToolCallPromptsAndApprovesAskSessionTool(t *testing.T) {
 	if got := app.permissions.Check("Write", nil); got != permission.Approve {
 		t.Fatalf("Write should be approved for the session, got %v", got)
 	}
-	if !strings.Contains(out.String(), "permission required") {
+	if !strings.Contains(out.String(), "Permission required") || !strings.Contains(out.String(), "[1] Allow once") || !strings.Contains(out.String(), "[Esc] Deny") {
 		t.Fatalf("permission prompt was not rendered: %q", out.String())
 	}
 }
@@ -86,7 +86,7 @@ func TestHandleAskUserRequestSelectsOption(t *testing.T) {
 	if result.ToolName != "AskUser" || result.ToolCallID != "ask-1" || result.Output != "beta" || result.ExitCode != 0 {
 		t.Fatalf("unexpected ask user result: %+v", result)
 	}
-	if !strings.Contains(out.String(), "ask user") || !strings.Contains(out.String(), "1. alpha") || !strings.Contains(out.String(), "2. beta") {
+	if !strings.Contains(out.String(), "Question") || !strings.Contains(out.String(), "[1] alpha") || !strings.Contains(out.String(), "[2] beta") {
 		t.Fatalf("ask user prompt was not rendered: %q", out.String())
 	}
 }
@@ -128,7 +128,7 @@ func TestHandleInterruptCancelsCurrentTurn(t *testing.T) {
 	if stopped {
 		t.Fatal("first interrupt should not stop the app")
 	}
-	if !strings.Contains(out.String(), "Interrupted") {
+	if !strings.Contains(out.String(), "[interrupted] Ready for new instructions.") {
 		t.Fatalf("interrupt prompt was not rendered: %q", out.String())
 	}
 }

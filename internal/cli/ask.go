@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -20,10 +19,8 @@ func (a *App) handleAskUserRequest(ctx context.Context, request *codeagentpb.Ask
 		return orchestrator.ToolResult{}, errors.New("input is not available")
 	}
 
-	lines := []string{
-		"question: " + strings.TrimSpace(request.GetQuestion()),
-	}
 	options := request.GetOptions()
+	viewOptions := make([]QuestionOption, 0, len(options))
 	for idx, option := range options {
 		if option == nil {
 			continue
@@ -32,24 +29,11 @@ func (a *App) handleAskUserRequest(ctx context.Context, request *codeagentpb.Ask
 		if label == "" {
 			continue
 		}
-		line := fmt.Sprintf("%d. %s", idx+1, label)
-		if description := strings.TrimSpace(option.GetDescription()); description != "" {
-			line += " - " + description
-		}
-		lines = append(lines, line)
-		if preview := strings.TrimSpace(option.GetPreview()); preview != "" {
-			lines = append(lines, "   preview: "+truncateForMetadata(preview, 120))
-		}
-	}
-	if request.GetMultiSelect() {
-		lines = append(lines, "selection: enter comma-separated choices or free-form text")
-	} else if len(options) > 0 {
-		lines = append(lines, "selection: enter a choice number, label, or free-form text")
-	} else {
-		lines = append(lines, "selection: enter a response")
+		_ = idx
+		viewOptions = append(viewOptions, QuestionOption{Label: label, Description: strings.TrimSpace(option.GetDescription()), Preview: truncateForMetadata(strings.TrimSpace(option.GetPreview()), 120)})
 	}
 	if a.renderer != nil {
-		a.renderer.PrintBlock("ask user", lines)
+		a.renderer.PrintQuestion(QuestionView{Question: strings.TrimSpace(request.GetQuestion()), Options: viewOptions, MultiSelect: request.GetMultiSelect()})
 	}
 
 	answer, err := a.input.ReadLine(ctx)

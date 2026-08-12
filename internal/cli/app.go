@@ -324,33 +324,28 @@ func (a *App) handleInterrupt(now time.Time, stop context.CancelFunc) bool {
 		return true
 	}
 	if a.renderer != nil {
-		a.renderer.PrintLine("")
-		a.renderer.PrintLine("[Interrupted. You can give new instructions.]")
+		a.renderer.PrintInterrupted()
 	}
 	return false
 }
 
 func (a *App) renderBootstrap() {
-	a.renderer.Separator()
-	a.renderer.PrintBlock("code-agent", []string{
-		"model: " + a.cfg.Model,
-		"context window: " + fmt.Sprint(a.cfg.ContextWindow),
-		"workspace: " + a.cfg.WorkingDir,
-		"orchestrator: " + a.cfg.OrchestratorAddr,
-		"instructions: " + fmt.Sprint(len(a.instructions)),
-		"mcp servers: " + fmt.Sprint(len(a.mcp.Snapshot())),
+	a.renderer.PrintBootstrap(BootstrapView{
+		Version:   "v0.1",
+		Branch:    currentBranch(a.cfg.WorkingDir),
+		Workspace: a.cfg.WorkingDir,
+		Mode:      "chat",
+		Model:     a.cfg.Model,
 	})
-	if len(a.instructions) > 0 {
-		lines := make([]string, 0, len(a.instructions))
-		for _, instruction := range a.instructions {
-			lines = append(lines, filepath.Base(instruction.Path))
-		}
-		a.renderer.PrintBlock("loaded AGENT.md", lines)
+	a.renderer.PrintLine("/help | /ingest | /diff | /plan")
+}
+
+func currentBranch(root string) string {
+	branch, err := runGit(context.Background(), root, "branch", "--show-current")
+	if err != nil || strings.TrimSpace(branch) == "" {
+		return "-"
 	}
-	a.renderer.PrintBlock("commands", []string{
-		"/help", "/plan", "/compact", "/clear", "/config", "/budget", "/memory", "/sessions", "/tasks", "/undo", "/diff", "/worktree", "/resume", "/skills", "/init", "/review", "/security-review", "/commit", "/ingest",
-	})
-	a.renderer.Separator()
+	return strings.TrimSpace(branch)
 }
 
 func (a *App) handleUserInput(ctx context.Context, input string) string {
@@ -559,10 +554,6 @@ func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCal
 		return false, errors.New("input is not available")
 	}
 
-	lines := []string{
-		"tool: " + call.Name,
-		"required permission: " + fmt.Sprint(call.RequiredPermission),
-	}
 	parametersJSON := strings.TrimSpace(call.ParametersJSON)
 	if parametersJSON == "" && len(params) > 0 {
 		if data, err := json.Marshal(params); err == nil {
@@ -570,11 +561,10 @@ func (a *App) confirmToolApproval(ctx context.Context, call orchestrator.ToolCal
 		}
 	}
 	if parametersJSON != "" {
-		lines = append(lines, "parameters: "+truncateForMetadata(parametersJSON, 360))
+		parametersJSON = truncateForMetadata(parametersJSON, 360)
 	}
-	lines = append(lines, "approve this tool call? [y/N]")
 	if a.renderer != nil {
-		a.renderer.PrintBlock("permission required", lines)
+		a.renderer.PrintPermission(PermissionView{Tool: call.Name, Reason: "requires approval", Parameters: parametersJSON})
 	}
 
 	answer, err := a.input.ReadLine(ctx)
@@ -615,7 +605,12 @@ func hooksCancelled(results []hooks.Result) bool {
 func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Event) {
 	_ = ctx
 	if event.ToolProgress != nil {
-		a.renderer.PrintLine(formatToolProgress(event.ToolProgress))
+		progress := event.ToolProgress
+		if strings.EqualFold(progress.Phase, "start") || strings.EqualFold(progress.Phase, "started") || strings.EqualFold(progress.Phase, "running") {
+			a.renderer.ToolStarted(progress.ToolName, "")
+		} else {
+			a.renderer.ToolCompleted(ToolEvent{Name: progress.ToolName, ExitCode: int(progress.ExitCode), Detail: progress.Error, Truncated: progress.Truncated})
+		}
 	}
 
 	if event.SessionMeta != nil {

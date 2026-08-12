@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"code-agent/internal/metrics"
 )
@@ -13,6 +14,10 @@ func NewStatusLine() *StatusLine {
 }
 
 func (s *StatusLine) Format(snapshot metrics.SessionMetrics) string {
+	return s.FormatWidth(snapshot, "status", 80)
+}
+
+func (s *StatusLine) FormatWidth(snapshot metrics.SessionMetrics, mode string, width int) string {
 	cachePart := ""
 	if snapshot.TotalCachedTokens > 0 {
 		ratio := 0.0
@@ -21,13 +26,17 @@ func (s *StatusLine) Format(snapshot metrics.SessionMetrics) string {
 		}
 		cachePart = fmt.Sprintf("  cache %d (%.0f%%)", snapshot.TotalCachedTokens, ratio*100)
 	}
-	return fmt.Sprintf("status  tokens %d in / %d out%s  cost $%.4f  tools %d  turns %d  errors %d",
-		snapshot.TotalTokensIn,
-		snapshot.TotalTokensOut,
-		cachePart,
-		snapshot.TotalCost,
-		snapshot.ToolCalls,
-		snapshot.Turns,
-		snapshot.Errors,
-	)
+	fields := []string{
+		strings.TrimSpace(mode),
+		fmt.Sprintf("errors %d", snapshot.Errors),
+		fmt.Sprintf("tokens %d in / %d out%s", snapshot.TotalTokensIn, snapshot.TotalTokensOut, cachePart),
+		fmt.Sprintf("cost $%.4f", snapshot.TotalCost),
+		fmt.Sprintf("tools %d", snapshot.ToolCalls),
+		fmt.Sprintf("turns %d", snapshot.Turns),
+		"/help",
+	}
+	for len(fields) > 2 && cellWidth(strings.Join(fields, " | ")) > width {
+		fields = fields[:len(fields)-1]
+	}
+	return strings.Join(fields, " | ")
 }
