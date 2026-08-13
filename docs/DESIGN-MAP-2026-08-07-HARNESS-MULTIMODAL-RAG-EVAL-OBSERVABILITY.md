@@ -3395,3 +3395,29 @@ receipt; a real runner must still exercise the full contract.
   stable `document_id/page_id/element_id/bbox` qrels and human review. The
   current 120-row DocVQA page pilot and ScreenSpot-Pro GUI grounding must stay
   separate from that requirement.
+
+## 52. WebSRC structural-evidence candidate qualification (2026-08-14)
+
+- **VERIFIED (source qualification only)**: `X-LANCE/WebSRC_v1.0` is public,
+  ungated, and declares `CC-BY-4.0` at Hugging Face revision
+  `7aa0bc6efc7ef43f68c192e2091108541acbaf1a`. Its upstream repository is
+  public at commit `50695bca882e3779f48f0eedea3ad88b84f3839f` (repository code
+  license MIT). The dataset card, not the repository code license, is the
+  license authority for dataset use.
+- **VERIFIED (schema qualification only)**: a sampled page binds
+  `dataset.csv.question` and `dataset.csv.element_id` to the same page's
+  `processed_data/<page>.json`, where the element key carries `rect.x`,
+  `rect.y`, `rect.width`, and `rect.height`; sibling HTML and PNG assets provide
+  structure and visual context. This supports a separately versioned
+  `question/page/element/bbox` structural-web evidence lane without inventing
+  a bbox from answer text.
+- **NOT APPLICABLE to the PDF gate**: WebSRC is a screenshot-plus-HTML web
+  reading-comprehension corpus, not a PDF/document corpus processed by MinerU.
+  It must not be merged with DocVQA, ViDoRe, ScreenSpot-Pro, PDF RAG reports,
+  or used to pass the document-native visual alias gate.
+- **Next gate before materialization**: define a separate source manifest and
+  deterministic converter, then test a fixed stratified public sample against
+  raw `dataset.csv`, JSON rects, PNG dimensions, and HTML element ids. The
+  receipt must include source/revision/tree hashes, source license, selected
+  ids, rejected zero-area/yes-no elements, and `pdf_rag_gate=NOT_APPLICABLE`.
+  No production corpus or alias may ingest these assets.
