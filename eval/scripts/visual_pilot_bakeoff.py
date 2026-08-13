@@ -59,12 +59,35 @@ def main(argv: list[str] | None = None) -> int:
             "status": "SCORED" if source else "NOT_RUN",
             "source": str(Path(source).resolve()) if source else "",
         })
-    bbox_labeled_qrels = sum(1 for qrel in qrels if qrel.bbox is not None)
+    qrels_with_page = sum(1 for qrel in qrels if qrel.page_id)
+    bbox_labeled_qrels = sum(
+        1 for qrel in qrels if qrel.element_id and qrel.bbox is not None
+    )
+    evidence_status = (
+        "COMPLETE_ELEMENT_BBOX"
+        if qrels and bbox_labeled_qrels == len(qrels)
+        else "PARTIAL_PAGE_LEVEL"
+        if qrels_with_page
+        else "INVALID"
+    )
+    bbox_status = (
+        "SCORED"
+        if evidence_status == "COMPLETE_ELEMENT_BBOX"
+        else "PARTIAL"
+        if bbox_labeled_qrels
+        else "NOT_APPLICABLE"
+    )
     report = {
         "qrels": str(Path(args.qrels).resolve()),
         "query_count": len({q.query_id for q in qrels}),
         "paths": paths,
-        "bbox": {"status": "SCORED" if bbox_labeled_qrels else "NOT_APPLICABLE", "labeled_qrels": bbox_labeled_qrels},
+        "evidence": {
+            "status": evidence_status,
+            "qrels_total": len(qrels),
+            "qrels_with_page": qrels_with_page,
+            "qrels_with_element_bbox": bbox_labeled_qrels,
+        },
+        "bbox": {"status": bbox_status, "labeled_qrels": bbox_labeled_qrels},
         "gpu_required": False,  # scoring is offline; encoding happens upstream
         "alias_created": False,
     }

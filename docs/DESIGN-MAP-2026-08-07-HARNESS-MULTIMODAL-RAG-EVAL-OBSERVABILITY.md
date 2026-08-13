@@ -3373,3 +3373,25 @@ receipt; a real runner must still exercise the full contract.
   gap remains public question/page/evidence/bbox qrels with a license that
   permits the required use. ScreenSpot-Pro remains a separate GUI grounding
   lane and cannot fill this document-RAG gap.
+
+## 51. Multimodal evaluation qualification audit (2026-08-14)
+
+- `VERIFIED`: the existing DocVQA public-120 receipts are genuine
+  `vidore/docvqa_test_subsampled` human-labeled page-level data with pinned
+  revision `49bf8f13e13c41dd8cdb0cae5314e31c1da1e0d6` and MIT metadata. Their
+  qrels contain `query_id`, question, `document_id`, and `page_id`, but no
+  `element_id` or `bbox`; the report correctly had `bbox.status=NOT_APPLICABLE`.
+  They qualify for page retrieval nDCG/Recall/MRR only, not document-native
+  element evidence or bbox grounding.
+- `IMPLEMENTED`: `eval.scripts.visual_pilot_bakeoff` now emits an explicit
+  `evidence` coverage object. It reports `COMPLETE_ELEMENT_BBOX` only when
+  every qrel has both an element id and bbox; mixed data is
+  `PARTIAL_PAGE_LEVEL`, and bbox status becomes `PARTIAL` rather than
+  `SCORED`. This prevents a few labeled rows from masking an incomplete set.
+- `VERIFIED`: the qualification behavior is covered by the visual bake-off
+  tests. No existing public results are reclassified silently; future reports
+  carry the coverage status at generation time.
+- Remaining evaluation gap: a license-clear, document-native public set with
+  stable `document_id/page_id/element_id/bbox` qrels and human review. The
+  current 120-row DocVQA page pilot and ScreenSpot-Pro GUI grounding must stay
+  separate from that requirement.
