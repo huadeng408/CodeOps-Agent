@@ -29,13 +29,19 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.baggage.propagation import W3CBaggagePropagator
+
 from eval.adapter import DefaultAgentAdapter, EvalInstance, EvalResult
 from eval.harness.trace_contract import SPAN_EXECUTE_TOOL, SPAN_INVOKE_AGENT
+from eval.harness.trace_join import current_join_attributes
 from orchestrator.rag.trace import otel_span
 
 
@@ -90,7 +96,7 @@ class LocalToolExecutor:
     :class:`~orchestrator.runtime.conversation.ConversationRunner` without a
     gRPC round-trip.
 
-    Supported tools: Read, Write, Edit, Bash, Glob, Grep.
+    Supported tools: Read, Write, Edit, Bash, Glob, Grep, SearchKnowledge.
     Unsupported tools return a stub error so the LLM can adapt.
     """
 
@@ -408,6 +414,121 @@ class LocalToolExecutor:
         output, truncated = self._truncate(output)
         return _LocalToolResult(output=output, truncated=truncated)
 
+    def _search_knowledge(self, params: dict[str, Any]) -> _LocalToolResult:
+        """Call the real internal Go RAG endpoint for a tool request.
+
+        This handler intentionally owns no retrieval implementation or fixture
+        fallback.  A missing configuration, failed HTTP call, or malformed
+        envelope is a tool error, so an O3 candidate cannot manufacture RAG
+        evidence from a local stand-in.
+        """
+        query = str(params.get("query", "")).strip()
+        if not query:
+            return _LocalToolResult(error="SearchKnowledge query must not be blank", exit_code=1)
+
+        server_url = os.environ.get("CODE_AGENT_RAG_SERVER_URL", "").strip().rstrip("/")
+        internal_secret = os.environ.get("CODE_AGENT_RAG_INTERNAL_SECRET", "").strip()
+        user_id_text = os.environ.get("CODE_AGENT_RAG_USER_ID", "").strip()
+        org_tag = os.environ.get("CODE_AGENT_RAG_ORG_TAG", "").strip()
+        if not server_url:
+            return _LocalToolResult(error="CODE_AGENT_RAG_SERVER_URL must be set", exit_code=1)
+        if not internal_secret:
+            return _LocalToolResult(error="CODE_AGENT_RAG_INTERNAL_SECRET must be set", exit_code=1)
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            user_id = 0
+        if user_id <= 0:
+            return _LocalToolResult(error="CODE_AGENT_RAG_USER_ID must be a positive integer", exit_code=1)
+
+        join = current_join_attributes()
+        run_id = join.get("eval.run_id", "")
+        if not run_id:
+            return _LocalToolResult(error="SearchKnowledge requires eval.run_id context", exit_code=1)
+
+        payload = {
+            "user": {"id": user_id, "orgTags": org_tag, "primaryOrg": org_tag},
+            "query": query,
+            "topK": 5,
+            "mode": "hybrid",
+            "disableRerank": False,
+            "runId": run_id,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Token": internal_secret,
+        }
+        try:
+            TraceContextTextMapPropagator().inject(headers)
+            W3CBaggagePropagator().inject(headers)
+        except Exception as exc:  # noqa: BLE001 - fail closed for O3 evidence
+            return _LocalToolResult(
+                error=f"SearchKnowledge cannot propagate OTel context: {exc}",
+                exit_code=1,
+            )
+        if not headers.get("traceparent"):
+            return _LocalToolResult(
+                error="SearchKnowledge requires an active W3C trace context",
+                exit_code=1,
+            )
+        request = urllib.request.Request(
+            f"{server_url}/internal/orchestrator/knowledge-search",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if not 200 <= response.status < 300:
+                    return _LocalToolResult(
+                        error=f"SearchKnowledge service returned HTTP {response.status}",
+                        exit_code=1,
+                    )
+                envelope = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            return _LocalToolResult(error=f"SearchKnowledge request failed: {exc}", exit_code=1)
+
+        if not isinstance(envelope, dict) or not 200 <= int(envelope.get("code", 0)) < 300:
+            return _LocalToolResult(error="SearchKnowledge response envelope is invalid", exit_code=1)
+        data = envelope.get("data")
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            return _LocalToolResult(error="SearchKnowledge response is missing results", exit_code=1)
+
+        # O3 requires at least one real, attributable retrieval hit.  An empty
+        # result set cannot support a claim that the agent used this corpus.
+        if not results:
+            return _LocalToolResult(
+                error="SearchKnowledge response has no stable hit",
+                exit_code=1,
+            )
+
+        lines: list[str] = []
+        for rank, item in enumerate(results, start=1):
+            if not isinstance(item, dict):
+                continue
+            document_id = str(item.get("documentId", "")).strip()
+            chunk_id = str(item.get("chunkId", "")).strip()
+            if not document_id or not chunk_id:
+                continue
+            lines.append(
+                "[rank {rank}] document={document} chunk={chunk} score={score}\n{text}".format(
+                    rank=rank,
+                    document=document_id,
+                    chunk=chunk_id,
+                    score=str(item.get("score", "")),
+                    text=str(item.get("textContent", "")),
+                )
+            )
+        if not lines:
+            return _LocalToolResult(
+                error="SearchKnowledge response has no stable hit",
+                exit_code=1,
+            )
+        output, truncated = self._truncate("\n\n".join(lines) if lines else "(no results)")
+        return _LocalToolResult(output=output, truncated=truncated)
+
 
 # Tool name -> handler mapping
 _TOOL_HANDLERS: dict[str, str] = {
@@ -417,6 +538,7 @@ _TOOL_HANDLERS: dict[str, str] = {
     "Bash": "_bash",
     "Glob": "_glob",
     "Grep": "_grep",
+    "SearchKnowledge": "_search_knowledge",
 }
 
 
