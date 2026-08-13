@@ -109,8 +109,22 @@ def test_terminalbench_agent_uses_responses_wire_api_without_chat_completion(mon
     monkeypatch.setattr("openai.OpenAI", lambda **kwargs: FakeClient())
     agent = DeepSeekTBAgent(model="gpt-5.6-sol", wire_api="responses", api_key="x", base_url="https://example.test/v1")
 
-    output, tokens_in, tokens_out = agent._request_commands("do the task")
+    output, tokens_in, tokens_out = agent._request_commands(
+        "do the task", "return only a bash command block"
+    )
 
     assert output.startswith("```bash")
     assert (tokens_in, tokens_out) == (7, 9)
-    assert calls == [("responses", {"model": "gpt-5.6-sol", "input": "do the task", "max_output_tokens": 4096})]
+    assert calls == [
+        (
+            "responses",
+            {
+                "model": "gpt-5.6-sol",
+                "input": [
+                    {"role": "developer", "content": "return only a bash command block"},
+                    {"role": "user", "content": "Task:\n\ndo the task"},
+                ],
+                "max_output_tokens": 4096,
+            },
+        )
+    ]

@@ -126,7 +126,10 @@ class DeepSeekTBAgent(BaseAgent):
         if self._wire_api == "responses":
             response = client.responses.create(
                 model=self._model,
-                input=instruction,
+                input=[
+                    {"role": "developer", "content": system_prompt},
+                    {"role": "user", "content": f"Task:\n\n{instruction}"},
+                ],
                 max_output_tokens=4096,
             )
             usage = getattr(response, "usage", None)
