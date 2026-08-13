@@ -2942,3 +2942,48 @@ hashes, then passed after the library-level contract was enforced.
 snapshot fields only. A future O3 live verifier must independently fetch an ES
 snapshot and compare those values before the design map may call live index
 drift detected.
+
+## 38. Real GPT-5.6 Sol relay review run (2026-08-13)
+
+The user authorized the project to use the self-operated BeeAPI OpenAI relay
+configured in `D:\Obsidian\code-autogrowth\项目进展\api-key.md`. The run requested
+`gpt-5.6-sol` through `https://beeapi.ai/v1` against the live
+`knowledge_base_current` Elasticsearch alias. The credential was process-only:
+it was not printed, copied into the repository, or written to review artifacts.
+
+Eight fixed shards ran both independent review prompts with immediate sidecar
+writes. The 20-minute watchdog stopped one slow shard after upstream 429/504
+responses; the sole missing `py-q015` pass-B row was resumed separately. Final
+membership is 180/180 unique qids for each pass and 180 arbitrated rows.
+
+The versioned evidence tree is
+`data/eval/techdocs/reviews/beeapi-openai-relay-20260813/`:
+
+- `qrels.sol-review-pass-a.jsonl`
+- `qrels.sol-review-pass-b.jsonl`
+- `qrels.sol-review-arbitrated.jsonl`
+- `summary.json`
+
+The honest result is 27 `AI_REVIEWED` and 153 `DISPUTED`. Pass A contains 27
+failed calls and pass B 72; parse failures and exhausted 429 retries remain
+disputed by construction. The response-side reported model observed in valid
+calls is `gpt-5.6-sol`. This run does not overwrite the original qrels, does not
+create `HUMAN_REVIEWED`, and does not fabricate an Ed25519 production
+attestation. Release remains blocked by insufficient golden rows and negative
+coverage, 153 unresolved rows, the empty hidden holdout, absent human review,
+and the not-yet-configured production signing chain.
+
+## 39. Relay concurrency contract (2026-08-13)
+
+BeeAPI rejects aggregate concurrency above 10 with HTTP 429. The Sol review
+entry points therefore enforce `1 <= concurrency <= 10`, with a default of 1.
+Values above 10 fail before any model call. Concurrent execution is batched and
+sidecar writes preserve input order, keeping evidence reproducible even when
+responses finish out of order.
+
+This is a host-wide operational limit, not merely a per-process suggestion.
+When multiple shards or review processes are launched, their configured worker
+counts must sum to at most 10. Retry-heavy remediation runs should use a lower
+total and bounded exponential backoff. A 429 or exhausted retry remains a
+failed pass and therefore `DISPUTED`; concurrency control must never be used to
+reinterpret transport failure as a valid negative or successful review.

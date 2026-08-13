@@ -117,5 +117,6 @@
 - Record every meaningful RAG milestone in both `docs/PROGRESS-YYYY-MM-DD.md` and `D:\Obsidian\code-autogrowth\私人\localcode\PROGRESS-YYYY-MM-DD.md` before handoff or push.
 - State `DESIGNED`, `IMPLEMENTED`, `VERIFIED`, and `BLOCKED` precisely, including commands, current MySQL/ES/MinIO counts, unfinished plans, and rollback boundaries.
 - All PDF entry points use MinerU in explicit OCR mode. Tika is limited to non-PDF office documents such as DOCX, PPTX, and XLSX.
+- BeeAPI/OpenAI relay concurrency is capped at 10 in-flight requests across all local processes and shards combined. Prefer a lower value for retry-heavy review runs. Never bypass the CLI limit by launching shards whose aggregate concurrency exceeds 10; HTTP 429 responses must be retried with backoff or left fail-closed.
 - GPT-5.6 Sol 复核必须标记为 `AI_REVIEWED` 或 `DISPUTED`，不得生成真人 `reviewer_hash` 或冒充真人复核；只有真实人工参与后才可标记 `HUMAN_REVIEWED`。
 - Do not claim the multimodal corpus complete until the design map's data, qrels, index, visual bake-off, observability, and explicit integration gates pass.

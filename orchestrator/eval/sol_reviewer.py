@@ -52,6 +52,8 @@ ES_INDEX_DEFAULT: str = "knowledge_base_v2_bge_m3"
 ES_URL_DEFAULT: str = "http://127.0.0.1:9200"
 MAX_EVIDENCE_CHARS_DEFAULT: int = 6000
 EVIDENCE_CHUNK_TRUNCATE: int = 2000
+RELAY_CONCURRENCY_DEFAULT: int = 1
+RELAY_CONCURRENCY_MAX: int = 10
 
 # Query type labels used in prompts.
 _QUERY_TYPE_LABELS: dict[str, str] = {
@@ -844,8 +846,29 @@ async def run_pass(
     revision: str,
     resume: bool = True,
     max_evidence_chars: int = MAX_EVIDENCE_CHARS_DEFAULT,
+    concurrency: int = RELAY_CONCURRENCY_DEFAULT,
 ) -> dict[str, PassVerdict]:
     """Run all reviews for one pass, writing sidecar rows incrementally."""
+    if not 1 <= concurrency <= RELAY_CONCURRENCY_MAX:
+        raise ValueError(
+            f"concurrency must be between 1 and {RELAY_CONCURRENCY_MAX}"
+        )
+    if concurrency > 1:
+        return await _run_pass_concurrent(
+            client=client,
+            pass_id=pass_id,
+            qrels=qrels,
+            queries=queries,
+            es_url=es_url,
+            index=index,
+            out_path=out_path,
+            model=model,
+            revision=revision,
+            resume=resume,
+            max_evidence_chars=max_evidence_chars,
+            concurrency=concurrency,
+        )
+
     # Determine already-complete query_ids for resume
     completed: set[str] = set()
     if resume:
@@ -943,6 +966,123 @@ async def run_pass(
             f"[{pass_id}] {status} {qid} ({i+1}/{len(worklist)}) "
             f"c={verdict.confidence:.2f} r={verdict.relevance_correct}"
         )
+
+    return results
+
+
+async def _run_pass_concurrent(
+    client: OpenAIClient,
+    pass_id: str,
+    qrels: list[dict[str, Any]],
+    queries: dict[str, str],
+    es_url: str,
+    index: str,
+    out_path: str,
+    model: str,
+    revision: str,
+    resume: bool,
+    max_evidence_chars: int,
+    concurrency: int,
+) -> dict[str, PassVerdict]:
+    """Review stable batches while keeping relay requests at or below ten."""
+    sidecar = load_sidecar(out_path) if resume else {}
+    if not resume:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("", encoding="utf-8")
+
+    worklist = list(qrels)
+    if pass_id == "B":
+        rng = random.Random(PASS_B_SEED)
+        rng.shuffle(worklist)
+
+    results: dict[str, PassVerdict] = {}
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for i, qrel in enumerate(worklist):
+        qid = str(qrel["query_id"])
+        if qid in sidecar:
+            results[qid] = _row_to_verdict(sidecar[qid], qid, pass_id)
+            print(f"[{pass_id}] resume skip {qid} ({i+1}/{len(worklist)})")
+        else:
+            pending.append((i, qrel))
+
+    async def _review_qrel(
+        qrel: dict[str, Any],
+    ) -> tuple[PassVerdict, str | None]:
+        qid = str(qrel["query_id"])
+        query_text = queries.get(qid, "")
+        if not query_text:
+            return PassVerdict(
+                query_id=qid,
+                pass_id=pass_id,
+                failed=True,
+                fail_reason="missing_query",
+                answerable=False,
+                language_correct=False,
+                query_type_correct=False,
+                relevance_correct=False,
+                section_correct=False,
+                evidence_sufficient=False,
+                contamination_risk="none",
+                confidence=0.0,
+                prompt_hash="",
+                evidence_refs=(),
+            ), None
+
+        doc_id = str(qrel.get("document_id", ""))
+        section = list(qrel.get("section_path", []) or [])
+        try:
+            evidence = fetch_evidence(
+                es_url, index, doc_id, section, max_evidence_chars
+            )
+        except RuntimeError as exc:
+            return PassVerdict(
+                query_id=qid,
+                pass_id=pass_id,
+                failed=True,
+                fail_reason="evidence_fetch_failed",
+                answerable=False,
+                language_correct=False,
+                query_type_correct=False,
+                relevance_correct=False,
+                section_correct=False,
+                evidence_sufficient=False,
+                contamination_risk="none",
+                confidence=0.0,
+                prompt_hash="",
+                evidence_refs=(f"es:{index}:{doc_id}",),
+            ), str(exc)
+
+        verdict = await review_one(
+            client, pass_id, query_text, qrel, evidence, model, revision
+        )
+        return verdict, None
+
+    for batch_start in range(0, len(pending), concurrency):
+        batch = pending[batch_start : batch_start + concurrency]
+        batch_results = await asyncio.gather(
+            *(_review_qrel(qrel) for _, qrel in batch)
+        )
+
+        # gather preserves input order, so sidecar output stays deterministic.
+        for (i, qrel), (verdict, evidence_error) in zip(batch, batch_results):
+            qid = str(qrel["query_id"])
+            results[qid] = verdict
+            write_sidecar_row(
+                out_path, _verdict_to_row(verdict, qrel, model, revision)
+            )
+
+            if evidence_error is not None:
+                print(
+                    f"[{pass_id}] evidence failed {qid} "
+                    f"({i+1}/{len(worklist)}): {evidence_error}"
+                )
+                continue
+
+            status = "failed" if verdict.failed else "ok"
+            print(
+                f"[{pass_id}] {status} {qid} ({i+1}/{len(worklist)}) "
+                f"c={verdict.confidence:.2f} r={verdict.relevance_correct}"
+            )
 
     return results
 
@@ -1179,6 +1319,7 @@ def run_review(
     resume: bool = True,
     only: str | None = None,
     max_evidence_chars: int = MAX_EVIDENCE_CHARS_DEFAULT,
+    concurrency: int = RELAY_CONCURRENCY_DEFAULT,
 ) -> dict[str, Any]:
     """Run the full Sol dual-pass review pipeline.
 
@@ -1209,6 +1350,7 @@ def run_review(
         "pass_a_out": str(pass_a_out),
         "pass_b_out": str(pass_b_out),
         "resume": resume,
+        "concurrency": concurrency,
     }
 
     pass_a: dict[str, PassVerdict] = {}
@@ -1221,12 +1363,14 @@ def run_review(
             pass_a = await run_pass(
                 client, "A", qrels, queries, es_url, index,
                 str(pass_a_out), model, revision, resume, max_evidence_chars,
+                concurrency,
             )
         if only is None or only == "passB":
             print(f"=== PASS B ({len(qrels)} queries) ===")
             pass_b = await run_pass(
                 client, "B", qrels, queries, es_url, index,
                 str(pass_b_out), model, revision, resume, max_evidence_chars,
+                concurrency,
             )
 
     asyncio.run(_run())
@@ -1337,6 +1481,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=CONFIDENCE_THRESHOLD_DEFAULT,
         help="Min confidence for AI_REVIEWED",
+    )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        choices=range(1, RELAY_CONCURRENCY_MAX + 1),
+        default=RELAY_CONCURRENCY_DEFAULT,
+        metavar="1..10",
+        help="Concurrent relay requests per process (hard maximum: 10)",
     )
     p.add_argument(
         "--only",
@@ -1451,6 +1603,7 @@ def main(argv: list[str] | None = None) -> int:
             resume=args.resume,
             only=args.only,
             max_evidence_chars=args.max_evidence_chars,
+            concurrency=args.concurrency,
         )
     except RuntimeError as exc:
         print(f"fatal: {exc}", file=sys.stderr)

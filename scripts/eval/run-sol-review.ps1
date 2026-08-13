@@ -31,6 +31,8 @@ param(
     [string]$Model = "gpt-5.6-sol",
     [string]$Revision = "unknown",
     [double]$ConfidenceThreshold = 0.7,
+    [ValidateRange(1, 10)]
+    [int]$Concurrency = 1,
     [string]$Only = $null,          # "passA" | "passB" | "arbitrate" | $null (full pipeline)
     [switch]$Resume = $true,        # skip already-completed rows
     [switch]$DryRun = $false,
@@ -104,7 +106,8 @@ $pyArgs = @(
     "--max-evidence-chars", $MaxEvidenceChars,
     "--model", $Model,
     "--revision", $Revision,
-    "--confidence-threshold", $ConfidenceThreshold
+    "--confidence-threshold", $ConfidenceThreshold,
+    "--concurrency", $Concurrency
 )
 
 if ($Only) {
@@ -132,6 +135,7 @@ Write-Host "  ES           : $EsUrl / $Index"
 Write-Host "  model        : $Model"
 Write-Host "  revision     : $Revision"
 Write-Host "  confidence   : $ConfidenceThreshold"
+Write-Host "  concurrency  : $Concurrency (relay hard max: 10)"
 Write-Host "  only         : $($Only -as [string])"
 Write-Host "  resume       : $Resume"
 Write-Host "  dry-run      : $DryRun"

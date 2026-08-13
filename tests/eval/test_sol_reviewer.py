@@ -6,6 +6,7 @@ monkeypatch for urllib to test the full pipeline without real services.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import urllib.request
@@ -21,6 +22,7 @@ from orchestrator.eval.sol_reviewer import (
     EvidenceChunk,
     PassVerdict,
     arbitrate,
+    build_parser,
     build_system_prompt,
     build_user_prompt,
     fetch_evidence,
@@ -30,6 +32,7 @@ from orchestrator.eval.sol_reviewer import (
     parse_verdict_json,
     redact_text,
     review_prompt_hash,
+    run_pass,
     summarize,
     validate_verdict_fields,
     write_sidecar_row,
@@ -221,6 +224,91 @@ class TestDryRun:
         assert not pass_a.exists()
         assert not summary.exists()
 
+
+class TestReviewConcurrency:
+    def test_cli_accepts_relay_limit(self):
+        args = build_parser().parse_args([
+            "--qrels-path", "qrels.jsonl",
+            "--queries-path", "queries.jsonl",
+            "--concurrency", "10",
+        ])
+
+        assert args.concurrency == 10
+
+    def test_cli_rejects_concurrency_above_relay_limit(self):
+        parser = build_parser()
+
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "--qrels-path", "qrels.jsonl",
+                "--queries-path", "queries.jsonl",
+                "--concurrency", "11",
+            ])
+
+    def test_run_pass_uses_configured_concurrency_without_exceeding_ten(
+        self, tmp_path, monkeypatch
+    ):
+        from orchestrator.eval import sol_reviewer
+
+        active = 0
+        peak = 0
+
+        async def _fake_review_one(
+            client, pass_id, query, qrel, evidence, model, revision
+        ):
+            del client, query, evidence, model, revision
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return PassVerdict(
+                query_id=str(qrel["query_id"]),
+                pass_id=pass_id,
+                failed=False,
+                fail_reason=None,
+                answerable=True,
+                language_correct=True,
+                query_type_correct=True,
+                relevance_correct=True,
+                section_correct=True,
+                evidence_sufficient=True,
+                contamination_risk="none",
+                confidence=0.9,
+                prompt_hash="test",
+                evidence_refs=(),
+            )
+
+        monkeypatch.setattr(sol_reviewer, "review_one", _fake_review_one)
+        monkeypatch.setattr(
+            sol_reviewer,
+            "fetch_evidence",
+            lambda *args, **kwargs: _SAMPLE_EVIDENCE,
+        )
+
+        qrels = [dict(_SAMPLE_QREL, query_id=f"go-q{i:03d}") for i in range(12)]
+        queries = {str(row["query_id"]): "test query" for row in qrels}
+
+        results = asyncio.run(
+            run_pass(
+                object(),
+                "A",
+                qrels,
+                queries,
+                "http://localhost:9200",
+                "test-index",
+                str(tmp_path / "pass-a.jsonl"),
+                "gpt-5.6-sol",
+                "unknown",
+                concurrency=10,
+            )
+        )
+
+        assert len(results) == 12
+        assert peak == 10
+
+
+class TestDryRunWithoutModelEnv:
     def test_dry_run_no_model_env(self, tmp_path, monkeypatch):
         """dry-run should still work even without OPENAI_MODEL set."""
         qrels_path = tmp_path / "qrels.jsonl"
