@@ -43,6 +43,7 @@ repo = Path(os.environ["LOCALCODE_REPO_ROOT"])
 sys.path.insert(0, str(repo))
 
 from eval.benchmarks.terminalbench import _patch_terminal_bench_windows
+from eval.benchmarks.terminalbenchofficial import TerminalBenchOfficialConfig, TerminalBenchOfficialRunner
 from eval.swebench_work.terminalbench_proxy import internal_harness_run_id, scoped_verifier_proxy
 from terminal_bench.harness import Harness
 
@@ -95,6 +96,21 @@ print(json.dumps({
         for item in results.results
     ],
 }, ensure_ascii=True))
+
+# Archive only the official Harness output for this short internal run id.
+dataset_file = repo / "eval" / "benchmark_data" / "terminalbench" / "terminalbench_2.jsonl"
+dataset_sha256 = __import__("hashlib").sha256(dataset_file.read_bytes()).hexdigest()
+receipt = TerminalBenchOfficialRunner(
+    TerminalBenchOfficialConfig(
+        dataset_root=repo / "eval" / "benchmark_data" / "terminalbench" / "tasks",
+        dataset_sha256=dataset_sha256,
+        package_version="0.2.18",
+        model="openai/gpt-5.6-sol",
+        task_id="break-filter-js-from-html",
+        max_concurrency=1,
+    )
+).collect_receipt(output / internal_run_id, Path(os.environ["TERMINALBENCH_RECEIPT_ROOT"]))
+print(json.dumps({"receipt_status": receipt["status"]}, ensure_ascii=True))
 '@ | Set-Content -LiteralPath $driverPath -Encoding utf8
 
 @'

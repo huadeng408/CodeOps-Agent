@@ -3317,3 +3317,30 @@ receipt; a real runner must still exercise the full contract.
   turn/token limits, plus an optional process-scoped, manifest-recorded
   verifier proxy. Never patch public task assets, official tests, or scorer
   output to make this pass.
+
+### 49.1 Closure evidence (2026-08-14)
+
+- `IMPLEMENTED`: `DeepSeekTBAgent` now has a bounded default of two feedback
+  turns (hard cap three), blocks on every tmux command before collecting output,
+  writes an agent transcript, and rejects protected test/solution/verifier paths
+  both in model commands and feedback.
+- `IMPLEMENTED`: the receipt wrapper supports an opt-in `-VerifierProxy`. It
+  uses `terminalbench_proxy.scoped_verifier_proxy()` to create an ephemeral
+  Compose overlay for the verifier container only. The public task, official
+  tests, official scorer, Docker Desktop settings, and parent process are not
+  modified. The manifest records enabled state and non-secret network policy;
+  credential-bearing proxy URLs are rejected. The wrapper maps a descriptive
+  receipt id to a stable short internal Harness id to avoid Windows path limits.
+- `VERIFIED`: at `1f1d6394`, receipt
+  `current-head-20260814-082200-proxy` completed one pinned public task with
+  concurrency one. The official verifier downloaded `uv 0.9.5`, ran pytest,
+  and returned `1 failed`; raw official results SHA-256 is
+  `cdba9502dcb71b707de69fd5e4c23f30b4834ea883e3e56c34998765aec64c9a`.
+  This is an `OFFICIAL_FAILURE` caused by the tested agent payload, not a
+  verifier network or parser fault. It remains one public development receipt,
+  never a score claim or a hidden-holdout result.
+- `VERIFIED`: targeted Terminal-Bench, benchmark-runner, and run-contract
+  regression suites were `45 passed, 1 upstream SQLAlchemy deprecation warning`
+  before the closure documentation update. The next harness priority is the
+  isolated official tau2-bench migration, not repeated optimization on this
+  single Terminal-Bench task.

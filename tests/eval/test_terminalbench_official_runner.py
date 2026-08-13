@@ -313,3 +313,34 @@ def test_terminalbench_receipt_uses_a_short_internal_harness_run_id() -> None:
     assert run_id == "tb-" + hashlib.sha256(receipt_id.encode("utf-8")).hexdigest()[:12]
     assert len(run_id) == 15
     assert internal_harness_run_id(receipt_id) == run_id
+
+
+def test_terminalbench_receipt_runner_maps_the_short_harness_output_to_a_receipt(
+    tmp_path: Path,
+) -> None:
+    from eval.benchmarks.terminalbenchofficial import (
+        TerminalBenchOfficialConfig,
+        TerminalBenchOfficialRunner,
+    )
+    from eval.swebench_work.terminalbench_proxy import internal_harness_run_id
+
+    dataset = tmp_path / "dataset"
+    _write_dataset(dataset)
+    receipt_id = "current-head-20260814-082200-proxy"
+    internal_id = internal_harness_run_id(receipt_id)
+    upstream = tmp_path / "upstream" / internal_id
+    _write_official_run(upstream, resolved=False)
+    runner = TerminalBenchOfficialRunner(
+        TerminalBenchOfficialConfig(
+            dataset_root=dataset,
+            dataset_sha256=hashlib.sha256((dataset / "terminalbench_2.jsonl").read_bytes()).hexdigest(),
+            package_version="0.2.18",
+            model="openai/gpt-5.6-sol",
+            task_id="fixed-task",
+        )
+    )
+
+    receipt = runner.collect_receipt(upstream, tmp_path / "receipt")
+
+    assert receipt["status"] == "OFFICIAL_FAILURE"
+    assert (tmp_path / "receipt" / "scorer" / "terminalbench-results.json").is_file()
