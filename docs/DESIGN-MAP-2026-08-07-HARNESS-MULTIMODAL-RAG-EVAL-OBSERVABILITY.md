@@ -3230,3 +3230,20 @@ capability, and artifact lifecycle regressions passed (`56 passed`). This is a
 strict executable gate only. It does not replace Phoenix readback or constitute
 an O3 receipt; the next dependency is a Phoenix source adapter followed by a
 current-HEAD real run.
+## 46. O3 Phoenix readback source adapter progress (2026-08-13)
+
+`eval.harness.phoenix` is the new read-only Phoenix source adapter. It reads
+the real project spans endpoint after a supplied start time, follows pagination,
+rejects repeated cursors or malformed span shapes, filters by exact run ID and
+expected instance IDs, and normalizes only end-time-bearing spans. It keeps a
+small allowlist of trace-contract attributes; unrelated Phoenix prompt/tool/LLM
+payload attributes cannot enter canonical evaluation artifacts.
+
+For `trace_profile="o3"`, harness finalization now requires Phoenix URL,
+project, and start time, then calls this adapter before the single shared v2
+contract and before checksums. It records `capture_mode="phoenix-api-readback"`
+and never falls back to in-process spans. A missing configuration or readback
+error results in an explicit profile-tagged `FAIL` assertion. Fresh combined
+regressions passed (`59 passed`), and the local Phoenix health plus real API
+response shape were checked. A real O3 receipt is still absent; runner and
+official-scorer integration remains the next dependency.

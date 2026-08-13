@@ -543,7 +543,35 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
     """
     capture = harness._capture
     try:
-        if capture is None:
+        profile = harness.config.get("trace_profile", "default")
+        expected_instance_ids = tuple(harness._completed)
+        if profile == "o3":
+            phoenix_url = str(harness.config.get("phoenix_url", "")).strip()
+            phoenix_project = str(harness.config.get("phoenix_project", "")).strip()
+            start_time = str(harness.config.get("trace_start_time", "")).strip()
+            if not phoenix_url or not phoenix_project or not start_time:
+                raise ValueError(
+                    "O3 trace profile requires phoenix_url, phoenix_project, and trace_start_time"
+                )
+            from eval.harness.phoenix import read_run_spans
+
+            spans = read_run_spans(
+                phoenix_url,
+                phoenix_project,
+                start_time,
+                harness.run_id,
+                expected_instance_ids,
+            )
+            trace_summary = {
+                "capture_mode": "phoenix-api-readback",
+                "collector": "phoenix",
+                "phoenix_verified": True,
+                "attached": False,
+                "span_count": len(spans),
+                "trace_ids": sorted({span.trace_id for span in spans}),
+                "spans": [span.to_dict() for span in spans],
+            }
+        elif capture is None:
             trace_summary: dict[str, Any] = {
                 "capture_mode": "disabled",
                 "collector": "none",
@@ -566,8 +594,8 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
             spans,
             run_id=harness.run_id,
             capabilities=capabilities,
-            profile=harness.config.get("trace_profile", "default"),
-            expected_instance_ids=tuple(harness._completed),
+            profile=profile,
+            expected_instance_ids=expected_instance_ids,
         )
         harness.artifacts.record_trace(TRACE_SUMMARY_FILENAME, trace_summary)
         harness.artifacts.record_trace(SPAN_ASSERTION_FILENAME, assertion)
@@ -579,6 +607,7 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
             {
                 "contract_version": "unknown",
                 "run_id": harness.run_id,
+                "profile": harness.config.get("trace_profile", "default"),
                 "verdict": "FAIL",
                 "problems": [f"trace artifact generation failed: {exc}"],
                 "span_count": 0,

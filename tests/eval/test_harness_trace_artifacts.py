@@ -199,6 +199,49 @@ def test_o3_trace_profile_is_explicitly_written_to_assertion(tmp_path: Path) -> 
     assert assertion["profile"] == "o3"
 
 
+def test_o3_trace_profile_uses_phoenix_readback_as_contract_source(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_readback(url, project, start_time, run_id, expected_ids):  # noqa: ANN001
+        captured.update(
+            url=url,
+            project=project,
+            start_time=start_time,
+            run_id=run_id,
+            expected_ids=tuple(expected_ids),
+        )
+        return []
+
+    monkeypatch.setattr("eval.harness.phoenix.read_run_spans", fake_readback)
+    harness = _harness(
+        tmp_path,
+        config={
+            "trace_profile": "o3",
+            "trace_capabilities": ("rag", "rerank"),
+            "corpus_generation": "techdocs-2026-07-30-v1",
+            "qrels_hash": "a" * 64,
+            "index_name": "knowledge_base_v2_bge_m3",
+            "phoenix_url": "http://phoenix",
+            "phoenix_project": "code-agent",
+            "trace_start_time": "2026-08-13T00:00:00Z",
+        },
+    )
+    harness.run([EvalInstance(instance_id="inst-1", task_description="t")])
+
+    assertion = _read(harness.artifacts.root, SPAN_ASSERTION)
+    assert captured == {
+        "url": "http://phoenix",
+        "project": "code-agent",
+        "start_time": "2026-08-13T00:00:00Z",
+        "run_id": "run-trace",
+        "expected_ids": ("inst-1",),
+    }
+    assert assertion["span_count"] == 0
+    assert assertion["verdict"] != VERDICT_PASS
+
+
 def test_resume_skipped_instances_get_a_span_with_skipped_status(tmp_path: Path) -> None:
     """§20.6.4 item 2 names 'skipped' explicitly, and §20.1 rule 7 keeps
     skipped instances in the denominator."""
