@@ -14,12 +14,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from eval.adapter import EvalInstance, EvalResult
 from eval.benchmarks.base import AgentBenchmark
+from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
 from eval.manifest import ALLOWED_LICENSES
 
 #: tau2-bench is a tool-using conversation benchmark over its own domain
@@ -30,6 +33,17 @@ if TYPE_CHECKING:  # import-time only — the AgentAdapter protocol is never use
     from eval.adapter import AgentAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_utf8_console(streams: tuple[Any, ...] | None = None) -> None:
+    """Avoid Windows GBK failures from the official runner's Unicode output."""
+    for stream in streams or (sys.stdout, sys.stderr):
+        try:
+            encoding = (stream.encoding or "").lower().replace("-", "")
+            if encoding and encoding != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +333,9 @@ class Tau2BenchAdapter(AgentBenchmark):
         data_dir: str | Path | None = None,
         env_name: str | None = None,
         model_name: str | None = None,
+        model_provider: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
         num_trials: int | None = None,
         max_concurrency: int | None = None,
         task_split: str | None = None,
@@ -335,6 +352,15 @@ class Tau2BenchAdapter(AgentBenchmark):
         self.data_dir = Path(raw_dir).resolve() if raw_dir else None
         self.env_name = env_name or os.environ.get("TAU2_ENV", "airline")
         self.model_name = model_name or os.environ.get("TAU2_MODEL", "deepseek-v4")
+        self.model_provider = model_provider or os.environ.get("TAU2_MODEL_PROVIDER", "deepseek")
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        configured_temperature = os.environ.get("TAU2_TEMPERATURE")
+        self.temperature = (
+            float(configured_temperature)
+            if configured_temperature is not None
+            else (1.0 if self.model_name.startswith("gpt-5") else 0.0)
+        )
         self.num_trials = int(num_trials or 1)
         self.max_concurrency = int(max_concurrency or 1)
         self.task_split = task_split or "test"
@@ -419,8 +445,8 @@ class Tau2BenchAdapter(AgentBenchmark):
         from tau_bench.types import EnvRunResult, RunConfig
 
         run_config = RunConfig(
-            model_provider="deepseek",
-            user_model_provider="deepseek",
+            model_provider=self.model_provider,
+            user_model_provider=self.model_provider,
             model=self.model_name,
             user_model=self.model_name,
             num_trials=self.num_trials,
@@ -429,6 +455,7 @@ class Tau2BenchAdapter(AgentBenchmark):
             task_ids=[task_id],
             log_dir=str(output_dir),
             max_concurrency=self.max_concurrency,
+            temperature=self.temperature,
         )
 
         logger.info(
@@ -438,7 +465,13 @@ class Tau2BenchAdapter(AgentBenchmark):
             config.env_name,
             self.model_name,
         )
-        env_results: list[EnvRunResult] = tau_run(run_config)
+        _ensure_utf8_console()
+        with _official_model_environment(
+            model_provider=self.model_provider,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        ):
+            env_results: list[EnvRunResult] = tau_run(run_config)
 
         if not env_results:
             return EvalResult(
@@ -487,14 +520,23 @@ class Tau2BenchAdapter(AgentBenchmark):
         sidecar_path = workspace / "score.json"
         if sidecar_path.exists():
             try:
-                sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-                return {
+                raw_sidecar = sidecar_path.read_text(encoding="utf-8")
+                sidecar = json.loads(raw_sidecar)
+                payload = {
                     "resolved": bool(sidecar.get("resolved", False)),
                     "reward": float(sidecar.get("reward", 0.0)),
                     "scorer": _SCORER_NAME,
                     "failure_mode": sidecar.get("failure_mode"),
                     "scorer_status": "official: reward embedded in solve()",
                 }
+                payload[SCORER_RAW_OUTPUT_KEY] = {
+                    f"{instance.instance_id}-score.json": raw_sidecar
+                }
+                for checkpoint in sorted((workspace / "tau2_runs").glob("*.json")):
+                    payload[SCORER_RAW_OUTPUT_KEY][
+                        f"{instance.instance_id}-official-checkpoint.json"
+                    ] = checkpoint.read_text(encoding="utf-8")
+                return payload
             except (json.JSONDecodeError, OSError, ValueError):
                 pass
         return {
@@ -531,4 +573,36 @@ class Tau2BenchAdapter(AgentBenchmark):
             "scorer_name": _SCORER_NAME,
             "env_name": self.env_name,
             "model_name": self.model_name,
+            "model_provider": self.model_provider,
+            "model_base_url": self.base_url,
+            "temperature": str(self.temperature),
         }
+
+
+@contextmanager
+def _official_model_environment(
+    *, model_provider: str, base_url: str, api_key: str
+):
+    """Temporarily expose the CLI connection only to the official runner.
+
+    tau2's OpenAI model reads these standard LiteLLM environment variables;
+    restoring the prior process environment prevents credentials or endpoint
+    choices from leaking into later benchmark instances.
+    """
+    names = {
+        "OPENAI_API_KEY": api_key,
+        "OPENAI_BASE_URL": base_url,
+        "OPENAI_API_BASE": base_url,
+    }
+    previous = {name: os.environ.get(name) for name in names}
+    try:
+        for name, value in names.items():
+            if value:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

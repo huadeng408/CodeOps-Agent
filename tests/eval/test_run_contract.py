@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -240,6 +241,209 @@ def test_run_cli_dash_b_without_value_lists(capsys) -> None:
     out = capsys.readouterr().out
     for name in FOUR_BENCHMARKS:
         assert name in out
+
+
+def test_find_agent_benchmark_passes_cli_model_to_official_adapter() -> None:
+    from eval import run as run_mod
+    from eval.benchmarks import tau2bench
+
+    adapter = run_mod._find_agent_benchmark(
+        tau2bench,
+        model="gpt-5.6-sol",
+        base_url="https://beeapi.ai/v1",
+        api_key="in-memory-key",
+    )
+
+    assert adapter is not None
+    assert adapter.model_name == "gpt-5.6-sol"
+    assert adapter.model_provider == "openai"
+    assert adapter.base_url == "https://beeapi.ai/v1"
+    assert adapter.api_key == "in-memory-key"
+
+
+def test_find_agent_benchmark_passes_cli_connection_to_terminalbench() -> None:
+    from eval import run as run_mod
+    from eval.benchmarks import terminalbench
+
+    adapter = run_mod._find_agent_benchmark(
+        terminalbench,
+        model="gpt-5.6-sol",
+        base_url="https://beeapi.ai/v1",
+        api_key="in-memory-key",
+    )
+
+    assert adapter is not None
+    assert adapter._agent_kwargs == {
+        "model": "gpt-5.6-sol",
+        "base_url": "https://beeapi.ai/v1",
+    }
+
+
+def test_official_benchmark_driver_invokes_benchmark_solve_not_generic_driver() -> None:
+    """The unified lifecycle must execute the benchmark's official runner."""
+    from eval import run as run_mod
+    from eval.adapter import EvalInstance
+
+    calls: list[tuple[object, str, object]] = []
+
+    class OfficialBenchmark:
+        def solve(self, instance, workspace, driver):
+            calls.append((instance, str(workspace), driver))
+            return EvalResult(instance_id=instance.instance_id, answer="official")
+
+    generic_driver = object()
+    bridge = run_mod._OfficialBenchmarkDriver(OfficialBenchmark(), generic_driver)
+    instance = EvalInstance(instance_id="tau2/0", task_description="task")
+
+    result = bridge.solve_instance(instance, "C:/temporary-workspace")
+
+    assert result.answer == "official"
+    assert calls == [(instance, "C:\\temporary-workspace", generic_driver)]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "adapter_name", "scorer_name"),
+    [
+        ("tau2bench", "Tau2BenchAdapter", "tau_bench.run.run"),
+        ("terminalbench", "TerminalBenchAdapter", "terminal_bench.Harness"),
+    ],
+)
+def test_official_adapter_score_preserves_raw_sidecar(
+    tmp_path: Path, module_name: str, adapter_name: str, scorer_name: str
+) -> None:
+    """Official score evidence must reach HarnessRun's canonical scorer tree."""
+    from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
+
+    module = importlib.import_module(f"eval.benchmarks.{module_name}")
+    adapter = getattr(module, adapter_name)()
+    raw = '{"resolved": true, "official": "evidence"}\n'
+    (tmp_path / "score.json").write_text(raw, encoding="utf-8")
+    result = EvalResult(instance_id="task-0")
+    instance = type("Instance", (), {"instance_id": "task-0"})()
+
+    score = adapter.score(result, instance, tmp_path)
+
+    assert score["scorer"] == scorer_name
+    assert score[SCORER_RAW_OUTPUT_KEY] == {"task-0-score.json": raw}
+
+
+def test_tau2_official_model_environment_is_scoped(monkeypatch) -> None:
+    """The official runner receives CLI connection settings without persistence."""
+    from eval.benchmarks.tau2bench import _official_model_environment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "old-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    with _official_model_environment(
+        model_provider="openai",
+        base_url="https://beeapi.ai/v1",
+        api_key="in-memory-key",
+    ):
+        assert os.environ["OPENAI_API_KEY"] == "in-memory-key"
+        assert os.environ["OPENAI_BASE_URL"] == "https://beeapi.ai/v1"
+        assert os.environ["OPENAI_API_BASE"] == "https://beeapi.ai/v1"
+
+    assert os.environ["OPENAI_API_KEY"] == "old-key"
+    assert "OPENAI_BASE_URL" not in os.environ
+    assert "OPENAI_API_BASE" not in os.environ
+
+
+def test_tau2_console_output_is_forced_to_utf8_when_needed() -> None:
+    """Official tau2 output must not fail on a Windows GBK console."""
+    from eval.benchmarks.tau2bench import _ensure_utf8_console
+
+    class Stream:
+        encoding = "gbk"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def reconfigure(self, *, encoding: str, errors: str) -> None:
+            self.calls.append((encoding, errors))
+
+    stdout = Stream()
+    stderr = Stream()
+
+    _ensure_utf8_console((stdout, stderr))
+
+    assert stdout.calls == [("utf-8", "replace")]
+    assert stderr.calls == [("utf-8", "replace")]
+
+
+def test_tau2_uses_gpt5_compatible_temperature() -> None:
+    """GPT-5 relays reject tau2's historical temperature=0.0 default."""
+    from eval.benchmarks.tau2bench import Tau2BenchAdapter
+
+    adapter = Tau2BenchAdapter(model_name="gpt-5.6-sol", model_provider="openai")
+
+    assert adapter.temperature == 1.0
+
+
+def test_tau2_score_preserves_official_checkpoint_bytes(tmp_path: Path) -> None:
+    """The official tau2 run record, not just its local summary, is pinned."""
+    from eval.benchmarks.tau2bench import Tau2BenchAdapter
+    from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
+
+    checkpoint = tmp_path / "tau2_runs" / "official-checkpoint.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text('[{"task_id": 0, "reward": 1.0}]\n', encoding="utf-8")
+    (tmp_path / "score.json").write_text('{"resolved": true, "reward": 1.0}\n', encoding="utf-8")
+
+    score = Tau2BenchAdapter().score(
+        EvalResult(instance_id="airline/0"),
+        type("Instance", (), {"instance_id": "airline/0"})(),
+        tmp_path,
+    )
+
+    assert score[SCORER_RAW_OUTPUT_KEY] == {
+        "airline/0-score.json": '{"resolved": true, "reward": 1.0}\n',
+        "airline/0-official-checkpoint.json": '[{"task_id": 0, "reward": 1.0}]\n',
+    }
+
+
+def test_terminalbench_score_preserves_official_run_files(tmp_path: Path) -> None:
+    """Terminal-Bench canonical evidence includes its official JSON outputs."""
+    from eval.benchmarks.terminalbench import TerminalBenchAdapter
+    from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
+
+    official_dir = tmp_path / "tb_runs" / "tb-adapter-task-0"
+    official_dir.mkdir(parents=True)
+    (official_dir / "results.json").write_text('{"resolved": true}\n', encoding="utf-8")
+    (official_dir / "run_metadata.json").write_text('{"agent": "custom"}\n', encoding="utf-8")
+    (tmp_path / "score.json").write_text('{"resolved": true}\n', encoding="utf-8")
+
+    score = TerminalBenchAdapter().score(
+        EvalResult(instance_id="task-0"),
+        type("Instance", (), {"instance_id": "task-0", "metadata": {}})(),
+        tmp_path,
+    )
+
+    assert score[SCORER_RAW_OUTPUT_KEY] == {
+        "task-0-score.json": '{"resolved": true}\n',
+        "task-0-results.json": '{"resolved": true}\n',
+        "task-0-run-metadata.json": '{"agent": "custom"}\n',
+    }
+
+
+def test_terminalbench_agent_uses_gpt5_compatible_temperature() -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    agent = DeepSeekTBAgent(model="gpt-5.6-sol")
+
+    assert agent._temperature == 1.0
+
+
+def test_terminalbench_failure_mode_is_json_serializable() -> None:
+    from eval.benchmarks.terminalbench import _json_safe_failure_mode
+
+    class FailureMode:
+        value = "TEST_TIMEOUT"
+
+        def __str__(self) -> str:
+            return "FailureMode.TEST_TIMEOUT"
+
+    assert _json_safe_failure_mode(FailureMode()) == "TEST_TIMEOUT"
 
 
 # ---------------------------------------------------------------------------

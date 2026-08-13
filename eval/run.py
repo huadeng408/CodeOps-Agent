@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import subprocess
@@ -26,6 +27,29 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+class _OfficialBenchmarkDriver:
+    """Expose an official benchmark lifecycle through ``AgentAdapter``.
+
+    ``HarnessRun`` owns the artifact, budget, trace, and scorer boundaries and
+    therefore calls ``solve_instance``.  Agent benchmarks own the actual
+    official runner invocation.  This bridge preserves both responsibilities:
+    it makes the harness call ``AgentBenchmark.solve`` while passing the
+    generic model driver only to the benchmark that needs it.
+    """
+
+    def __init__(self, benchmark: Any, generic_driver: Any) -> None:
+        self._benchmark = benchmark
+        self._generic_driver = generic_driver
+
+    def solve_instance(self, instance: Any, working_dir: str, **kwargs: Any) -> Any:
+        return self._benchmark.solve(
+            instance,
+            Path(working_dir),
+            self._generic_driver,
+            **kwargs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +244,13 @@ def _git_dirty_hash() -> str:
         return ""
 
 
-def _find_agent_benchmark(mod: Any) -> Any | None:
+def _find_agent_benchmark(
+    mod: Any,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Any | None:
     """Return an instance of the :class:`AgentBenchmark` subclass exposed by
     *mod*, or ``None`` when the benchmark has no unified adapter.
 
@@ -240,8 +270,57 @@ def _find_agent_benchmark(mod: Any) -> Any | None:
             and issubclass(attr, AgentBenchmark)
             and attr is not AgentBenchmark
         ):
+            if attr.__name__ == "TerminalBenchAdapter":
+                return attr(
+                    agent_kwargs={
+                        "model": model or "",
+                        "base_url": base_url or "",
+                    }
+                )
+            if attr.__name__ == "Tau2BenchAdapter":
+                return attr(
+                    model_name=model or None,
+                    model_provider="openai",
+                    base_url=base_url or "",
+                    api_key=api_key or "",
+                )
             return attr()
     return None
+
+
+def _find_agent_benchmark_with_cli(
+    mod: Any,
+    *,
+    model: str,
+    base_url: str,
+    api_key: str | None,
+) -> Any | None:
+    """Call the adapter factory without breaking one-argument test spies.
+
+    The production factory accepts explicit CLI connection settings.  Older
+    pin-gating tests intentionally replace it with a one-argument stub to
+    isolate preflight behaviour; inspect the callable rather than catching an
+    arbitrary TypeError from its implementation.
+    """
+    try:
+        signature = inspect.signature(_find_agent_benchmark)
+        accepts_keywords = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ) or all(
+            name in signature.parameters
+            for name in ("model", "base_url", "api_key")
+        )
+    except (TypeError, ValueError):
+        accepts_keywords = True
+    if not accepts_keywords:
+        return _find_agent_benchmark(mod)
+    return _find_agent_benchmark(
+        mod,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+    )
 
 
 def _model_endpoint_allowlist(base_url: str) -> tuple[str, ...]:
@@ -400,7 +479,12 @@ def main(argv: list[str] | None = None) -> int:
         limit = 1
 
     # ---- AgentBenchmark adapter (official scorer wiring) ----
-    agent_bench = _find_agent_benchmark(benchmark_mod)
+    agent_bench = _find_agent_benchmark_with_cli(
+        benchmark_mod,
+        model=model,
+        base_url=base_url,
+        api_key=os.environ.get("LOCAL_LLM_API_KEY"),
+    )
 
     # ---- H0 pin preflight: fail BEFORE launching on incomplete pins ----
     # This must also gate --dry-run.  The dry-run branch used to return here
@@ -477,11 +561,16 @@ def main(argv: list[str] | None = None) -> int:
         f"(250k tokens, 900s, $2.00) = {budget.max_tokens:,} tokens, "
         f"{budget.wall_clock_seconds:.0f}s, ${budget.max_cost:.2f}"
     )
+    harness_adapter = (
+        _OfficialBenchmarkDriver(agent_bench, adapter)
+        if agent_bench is not None
+        else adapter
+    )
     harness = HarnessRun(
         run_id=run_id,
         artifacts=artifacts,
         budget=budget,
-        adapter=adapter,
+        adapter=harness_adapter,
         scorer=agent_bench.score if agent_bench is not None else None,
         # The harness hands the agent a fresh temp dir; only the benchmark
         # knows how to populate it (SWE-bench clones the repo at base_commit).

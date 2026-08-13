@@ -133,17 +133,26 @@ def test_run_artifacts_append_line_and_atomic_summary(tmp_path: Path) -> None:
     assert len(lines) == 1
 
 
-def test_environment_redacts_secrets(tmp_path: Path) -> None:
+def test_environment_excludes_process_variables(tmp_path: Path, monkeypatch) -> None:
     artifacts = RunArtifacts("run-1", tmp_path)
-    import os
-
-    os.environ["TEST_API_KEY"] = "secret-value"
-    os.environ["TEST_NORMAL_VAR"] = "visible"
+    monkeypatch.setenv("TEST_API_KEY", "secret-value")
+    monkeypatch.setenv("TEST_NORMAL_VAR", "visible")
     path = artifacts.write_environment()
     content = path.read_text(encoding="utf-8")
     assert "secret-value" not in content
-    assert "<redacted>" in content
-    assert "visible" in content
+    assert "TEST_API_KEY" not in content
+    assert "TEST_NORMAL_VAR" not in content
+    assert "visible" not in content
+
+
+def test_environment_omits_secret_variable_names(tmp_path: Path, monkeypatch) -> None:
+    artifacts = RunArtifacts("run-1", tmp_path)
+    monkeypatch.setenv("TEST_API_KEY", "secret-value")
+
+    content = artifacts.write_environment().read_text(encoding="utf-8")
+
+    assert "TEST_API_KEY" not in content
+    assert "secret-value" not in content
 
 
 # ---------------------------------------------------------------------------

@@ -123,17 +123,19 @@ class RunArtifacts:
                 os.unlink(tmp)
         return path
 
-    def write_environment(self, secret_keys: tuple[str, ...] = ("API_KEY", "SECRET", "TOKEN")) -> Path:
-        env = {}
-        for key, value in os.environ.items():
-            if any(token in key.upper() for token in secret_keys):
-                env[key] = "<redacted>"
-            else:
-                env[key] = value
+    def write_environment(self) -> Path:
+        """Record stable runtime metadata without serializing process env.
+
+        Model and endpoint pins belong in the manifest.  Copying the ambient
+        process environment adds no reproducibility value and creates a broad
+        secret/configuration disclosure surface, even when known key values
+        are redacted.
+        """
         payload = {
             "platform": platform.platform(),
             "python": platform.python_version(),
-            "environment": env,
+            "machine": platform.machine(),
+            "processor": platform.processor(),
         }
         return self.write("environment.txt", payload)
 

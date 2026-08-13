@@ -7,6 +7,7 @@ Fixes:
   - Increased max_timeout_sec to 300s for expensive commands (pip install, apt-get).
   - Multi-turn mode: the agent can ask for command output and issue follow-up commands.
 """
+import os
 from pathlib import Path
 from terminal_bench.agents.base_agent import AgentResult, BaseAgent
 from terminal_bench.agents.failure_mode import FailureMode
@@ -22,8 +23,10 @@ class DeepSeekTBAgent(BaseAgent):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._api_key = kwargs.get("api_key", "")
+        self._api_key = kwargs.get("api_key") or os.environ.get("LOCAL_LLM_API_KEY", "")
         self._model = kwargs.get("model", "deepseek-chat")
+        self._base_url = kwargs.get("base_url", "https://api.deepseek.com/v1")
+        self._temperature = 1.0 if self._model.startswith("gpt-5") else 0.0
 
     def perform_task(
         self,
@@ -36,7 +39,7 @@ class DeepSeekTBAgent(BaseAgent):
 
         client = OpenAI(
             api_key=self._api_key,
-            base_url="https://api.deepseek.com/v1",
+            base_url=self._base_url,
         )
 
         rendered = self._render_instruction(instruction)
@@ -69,7 +72,7 @@ class DeepSeekTBAgent(BaseAgent):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Task:\n\n{rendered}"},
             ],
-            temperature=0.0,
+            temperature=self._temperature,
             max_tokens=4096,
         )
 

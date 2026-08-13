@@ -3037,3 +3037,56 @@ current-HEAD MinerU pilot into a new receipt; query Phoenix programmatically
 against that receipt; then build the multimodal qrels and visual bake-off. A
 license conflict, missing independent human decision, or absent net-new holdout
 is not an operational retry and must remain visibly blocked.
+
+## 41. Official Harness execution closure and remaining label audit (2026-08-13)
+
+### 41.1 Implemented official execution path
+
+- `IMPLEMENTED`: `eval.run` now gives an AgentBenchmark an official-driver
+  adapter. Its `solve_instance()` delegates to the benchmark's own
+  `solve(instance, workspace, generic_driver)` path, rather than silently
+  substituting the generic headless driver for an official benchmark runner.
+- `IMPLEMENTED`: the tau2 adapter invokes `tau_bench.run.run` with process-only
+  OpenAI relay configuration and archives the official checkpoint together
+  with `score.json`. It uses UTF-8 console output on Windows and the
+  GPT-5-compatible temperature accepted by the upstream client.
+- `IMPLEMENTED`: the Terminal-Bench adapter archives official `results.json`
+  and `run_metadata.json`; failure-mode values are normalized before artifact
+  serialization, so an adapter serialization fault cannot be misreported as an
+  agent result. Terminal-Bench credentials are read only from the process
+  environment and are not passed to official metadata output.
+- `IMPLEMENTED`: `environment.txt` is a platform/Python/machine summary, not a
+  copy of the parent process environment. This prevents process-only API keys
+  and unrelated configuration from entering a canonical artifact.
+
+### 41.2 Verified, bounded evidence
+
+- `VERIFIED`: a real `gpt-5.6-sol` tau2 official smoke ran one public airline
+  development instance through the official runner in about 197 seconds. The
+  official checkpoint reward is `1.0`; the canonical receipt is
+  `.tmp/blocker-audit/tau2bench-official-20260813-04/tau2bench-gpt-5.6-sol-f4c83853`.
+  It contains the manifest, prediction, official score/checkpoint, and a
+  checksum file that `RunArtifacts.verify_checksums()` accepts.
+- This is only a single public development smoke. It is not a hidden holdout,
+  a representative aggregate score, or release evidence. No document may
+  present `1.0` as a tau2 benchmark result.
+- `VERIFIED`: a real Terminal-Bench official run reached Docker compose build
+  and preserved official `results.json` and `run_metadata.json` under
+  `.tmp/blocker-audit/terminalbench-official-20260813-02/terminalbench-gpt-5.6-sol-ca28505d/scorer/`.
+  The run has `failure_mode=unknown_agent_error`, but `run.log` identifies an
+  infrastructure cause: Docker image pull attempted to use `127.0.0.1:9` and
+  was refused. This is not an agent or model failure.
+
+### 41.3 Remaining items must not close by label
+
+| Main line | Current state | Actual closure required |
+| --- | --- | --- |
+| Harness | `BLOCKED`: Terminal-Bench cannot pull `ubuntu:24.04` because Docker Desktop maps its proxy to an unavailable endpoint | With explicit Docker Desktop proxy reconfiguration and daemon restart, rerun the same pinned official task and retain the raw official result; do not count this infrastructure fault as a model score. |
+| Evaluation set | `BLOCKED`: 143 `DISPUTED` Sol rows are valid semantic disagreements after all recoverable transport/parse failures were retried | Create a source-evidence adjudication worksheet and collect real controlled human decisions. Retries and status edits are no longer a valid remedy. |
+| Evaluation set | `BLOCKED`: hidden holdout, production signing/attestation, and independent human review are absent | Create net-new held-out questions and configure the controlled signing/reviewer process. Existing development qrels must not be relabeled into a holdout. |
+| Multimodal RAG | `IMPLEMENTED` MinerU OCR pilot only | Produce 120 locked multimodal qrels, a distinct visual encoder/index, ViDoRe and bbox bake-off receipts, and keep the visual alias gated until they pass. PDF remains MinerU plus explicit OCR; Tika remains non-PDF Office-only. |
+| Observability | `INCOMPLETE`: current official smoke has only `eval.run`, `eval.instance`, and `scorer.official` spans | Run current-HEAD RAG retrieval/embedding/rerank and official scoring in one trace; query Phoenix programmatically and assert the machine-readable parent chain includes agent/tool/chat/retrieve/scorer spans. |
+
+The next automatic work must target real runner/artifact/trace evidence. A
+status marker, synthetic artifact, or retry of a valid semantic disagreement
+does not close any row in this table.

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from eval.adapter import EvalInstance, EvalResult
 from eval.benchmarks.base import AgentBenchmark
+from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
 from eval.manifest import ALLOWED_LICENSES
 
 #: Terminal-Bench runs long terminal tasks in its own container runner: no
@@ -439,6 +440,14 @@ _DEFAULT_AGENT_IMPORT_PATH = "eval.swebench_work.deepseek_tb_agent:DeepSeekTBAge
 _SCORER_NAME = "terminal_bench.Harness"
 
 
+def _json_safe_failure_mode(value: Any) -> str | None:
+    """Convert official enum values before writing adapter-owned JSON."""
+    if value is None:
+        return None
+    raw = getattr(value, "value", value)
+    return str(raw)
+
+
 class TerminalBenchAdapter(AgentBenchmark):
     """Terminal-Bench adapter for the unified :class:`AgentBenchmark`
     contract (prepare -> solve -> score).
@@ -615,9 +624,10 @@ class TerminalBenchAdapter(AgentBenchmark):
         # 6. Convert the official trial -> EvalResult (+ score sidecar).
         trial = results.results[0]
         resolved = bool(trial.is_resolved)
+        failure_mode = _json_safe_failure_mode(getattr(trial, "failure_mode", None))
         error = ""
         if not resolved:
-            error = f"unresolved (failure_mode={trial.failure_mode})"
+            error = f"unresolved (failure_mode={failure_mode})"
         eval_result = EvalResult(
             instance_id=trial.task_id or task_id,
             error=error,
@@ -627,7 +637,7 @@ class TerminalBenchAdapter(AgentBenchmark):
         sidecar = {
             "instance_id": eval_result.instance_id,
             "resolved": resolved,
-            "failure_mode": getattr(trial, "failure_mode", None),
+            "failure_mode": failure_mode,
             "scorer": _SCORER_NAME,
             "official_runner": "terminal_bench.Harness",
             "task_id": task_id,
@@ -637,6 +647,11 @@ class TerminalBenchAdapter(AgentBenchmark):
         (workspace / "score.json").write_text(
             json.dumps(sidecar, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        official_dir = output / f"tb-adapter-{task_id}"
+        for filename in ("results.json", "run_metadata.json"):
+            source = official_dir / filename
+            if source.exists():
+                shutil.copy2(source, output / filename)
         logger.info(
             "[terminalbench-adapter] %s resolved=%s failure_mode=%s",
             task_id,
@@ -662,13 +677,26 @@ class TerminalBenchAdapter(AgentBenchmark):
         sidecar_path = workspace / "score.json"
         if sidecar_path.exists():
             try:
-                sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-                return {
+                raw_sidecar = sidecar_path.read_text(encoding="utf-8")
+                sidecar = json.loads(raw_sidecar)
+                payload = {
                     "resolved": bool(sidecar.get("resolved", False)),
                     "scorer": _SCORER_NAME,
                     "failure_mode": sidecar.get("failure_mode"),
                     "scorer_status": "official: score embedded in solve()",
                 }
+                payload[SCORER_RAW_OUTPUT_KEY] = {
+                    f"{instance.instance_id}-score.json": raw_sidecar
+                }
+                official_dir = workspace / "tb_runs" / f"tb-adapter-{self._task_id(instance)}"
+                for filename in ("results.json", "run_metadata.json"):
+                    official_path = official_dir / filename
+                    if official_path.exists():
+                        artifact_name = filename.replace("_", "-")
+                        payload[SCORER_RAW_OUTPUT_KEY][
+                            f"{instance.instance_id}-{artifact_name}"
+                        ] = official_path.read_text(encoding="utf-8")
+                return payload
             except (json.JSONDecodeError, OSError):
                 pass
         return {
@@ -720,7 +748,8 @@ class TerminalBenchAdapter(AgentBenchmark):
 
     def _task_id(self, instance: EvalInstance) -> str:
         """Task id: metadata wins, else the name part of the instance id."""
-        tid = instance.metadata.get("task_id") or instance.metadata.get("name")
+        metadata = getattr(instance, "metadata", {})
+        tid = metadata.get("task_id") or metadata.get("name")
         if tid:
             return str(tid)
         return str(instance.instance_id).rsplit("/", 1)[-1]
