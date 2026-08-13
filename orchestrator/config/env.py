@@ -33,7 +33,7 @@ def is_thinking_enabled() -> bool:
     return read_env("THINKING_ENABLED", "true").lower() == "true"
 
 
-MODEL_FAST_DEFAULT: str = "gpt-4o-mini"
+MODEL_FAST_DEFAULT: str = "gpt-5.5-openai-compact"
 
 _otel_initialised = False
 _otel_shutdown = lambda: None
@@ -44,7 +44,7 @@ def get_model_fast() -> str:
 
     Controlled by the MODEL_FAST environment variable, which the Go harness
     sets from its config.ModelFast before launching the orchestrator subprocess.
-    Defaults to "gpt-4o-mini".
+    Defaults to the relay-compatible "gpt-5.5-openai-compact".
     Returns empty string when explicitly set to empty (disabled).
     """
     return read_env("MODEL_FAST", MODEL_FAST_DEFAULT)

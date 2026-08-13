@@ -898,6 +898,7 @@ from orchestrator.llm.client import (  # noqa: E402
     COMPLEXITY_FAST_THRESHOLD,
     assess_complexity,
 )
+from orchestrator.config.env import MODEL_FAST_DEFAULT  # noqa: E402
 from orchestrator.llm.providers import build_fast_client  # noqa: E402
 
 
@@ -980,6 +981,22 @@ def test_build_fast_client_builds_openai_client_for_gpt_model(monkeypatch) -> No
     assert isinstance(client, OpenAIClient)
     assert client.model == "gpt-4o-mini"
     assert client.api_key == "sk-test-123"
+
+
+def test_fast_model_default_matches_supported_relay() -> None:
+    """The default fast route must be a model accepted by the configured relay."""
+    assert MODEL_FAST_DEFAULT == "gpt-5.5-openai-compact"
+
+
+def test_build_fast_client_builds_openai_client_for_relay_compact_model(monkeypatch) -> None:
+    """Relay compact models use the OpenAI-compatible client path."""
+    monkeypatch.setenv("MODEL_FAST", "gpt-5.5-openai-compact")
+    monkeypatch.setenv("OPENAI_API_KEY", "relay-test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://relay.example/v1")
+    client = build_fast_client()
+    assert isinstance(client, OpenAIClient)
+    assert client.model == "gpt-5.5-openai-compact"
+    assert client.base_url == "https://relay.example/v1"
 
 
 def test_build_fast_client_builds_anthropic_client_for_claude_model(monkeypatch) -> None:

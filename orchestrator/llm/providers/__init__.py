@@ -30,7 +30,7 @@ def build_default_client():
 def build_fast_client():
     """Build a lightweight LLM client for simple queries.
 
-    Reads MODEL_FAST from environment (default: gpt-4o-mini).
+    Reads MODEL_FAST from environment (default: deepseek-v4-flash).
     Detects the provider from the model name to build the right client.
     Returns None when MODEL_FAST is explicitly empty/disabled or no
     credentials are available.
@@ -49,7 +49,7 @@ def build_fast_client():
             base_url=read_env("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
             model=model,
         )
-    if "gpt" in model_lower or model_lower.startswith("o"):
+    if "gpt" in model_lower or model_lower.startswith("o") or model_lower.startswith("deepseek-"):
         api_key = read_env("OPENAI_API_KEY")
         if not api_key or api_key.startswith("<"):
             return None

@@ -73,7 +73,7 @@ func Default(projectRoot string) Config {
 		ProjectRoot:                     projectRoot,
 		WorkingDir:                      workingDir,
 		Model:                           "gpt-4o",
-		ModelFast:                       "gpt-4o-mini",
+		ModelFast:                       "gpt-5.5-openai-compact",
 		ContextWindow:                   256000,
 		MaxTokensPerSession:             1_000_000,
 		MaxCostPerSession:               5.0,

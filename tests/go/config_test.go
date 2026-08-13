@@ -45,23 +45,23 @@ func TestConfigDefaultContextWindowIs256K(t *testing.T) {
 	}
 }
 
-func TestConfigDefaultModelFastIsGpt4oMini(t *testing.T) {
+func TestConfigDefaultModelFastIsRelayCompact(t *testing.T) {
 	cfg := config.Default(t.TempDir())
 
-	if cfg.ModelFast != "gpt-4o-mini" {
+	if cfg.ModelFast != "gpt-5.5-openai-compact" {
 		t.Fatalf("unexpected default model_fast: %q", cfg.ModelFast)
 	}
 }
 
 func TestConfigLoadPreservesDefaultModelFast(t *testing.T) {
-	// With no settings override, the gpt-4o-mini default round-trips through
+	// With no settings override, the relay-compatible default round-trips through
 	// a full config load.
 	projectRoot := t.TempDir()
 	cfg, err := config.Load(projectRoot)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.ModelFast != "gpt-4o-mini" {
+	if cfg.ModelFast != "gpt-5.5-openai-compact" {
 		t.Fatalf("unexpected model_fast after load: %q", cfg.ModelFast)
 	}
 }
