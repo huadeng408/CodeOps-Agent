@@ -128,3 +128,24 @@ def test_real_swebench_adapter_passes_the_dry_run_gate(capsys, tmp_path, no_driv
     rc = run_mod.main([*ARGV, "--output-dir", str(tmp_path)])
     assert rc == 0, "the shipped SWE-bench adapter should be fully pinned"
     assert "dry-run OK: pins validated" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("benchmark", ["beir", "miracl", "bright"])
+def test_retrieval_dry_run_reaches_dataset_preflight(
+    benchmark, capsys, tmp_path, no_driver
+):
+    rc = run_mod.main(
+        [
+            "--benchmark",
+            benchmark,
+            "--dry-run",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "has no load_instances" not in captured.err
+    assert "not pinned" in captured.err or "artifact missing" in captured.err

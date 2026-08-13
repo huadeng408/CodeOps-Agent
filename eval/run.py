@@ -50,6 +50,7 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         "dry_run": False,
         "smoke": False,
         "subset": "",
+        "cache_dir": "",
     }
 
     i = 0
@@ -83,6 +84,9 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
             # comparison whose arms drew different instances is not a
             # comparison.
             args["subset"] = argv[i + 1]
+            i += 2
+        elif flag == "--cache-dir" and i + 1 < len(argv):
+            args["cache_dir"] = argv[i + 1]
             i += 2
         elif flag in ("--no-runner", "--direct-only"):
             args["use_runner"] = False
@@ -300,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     use_runner: bool = args["use_runner"]
     dry_run: bool = args.get("dry_run", False)
     smoke: bool = args.get("smoke", False)
-    cache_dir: str = args.get("cache", "")
+    cache_dir: str = args.get("cache_dir", "")
     subset_path: str = args.get("subset", "")
 
     # ---- List available benchmarks ----
@@ -330,7 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if not hasattr(benchmark_mod, "load_instances"):
+    retrieval_benchmarks = ("beir", "miracl", "bright")
+    if benchmark_name not in retrieval_benchmarks and not hasattr(benchmark_mod, "load_instances"):
         print(
             f"ERROR: benchmark module {module_name} has no load_instances() "
             f"function.  The unified HarnessRun lifecycle requires every "
@@ -340,26 +345,37 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # ---- Retrieval benchmarks (beir/miracl/bright) run offline from cache --
-    if hasattr(benchmark_mod, "RetrievalBenchmark") or benchmark_name in ("beir", "miracl", "bright"):
+    if benchmark_name in retrieval_benchmarks:
         from eval.benchmarks.base import cache_root
-        from eval.benchmarks.beir import BeirDataset, load_offline as _load_beir_offline
+        from eval.benchmarks.beir import (
+            BeirDataset,
+            load_offline as _load_beir_offline,
+            require_pinned as _require_beir_pinned,
+        )
 
         cache = Path(cache_dir) if cache_dir else cache_root()
-        if benchmark_name == "beir":
-            bench = _load_beir_offline(cache / "beir-nfcorpus")
-        elif benchmark_name == "miracl":
-            from eval.benchmarks.miracl import MiraclBenchmark
-            bench = MiraclBenchmark(language="zh")
-            bench.load_offline(cache)
-        elif benchmark_name == "bright":
-            from eval.benchmarks.bright import BrightBenchmark
-            bench = BrightBenchmark()
-            bench.load_offline(cache)
-        else:
-            print(f"ERROR: unsupported retrieval benchmark {benchmark_name}", file=sys.stderr)
+        try:
+            if benchmark_name == "beir":
+                dataset_cache = cache / "beir-nfcorpus"
+                bench = _load_beir_offline(dataset_cache)
+                dataset_pin = _require_beir_pinned("beir-nfcorpus", dataset_cache)
+            elif benchmark_name == "miracl":
+                from eval.benchmarks.miracl import MiraclBenchmark
+                bench = MiraclBenchmark(language="zh")
+                bench.load_offline(cache)
+                dataset_pin = bench.require_pinned(cache / bench.name)
+            elif benchmark_name == "bright":
+                from eval.benchmarks.bright import BrightBenchmark
+                bench = BrightBenchmark()
+                bench.load_offline(cache)
+                dataset_pin = bench.require_pinned(cache / bench.name)
+            else:
+                print(f"ERROR: unsupported retrieval benchmark {benchmark_name}", file=sys.stderr)
+                return 1
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 
-        bench.require_pinned()
         query_ids = bench.queries() if not isinstance(bench, BeirDataset) else list(bench.queries)
         if smoke:
             query_ids = query_ids[: min(limit, 5)]
@@ -367,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[eval] cache               : {cache.resolve()}")
         print(f"[eval] queries             : {len(query_ids)}" + (" (smoke)" if smoke else ""))
         print(f"[eval] dry-run             : {dry_run}")
+        print(f"[eval] dataset revision    : {dataset_pin['dataset_revision']}")
+        print(f"[eval] dataset hash        : {dataset_pin['dataset_hash']}")
         if dry_run:
             print("dry-run OK: dataset pinned and cached; predictions and scoring are wired")
             return 0

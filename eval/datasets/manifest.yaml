@@ -4,27 +4,65 @@
 # evidence, split and scorer. The eval manifest validator (eval/manifest.py)
 # rejects floating revisions, missing hashes and disallowed licenses.
 #
-# NOTE: revisions below are PLACEHOLDERS — pin the real commit/hash of each
-# dataset snapshot before running any public benchmark
-# (CODE_AGENT_RUN_PUBLIC_BENCHMARKS=1).
+# Entries remain fail-closed until their revision, bytes and license evidence
+# are all verified. A real byte pin with an unresolved license conflict is
+# still blocked.
 datasets:
   - name: "beir-nfcorpus"
-    source_url: "https://github.com/beir-cellar/beir"
-    revision: "0000000000000000000000000000000000000000"
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-    license_spdx: "CC-BY-4.0"
+    source_url: "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip"
+    revision: "ef83d29307061c65d04b035b4f4e7c18bd8374af"
+    sha256: "efe5be03f8c5b86a5870102d0599d227c8c6e2484328e68c6522560385671b0b"
+    license_spdx: "CC-BY-SA-4.0"
+    license_status: "CONFLICT_UNRESOLVED"
+    license_evidence:
+      - "https://www.cl.uni-heidelberg.de/statnlpgroup/nfcorpus/#terms-of-use"
+      - "https://huggingface.co/datasets/BeIR/nfcorpus"
+    license_note: "HF metadata says CC-BY-SA-4.0; upstream terms limit free use to academic research. Non-academic use remains blocked."
     scorer: "official-beir"
     split: "test"
     allowed_use: "zero-shot retrieval baseline"
+    artifacts:
+      - path: "nfcorpus/corpus.jsonl"
+        sha256: "10cc83ef1826b1425e6a87090b5140b39b27755d5a27e48215a88611c899991f"
+      - path: "nfcorpus/queries.jsonl"
+        sha256: "d024e6621b84925d485ae473d316a0c3af31c62c8068a59fb29d22f7613aef2a"
+      - path: "nfcorpus/qrels/test.tsv"
+        sha256: "f8fba6ef3d4dd9c3a242a8ba4ae38276fc3622fce7dcbae764766d564542fd2a"
 
   - name: "miracl-zh"
-    source_url: "https://github.com/project-miracl/miracl"
-    revision: "0000000000000000000000000000000000000000"
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-    license_spdx: "CC-BY-4.0"
-    scorer: "official-miracl"
+    source_url: "https://huggingface.co/datasets/miracl/miracl-corpus"
+    revision: "d921ec7e349ce0d28daf30b2da9da5ee698bef0d"
+    sha256: "d5efedcbae2bdabe3517890951aa94a6f74775427a570b63ebe7b117fe15e839"
+    sha256_semantics: "sha256 of canonical compact JSON artifact ledger in listed order"
+    license_spdx: "CC-BY-SA-4.0"
+    license_status: "CONFLICT_UNRESOLVED"
+    license_evidence:
+      - "https://huggingface.co/datasets/miracl/miracl-corpus"
+      - "https://huggingface.co/datasets/miracl/miracl"
+      - "https://dumps.wikimedia.org/legal.html"
+    license_note: "HF metadata says Apache-2.0, while the zhwiki source requires CC-BY-SA/GFDL attribution and share-alike handling."
+    scorer: "pyserini-trec_eval"
     split: "dev"
     allowed_use: "multilingual retrieval (Chinese queries)"
+    source_revisions:
+      corpus: "d921ec7e349ce0d28daf30b2da9da5ee698bef0d"
+      topics_qrels: "5be20db9509754dadad47689368639fcec739c00"
+      miracl_code: "fa3a57c89ad8f61f0a02d8c27167d8141cfd77ca"
+      pyserini: "c16016f315feb83b0c4279cc69c8586dab33f424"
+    scorer_command: "python -m pyserini.eval.trec_eval -c -M 100 -m ndcg_cut.10 <qrels> <run>"
+    artifacts:
+      - {path: "miracl-corpus-v1.0-zh/docs-0.jsonl.gz", sha256: "b036ba6a927a4598b314de55a1de200d2a619b28b4327f49e97ec4233d324827", bytes: 97061486}
+      - {path: "miracl-corpus-v1.0-zh/docs-1.jsonl.gz", sha256: "d6db9e242bdebeac76f586c0ec9a6301a9ec4a52c64c71949945ba5983467506", bytes: 85538355}
+      - {path: "miracl-corpus-v1.0-zh/docs-2.jsonl.gz", sha256: "29f1b1e3bec59770367be71d1698a7afaf7efb8006d168d40a2815025c8d1b43", bytes: 80287705}
+      - {path: "miracl-corpus-v1.0-zh/docs-3.jsonl.gz", sha256: "9cfc76c7f9ec9edc12d351913ba0f33a96d496a7449b46a6488f77668acf178d", bytes: 76098139}
+      - {path: "miracl-corpus-v1.0-zh/docs-4.jsonl.gz", sha256: "d47cef57928c3452d95cc8499dea37ce6e589808a9315ab2cf9809a23fe349b5", bytes: 60594024}
+      - {path: "miracl-corpus-v1.0-zh/docs-5.jsonl.gz", sha256: "17e1d4bf36d3992ccf5c519522ed1dcf896cb72772907e973bfcf1b2dd993e28", bytes: 50492481}
+      - {path: "miracl-corpus-v1.0-zh/docs-6.jsonl.gz", sha256: "4b3cdc7aeefc01ca4c2f55ba16ac80d773393068b78d4f971fc3c25c6fb9a859", bytes: 76002940}
+      - {path: "miracl-corpus-v1.0-zh/docs-7.jsonl.gz", sha256: "e7541af8c2fb7a96cff271e06047f0b4f00372b205735fabeed6217f9a7bb334", bytes: 71709349}
+      - {path: "miracl-corpus-v1.0-zh/docs-8.jsonl.gz", sha256: "f456671170b8286ede8f81feb9d365750af5027465399f63445a441fc96c41a7", bytes: 72069621}
+      - {path: "miracl-corpus-v1.0-zh/docs-9.jsonl.gz", sha256: "6c8193e14aafd93fb1ee57eac4f1171a44a0c975ebdefd6e9df1903c1b2fd7ca", bytes: 63401726}
+      - {path: "miracl-v1.0-zh/topics/topics.miracl-v1.0-zh-dev.tsv", sha256: "5b284a9aabf08bb2d1c88ed7ea276025c9d23846457c5350dc8d391b5e0d0a13", bytes: 16903}
+      - {path: "miracl-v1.0-zh/qrels/qrels.miracl-v1.0-zh-dev.tsv", sha256: "5546474d3dc8139014e6571e9f4041848bb0a314ca6d2d4bac708174d71c59eb", bytes: 94140}
 
   - name: "bright"
     source_url: "https://github.com/xlang-ai/BRIGHT"

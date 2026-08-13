@@ -87,6 +87,10 @@ class TraceCapture:
         with self._lock:
             self._spans.append(converted)
 
+    def _on_ending(self, span: Any) -> None:
+        """OpenTelemetry 1.44 pre-end hook; capture only finalized spans."""
+        return None
+
     def stop(self) -> None:
         """Stop recording, keeping whatever was already captured.
 

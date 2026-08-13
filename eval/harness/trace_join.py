@@ -141,6 +141,10 @@ class BaggageJoinSpanProcessor:
     def on_end(self, span: Any) -> None:  # noqa: D102
         return None
 
+    def _on_ending(self, span: Any) -> None:
+        """OpenTelemetry 1.44 pre-end hook; no mutation is needed here."""
+        return None
+
     def shutdown(self) -> None:  # noqa: D102
         return None
 

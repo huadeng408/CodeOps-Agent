@@ -658,6 +658,7 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         "qrels_hash": pin_values["qrels_hash"],
         "physical_index": pin_values["physical_index"],
         "index_mapping_hash": config.get("index_mapping_hash", ""),
+        "dataset_pin": config.get("dataset_pin", {}),
         "budgets": {
             "wall_clock_seconds": harness.budget.wall_clock_seconds,
             "max_tokens": harness.budget.max_tokens,

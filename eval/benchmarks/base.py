@@ -84,8 +84,13 @@ class RetrievalBenchmark(ABC):
                     )
         return path
 
-    def require_pinned(self) -> None:
-        from eval.datasets.loader import load_dataset_manifest, validate_dataset_records
+    def require_pinned(self, dataset_cache: Path | None = None) -> dict[str, Any]:
+        from eval.datasets.loader import (
+            dataset_pin_payload,
+            load_dataset_manifest,
+            validate_dataset_records,
+            verify_dataset_artifacts,
+        )
 
         records = load_dataset_manifest()
         by_name = {record["name"]: record for record in records}
@@ -93,8 +98,11 @@ class RetrievalBenchmark(ABC):
         if record is None:
             raise ValueError(f"dataset {self.name} not present in eval/datasets/manifest.yaml")
         issues = validate_dataset_records([record])
+        if not issues and dataset_cache is not None:
+            issues.extend(verify_dataset_artifacts(record, dataset_cache))
         if issues:
             raise ValueError(f"dataset {self.name} not pinned: {'; '.join(issues)}")
+        return dataset_pin_payload(record)
 
 
 def cache_root() -> Path:
