@@ -15,6 +15,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+rag = [
+    # Runtime imports for orchestrator.rag. Keep these optional because the Go
+    # harness does not need the Python HTTP/RAG service installed.
+    "fastapi>=0.110,<1",
+    "httpx>=0.27,<1",
+    "langchain-core>=0.3,<1",
+    "langchain-openai>=0.2,<1",
+    "langchain-text-splitters>=0.3,<1",
+    "langgraph>=0.2,<1",
+    "pydantic>=2.7,<3",
+    "typing-extensions>=4.12,<5",
+    "uvicorn>=0.29,<1",
+]
 trace-e2e = [
     "opentelemetry-api>=1.30,<2",
     "opentelemetry-sdk>=1.30,<2",

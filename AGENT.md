@@ -120,3 +120,27 @@
 - BeeAPI/OpenAI relay concurrency is capped at 10 in-flight requests across all local processes and shards combined. Prefer a lower value for retry-heavy review runs. Never bypass the CLI limit by launching shards whose aggregate concurrency exceeds 10; HTTP 429 responses must be retried with backoff or left fail-closed.
 - GPT-5.6 Sol 复核必须标记为 `AI_REVIEWED` 或 `DISPUTED`，不得生成真人 `reviewer_hash` 或冒充真人复核；只有真实人工参与后才可标记 `HUMAN_REVIEWED`。
 - Do not claim the multimodal corpus complete until the design map's data, qrels, index, visual bake-off, observability, and explicit integration gates pass.
+
+## Mandatory phase-end status report
+
+At every natural phase boundary, handoff, blocked stop, or final answer, report
+the four design-map workstreams in Chinese. This is mandatory even when no code
+changed in the phase:
+
+1. 自研 Harness
+2. 多模态 RAG
+3. 评测集
+4. 可观测性
+
+The report must contain all of the following:
+
+- a percentage bar for each workstream, for example `自研 Harness 55% [#####-----]`;
+- the items that most need work next, ordered by impact;
+- the thing the agent is least certain about right now;
+- the largest likely omission in the current understanding.
+
+Percentages are evidence-weighted coverage estimates, not completion claims.
+Count only requirements with fresh, reproducible verification evidence. Do not
+increase a percentage merely because code, a plan, a label, a synthetic fixture,
+or a preflight exists. State the source of material uncertainty and revise the
+estimate downward when an acceptance gate is missing or invalidated.
