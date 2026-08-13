@@ -10,6 +10,7 @@ import (
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 	"code-agent/pkg/reranker"
 )
@@ -101,10 +102,10 @@ func (s *orchestratorSupportService) RetrieveContext(ctx context.Context, req *m
 		return nil, fmt.Errorf("knowledge and memory retrieval both failed: knowledge=%v memory=%v", knowledgeErr, memoryErr)
 	}
 	if knowledgeErr != nil {
-		log.Warnf("[OrchestratorSupportService] knowledge retrieval degraded for query=%q: %v", req.Query, knowledgeErr)
+		log.Warnf("[OrchestratorSupportService] knowledge retrieval degraded for query_hash=%s: %v", genai.HashQuery(req.Query), knowledgeErr)
 	}
 	if memoryErr != nil {
-		log.Warnf("[OrchestratorSupportService] memory retrieval degraded for query=%q: %v", req.Query, memoryErr)
+		log.Warnf("[OrchestratorSupportService] memory retrieval degraded for query_hash=%s: %v", genai.HashQuery(req.Query), memoryErr)
 	}
 
 	contextItems := append([]ContextSnippet{}, knowledgeItems...)
@@ -115,7 +116,7 @@ func (s *orchestratorSupportService) RetrieveContext(ctx context.Context, req *m
 			if err == nil {
 				contextItems = fused
 			} else {
-				log.Warnf("[OrchestratorSupportService] context fusion degraded for query=%q: %v", req.Query, err)
+				log.Warnf("[OrchestratorSupportService] context fusion degraded for query_hash=%s: %v", genai.HashQuery(req.Query), err)
 				sort.SliceStable(contextItems, func(i, j int) bool {
 					if contextItems[i].Score == contextItems[j].Score {
 						return contextItems[i].Timestamp.After(contextItems[j].Timestamp)
@@ -133,7 +134,7 @@ func (s *orchestratorSupportService) RetrieveContext(ctx context.Context, req *m
 	if s.memoryService != nil && conversationID != "" {
 		prelude, err := s.memoryService.BuildPrelude(ctx, user.ID, conversationID, history)
 		if err != nil {
-			log.Warnf("[OrchestratorSupportService] memory prelude degraded for query=%q: %v", req.Query, err)
+			log.Warnf("[OrchestratorSupportService] memory prelude degraded for query_hash=%s: %v", genai.HashQuery(req.Query), err)
 		} else {
 			memoryPrelude = prelude
 		}
@@ -333,7 +334,7 @@ func (s *orchestratorSupportService) RerankContext(ctx context.Context, req *mod
 				return &model.OrchestratorRerankResponse{Items: convertContextSnippets(reranked)}, nil
 			}
 		} else {
-			log.Warnf("[OrchestratorSupportService] rerank degraded for query=%q: %v", req.Query, err)
+			log.Warnf("[OrchestratorSupportService] rerank degraded for query_hash=%s: %v", genai.HashQuery(req.Query), err)
 		}
 	}
 

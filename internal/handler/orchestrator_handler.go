@@ -67,7 +67,7 @@ func (h *OrchestratorHandler) RetrieveContext(c *gin.Context) {
 
 	resp, err := h.supportService.RetrieveContext(c.Request.Context(), &req)
 	if err != nil {
-		log.Errorf("[OrchestratorHandler] retrieve context failed query=%q err=%v", req.Query, err)
+		log.Errorf("[OrchestratorHandler] retrieve context failed query_hash=%s err=%v", genai.HashQuery(req.Query), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve context"})
 		return
 	}
@@ -136,7 +136,7 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		if retrieveSpan != nil {
 			retrieveSpan.RecordError(err)
 		}
-		log.Errorf("[OrchestratorHandler] knowledge search failed query=%q mode=%s err=%v", req.Query, req.Mode, err)
+		log.Errorf("[OrchestratorHandler] knowledge search failed query_hash=%s mode=%s err=%v", genai.HashQuery(req.Query), req.Mode, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search knowledge"})
 		return
 	}
@@ -157,7 +157,7 @@ func (h *OrchestratorHandler) SearchMemory(c *gin.Context) {
 
 	resp, err := h.supportService.SearchMemory(c.Request.Context(), &req)
 	if err != nil {
-		log.Errorf("[OrchestratorHandler] memory search failed query=%q err=%v", req.Query, err)
+		log.Errorf("[OrchestratorHandler] memory search failed query_hash=%s err=%v", genai.HashQuery(req.Query), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search memory"})
 		return
 	}
@@ -175,7 +175,7 @@ func (h *OrchestratorHandler) RerankContext(c *gin.Context) {
 
 	resp, err := h.supportService.RerankContext(c.Request.Context(), &req)
 	if err != nil {
-		log.Errorf("[OrchestratorHandler] rerank context failed query=%q err=%v", req.Query, err)
+		log.Errorf("[OrchestratorHandler] rerank context failed query_hash=%s err=%v", genai.HashQuery(req.Query), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rerank context"})
 		return
 	}

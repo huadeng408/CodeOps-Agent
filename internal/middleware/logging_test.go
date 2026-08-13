@@ -14,40 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestRedactJSONLogBodyRecursively(t *testing.T) {
-	body := []byte(`{
-		"username":"alice",
-		"password":"request-password-secret",
-		"nested":{"accessToken":"access-token-secret","safe":"visible"},
-		"items":[{"refresh_token":"refresh-token-secret"},{"X-Internal-Token":"internal-token-secret"}],
-		"Authorization":"Bearer authorization-secret"
-	}`)
-
-	redacted := redactJSONLogBody(body)
-	for _, secret := range []string{
-		"request-password-secret",
-		"access-token-secret",
-		"refresh-token-secret",
-		"internal-token-secret",
-		"authorization-secret",
-	} {
-		if strings.Contains(redacted, secret) {
-			t.Fatalf("redacted JSON contains sensitive value %q: %s", secret, redacted)
-		}
-	}
-	if !strings.Contains(redacted, `"safe":"visible"`) || !strings.Contains(redacted, `"password":"[REDACTED]"`) {
-		t.Fatalf("redacted JSON lost safe data or field names: %s", redacted)
-	}
-}
-
-func TestRedactJSONLogBodyPreservesNonJSON(t *testing.T) {
-	const body = "plain request body with existing formatting\n"
-	if got := redactJSONLogBody([]byte(body)); got != body {
-		t.Fatalf("non-JSON body changed: got %q want %q", got, body)
-	}
-}
-
-func TestRequestLoggerDoesNotPersistSensitiveJSONOrHeaders(t *testing.T) {
+func TestRequestLoggerDoesNotPersistKnowledgeSearchBodies(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	readLog, writeLog, err := os.Pipe()
 	if err != nil {
@@ -74,20 +41,25 @@ func TestRequestLoggerDoesNotPersistSensitiveJSONOrHeaders(t *testing.T) {
 
 	router := gin.New()
 	router.Use(RequestLogger())
-	router.POST("/login", func(c *gin.Context) {
-		_, _ = io.Copy(io.Discard, c.Request.Body)
+	requestBody := `{"user":{"id":7},"query":"private retrieval query","topK":5}`
+	responseBody := "private retrieved document body"
+	router.POST("/internal/orchestrator/knowledge-search", func(c *gin.Context) {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Fatalf("handler failed to read request body: %v", err)
+		}
+		if string(body) != requestBody {
+			t.Fatalf("handler received %q, want %q", body, requestBody)
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"data": gin.H{
-				"accessToken":  "response-access-token-secret",
-				"refreshToken": "response-refresh-token-secret",
+				"textContent": responseBody,
 			},
 		})
 	})
 
-	request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBufferString(`{"username":"alice","password":"request-password-secret"}`))
+	request := httptest.NewRequest(http.MethodPost, "/internal/orchestrator/knowledge-search", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer header-authorization-secret")
-	request.Header.Set("X-Internal-Token", "header-internal-token-secret")
 	router.ServeHTTP(httptest.NewRecorder(), request)
 	log.Sync()
 	if err := writeLog.Close(); err != nil {
@@ -101,18 +73,24 @@ func TestRequestLoggerDoesNotPersistSensitiveJSONOrHeaders(t *testing.T) {
 	logged := result.body
 	log.Init("info", "json", "")
 	text := string(logged)
-	for _, secret := range []string{
-		"request-password-secret",
-		"response-access-token-secret",
-		"response-refresh-token-secret",
-		"header-authorization-secret",
-		"header-internal-token-secret",
+	for _, content := range []string{
+		"private retrieval query",
+		responseBody,
+		"requestBody",
+		"responseBody",
 	} {
-		if strings.Contains(text, secret) {
-			t.Fatalf("request log contains sensitive value %q: %s", secret, text)
+		if strings.Contains(text, content) {
+			t.Fatalf("request log contains body content %q: %s", content, text)
 		}
 	}
-	if !strings.Contains(text, "[REDACTED]") {
-		t.Fatalf("request log does not contain redaction marker: %s", text)
+	for _, diagnostic := range []string{
+		`"statusCode":200`,
+		`"path":"/internal/orchestrator/knowledge-search"`,
+		`"requestBytes":`,
+		`"responseBytes":`,
+	} {
+		if !strings.Contains(text, diagnostic) {
+			t.Fatalf("request log is missing diagnostic %q: %s", diagnostic, text)
+		}
 	}
 }

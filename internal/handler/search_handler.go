@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
 	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
@@ -35,7 +35,8 @@ func (h *SearchHandler) SetTracer(t genai.Tracer) {
 // HybridSearch handles hybrid search.
 func (h *SearchHandler) HybridSearch(c *gin.Context) {
 	query := c.Query("query")
-	log.Infof("[SearchHandler] receive hybrid search request, query=%s", query)
+	queryHash := genai.HashQuery(query)
+	log.Infof("[SearchHandler] receive hybrid search request, query_hash=%s", queryHash)
 
 	if query == "" {
 		log.Warnf("[SearchHandler] hybrid search rejected: empty query")
@@ -84,11 +85,11 @@ func (h *SearchHandler) HybridSearch(c *gin.Context) {
 		if retrieveSpan != nil {
 			retrieveSpan.RecordError(err)
 		}
-		log.Errorf("[SearchHandler] hybrid search failed, query=%q topK=%d disableRerank=%t err=%v", query, topK, disableRerank, err)
+		log.Errorf("[SearchHandler] hybrid search failed, query_hash=%s topK=%d disableRerank=%t err=%v", queryHash, topK, disableRerank, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 		return
 	}
 
-	log.Infof("[SearchHandler] hybrid search completed, query=%q topK=%d disableRerank=%t resultCount=%d", query, topK, disableRerank, len(results))
+	log.Infof("[SearchHandler] hybrid search completed, query_hash=%s topK=%d disableRerank=%t resultCount=%d", queryHash, topK, disableRerank, len(results))
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": results, "message": "success"})
 }

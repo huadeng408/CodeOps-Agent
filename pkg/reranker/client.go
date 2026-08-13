@@ -81,7 +81,7 @@ func NewClient(cfg serverconfig.RerankerConfig) Client {
 		return noopClient{}
 	}
 	return &httpClient{
-		cfg:    cfg,
+		cfg: cfg,
 		// The retrieval service owns the request deadline. A second fixed
 		// client timeout would silently cap configured rerank_timeout_ms.
 		client: &http.Client{},
@@ -136,7 +136,7 @@ func (c *httpClient) Rerank(ctx context.Context, query string, documents []Docum
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("rerank api returned status=%s body=%s", resp.Status, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("rerank api returned status=%s body_bytes=%d", resp.Status, len(raw))
 	}
 
 	var parsed rerankResponse

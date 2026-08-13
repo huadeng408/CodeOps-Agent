@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/es"
 	"code-agent/pkg/log"
@@ -230,10 +231,10 @@ func (s *memoryService) SearchLongTermMemories(ctx context.Context, user *model.
 	<-done
 
 	if textErr != nil {
-		log.Warnf("[MemoryService] text memory search degraded for user=%d query=%q: %v", user.ID, query, textErr)
+		log.Warnf("[MemoryService] text memory search degraded for user=%d query_hash=%s: %v", user.ID, genai.HashQuery(query), textErr)
 	}
 	if vectorErr != nil {
-		log.Warnf("[MemoryService] vector memory search degraded for user=%d query=%q: %v", user.ID, query, vectorErr)
+		log.Warnf("[MemoryService] vector memory search degraded for user=%d query_hash=%s: %v", user.ID, genai.HashQuery(query), vectorErr)
 	}
 
 	hits := rrfFuseMemoryHits(60, textHits, vectorHits)
@@ -301,7 +302,7 @@ func (s *memoryService) FuseContext(ctx context.Context, query string, items []C
 				return reranked, nil
 			}
 		} else {
-			log.Warnf("[MemoryService] context rerank degraded for query=%q: %v", query, err)
+			log.Warnf("[MemoryService] context rerank degraded for query_hash=%s: %v", genai.HashQuery(query), err)
 		}
 	}
 
@@ -668,7 +669,7 @@ func (s *memoryService) searchMemoriesOnce(ctx context.Context, body map[string]
 	defer res.Body.Close()
 	if res.IsError() {
 		raw, _ := io.ReadAll(res.Body)
-		return nil, fmt.Errorf("memory search failed: status=%s body=%s", res.Status(), strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("memory search failed: status=%s body_bytes=%d", res.Status(), len(raw))
 	}
 
 	var parsed memorySearchResponse

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
 	"code-agent/pkg/log"
 )
 
@@ -131,7 +131,7 @@ func (c *httpMemoryClient) doJSON(ctx context.Context, path string, payload any)
 		return nil, fmt.Errorf("read memory response failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("memory worker returned status=%s body=%s", resp.Status, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("memory worker returned status=%s body_bytes=%d", resp.Status, len(raw))
 	}
 
 	var envelope struct {

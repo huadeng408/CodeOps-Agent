@@ -8,6 +8,7 @@ import (
 
 	"code-agent/internal/model"
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 )
 
@@ -230,7 +231,7 @@ func expandEvidenceForUser(ctx context.Context, loader EvidenceLoader, userServi
 	expander := NewEvidenceExpander(loader, user.ID, effectiveOrgTagsForEvidence(userService, user))
 	expanded, err := expander.ExpandSearchResults(ctx, results, evidenceTokenBudget())
 	if err != nil {
-		log.Warnf("evidence expansion degraded for query=%q: %v", query, err)
+		log.Warnf("evidence expansion degraded for query_hash=%s: %v", genai.HashQuery(query), err)
 		return results
 	}
 	return expanded

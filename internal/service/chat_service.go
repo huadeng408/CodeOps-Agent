@@ -12,6 +12,7 @@ import (
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 	orchestratorclient "code-agent/pkg/orchestrator"
 
@@ -94,10 +95,10 @@ func (s *chatService) retrieveContextWithPlan(ctx context.Context, query string,
 	}
 
 	if knowledgeErr != nil {
-		log.Warnf("knowledge retrieval degraded for query=%q: %v", query, knowledgeErr)
+		log.Warnf("knowledge retrieval degraded for query_hash=%s: %v", genai.HashQuery(query), knowledgeErr)
 	}
 	if memoryErr != nil {
-		log.Warnf("memory retrieval degraded for query=%q: %v", query, memoryErr)
+		log.Warnf("memory retrieval degraded for query_hash=%s: %v", genai.HashQuery(query), memoryErr)
 	}
 
 	contextItems := append(knowledgeItems, memoryItems...)
@@ -110,7 +111,7 @@ func (s *chatService) retrieveContextWithPlan(ctx context.Context, query string,
 		if err == nil {
 			return fused, nil
 		}
-		log.Warnf("context fusion degraded for query=%q: %v", query, err)
+		log.Warnf("context fusion degraded for query_hash=%s: %v", genai.HashQuery(query), err)
 	}
 
 	sort.SliceStable(contextItems, func(i, j int) bool {
@@ -161,7 +162,7 @@ func (s *chatService) retrieveKnowledgeWithPlan(ctx context.Context, query strin
 			if idx == 0 {
 				return nil, err
 			}
-			log.Warnf("sub-query retrieval degraded, query=%q err=%v", item, err)
+			log.Warnf("sub-query retrieval degraded, query_hash=%s err=%v", genai.HashQuery(item), err)
 			continue
 		}
 		collected = append(collected, results)

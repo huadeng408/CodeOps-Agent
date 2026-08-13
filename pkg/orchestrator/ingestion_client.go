@@ -258,7 +258,7 @@ func (c *httpIngestionClient) doJSON(ctx context.Context, path string, payload a
 		return nil, fmt.Errorf("read ingestion response failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ingestion worker returned status=%s body=%s", resp.Status, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("ingestion worker returned status=%s body_bytes=%d", resp.Status, len(raw))
 	}
 
 	var envelope struct {

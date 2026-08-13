@@ -164,6 +164,7 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 	if query == "" {
 		return []model.SearchResponseDTO{}, nil
 	}
+	queryHash := genai.HashQuery(query)
 	if user == nil {
 		return nil, errors.New("user is required")
 	}
@@ -230,24 +231,24 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 			// never silently degrade to BM25 (design spec §10).
 			return nil, fmt.Errorf("vector recall failed: %w", vectorErr)
 		}
-		log.Warnf("[SearchService] vector-only mode degraded to bm25 for query=%q: %v", query, vectorErr)
+		log.Warnf("[SearchService] vector-only mode degraded to bm25 for query_hash=%s: %v", queryHash, vectorErr)
 		bm25Hits, bm25Err = s.bm25Search(ctx, keywordQuery, s.retrievalCfg.BM25TopN, user.ID, orgTags)
 		mode = model.RetrievalModeBM25
 	}
 	if mode == model.RetrievalModeBM25 && len(bm25Hits) == 0 && bm25Err != nil {
-		log.Warnf("[SearchService] bm25-only mode degraded to vector for query=%q: %v", query, bm25Err)
+		log.Warnf("[SearchService] bm25-only mode degraded to vector for query_hash=%s: %v", queryHash, bm25Err)
 		vectorHits, vectorErr = s.vectorSearch(ctx, query, s.retrievalCfg.VectorTopN, user.ID, orgTags)
 		mode = model.RetrievalModeVector
 	}
 
 	if bm25Err != nil {
-		log.Warnf("[SearchService] bm25 recall degraded for query=%q: %v", query, bm25Err)
+		log.Warnf("[SearchService] bm25 recall degraded for query_hash=%s: %v", queryHash, bm25Err)
 	}
 	if vectorErr != nil {
 		if isVectorDimensionMismatchError(vectorErr) {
-			log.Warnf("[SearchService] vector recall skipped due to dimension mismatch, query=%q: %v", query, vectorErr)
+			log.Warnf("[SearchService] vector recall skipped due to dimension mismatch, query_hash=%s: %v", queryHash, vectorErr)
 		} else {
-			log.Warnf("[SearchService] vector recall degraded for query=%q: %v", query, vectorErr)
+			log.Warnf("[SearchService] vector recall degraded for query_hash=%s: %v", queryHash, vectorErr)
 		}
 	}
 	if len(bm25Hits) == 0 && len(vectorHits) == 0 && bm25Err != nil && vectorErr != nil {
@@ -258,14 +259,14 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 	if mode != model.RetrievalModeVector && shouldTriggerPhraseFallback(rawPhrase, len(bm25Hits), len(vectorHits), phraseFallbackThreshold(requestedTopK)) {
 		phraseHits, err = s.phraseSearch(ctx, rawPhrase, s.retrievalCfg.BM25TopN, user.ID, orgTags)
 		if err != nil {
-			log.Warnf("[SearchService] phrase fallback degraded for query=%q phrase=%q: %v", query, rawPhrase, err)
+			log.Warnf("[SearchService] phrase fallback degraded for query_hash=%s: %v", queryHash, err)
 			phraseHits = []retrievalHit{}
 		}
 	}
 
 	fusedHits := fuseHitsByMode(mode, s.retrievalCfg.RRFK, bm25Hits, vectorHits, phraseHits)
 	if len(fusedHits) == 0 {
-		s.logRetrievalMetrics(query, keywordQuery, rawPhrase, retrievalObservation{
+		s.logRetrievalMetrics(query, retrievalObservation{
 			RecallAt100:      -1,
 			NDCGAt5:          -1,
 			LatencyMs:        time.Since(start).Seconds() * 1000,
@@ -298,7 +299,7 @@ func (s *searchService) Search(ctx context.Context, options SearchOptions, user 
 		return nil, err
 	}
 
-	s.logRetrievalMetrics(query, keywordQuery, rawPhrase, retrievalObservation{
+	s.logRetrievalMetrics(query, retrievalObservation{
 		RecallAt100:      -1,
 		NDCGAt5:          -1,
 		LatencyMs:        time.Since(start).Seconds() * 1000,
@@ -459,7 +460,7 @@ func (s *searchService) searchOnce(ctx context.Context, body map[string]any) ([]
 
 	if res.IsError() {
 		raw, _ := io.ReadAll(res.Body)
-		return nil, fmt.Errorf("elasticsearch returned status=%s body=%s", res.Status(), strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("elasticsearch returned status=%s body_bytes=%d", res.Status(), len(raw))
 	}
 
 	var parsed esSearchResponse
@@ -520,7 +521,7 @@ func (s *searchService) rerankHits(ctx context.Context, query string, fusedHits 
 			rerankSpan.RecordError(err)
 		}
 		timeoutHit := isTimeoutError(err) || errors.Is(rerankCtx.Err(), context.DeadlineExceeded)
-		log.Warnf("[SearchService] rerank degraded for query=%q timeout=%t: %v", query, timeoutHit, err)
+		log.Warnf("[SearchService] rerank degraded for query_hash=%s timeout=%t: %v", genai.HashQuery(query), timeoutHit, err)
 		return truncateHits(fusedHits, returnTopK), false, timeoutHit
 	}
 	MarkRerankApplied(ctx)
@@ -613,13 +614,11 @@ func (s *searchService) buildResponseDTOs(hits []retrievalHit) ([]model.SearchRe
 	return results, nil
 }
 
-// logRetrievalMetrics handles log retrieval metrics.
-func (s *searchService) logRetrievalMetrics(query, normalizedQuery, rawPhrase string, obs retrievalObservation) {
+// logRetrievalMetrics records aggregate retrieval diagnostics without query content.
+func (s *searchService) logRetrievalMetrics(query string, obs retrievalObservation) {
 	snapshot := s.observer.Record(obs)
 	log.Infow("[SearchService] retrieval metrics",
-		"query", query,
-		"normalizedQuery", normalizedQuery,
-		"rawPhrase", rawPhrase,
+		"queryHash", genai.HashQuery(query),
 		"recallAt100", obs.RecallAt100,
 		"nDCGAt5", obs.NDCGAt5,
 		"bm25Candidates", obs.BM25Candidates,

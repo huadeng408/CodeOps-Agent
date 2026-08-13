@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/serverconfig"
 	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 
 	"github.com/gorilla/websocket"
@@ -132,7 +133,7 @@ func (c *httpClient) StreamResponse(ctx context.Context, query string, user *mod
 	log.Infow("[OrchestratorClient] stream start",
 		"trace_id", traceID,
 		"user_id", user.ID,
-		"query", query,
+		"query_hash", genai.HashQuery(query),
 	)
 
 	resp, err := c.client.Do(req)
@@ -147,7 +148,7 @@ func (c *httpClient) StreamResponse(ctx context.Context, query string, user *mod
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("orchestrator returned status=%s body=%s", resp.Status, strings.TrimSpace(string(raw)))
+		return fmt.Errorf("orchestrator returned status=%s body_bytes=%d", resp.Status, len(raw))
 	}
 
 	reader := bufio.NewReader(resp.Body)
