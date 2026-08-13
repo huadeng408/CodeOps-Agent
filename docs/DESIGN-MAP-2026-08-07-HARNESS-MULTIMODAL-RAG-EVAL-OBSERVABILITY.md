@@ -2652,11 +2652,11 @@ This is a runnable integration demo, not a retrieval benchmark or production
 release gate.
 
 ```text
-artifact: .tmp/multimodal-rag-pilot/20260813-real-04
-run_id: multimodal-pilot-20260813082110-9887a76a
-source_commit: 6b2c5a030311c4efc0a267fd9cbf7f11ef840240
+artifact: .tmp/multimodal-rag-pilot/20260813-real-05
+run_id: multimodal-pilot-20260813084228-842c2dba
+source_commit: 20bae9399dc148c103621dc800caa0dd111d274c
 file_md5: f75d6778fe737d1e1bdbb9da8273f82a
-trace_id: bc3cb521bc4e05610e31f264de7f44ee
+trace_id: 082f5cd7ae4cd3d66c6745eac0cc8c7b
 parser: MinerU 3.4.4, mode=ocr, backend=pipeline
 pipeline: parse/chunk/embed/index = SUCCESS exactly once
 retrieval: one matching hit; citation wiring precision=1.0, recall=1.0
@@ -2674,8 +2674,8 @@ tests did not find:
    file-MD5-derived `page_id`/`element_id` namespace. Citation joins now model
    those as separate identities and validate the namespace before acceptance.
 
-The four attempted run IDs were retained as audit evidence. Relative to the
-33.1 baseline they added four source/document receipts and twenty run-scoped
+The five attempted run IDs were retained as audit evidence. Relative to the
+33.1 baseline they added five source/document receipts and twenty-four run-scoped
 pipeline rows; MinIO added one deduplicated object. The final ES target contains
 two chunks for the fixture, and `knowledge_base_current` still points to
 `knowledge_base_v2_bge_m3`. No automatic cleanup, index deletion, volume
@@ -2691,3 +2691,10 @@ Updated mainline truth:
   dataset pins unresolved). This smoke result must never be reported as eval.
 - Harness: unchanged receipt-bound astropy-20 development subset only; no new
   SWE-bench Verified, Terminal-Bench, or tau2-bench claim.
+
+An independent adversarial review then found and closed two Important gaps:
+the citation gate now reconstructs the production citation key and verifies
+page/element/bbox geometry against MinerU, and the Go completion client now
+rejects wrong run/file scope, missing/duplicate/out-of-order stages, and any
+completed response with a non-SUCCESS stage. The `real-05` evidence above was
+generated after those fixes were committed.
