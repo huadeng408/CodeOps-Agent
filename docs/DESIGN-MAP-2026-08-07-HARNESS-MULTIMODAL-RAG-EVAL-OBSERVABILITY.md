@@ -3344,3 +3344,32 @@ receipt; a real runner must still exercise the full contract.
   before the closure documentation update. The next harness priority is the
   isolated official tau2-bench migration, not repeated optimization on this
   single Terminal-Bench task.
+
+## 50. Real MinerU-to-RAG E2E receipt (2026-08-14)
+
+- `VERIFIED`: `scripts/rag-agent-e2e.ps1` ran with the local MinerU 3.4.4
+  executable, BGE-M3 embedding service, Tika for the non-PDF text fixtures,
+  Kafka, MinIO, MySQL, Elasticsearch, a temporary Python ingestion worker,
+  and a temporary Go server. The script generates a fresh process-only
+  internal service token; it is not read from a key file, logged, or persisted.
+- `VERIFIED`: `pkg/mineru.TestRealMinerUOCR` passed in `52.86s`, proving a
+  real PDF went through MinerU OCR. It did not invoke Tika for PDF extraction.
+  The two independent RAG paths then both passed: direct RAG client ingestion
+  and the CLI application's `/ingest` lifecycle. Each completed
+  `parse -> chunk -> embed -> index` with all stages `SUCCESS`, and each
+  returned its newly generated marker through `SearchKnowledge`.
+- `VERIFIED`: run `20260814062509-8944183f` at `439a846c` left auditable
+  snapshots under `.tmp/rag-agent-e2e-20260814/`. The before/after delta is
+  exactly two private synthetic documents: ES text index `24885 -> 24887`,
+  vectors `24873 -> 24875`, MinIO upload objects `4621 -> 4623`, knowledge
+  documents `3113 -> 3115`, and pipeline tasks `22403 -> 22411`. The tests
+  also asserted that another user cannot retrieve either private marker.
+- `VERIFIED`: the script stopped its temporary Go server and Python worker;
+  its temporary executable and logs were absent after success, and neither
+  port 8081 nor 8090 had a listening process. Existing Docker infrastructure
+  was deliberately retained because it serves the local workspace.
+- Boundary: this is a real pipeline and access-control receipt, not a
+  document-native multimodal retrieval benchmark. The outstanding evaluation
+  gap remains public question/page/evidence/bbox qrels with a license that
+  permits the required use. ScreenSpot-Pro remains a separate GUI grounding
+  lane and cannot fill this document-RAG gap.
