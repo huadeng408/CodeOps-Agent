@@ -110,7 +110,7 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 	// Orchestrator-initiated search — create a rag.retrieve span.
 	var retrieveSpan genai.Span
 	if h.tracer != nil {
-		ctx, retrieveSpan = h.tracer.StartSpan(ctx, "retrieve orchestrator /knowledge-search", genai.OperationRetrieve, genai.SystemGenAI)
+		ctx, retrieveSpan = h.tracer.StartSpan(ctx, "rag.retrieve orchestrator /knowledge-search", genai.OperationRetrieve, genai.SystemGenAI)
 		retrieveSpan.SetAttributes(
 			genai.QueryHashKV(genai.HashQuery(req.Query)),
 			genai.TopNKV(req.TopK),

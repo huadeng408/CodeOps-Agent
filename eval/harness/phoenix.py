@@ -114,7 +114,14 @@ def read_run_spans(
         for span in page:
             if str(span.attributes.get("eval.run_id", "")) != run_id:
                 continue
-            if expected and str(span.attributes.get("eval.instance_id", "")) not in expected:
+            # ``eval.run`` is run-scoped and correctly carries an empty
+            # instance ID.  Keep it alongside expected instance spans so the
+            # O3 topology validator can see the real root of the trace.
+            if (
+                expected
+                and span.name != "eval.run"
+                and str(span.attributes.get("eval.instance_id", "")) not in expected
+            ):
                 continue
             matched.append(span)
         if not next_cursor:

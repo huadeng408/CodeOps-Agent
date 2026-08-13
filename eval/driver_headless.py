@@ -494,7 +494,12 @@ class LocalToolExecutor:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            request_timeout = int(os.environ.get("CODE_AGENT_RAG_TIMEOUT_SECONDS", "30"))
+        except ValueError:
+            request_timeout = 30
+        request_timeout = min(max(request_timeout, 1), 300)
+        try:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:
                 if not 200 <= response.status < 300:
                     return _LocalToolResult(
                         error=f"SearchKnowledge service returned HTTP {response.status}",

@@ -180,7 +180,10 @@ services:
       - "8008:8008"
     environment:
       RERANKER_MODEL: "jinaai/jina-reranker-v2-base-multilingual"
-      RERANKER_THREADS: "4"
+      RERANKER_THREADS: "2"
+      # The local cross-encoder is memory-heavy; concurrent inference caused
+      # Docker OOM kills during the two-search O3 conversation turn.
+      RERANKER_SERIALIZE_REQUESTS: "true"
       HTTP_PROXY: "http://host.docker.internal:7890"
       HTTPS_PROXY: "http://host.docker.internal:7890"
       NO_PROXY: "localhost,127.0.0.1,host.docker.internal,codeagent-network"

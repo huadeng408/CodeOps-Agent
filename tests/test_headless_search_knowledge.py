@@ -7,6 +7,7 @@ from threading import Thread
 from opentelemetry import trace
 
 from eval.adapter import EvalInstance, EvalResult
+import eval.driver_headless as driver_headless
 from eval.driver_headless import HeadlessDriver, LocalToolExecutor
 from eval.harness.trace_join import eval_join_context
 
@@ -120,6 +121,51 @@ def test_search_knowledge_fails_closed_without_internal_rag_configuration(
 
     assert result.exit_code == 1
     assert "CODE_AGENT_RAG_SERVER_URL" in result.error
+
+
+def test_search_knowledge_uses_configured_request_timeout_for_live_rag(
+    monkeypatch, tmp_path
+) -> None:
+    """A slow, real retrieval must not be discarded at the old fixed 30 seconds."""
+    observed: dict[str, int] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"code": 200, "data": {"results": [{"documentId": "doc", "chunkId": 1}]}}
+            ).encode()
+
+    def urlopen(_request, timeout: int):
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(driver_headless.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("CODE_AGENT_RAG_SERVER_URL", "http://example.test")
+    monkeypatch.setenv("CODE_AGENT_RAG_INTERNAL_SECRET", "test-only-internal-secret")
+    monkeypatch.setenv("CODE_AGENT_RAG_USER_ID", "7")
+    monkeypatch.setenv("CODE_AGENT_RAG_TIMEOUT_SECONDS", "90")
+    span_context = trace.SpanContext(
+        trace_id=int("5" * 32, 16),
+        span_id=int("6" * 16, 16),
+        is_remote=False,
+        trace_flags=trace.TraceFlags(1),
+    )
+    with trace.use_span(trace.NonRecordingSpan(span_context)):
+        with eval_join_context("o3-run", "o3-instance"):
+            result = LocalToolExecutor(str(tmp_path)).execute(
+                "SearchKnowledge", json.dumps({"query": "interface"})
+            )
+
+    assert result.exit_code == 0
+    assert observed["timeout"] == 90
 
 
 def test_search_knowledge_fails_closed_when_response_has_no_stable_hit(

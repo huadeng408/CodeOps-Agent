@@ -51,7 +51,10 @@ func (rerankTelemetrySupportService) SearchKnowledge(ctx context.Context, _ *mod
 
 var _ service.OrchestratorSupportService = rerankTelemetrySupportService{}
 
-type telemetrySpan struct{ attributes []attribute.KeyValue }
+type telemetrySpan struct {
+	name       string
+	attributes []attribute.KeyValue
+}
 
 func (*telemetrySpan) End() {}
 func (s *telemetrySpan) SetAttributes(attrs ...attribute.KeyValue) {
@@ -62,8 +65,8 @@ func (*telemetrySpan) AddEvent(string)   {}
 
 type telemetryTracer struct{ span *telemetrySpan }
 
-func (t *telemetryTracer) StartSpan(ctx context.Context, _ string, _ string, _ string) (context.Context, genai.Span) {
-	t.span = &telemetrySpan{}
+func (t *telemetryTracer) StartSpan(ctx context.Context, name, _ string, _ string) (context.Context, genai.Span) {
+	t.span = &telemetrySpan{name: name}
 	return ctx, t.span
 }
 func (*telemetryTracer) Shutdown(context.Context) error { return nil }
@@ -89,6 +92,9 @@ func TestSearchKnowledgeStampsInstanceIDFromW3CBaggage(t *testing.T) {
 	}
 	if tracer.span == nil {
 		t.Fatal("expected retrieve span")
+	}
+	if tracer.span.name != "rag.retrieve orchestrator /knowledge-search" {
+		t.Fatalf("retrieve span name = %q, want rag.retrieve-prefixed name", tracer.span.name)
 	}
 	values := map[attribute.Key]attribute.Value{}
 	for _, kv := range tracer.span.attributes {

@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
@@ -558,15 +559,37 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
                 raise ValueError(
                     "O3 trace profile requires phoenix_url, phoenix_project, and trace_start_time"
                 )
+            # O3 verifies the collector rather than the in-process capture.
+            # Its root/instance/scorer spans can still be queued in the SDK's
+            # BatchSpanProcessor when the run context exits, so drain the
+            # provider before polling Phoenix or readback can observe only an
+            # orphaned earlier subset of the real trace.
+            try:
+                from opentelemetry import trace as trace_api
+
+                trace_api.get_tracer_provider().force_flush()
+            except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+                pass
             from eval.harness.phoenix import read_run_spans
 
-            spans = read_run_spans(
-                phoenix_url,
-                phoenix_project,
-                start_time,
-                harness.run_id,
-                expected_instance_ids,
-            )
+            # Phoenix ingestion is asynchronous even after the SDK provider
+            # reports a successful flush. Poll a bounded window for the O3
+            # topology rather than accepting an early partial trace.
+            spans = []
+            deadline = time.monotonic() + 10.0
+            while True:
+                spans = read_run_spans(
+                    phoenix_url,
+                    phoenix_project,
+                    start_time,
+                    harness.run_id,
+                    expected_instance_ids,
+                )
+                names = {span.name for span in spans}
+                required_names = {"eval.run", "eval.instance", "scorer.official"}
+                if required_names.issubset(names) or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
             trace_summary = {
                 "capture_mode": "phoenix-api-readback",
                 "collector": "phoenix",

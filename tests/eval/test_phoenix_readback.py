@@ -60,6 +60,26 @@ def test_read_run_spans_paginates_filters_and_allowlists(monkeypatch) -> None:
     }
 
 
+def test_read_run_spans_keeps_the_run_root_with_empty_instance_id(monkeypatch) -> None:
+    """The root spans the whole run, so it legitimately has no instance ID."""
+    monkeypatch.setattr(
+        "eval.harness.phoenix._request_json",
+        lambda _url: {
+            "data": [
+                _span(run_id="run-1", instance_id="", name="eval.run"),
+                _span(run_id="run-1", instance_id="inst-1", name="eval.instance"),
+                _span(run_id="run-1", instance_id="foreign", name="eval.instance"),
+            ]
+        },
+    )
+
+    spans = read_run_spans(
+        "http://phoenix", "code-agent", "2026-08-13T00:00:00Z", "run-1", ("inst-1",)
+    )
+
+    assert [span.name for span in spans] == ["eval.run", "eval.instance"]
+
+
 def test_read_run_spans_rejects_repeated_pagination_cursor(monkeypatch) -> None:
     monkeypatch.setattr(
         "eval.harness.phoenix._request_json",

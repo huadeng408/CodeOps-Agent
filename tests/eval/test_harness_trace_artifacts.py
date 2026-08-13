@@ -288,6 +288,49 @@ def test_o3_installs_phoenix_exporter_before_run_span(monkeypatch, tmp_path: Pat
     assert seen == ["http://127.0.0.1:6006/v1/traces"]
 
 
+def test_o3_forces_export_before_phoenix_readback(monkeypatch, tmp_path: Path) -> None:
+    """The root/instance/scorer spans must leave the batch processor before readback."""
+    calls: list[str] = []
+
+    class Provider:
+        def force_flush(self) -> bool:
+            calls.append("flush")
+            return True
+
+    class O3Adapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                answer="answer",
+                evidence={"retrieval_hits": [{"rank": 1, "document_id": "doc", "chunk_id": 1, "score": 0.9}]},
+            )
+
+    def readback(*_args, **_kwargs):
+        calls.append("readback")
+        return []
+
+    monkeypatch.setattr("opentelemetry.trace.get_tracer_provider", lambda: Provider())
+    monkeypatch.setattr("eval.harness.phoenix.read_run_spans", readback)
+    harness = _harness(
+        tmp_path,
+        adapter=O3Adapter(),
+        config={
+            "trace_profile": "o3",
+            "trace_capabilities": ("rag", "rerank"),
+            "corpus_generation": "techdocs-2026-07-30-v1",
+            "qrels_hash": "a" * 64,
+            "index_name": "knowledge_base_v2_bge_m3",
+            "phoenix_url": "http://phoenix",
+            "phoenix_project": "code-agent",
+            "trace_start_time": "2026-08-13T00:00:00Z",
+        },
+    )
+    harness.run([EvalInstance(instance_id="inst-1", task_description="t")])
+
+    assert calls[0] == "flush"
+    assert calls[1:] and set(calls[1:]) == {"readback"}
+
+
 def test_resume_skipped_instances_get_a_span_with_skipped_status(tmp_path: Path) -> None:
     """§20.6.4 item 2 names 'skipped' explicitly, and §20.1 rule 7 keeps
     skipped instances in the denominator."""

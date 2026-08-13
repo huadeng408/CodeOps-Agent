@@ -379,6 +379,7 @@ func (s *searchService) vectorSearch(ctx context.Context, query string, topN int
 			embSpan.SetAttributes(genai.DocumentLengthKV(s.embedderDim))
 		}
 		embSpan.SetAttributes(genai.QueryHashKV(genai.HashQuery(query)))
+		embSpan.SetAttributes(genai.EvalJoinAttributes(ctx)...)
 		defer embSpan.End()
 	}
 
@@ -505,6 +506,7 @@ func (s *searchService) rerankHits(ctx context.Context, query string, fusedHits 
 			genai.QueryHashKV(genai.HashQuery(query)),
 			genai.DocumentLengthKV(len(docs)),
 		)
+		rerankSpan.SetAttributes(genai.EvalJoinAttributes(ctx)...)
 		defer rerankSpan.End()
 	}
 

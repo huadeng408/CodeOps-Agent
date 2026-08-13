@@ -106,9 +106,12 @@ retrieval:
   bm25_topn: 100
   vector_topn: 100
   rrf_k: 60
-  rerank_topn: 100
+  rerank_topn: 5
   final_topk: 5
-  rerank_timeout_ms: 120
+  # CPU reranker cold/warm inference is hundreds of milliseconds to seconds;
+  # 120ms made the live O3 path deterministically degrade before the model
+  # could score its real candidate set.
+  rerank_timeout_ms: 30000
   strict_mode: true
 
 reranker:

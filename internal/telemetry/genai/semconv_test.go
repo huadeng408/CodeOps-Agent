@@ -1,9 +1,11 @@
 package genai
 
 import (
+	"context"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 func TestOperationNameConstants(t *testing.T) {
@@ -58,6 +60,35 @@ func TestConvenienceConstructors(t *testing.T) {
 				t.Errorf("value = %q, want %q", kv.Value.AsString(), tt.val)
 			}
 		})
+	}
+}
+
+func TestEvalJoinAttributesReadsOnlyPresentBaggageKeys(t *testing.T) {
+	run, err := baggage.NewMember(AttrEvalRunID, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := baggage.NewMember(AttrEvalInstanceID, "instance-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bag, err := baggage.New(run, instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := EvalJoinAttributes(baggage.ContextWithBaggage(context.Background(), bag))
+	if len(attrs) != 2 {
+		t.Fatalf("attribute count = %d, want 2", len(attrs))
+	}
+	values := map[attribute.Key]attribute.Value{}
+	for _, attr := range attrs {
+		values[attr.Key] = attr.Value
+	}
+	if got := values[attribute.Key(AttrEvalRunID)].AsString(); got != "run-1" {
+		t.Fatalf("run ID = %q, want run-1", got)
+	}
+	if got := values[attribute.Key(AttrEvalInstanceID)].AsString(); got != "instance-1" {
+		t.Fatalf("instance ID = %q, want instance-1", got)
 	}
 }
 

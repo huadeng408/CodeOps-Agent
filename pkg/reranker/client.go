@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"code-agent/internal/serverconfig"
 )
@@ -83,7 +82,9 @@ func NewClient(cfg serverconfig.RerankerConfig) Client {
 	}
 	return &httpClient{
 		cfg:    cfg,
-		client: &http.Client{Timeout: 5 * time.Second},
+		// The retrieval service owns the request deadline. A second fixed
+		// client timeout would silently cap configured rerank_timeout_ms.
+		client: &http.Client{},
 	}
 }
 

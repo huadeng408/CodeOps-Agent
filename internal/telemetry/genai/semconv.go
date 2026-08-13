@@ -9,12 +9,14 @@
 package genai
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 // ---------------------------------------------------------------------------
@@ -146,6 +148,25 @@ func EvalRunIDKV(runID string) attribute.KeyValue {
 // EvalInstanceIDKV joins a production span to one evaluated instance.
 func EvalInstanceIDKV(instanceID string) attribute.KeyValue {
 	return attribute.String(AttrEvalInstanceID, instanceID)
+}
+
+// EvalJoinAttributes copies the admitted eval join keys from W3C baggage into
+// a child span. The boundary middleware accepts only these keys, so deeper
+// embedding and rerank spans can remain correlated without recording arbitrary
+// caller-controlled baggage.
+func EvalJoinAttributes(ctx context.Context) []attribute.KeyValue {
+	if ctx == nil {
+		return nil
+	}
+	bag := baggage.FromContext(ctx)
+	attrs := make([]attribute.KeyValue, 0, 2)
+	if runID := bag.Member(AttrEvalRunID).Value(); runID != "" {
+		attrs = append(attrs, EvalRunIDKV(runID))
+	}
+	if instanceID := bag.Member(AttrEvalInstanceID).Value(); instanceID != "" {
+		attrs = append(attrs, EvalInstanceIDKV(instanceID))
+	}
+	return attrs
 }
 
 func ToolNameKV(name string) attribute.KeyValue {
