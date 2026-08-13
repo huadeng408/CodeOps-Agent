@@ -186,9 +186,14 @@ def run_pilot(
             "pipeline": verified_pipeline,
         }
         hits = _poll_hits(search, marker, receipt.file_md5, poll_timeout_seconds, poll_interval_seconds)
-        document_id = str((provenance or {}).get("document_id", "") or hits[0].document_id).strip()
+        # The indexed citation namespace is authoritative for the join.  The
+        # source provenance document id may be a logical URI while the current
+        # structured worker uses fileMd5-derived ids for MinerU elements.
+        document_id = str(hits[0].document_id).strip()
         if not document_id:
             raise RuntimeError("retrieval hit is missing stable documentId")
+        if any(str(item.document_id).strip() != document_id for item in hits):
+            raise RuntimeError("retrieval hits contain multiple documentId namespaces")
         elements = map_mineru_output(content_list_path, middle_path, document_id=document_id)
         ocr_element_ids = {item.element_id for item in elements}
         citations = [_citation_from_hit(item, ocr_element_ids) for item in hits[:1]]
