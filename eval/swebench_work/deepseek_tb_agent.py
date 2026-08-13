@@ -26,6 +26,7 @@ class DeepSeekTBAgent(BaseAgent):
         self._api_key = kwargs.get("api_key") or os.environ.get("LOCAL_LLM_API_KEY", "")
         self._model = kwargs.get("model", "deepseek-chat")
         self._base_url = kwargs.get("base_url", "https://api.deepseek.com/v1")
+        self._wire_api = kwargs.get("wire_api", "chat_completions")
         self._temperature = 1.0 if self._model.startswith("gpt-5") else 0.0
 
     def perform_task(
@@ -35,13 +36,6 @@ class DeepSeekTBAgent(BaseAgent):
         logging_dir: Path | None = None,  # noqa: ARG002 — required by BaseAgent interface
     ) -> AgentResult:
         import time
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=self._api_key,
-            base_url=self._base_url,
-        )
-
         rendered = self._render_instruction(instruction)
 
         system_prompt = (
@@ -66,19 +60,9 @@ class DeepSeekTBAgent(BaseAgent):
             "Do NOT output explanations — only the ```bash block with commands."
         )
 
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Task:\n\n{rendered}"},
-            ],
-            temperature=self._temperature,
-            max_tokens=4096,
+        output_text, tokens_in, tokens_out = self._request_commands(
+            rendered, system_prompt
         )
-
-        output_text = response.choices[0].message.content or ""
-        tokens_in = response.usage.prompt_tokens if response.usage else 0
-        tokens_out = response.usage.completion_tokens if response.usage else 0
 
         print(f"\n[DeepSeekAgent] Model output ({tokens_out} tokens):")
         print(output_text[:2000])
@@ -130,6 +114,42 @@ class DeepSeekTBAgent(BaseAgent):
             total_input_tokens=tokens_in,
             total_output_tokens=tokens_out,
             failure_mode=FailureMode.NONE,
+        )
+
+    def _request_commands(
+        self, instruction: str, system_prompt: str = ""
+    ) -> tuple[str, int, int]:
+        """Request a command plan via the configured provider wire API."""
+        from openai import OpenAI
+
+        client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+        if self._wire_api == "responses":
+            response = client.responses.create(
+                model=self._model,
+                input=instruction,
+                max_output_tokens=4096,
+            )
+            usage = getattr(response, "usage", None)
+            return (
+                getattr(response, "output_text", "") or "",
+                int(getattr(usage, "input_tokens", 0) or 0),
+                int(getattr(usage, "output_tokens", 0) or 0),
+            )
+
+        response = client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Task:\n\n{instruction}"},
+            ],
+            temperature=self._temperature,
+            max_tokens=4096,
+        )
+        usage = response.usage
+        return (
+            response.choices[0].message.content or "",
+            int(getattr(usage, "prompt_tokens", 0) or 0),
+            int(getattr(usage, "completion_tokens", 0) or 0),
         )
 
     @staticmethod

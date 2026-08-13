@@ -79,3 +79,38 @@ def test_terminalbench_official_runner_rejects_invalid_model_and_concurrency(tmp
         "model must include a LiteLLM provider prefix",
         "max_concurrency must be between 1 and 10",
     ]
+
+
+def test_terminalbench_agent_uses_responses_wire_api_without_chat_completion(monkeypatch) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            calls.append(("responses", kwargs))
+            return type(
+                "Response",
+                (),
+                {
+                    "output_text": "```bash\necho solved > /app/out.html\n```",
+                    "usage": type("Usage", (), {"input_tokens": 7, "output_tokens": 9})(),
+                },
+            )()
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):  # pragma: no cover - must never be selected
+            raise AssertionError("chat completions must not be used for responses wire API")
+
+    class FakeClient:
+        responses = FakeResponses()
+        chat = type("Chat", (), {"completions": FakeChatCompletions()})()
+
+    monkeypatch.setattr("openai.OpenAI", lambda **kwargs: FakeClient())
+    agent = DeepSeekTBAgent(model="gpt-5.6-sol", wire_api="responses", api_key="x", base_url="https://example.test/v1")
+
+    output, tokens_in, tokens_out = agent._request_commands("do the task")
+
+    assert output.startswith("```bash")
+    assert (tokens_in, tokens_out) == (7, 9)
+    assert calls == [("responses", {"model": "gpt-5.6-sol", "input": "do the task", "max_output_tokens": 4096})]
