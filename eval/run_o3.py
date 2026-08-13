@@ -36,6 +36,9 @@ REQUIRED_EXECUTION_ENV = (
 DEFAULT_RERANKER_URL = "http://127.0.0.1:8008"
 DEFAULT_ELASTICSEARCH_URL = "http://127.0.0.1:9200"
 DEFAULT_READ_ALIAS = "knowledge_base_current"
+# HarnessRun processes its list synchronously. Keep this explicit in the
+# receipt manifest because the relay rejects aggregate model concurrency >10.
+MODEL_CONCURRENCY = 1
 
 
 def _blocked(reason: str) -> int:
@@ -181,6 +184,11 @@ def _git_head() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def _instances_for_execution():
+    """Load the fixed development-smoke population in deterministic order."""
+    return trace_o3.load_instances()
+
+
 def _args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="perform one real, authorized O3 receipt")
@@ -199,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         return _blocked(problem)
 
     run_id = f"trace-o3-{uuid.uuid4().hex[:8]}"
+    instances = _instances_for_execution()
     phoenix_url = os.environ["PHOENIX_URL"].rstrip("/")
     base_url = os.environ["LOCAL_LLM_BASE_URL"].rstrip("/")
     artifacts = RunArtifacts(run_id=run_id, root=args.output_dir)
@@ -235,11 +244,13 @@ def main(argv: list[str] | None = None) -> int:
                 "queries_sha256": trace_o3.QUERIES_SHA256,
                 "qrels_sha256": trace_o3.QRELS_SHA256,
                 "scope": "non_release_dev_smoke",
+                "instance_ids": [instance.instance_id for instance in instances],
             },
+            "model_concurrency": MODEL_CONCURRENCY,
         },
     )
     try:
-        result = harness.run(trace_o3.load_instances())
+        result = harness.run(instances)
     except Exception as exc:  # noqa: BLE001 - emit a safe bounded blocker
         return _blocked(f"O3 harness failed: {type(exc).__name__}")
 

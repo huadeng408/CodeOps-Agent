@@ -7,6 +7,17 @@ from threading import Thread
 from eval import run_o3
 
 
+def test_o3_run_defaults_to_the_fixed_multi_instance_development_smoke() -> None:
+    instances = run_o3._instances_for_execution()
+
+    assert [instance.instance_id for instance in instances] == [
+        "trace-o3/go-q001",
+        "trace-o3/dk-q001",
+        "trace-o3/kb-q001",
+    ]
+    assert run_o3.MODEL_CONCURRENCY == 1
+
+
 def test_default_o3_command_is_read_only_preflight(monkeypatch, capsys) -> None:
     for name in run_o3.REQUIRED_EXECUTION_ENV:
         monkeypatch.delenv(name, raising=False)
