@@ -62,6 +62,9 @@ func TestQueryHashIsStableAndPrivacySafe(t *testing.T) {
 	if len(a) > 20 {
 		t.Fatalf("hash too long: %q", a)
 	}
+	if want := "b94d27b9934d3e08"; a != want {
+		t.Fatalf("query hash = %q, want lowercase sha256 prefix %q", a, want)
+	}
 }
 
 func TestDocumentAttributesAreHashAndLengthOnly(t *testing.T) {

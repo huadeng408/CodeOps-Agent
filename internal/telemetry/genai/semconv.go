@@ -9,6 +9,8 @@
 package genai
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"strings"
 
@@ -93,6 +95,7 @@ const (
 	AttrDocumentHash   = "rag.document_hash"
 	AttrDocumentLength = "rag.document_length"
 	AttrEvalRunID      = "eval.run_id"
+	AttrEvalInstanceID = "eval.instance_id"
 )
 
 // ---------------------------------------------------------------------------
@@ -138,6 +141,11 @@ func AgentNameKV(name string) attribute.KeyValue {
 // EvalRunIDKV joins a production span to an explicit evaluation or pilot run.
 func EvalRunIDKV(runID string) attribute.KeyValue {
 	return attribute.String(AttrEvalRunID, runID)
+}
+
+// EvalInstanceIDKV joins a production span to one evaluated instance.
+func EvalInstanceIDKV(instanceID string) attribute.KeyValue {
+	return attribute.String(AttrEvalInstanceID, instanceID)
 }
 
 func ToolNameKV(name string) attribute.KeyValue {
@@ -231,41 +239,14 @@ func DocumentLengthKV(n int) attribute.KeyValue {
 	return attribute.Int(AttrDocumentLength, n)
 }
 
-// HashQuery returns a privacy-safe hash of a query (sha256 hex, truncated).
+// HashQuery returns the cross-language, privacy-safe query identifier:
+// lowercase SHA-256 over UTF-8 bytes, truncated to 16 hex characters.
 func HashQuery(query string) string {
 	if query == "" {
 		return ""
 	}
-	// Fast non-cryptographic stable hash for telemetry only; not used for
-	// security.
-	sum := fnv64(query)
-	return strings.ToUpper(itoa64(sum))
-}
-
-func fnv64(s string) uint64 {
-	const (
-		offset = 14695981039346656037
-		prime  = 1099511628211
-	)
-	h := uint64(offset)
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= prime
-	}
-	return h
-}
-
-func itoa64(n uint64) string {
-	if n == 0 {
-		return "0"
-	}
-	const hexDigits = "0123456789abcdef"
-	digits := make([]byte, 0, 16)
-	for n > 0 {
-		digits = append([]byte{hexDigits[n&0xf]}, digits...)
-		n >>= 4
-	}
-	return string(digits)
+	sum := sha256.Sum256([]byte(query))
+	return fmt.Sprintf("%x", sum[:])[:16]
 }
 
 // ---------------------------------------------------------------------------

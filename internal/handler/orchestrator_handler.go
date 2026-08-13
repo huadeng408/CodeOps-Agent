@@ -10,6 +10,7 @@ import (
 	"code-agent/pkg/log"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 // OrchestratorHandler serves internal endpoints consumed by the external LangGraph service.
@@ -91,6 +92,10 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	if baggageRunID := strings.TrimSpace(baggage.FromContext(ctx).Member(genai.AttrEvalRunID).Value()); baggageRunID != "" && req.RunID != "" && baggageRunID != req.RunID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "evaluation run context does not match request"})
+		return
+	}
 
 	// Orchestrator-initiated search — create a rag.retrieve span.
 	var retrieveSpan genai.Span
@@ -103,6 +108,9 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		)
 		if runID := strings.TrimSpace(req.RunID); runID != "" && len(runID) <= 96 {
 			retrieveSpan.SetAttributes(genai.EvalRunIDKV(runID))
+			if instanceID := strings.TrimSpace(baggage.FromContext(ctx).Member(genai.AttrEvalInstanceID).Value()); instanceID != "" && len(instanceID) <= 96 {
+				retrieveSpan.SetAttributes(genai.EvalInstanceIDKV(instanceID))
+			}
 		}
 		defer retrieveSpan.End()
 	}

@@ -3178,3 +3178,37 @@ other service. After recreating only this container, FastEmbed downloaded and
 preloaded the configured Jina model; `/health` reported `ready=true` and a real
 `/rerank` request returned HTTP 200. This resolves the service readiness
 blocker only; it does not create an O3 trace or benchmark receipt.
+## 44. O3 SearchKnowledge bridge and W3C parentage progress (2026-08-13)
+
+### Implemented dependency
+
+`eval/driver_headless.py` now executes `SearchKnowledge` through the real
+Go `/internal/orchestrator/knowledge-search` endpoint. It has no fixture or
+local retrieval fallback. Its O3 policy is immutable at `hybrid`, `topK=5`,
+and `disableRerank=false`, and it fails closed for absent configuration, absent
+evaluation join context, absent W3C parent context, failed/malformed response,
+empty response, or an item without stable document and chunk identifiers.
+
+The request injects W3C TraceContext and Baggage. `TraceContextMiddleware` on
+the Go `/internal` route extracts the remote parent but reconstructs baggage
+from only `eval.run_id` and `eval.instance_id`; it does not propagate arbitrary
+caller baggage. `SearchKnowledge` rejects a payload `runId` that conflicts with
+the extracted run ID before it starts `rag.retrieve`; successful retrieve spans
+stamp the propagated instance ID. Query hashes now use the shared lowercase
+UTF-8 SHA-256 prefix (16 hex characters).
+
+### Verified scope
+
+Fresh local tests passed: Python bridge/tool/server subset `35 passed`; Go
+middleware, handler, and telemetry subsets passed. Tests demonstrate remote
+parent extraction, baggage allowlisting, instance join stamping, mismatched
+run rejection, hash consistency, and no fabricated empty-hit success.
+
+### Still not acceptance
+
+This dependency is not an O3 result. The remaining mandatory work is the
+single strict trace contract v2, Phoenix source readback and parent-chain
+assertion, exporter/flush ordering, privacy validation, O3 runner wiring to an
+official scorer, and one current-HEAD checksum-valid real receipt containing
+agent/tool/chat/retrieve/embedding/rerank/scorer. No status label or isolated
+test may substitute for that receipt.

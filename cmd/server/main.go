@@ -298,8 +298,8 @@ func main() {
 			}
 		}
 
-		internalGroup := r.Group("/internal")
-		internalGroup.Use(middleware.InternalAuthMiddleware())
+	internalGroup := r.Group("/internal")
+	internalGroup.Use(middleware.TraceContextMiddleware(), middleware.InternalAuthMiddleware())
 		{
 			orchHandler := handler.NewOrchestratorHandler(orchestratorSupportService)
 			orchHandler.SetTracer(telemetry)
