@@ -3256,3 +3256,27 @@ existing SDK provider, and marks the endpoint to avoid duplicate attachment.
 Focused capture/artifact regressions passed (`24 passed`). This removes the
 known local-capture-only root-span gap but is still not a current-HEAD O3
 receipt; a real runner must still exercise the full contract.
+
+## 48. Automatic closure evidence (2026-08-14)
+
+- `VERIFIED`: at `e1122b823a2cf81626c1862d7c5524700985f24c`, the three-instance
+  O3 development smoke completed with real `gpt-5.6-sol` calls at concurrency
+  one. Phoenix API readback supplied 33 spans; the shared v2 O3 contract was
+  `PASS`, all three raw scorer reports were retained, and recursive checksum
+  verification returned no problems. This is current-HEAD non-release
+  evidence, not a hidden-holdout or model-identity attestation.
+- `VERIFIED`: official `tau2-bench` is now independently pinned to `v1.0.1`
+  (`fc0055dc4e0a316c3f83133267fbd6faaa770992`, MIT) in an isolated checkout.
+  Its CLI and bundled data check passed. A real one-task `mock` run at
+  concurrency one reached the official scorer but returned reward `0.0`; the
+  raw output and checksum-valid canonical receipt are retained as
+  `OFFICIAL_FAILURE`. Historical `tau_bench 0.1.0` results remain development
+  evidence only and must not be called tau2 official acceptance.
+- `IMPLEMENTED`: `eval.benchmarks.tau2official` is a deliberately separate
+  pinned CLI boundary. It validates source/data fingerprints, requires a
+  LiteLLM provider prefix, caps concurrency at ten, preserves raw upstream
+  output, and does not alter the legacy adapter.
+- `VERIFIED`: ScreenSpot-Pro is eligible only as a separate, public MIT GUI
+  grounding lane with screenshot/instruction/bbox labels. It is not document
+  retrieval, DocVQA, ViDoRe, or visual-alias evidence. The document-native
+  question/page/evidence/bbox gap remains open.
