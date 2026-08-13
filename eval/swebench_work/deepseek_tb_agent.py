@@ -1,125 +1,105 @@
-"""Custom DeepSeek Agent for Terminal-Bench — standalone module the harness can import.
+"""Bounded Terminal-Bench agent with auditable terminal-feedback turns."""
 
-Fixes:
-  - First command not blocked (container warm-up is slow, so the first command
-    often times out if we block). We send a no-op echo first without blocking,
-    then block on subsequent commands.
-  - Increased max_timeout_sec to 300s for expensive commands (pip install, apt-get).
-  - Multi-turn mode: the agent can ask for command output and issue follow-up commands.
-"""
+from __future__ import annotations
+
+import json
 import os
+import re
 from pathlib import Path
+
 from terminal_bench.agents.base_agent import AgentResult, BaseAgent
 from terminal_bench.agents.failure_mode import FailureMode
 from terminal_bench.terminal.tmux_session import TmuxSession
 
 
 class DeepSeekTBAgent(BaseAgent):
-    """Calls DeepSeek API with the task instruction, writes code to tmux terminal."""
+    """Run bounded command-planning turns without exposing protected assets."""
+
+    _MAX_TURNS = 3
+    _MAX_COMMANDS_PER_TURN = 8
+    _PROTECTED_PATH_MARKERS = ("/tests", "/solution", "/logs/verifier", "protected.tar")
 
     @staticmethod
     def name() -> str:
         return "deepseek-tb-agent"
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
-        self._api_key = kwargs.get("api_key") or os.environ.get("LOCAL_LLM_API_KEY", "")
-        self._model = kwargs.get("model", "deepseek-chat")
-        self._base_url = kwargs.get("base_url", "https://api.deepseek.com/v1")
-        self._wire_api = kwargs.get("wire_api", "chat_completions")
+        self._api_key = str(kwargs.get("api_key") or os.environ.get("LOCAL_LLM_API_KEY", ""))
+        self._model = str(kwargs.get("model") or "deepseek-chat")
+        self._base_url = str(kwargs.get("base_url") or "https://api.deepseek.com/v1")
+        self._wire_api = str(kwargs.get("wire_api") or "chat_completions")
+        requested_turns = int(kwargs.get("max_turns") or 2)
+        self._max_turns = min(max(requested_turns, 1), self._MAX_TURNS)
         self._temperature = 1.0 if self._model.startswith("gpt-5") else 0.0
 
     def perform_task(
         self,
         instruction: str,
         session: TmuxSession,
-        logging_dir: Path | None = None,  # noqa: ARG002 — required by BaseAgent interface
+        logging_dir: Path | None = None,
     ) -> AgentResult:
-        import time
         rendered = self._render_instruction(instruction)
+        system_prompt = self._system_prompt()
+        total_input_tokens = 0
+        total_output_tokens = 0
+        feedback = ""
+        transcript: list[dict[str, object]] = []
 
-        system_prompt = (
-            "You are an expert software engineer working in a Linux container via tmux. "
-            "You must solve the given task by executing shell commands.\n\n"
-            "IMPORTANT: To write multi-line files, use base64 encoding — do NOT use heredoc "
-            "because tmux sends each line separately and breaks the heredoc syntax. "
-            "Example:\n"
-            "```bash\n"
-            "echo 'cHJpbnQoJ2hlbGxvJyk=' | base64 -d > /app/solve.py\n"
-            "```\n"
-            "Use python3 -c 'import base64; print(base64.b64encode(b\"\"\"...multi-line content...\"\"\").decode())' "
-            "to generate the base64 string if you need to.\n\n"
-            "Alternative for short files: use printf with \\n for newlines:\n"
-            "```bash\n"
-            "printf 'line1\\nline2\\n' > /app/file.txt\n"
-            "```\n"
-            "Output ONLY bash commands within ```bash blocks. "
-            "For multi-step tasks, output commands in logical order.\n"
-            "If a command is likely to take >30s (pip install, apt-get, large build), "
-            "prefix it with `timeout 300`.\n"
-            "Do NOT output explanations — only the ```bash block with commands."
-        )
-
-        output_text, tokens_in, tokens_out = self._request_commands(
-            rendered, system_prompt
-        )
-
-        print(f"\n[DeepSeekAgent] Model output ({tokens_out} tokens):")
-        print(output_text[:2000])
-
-        # Extract bash commands — now supports base64 encoded payloads
-        commands = self._extract_commands(output_text)
-
-        if not commands:
-            print(f"  WARNING: No commands extracted from model output!")
-            return AgentResult(
-                total_input_tokens=tokens_in,
-                total_output_tokens=tokens_out,
-                failure_mode=FailureMode.TEST_TIMEOUT,
+        for turn in range(1, self._max_turns + 1):
+            turn_instruction = rendered
+            if feedback:
+                turn_instruction += f"\n\nTerminal feedback from your previous commands:\n{feedback}"
+            output_text, tokens_in, tokens_out = self._request_commands(
+                turn_instruction, system_prompt
             )
+            total_input_tokens += tokens_in
+            total_output_tokens += tokens_out
+            commands = self._command_lines(output_text)
+            if not commands or any(self._is_protected_content(command) for command in commands):
+                self._write_transcript(logging_dir, transcript)
+                return AgentResult(
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                    failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+                )
 
-        # Phase 1: Warm up — send a no-op without blocking
-        try:
-            session.send_keys(["echo warmup-ok", "Enter"], block=False, max_timeout_sec=30)
-            time.sleep(3)  # let the container process it
-        except Exception as e:
-            print(f"  WARMUP ERROR: {e}")
+            for command in commands:
+                session.send_keys([command, "Enter"], block=False, max_timeout_sec=30)
+            feedback = session.get_incremental_output()
+            transcript.append(
+                {"turn": turn, "commands": commands, "terminal_output": feedback}
+            )
+            if self._is_protected_content(feedback):
+                self._write_transcript(logging_dir, transcript)
+                return AgentResult(
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                    failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+                )
 
-        # Phase 2: Send actual commands — each command as a SINGLE line
-        # (tmux send_keys with a literal newline in the string, not heredoc lines)
-        for i, line in enumerate(commands.split("\n")):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("```"):
-                continue
-
-            print(f"  [{i}] SEND: {line[:150]}")
-            try:
-                # Send each command as a single string including \n for multi-line
-                # The command text already contains \n for multi-line printf/echo
-                session.send_keys([line, "Enter"], block=False, max_timeout_sec=30)
-                time.sleep(2)  # brief pause for execution
-            except Exception as e:
-                print(f"  [{i}] SEND ERROR: {e}")
-
-        # Phase 3: Wait for final command to settle with longer timeout
-        try:
-            time.sleep(10)  # more settling time for apt-get, pip install, etc.
-            session.send_keys(["echo agent-done", "Enter"], block=True, max_timeout_sec=120)
-        except Exception as e:
-            print(f"  FINAL WAIT ERROR: {e}")
-
+        self._write_transcript(logging_dir, transcript)
         return AgentResult(
-            total_input_tokens=tokens_in,
-            total_output_tokens=tokens_out,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
             failure_mode=FailureMode.NONE,
+        )
+
+    @staticmethod
+    def _system_prompt() -> str:
+        return (
+            "You are an expert software engineer working in a Linux container via tmux. "
+            "Solve the task by issuing shell commands. You have a bounded number of turns; "
+            "after each turn, inspect the supplied terminal feedback and continue. "
+            "Never read /tests, /solution, /logs/verifier, or protected task assets. "
+            "Do not use heredocs because tmux sends each line separately. "
+            "Output only one bash code block. Each command must be one complete shell line."
         )
 
     def _request_commands(
         self, instruction: str, system_prompt: str = ""
     ) -> tuple[str, int, int]:
-        """Request a command plan via the configured provider wire API."""
+        """Request one command plan via the configured OpenAI-compatible API."""
         from openai import OpenAI
 
         client = OpenAI(api_key=self._api_key, base_url=self._base_url)
@@ -155,28 +135,46 @@ class DeepSeekTBAgent(BaseAgent):
             int(getattr(usage, "completion_tokens", 0) or 0),
         )
 
+    @classmethod
+    def _command_lines(cls, output_text: str) -> list[str]:
+        commands = cls._extract_commands(output_text)
+        lines = [
+            line.strip()
+            for line in commands.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and not line.startswith("```")
+        ]
+        return lines[: cls._MAX_COMMANDS_PER_TURN]
+
+    @classmethod
+    def _is_protected_content(cls, value: str) -> bool:
+        lowered = value.lower()
+        return any(marker in lowered for marker in cls._PROTECTED_PATH_MARKERS)
+
+    @staticmethod
+    def _write_transcript(logging_dir: Path | None, turns: list[dict[str, object]]) -> None:
+        if logging_dir is None:
+            return
+        logging_dir.mkdir(parents=True, exist_ok=True)
+        (logging_dir / "agent-transcript.json").write_text(
+            json.dumps({"turns": turns}, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
     @staticmethod
     def _extract_commands(text: str) -> str:
-        """Extract bash commands from model output."""
-        import re
-        # Try ```bash ... ``` block
-        m = re.search(r"```(?:bash|sh)\n(.*?)```", text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-        # Try any code block
-        m = re.search(r"```\n?(.*?)```", text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-        # Try inline code blocks
-        m = re.search(r"`([^`]{20,})`", text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-        # Raw text — take non-explanatory lines
-        lines = []
-        for line in text.split("\n"):
+        """Extract a bash code block or conservative raw shell-command lines."""
+        block = re.search(r"```(?:bash|sh)\n(.*?)```", text, re.DOTALL)
+        if block:
+            return block.group(1).strip()
+        block = re.search(r"```\n?(.*?)```", text, re.DOTALL)
+        if block:
+            return block.group(1).strip()
+        accepted = []
+        for line in text.splitlines():
             line = line.strip()
-            if not line:
-                continue
-            if re.match(r"^(?:timeout\s+\d+\s+)?(sudo |cat |echo |python[23]? |cd |bash |mkdir |pip |apt |npm |node |git |curl |wget |cp |mv |rm |docker |ls |pwd |grep |find |sed |awk |chmod |make |gcc |g\+\+|\./)", line):
-                lines.append(line)
-        return "\n".join(lines) if lines else text.strip()
+            if re.match(
+                r"^(?:timeout\s+\d+\s+)?(sudo |cat |echo |printf |python[23]? |cd |bash |mkdir |pip |apt |npm |node |git |curl |wget |cp |mv |rm |docker |ls |pwd |grep |find |sed |awk |chmod |make |gcc |g\+\+|\./)",
+                line,
+            ):
+                accepted.append(line)
+        return "\n".join(accepted)

@@ -128,3 +128,72 @@ def test_terminalbench_agent_uses_responses_wire_api_without_chat_completion(mon
             },
         )
     ]
+
+
+def test_terminalbench_agent_multiturn_mode_replays_terminal_feedback_and_writes_transcript(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    responses = iter([
+        ("```bash\nprintf 'first'\n```", 10, 11),
+        ("```bash\nprintf 'second'\n```", 12, 13),
+    ])
+    prompts: list[str] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commands: list[object] = []
+            self.outputs = iter(["Current Terminal Screen:\nfirst\n", "New Terminal Output:\nsecond\n"])
+
+        def send_keys(self, keys, **kwargs) -> None:
+            self.commands.append(keys)
+
+        def get_incremental_output(self) -> str:
+            return next(self.outputs)
+
+    agent = DeepSeekTBAgent(
+        model="gpt-5.6-sol",
+        wire_api="responses",
+        max_turns=2,
+    )
+
+    def fake_request(instruction: str, system_prompt: str = "") -> tuple[str, int, int]:
+        prompts.append(instruction)
+        return next(responses)
+
+    monkeypatch.setattr(agent, "_request_commands", fake_request)
+    session = FakeSession()
+
+    result = agent.perform_task("solve the task", session, logging_dir=tmp_path)
+
+    assert result.total_input_tokens == 22
+    assert result.total_output_tokens == 24
+    assert len(prompts) == 2
+    assert "Terminal feedback" in prompts[1]
+    assert "first" in prompts[1]
+    assert session.commands == [
+        ["printf 'first'", "Enter"],
+        ["printf 'second'", "Enter"],
+    ]
+    transcript = json.loads((tmp_path / "agent-transcript.json").read_text(encoding="utf-8"))
+    assert transcript["turns"] == [
+        {"turn": 1, "commands": ["printf 'first'"], "terminal_output": "Current Terminal Screen:\nfirst\n"},
+        {"turn": 2, "commands": ["printf 'second'"], "terminal_output": "New Terminal Output:\nsecond\n"},
+    ]
+
+
+def test_terminalbench_agent_multiturn_mode_rejects_protected_path_commands(monkeypatch) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+    from terminal_bench.agents.failure_mode import FailureMode
+
+    agent = DeepSeekTBAgent(max_turns=1)
+    monkeypatch.setattr(
+        agent,
+        "_request_commands",
+        lambda instruction, system_prompt="": ("```bash\ncat /tests/test_outputs.py\n```", 3, 4),
+    )
+
+    result = agent.perform_task("solve the task", object())
+
+    assert result.failure_mode is FailureMode.FATAL_LLM_PARSE_ERROR
