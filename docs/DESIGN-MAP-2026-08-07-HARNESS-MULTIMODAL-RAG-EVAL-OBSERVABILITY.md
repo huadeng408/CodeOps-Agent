@@ -3421,3 +3421,50 @@ receipt; a real runner must still exercise the full contract.
   receipt must include source/revision/tree hashes, source license, selected
   ids, rejected zero-area/yes-no elements, and `pdf_rag_gate=NOT_APPLICABLE`.
   No production corpus or alias may ingest these assets.
+
+## 53. Document-native bbox source audit closure (2026-08-14)
+
+### 53.1 Evidence obtained
+
+The required public source contract remains: a declared allowlisted license,
+public ungated access, pinned revision, document/page image asset, question,
+and an upstream question-to-evidence `element_id` or bbox. A text answer offset,
+unlinked word boxes, or a box from a different benchmark do not satisfy it.
+
+| Candidate | Evidence inspected | Verdict | Reason |
+| --- | --- | --- | --- |
+| `vidore/docvqa_test_subsampled` | MIT, public, pinned 120 page rows | `PAGE_ONLY` | no `element_id` or bbox |
+| `next-tat/TAT-DQA` | CC-BY-4.0, public; pinned test-gold JSON, document zips | `PAGE_ONLY` | human `block_mapping` has text offsets only; no geometry key, and upstream code repo publishes no layout asset |
+| `NTT-hil-insight/VisualMRC` | public metadata | `LICENSE_BLOCKED` | gated access and terms not accepted; never materialized |
+| VisualMRC mirrors | raw cards/tree | `LICENSE_UNVERIFIED` | no dataset license metadata; do not inherit a license from the original |
+| `munish0838/funsd-vqa` | OpenRAIL card, pinned 149-line JSONL | `LICENSE_BLOCKED` | not in allowlist; questions/answers and word boxes are not linked as gold evidence, and image assets are absent |
+| `jrzhang/TextVQA_GT_bbox` | Apache-2.0, manually boxed | `NOT_DOCUMENT` | street-scene TextVQA, not a document/page retrieval corpus |
+| `X-LANCE/WebSRC_v1.0` | CC-BY-4.0, question + element id + JSON rect + HTML + PNG | `WEB_STRUCTURAL_ONLY` | qualified independently in §52; does not test PDF/MinerU document RAG |
+| ScreenSpot-Pro | MIT, screenshot/instruction/bbox | `GUI_GROUNDING_ONLY` | qualified independently; not document retrieval |
+
+### 53.2 Result and allowed route
+
+**BLOCKED**: no inspected candidate is both a public, allowlisted,
+document-native, upstream question-to-element/bbox evaluation set. This is a
+data availability and human-review dependency, not an implementation failure.
+It is forbidden to join DocVQA/TAT-DQA question rows to DocLayNet/FUNSD boxes,
+to infer a box from an answer string and call it gold, or to transfer WebSRC/
+ScreenSpot-Pro scores to the PDF RAG gate.
+
+The sole legitimate route to a project document-native gold lane is:
+
+1. Fix a license-clear page-level document source and a non-evaluation corpus
+   split; create candidate elements through the production MinerU explicit OCR
+   path, recording parser/version/page/image hashes.
+2. Generate candidate evidence boxes only as `AI_CANDIDATE`, never qrels or
+   scores. Preserve the original page-level label separately.
+3. Have a real human reviewer accept, correct, or reject every candidate;
+   only accepted records become a new immutable qrels version marked
+   `HUMAN_REVIEWED` with a real review record.
+4. Freeze train/dev/holdout before retrieval/indexing; run the four-layer
+   contamination scan; then score the isolated PDF visual lane with its own
+   manifest, checksums, and Phoenix trace.
+
+GPT-5.6 Sol may help generate or challenge `AI_CANDIDATE` records but may only
+produce `AI_REVIEWED` or `DISPUTED`; it cannot satisfy step 3. Until step 3
+has actual human evidence, the PDF document-native bbox gate remains blocked.
