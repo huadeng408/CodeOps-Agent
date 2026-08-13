@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"code-agent/internal/serverconfig"
 
 	"github.com/gin-gonic/gin"
 )
@@ -43,5 +46,38 @@ func TestHealthzReportsEmbeddingPreflightDegraded(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	if body.EmbeddingPreflight != "degraded: embedding preflight failed" {
 		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestSearchReadIndexUsesConfiguredCorpusReadAlias(t *testing.T) {
+	cfg := serverconfig.Config{
+		Elasticsearch: serverconfig.ElasticsearchConfig{IndexName: "knowledge_base"},
+		Corpus:        serverconfig.CorpusConfig{ReadAlias: "knowledge_base_current"},
+	}
+
+	got, err := searchReadIndex(cfg)
+	if err != nil {
+		t.Fatalf("searchReadIndex: %v", err)
+	}
+	if got != "knowledge_base_current" {
+		t.Fatalf("search read index = %q, want configured corpus read alias", got)
+	}
+	if got == cfg.Elasticsearch.IndexName {
+		t.Fatal("search wiring silently selected legacy Elasticsearch index")
+	}
+}
+
+func TestSearchReadIndexFailsClosedWhenCorpusReadAliasIsBlank(t *testing.T) {
+	cfg := serverconfig.Config{
+		Elasticsearch: serverconfig.ElasticsearchConfig{IndexName: "knowledge_base"},
+		Corpus:        serverconfig.CorpusConfig{ReadAlias: "  "},
+	}
+
+	_, err := searchReadIndex(cfg)
+	if err == nil {
+		t.Fatal("searchReadIndex returned nil error for blank corpus read alias")
+	}
+	if !strings.Contains(err.Error(), "corpus.read_alias") {
+		t.Fatalf("error = %q, want corpus.read_alias context", err)
 	}
 }

@@ -42,6 +42,13 @@ func TestRealRAGIngestThenSearchKnowledge(t *testing.T) {
 		t.Fatalf("real RAG ingest returned no file MD5: %#v", ingested)
 	}
 	t.Logf("fileMd5=%s", ingested.FileMD5)
+	pipelineCtx, cancelPipeline := context.WithTimeout(context.Background(), 2*time.Minute)
+	pipeline, err := client.WaitForPipelineCompletion(pipelineCtx, requiredRAGEnv(t, "CODE_AGENT_RAG_RUN_ID"), ingested.FileMD5, time.Second)
+	cancelPipeline()
+	if err != nil {
+		t.Fatalf("current-run pipeline did not complete: %v", err)
+	}
+	t.Logf("pipeline stages=%+v", pipeline.Stages)
 
 	executor := tools.NewExecutor(t.TempDir())
 	executor.SetRAGSearcher(client)
@@ -102,7 +109,7 @@ func realRAGConfig(t *testing.T) rag.Config {
 		IngestProvenance: rag.IngestProvenanceConfig{
 			SourceID:         requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_ID"),
 			SourcePathPrefix: requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_PATH_PREFIX"),
-			SourceURL:        requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_URL"),
+			SourceURL:        strings.TrimSpace(os.Getenv("CODE_AGENT_RAG_SOURCE_URL")),
 			SourceCommit:     requiredRAGEnv(t, "CODE_AGENT_RAG_SOURCE_COMMIT"),
 			TargetIndex:      requiredRAGEnv(t, "CODE_AGENT_RAG_TARGET_INDEX"),
 			CorpusGeneration: requiredRAGEnv(t, "CODE_AGENT_RAG_CORPUS_GENERATION"),
@@ -139,6 +146,10 @@ func newRAGFileName(t *testing.T) string {
 }
 
 func TestMatchingRAGHitRequiresAllValuesInOneBlock(t *testing.T) {
+	emptyFileName := "Knowledge search results: 1\n\n[1]\nfileName: \nfileMd5: expected-md5\ntextContent:\nunique-marker"
+	if _, ok := matchingRAGHit(emptyFileName, "unique-marker", "expected.txt", "expected-md5"); !ok {
+		t.Fatal("run-scoped fileMd5 plus marker in one hit must not depend on lossy fileName metadata")
+	}
 	markerInFileName := "Knowledge search results: 1\n\n[1]\nfileName: unique-marker.txt\nfileMd5: expected-md5\ntextContent:\nother text"
 	if _, ok := matchingRAGHit(markerInFileName, "unique-marker", "unique-marker.txt", "expected-md5"); ok {
 		t.Fatal("marker in fileName must not count as a textContent match")
@@ -219,7 +230,7 @@ func assertRAGMarkerInvisible(t *testing.T, marker string, search func(context.C
 
 func matchingRAGHit(output, marker, fileName, fileMD5 string) (string, bool) {
 	for _, hit := range parseRAGHits(output) {
-		if strings.Contains(hit.textContent, marker) && hit.fileName == fileName && hit.fileMD5 == fileMD5 {
+		if strings.Contains(hit.textContent, marker) && hit.fileMD5 == fileMD5 {
 			return hit.block, true
 		}
 	}
@@ -273,5 +284,5 @@ func isRAGHitStart(lines []string, index int) bool {
 	if _, err := strconv.Atoi(line[1 : len(line)-1]); err != nil {
 		return false
 	}
-	return (index == 0 || strings.TrimSpace(lines[index-1]) == "") && index+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index+1]), "fileName: ")
+	return (index == 0 || strings.TrimSpace(lines[index-1]) == "") && index+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index+1]), "fileName:")
 }

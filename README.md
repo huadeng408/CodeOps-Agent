@@ -200,7 +200,6 @@ python -m orchestrator.server
   "worktree_base_ref": "fresh",
   "rag_enabled": true,
   "rag_server_url": "http://127.0.0.1:8081",
-  "rag_internal_secret": "replace-with-internal-secret",
   "rag_user_id": 1,
   "rag_org_tag": "engineering",
   "rag_ingest_public": false,
@@ -222,6 +221,10 @@ python -m orchestrator.server
   ]
 }
 ```
+
+`CODE_AGENT_RAG_INTERNAL_SECRET` is read only from the process environment.
+Do not put the internal RAG secret in settings JSON, dotenv files, fixtures,
+command-line arguments, logs, or committed artifacts.
 
 `rag_org_tag` 只接受一个组织标签，不支持逗号分隔的多值。`/ingest` 仅接受工作区内的普通文件；PDF 入库统一使用 MinerU OCR，Tika 只处理 DOCX、PPTX、XLSX 等非 PDF 文档。
 

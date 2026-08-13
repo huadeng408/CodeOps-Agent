@@ -38,6 +38,7 @@ func embeddingServer(t *testing.T, model, revision string, dim int, count int, r
 			"status":         "ok",
 			"model":          model,
 			"model_revision": revision,
+			"dimensions":     dim,
 			"ready":          true,
 		})
 	})
@@ -53,6 +54,57 @@ func embeddingServer(t *testing.T, model, revision string, dim int, count int, r
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "model": model, "data": items})
 	})
 	return httptest.NewServer(mux)
+}
+
+func TestPreflightRejectsHealthThatIsNotReady(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "degraded", "model": "BAAI/bge-m3",
+			"model_revision": pinnedRevision, "dimensions": 1024,
+			"ready": false, "last_error": "model preload failed",
+		})
+	})
+	mux.HandleFunc("/embeddings", func(http.ResponseWriter, *http.Request) {
+		t.Fatal("preflight must not call inference after failed readiness")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("expected readiness error, got %v", err)
+	}
+}
+
+func TestPreflightRejectsMissingReadiness(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "model": "BAAI/bge-m3",
+			"model_revision": pinnedRevision, "dimensions": 1024,
+		})
+	}))
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "readiness") {
+		t.Fatalf("expected missing readiness error, got %v", err)
+	}
+}
+
+func TestPreflightRejectsAdvertisedDimensionMismatchBeforeInference(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "model": "BAAI/bge-m3", "ready": true,
+			"model_revision": pinnedRevision, "dimensions": 512,
+		})
+	}))
+	defer srv.Close()
+
+	err := Preflight(context.Background(), preflightCfg(srv.URL, "BAAI/bge-m3", pinnedRevision, 1024))
+	if err == nil || !strings.Contains(err.Error(), "health dimensions mismatch") {
+		t.Fatalf("expected health dimension mismatch, got %v", err)
+	}
 }
 
 func preflightCfg(baseURL, model, revision string, expectedDim int) serverconfig.EmbeddingConfig {
@@ -208,7 +260,7 @@ func TestPreflightRejectsDimensionsParamDroppedWhenNativeRequired(t *testing.T) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "model": "BAAI/bge-m3", "model_revision": pinnedRevision})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "model": "BAAI/bge-m3", "model_revision": pinnedRevision, "ready": true, "dimensions": 1024})
 			return
 		}
 		_ = json.NewDecoder(r.Body).Decode(&recorded)

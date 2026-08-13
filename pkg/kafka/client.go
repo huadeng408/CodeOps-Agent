@@ -2,16 +2,16 @@
 package kafka
 
 import (
+	"code-agent/internal/model"
+	"code-agent/internal/repository"
+	"code-agent/internal/serverconfig"
+	"code-agent/pkg/log"
+	"code-agent/pkg/tasks"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"code-agent/internal/model"
-	"code-agent/internal/serverconfig"
-	"code-agent/internal/repository"
-	"code-agent/pkg/log"
-	"code-agent/pkg/tasks"
 	"strings"
 	"time"
 
@@ -264,14 +264,9 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 		KeepAlive: 30 * time.Second,
 	}
 
-	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  brokers,
-		Topic:    topic,
-		GroupID:  groupID,
-		MinBytes: 10e3,
-		MaxBytes: 10e6,
-		Dialer:   dialer,
-	})
+	readerConfig := pipelineReaderConfig(brokers, topic, groupID)
+	readerConfig.Dialer = dialer
+	r := kafka.NewReader(readerConfig)
 	defer func() {
 		if err := r.Close(); err != nil {
 			log.Errorf("关闭 Kafka 消费者失败, stage=%s err=%v", stage, err)
@@ -388,6 +383,18 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 		if err := r.CommitMessages(context.Background(), m); err != nil {
 			log.Errorf("提交 Kafka offset 失败, stage=%s offset=%d err=%v", stage, m.Offset, err)
 		}
+	}
+}
+
+func pipelineReaderConfig(brokers []string, topic, groupID string) kafka.ReaderConfig {
+	return kafka.ReaderConfig{
+		Brokers:          brokers,
+		Topic:            topic,
+		GroupID:          groupID,
+		MinBytes:         10e3,
+		MaxBytes:         10e6,
+		MaxWait:          time.Second,
+		ReadBatchTimeout: 5 * time.Second,
 	}
 }
 

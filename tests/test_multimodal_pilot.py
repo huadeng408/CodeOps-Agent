@@ -79,7 +79,7 @@ def _fixture_runner(tmp_path: Path):
         )
 
     def search(query: str) -> list[SearchHit]:
-        return [SearchHit(file_md5="abc123", file_name="pilot.pdf", chunk_id=0, text="OCR text " + MARKER, score=1.0, document_id="doc-1", page_id="doc-1:p0", element_ids=["doc-1:p0:e0"], bbox_refs=["doc-1:p0:e0:0,0,10,10"], citation_key="doc-1#doc-1:p0#doc-1:p0:e0")]
+        return [SearchHit(file_md5="abc123", file_name="pilot.pdf", chunk_id=0, text="OCR text " + MARKER, score=1.0, document_id="doc-1", page_id="doc-1:p0", element_ids=["doc-1:p0:e0"], bbox_refs=["doc-1:p0:e0:0.0,0.0,10.0,10.0"], citation_key="doc-1/doc-1:p0/doc-1:p0:e0")]
 
     def trace() -> TraceStatus:
         return TraceStatus(available=True, reason="fixture", trace_id="a" * 32, verified=True)
@@ -119,7 +119,7 @@ def test_run_pilot_writes_auditable_non_gold_artifacts(tmp_path: Path) -> None:
     assert manifest["ocr_provenance"]["elements"][0]["page_id"] == "doc-1:p0"
     assert manifest["ocr_provenance"]["elements"][0]["bbox"] == [0.0, 0.0, 10.0, 10.0]
     evidence = json.loads((result.output_dir / "evidence.json").read_text())
-    assert evidence["citations"][0]["citation_key"] == "doc-1#doc-1:p0#doc-1:p0:e0"
+    assert evidence["citations"][0]["citation_key"] == "doc-1/doc-1:p0/doc-1:p0:e0"
     assert evidence["citations"][0]["element_ids"] == ["doc-1:p0:e0"]
     checksums = json.loads((result.output_dir / "checksums.json").read_text())
     assert "mineru/content_list.json" in checksums
@@ -402,7 +402,7 @@ out.mkdir(parents=True)
             else:
                 document_id = "fixture-source@0123456789abcdef0123456789abcdef01234567:tests/fixtures/fixture.pdf"
                 element_id = document_id + ":p0:e0"
-                data = {"results": [{"fileMd5": "fixture-md5", "fileName": "image-only.pdf", "chunkId": 7, "textContent": marker, "score": 1.0, "documentId": document_id, "pageId": document_id + ":p0", "elementIds": [element_id], "bboxRefs": [element_id + ":0,0,10,10"], "citationKey": document_id + "#" + document_id + ":p0#" + element_id}]}
+                data = {"results": [{"fileMd5": "fixture-md5", "fileName": "image-only.pdf", "chunkId": 7, "textContent": marker, "score": 1.0, "documentId": document_id, "pageId": document_id + ":p0", "elementIds": [element_id], "bboxRefs": [element_id + ":0.0,0.0,10.0,10.0"], "citationKey": document_id + "/" + document_id + ":p0/" + element_id}]}
             body = json.dumps({"code": 200, "message": "ok", "data": data}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -533,8 +533,8 @@ def test_run_pilot_separates_logical_document_id_from_element_namespace(tmp_path
             file_md5="abc123", file_name="join.pdf", chunk_id=0, text="JOIN",
             document_id=document_id, page_id=f"{element_namespace}:p0",
             element_ids=[f"{element_namespace}:p0:e0"],
-            bbox_refs=[f"{element_namespace}:p0:e0:0,0,10,10"],
-            citation_key=f"{document_id}#{element_namespace}:p0#{element_namespace}:p0:e0",
+            bbox_refs=[f"{element_namespace}:p0:e0:0.0,0.0,10.0,10.0"],
+            citation_key=f"{document_id}/{element_namespace}:p0/{element_namespace}:p0:e0",
         )],
         trace=lambda: TraceStatus(True, "fixture", "a" * 32, verified=True),
         pdf_factory=lambda path, _marker: path.write_bytes(b"%PDF-join"),
@@ -542,3 +542,31 @@ def test_run_pilot_separates_logical_document_id_from_element_namespace(tmp_path
     )
     manifest = json.loads((result.output_dir / "manifest.json").read_text())
     assert manifest["ocr_provenance"]["elements"][0]["page_id"] == f"{element_namespace}:p0"
+
+
+@pytest.mark.parametrize(
+    ("page_id", "bbox_refs", "citation_key"),
+    [
+        ("ns:p999", ["ns:p0:e0:0.0,0.0,10.0,10.0"], "doc/ns:p999/ns:p0:e0"),
+        ("ns:p0", ["totally-fake"], "doc/ns:p0/ns:p0:e0"),
+        ("ns:p0", ["ns:p0:e0:0.0,0.0,10.0,10.0"], "attacker-controlled"),
+    ],
+)
+def test_run_pilot_rejects_forged_citation_contract(tmp_path: Path, page_id: str, bbox_refs: list[str], citation_key: str) -> None:
+    ocr, ingest, _search, trace = _fixture_runner(tmp_path)
+    forged = SearchHit(
+        file_md5="abc123", file_name="pilot.pdf", chunk_id=0, text="OCR text " + MARKER,
+        document_id="doc", page_id=page_id, element_ids=["ns:p0:e0"],
+        bbox_refs=bbox_refs, citation_key=citation_key,
+    )
+    with pytest.raises(RuntimeError, match="citation"):
+        run_pilot(
+            tmp_path / "forged",
+            marker=MARKER,
+            ocr=ocr,
+            ingest=ingest,
+            search=lambda _query: [forged],
+            trace=trace,
+            pdf_factory=lambda path, _marker: path.write_bytes(b"%PDF-forged"),
+            poll_interval_seconds=0,
+        )

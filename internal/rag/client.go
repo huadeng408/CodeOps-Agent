@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,8 +20,9 @@ import (
 )
 
 const (
-	searchPath = "/internal/orchestrator/knowledge-search"
-	ingestPath = "/internal/orchestrator/knowledge-ingest"
+	searchPath         = "/internal/orchestrator/knowledge-search"
+	ingestPath         = "/internal/orchestrator/knowledge-ingest"
+	pipelineStatusPath = "/internal/orchestrator/pipeline-status"
 )
 
 // ErrUnavailable identifies clients that are disabled or incompletely configured.
@@ -110,6 +110,21 @@ type IngestResult struct {
 	Message   string `json:"-"`
 }
 
+// PipelineStageStatus is one run-scoped processing stage returned by the server.
+type PipelineStageStatus struct {
+	Stage     string `json:"stage"`
+	Status    string `json:"status"`
+	LastError string `json:"lastError,omitempty"`
+}
+
+// PipelineStatusResult reports whether all required stages completed for one run/file.
+type PipelineStatusResult struct {
+	RunID    string                `json:"runId"`
+	FileMD5  string                `json:"fileMd5"`
+	Complete bool                  `json:"complete"`
+	Stages   []PipelineStageStatus `json:"stages"`
+}
+
 // Client implements Searcher and Ingester over the internal RAG HTTP API.
 type Client struct {
 	config     Config
@@ -157,11 +172,13 @@ func (c *Client) Search(ctx context.Context, options SearchOptions) ([]SearchRes
 		TopK          int    `json:"topK"`
 		Mode          string `json:"mode"`
 		DisableRerank bool   `json:"disableRerank"`
+		RunID         string `json:"runId,omitempty"`
 	}{
 		Query:         query,
 		TopK:          options.TopK,
 		Mode:          options.Mode,
 		DisableRerank: options.DisableRerank,
+		RunID:         strings.TrimSpace(c.config.IngestProvenance.RunID),
 	}
 	payload.User.ID = c.config.UserID
 	payload.User.OrgTags = c.config.OrgTag
@@ -204,6 +221,83 @@ func (c *Client) Search(ctx context.Context, options SearchOptions) ([]SearchRes
 		return nil, errors.New("RAG search response is missing data")
 	}
 	return envelope.Data.Results, nil
+}
+
+// PipelineStatus reads the exact run-scoped pipeline state for one ingested file.
+func (c *Client) PipelineStatus(ctx context.Context, runID, fileMD5 string) (*PipelineStatusResult, error) {
+	if err := c.validateAvailable(); err != nil {
+		return nil, err
+	}
+	query := url.Values{}
+	query.Set("runId", strings.TrimSpace(runID))
+	query.Set("fileMd5", strings.TrimSpace(fileMD5))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint(pipelineStatusPath)+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create RAG pipeline status request: %w", err)
+	}
+	c.authorize(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send RAG pipeline status request: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := requireHTTPSuccess(resp); err != nil {
+		return nil, fmt.Errorf("RAG pipeline status failed: %w", err)
+	}
+	var result PipelineStatusResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode RAG pipeline status response: %w", err)
+	}
+	if err := validatePipelineStatus(&result, strings.TrimSpace(runID), strings.TrimSpace(fileMD5)); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func validatePipelineStatus(result *PipelineStatusResult, runID, fileMD5 string) error {
+	if result.RunID != runID || result.FileMD5 != fileMD5 {
+		return fmt.Errorf("RAG pipeline status scope mismatch")
+	}
+	expected := [...]string{"parse", "chunk", "embed", "index"}
+	if len(result.Stages) != len(expected) {
+		return fmt.Errorf("RAG pipeline status must contain exactly four stages")
+	}
+	for index, stage := range result.Stages {
+		if stage.Stage != expected[index] {
+			return fmt.Errorf("RAG pipeline status stage order is invalid")
+		}
+		if result.Complete && stage.Status != "SUCCESS" {
+			return fmt.Errorf("RAG pipeline completed with non-SUCCESS stage %s", stage.Stage)
+		}
+	}
+	return nil
+}
+
+// WaitForPipelineCompletion waits for this run's stages and fails immediately on a failed stage.
+func (c *Client) WaitForPipelineCompletion(ctx context.Context, runID, fileMD5 string, pollInterval time.Duration) (*PipelineStatusResult, error) {
+	for {
+		status, err := c.PipelineStatus(ctx, runID, fileMD5)
+		if err != nil {
+			return nil, err
+		}
+		for _, stage := range status.Stages {
+			if stage.Status == "FAILED" {
+				return nil, fmt.Errorf("RAG pipeline stage %s failed: %s", stage.Stage, stage.LastError)
+			}
+		}
+		if status.Complete {
+			return status, nil
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, fmt.Errorf("wait for RAG pipeline run %s file %s: %w", runID, fileMD5, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 // Ingest streams one regular file to the internal ingestion endpoint.
@@ -333,7 +427,7 @@ func (c *Client) resolveIngestProvenance(options IngestOptions, sourceSHA256 str
 		CorpusGeneration: strings.TrimSpace(configured.CorpusGeneration),
 	}
 	if provenance.SourceURL == "" {
-		provenance.SourceURL = deriveSourceURL(configured.SourceURL, provenance.SourcePath)
+		provenance.SourceURL = strings.TrimSpace(configured.SourceURL)
 	}
 	for field, value := range map[string]string{
 		"sourceId": provenance.SourceID, "sourcePath": provenance.SourcePath,
@@ -367,25 +461,11 @@ func isLowerHex(value string, length int) bool {
 }
 
 func (c *Client) deriveSourcePath(filePath string) string {
-	cleaned := filepath.ToSlash(filepath.Clean(filePath))
 	prefix := strings.Trim(strings.TrimSpace(c.config.IngestProvenance.SourcePathPrefix), "/\\")
 	if prefix == "" {
-		return cleaned
+		return filepath.Base(filepath.Clean(filePath))
 	}
-	return pathpkg.Join(filepath.ToSlash(prefix), filepath.Base(cleaned))
-}
-
-func deriveSourceURL(baseURL, sourcePath string) string {
-	baseURL = strings.TrimSpace(baseURL)
-	if baseURL == "" {
-		return ""
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme == "" {
-		return baseURL
-	}
-	parsed.Path = pathpkg.Join(parsed.Path, filepath.ToSlash(sourcePath))
-	return parsed.String()
+	return strings.TrimRight(filepath.ToSlash(prefix), "/") + "/" + filepath.Base(filePath)
 }
 
 func (c *Client) validateAvailable() error {

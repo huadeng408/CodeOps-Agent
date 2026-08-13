@@ -2,10 +2,8 @@
 
 Two backends:
 - fastembed (default) for models it supports (bge-small/large, jina, etc.)
-- FlagEmbedding BGEM3FlagModel for BAAI/bge-m3 (1024-dim native, not
-  supported by fastembed). Selected automatically when the model name
-  contains "bge-m3"; the model is downloaded from the configured source
-  (ModelScope via MODELSCOPE_CACHE, or HuggingFace via HF_ENDPOINT).
+- sentence-transformers for BAAI/bge-m3 (native 1024 dimensions; unsupported
+  by fastembed). The pinned revision is passed to the model loader.
 """
 
 import os
@@ -16,6 +14,8 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from scripts.embedding_contract import backend_name, native_dimensions, prepare_vectors
 
 
 class EmbeddingRequest(BaseModel):
@@ -69,7 +69,7 @@ logger = logging.getLogger("paismart.embedding")
 
 
 def _is_bge_m3(model_name: str) -> bool:
-    return "bge-m3" in model_name.lower()
+    return backend_name(model_name) == "sentence-transformers"
 
 
 def _load_bge_m3(model_name: str):
@@ -85,7 +85,11 @@ def _load_bge_m3(model_name: str):
                 device = "cpu"
         except Exception:
             device = "cpu"
-    return SentenceTransformer(model_name, device=device)
+    revision = DEFAULT_REVISION.rsplit("@", 1)[-1] if "@" in DEFAULT_REVISION else DEFAULT_REVISION
+    kwargs = {"device": device}
+    if revision:
+        kwargs["revision"] = revision
+    return SentenceTransformer(model_name, **kwargs)
 
 
 def _load_fastembed(model_name: str):
@@ -153,27 +157,6 @@ def run_embedding(model_name: str, texts: List[str]):
         raise
 
 
-def resize_vector(vector: List[float], target_dim: int | None) -> List[float]:
-    """Resize vectors for local development so downstream ES dimensions stay stable."""
-    if not target_dim or target_dim <= 0:
-        return [float(v) for v in vector]
-
-    values = [float(v) for v in vector]
-    if len(values) == target_dim:
-        return values
-    if len(values) > target_dim:
-        return values[:target_dim]
-    if not values:
-        return [0.0] * target_dim
-
-    resized = list(values)
-    idx = 0
-    while len(resized) < target_dim:
-        resized.append(values[idx % len(values)])
-        idx += 1
-    return resized
-
-
 @app.on_event("startup")
 def preload_model():
     """Optionally warm the default model to reduce first-request latency."""
@@ -208,7 +191,7 @@ def health():
         "status": "ok" if _ready else "degraded",
         "model": DEFAULT_MODEL,
         "model_revision": DEFAULT_REVISION,
-        "dimensions": OUTPUT_DIMENSIONS or None,
+        "dimensions": native_dimensions(DEFAULT_MODEL) or OUTPUT_DIMENSIONS or None,
         "ready": _ready,
         "last_error": _last_error,
     }
@@ -234,7 +217,10 @@ def embeddings(req: EmbeddingRequest):
     latency_ms = (time.perf_counter() - started) * 1000
 
     target_dim = req.dimensions or OUTPUT_DIMENSIONS or None
-    resized_vectors = [resize_vector(vector, target_dim) for vector in vectors]
+    try:
+        resized_vectors = prepare_vectors(model_name, vectors, target_dim)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     data = [
         EmbeddingItem(index=idx, embedding=vector)

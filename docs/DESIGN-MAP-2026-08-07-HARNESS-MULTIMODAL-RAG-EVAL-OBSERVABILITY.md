@@ -2554,3 +2554,140 @@ BM25 的超参（k1=1.5, b=0.75）取 Okapi 默认值、**不针对答案调参*
 后续工作按权威路线切回其余主线：M1 MinerU Windows 真实 E2E；O1→O2→O3 真实 RAG 同 trace E2E；再做 net-new hidden holdout 与 Terminal-Bench / tau2-bench 固定小样本验收。C3 validation/retry 仍只标 `IMPLEMENTED`，本次 Arm B 不为它提供真实接线验收。
 
 **本轮未删除任何容器、volume、ES 索引、MySQL 数据或 MinIO 对象；未重写历史。**
+
+---
+
+## 33. 2026-08-13 current-HEAD audit and continuation checkpoint
+
+This section is the latest operational truth for the four mainlines. Earlier
+sections remain historical evidence and must not override these fresh checks.
+
+### 33.1 Fresh repository and runtime evidence
+
+```text
+repository: D:\vscode\localcode
+branch: main (user-selected integration target)
+HEAD: 3244ac0eb89df162111cb7ddb946e9607d5e5444
+origin/main: 0d19f872e5f4fbc4bf5e3ceebfa722428630d02c
+worktree: dirty; unrelated WIP and generated artifacts remain protected
+
+MySQL: knowledge_source=12, knowledge_document=3107,
+       document_vectors=24871, pipeline_task=22375
+Elasticsearch: knowledge_base=44, knowledge_base_v2_bge_m3=24883
+alias: knowledge_base_current -> knowledge_base_v2_bge_m3
+MinIO uploads: 4620 objects
+Docker: required stateful services running; no destructive cleanup performed
+```
+
+These counts are a snapshot, not a release claim. Any ingest run must record
+before/after counts and its unique run id.
+
+### 33.2 Mainline status matrix
+
+| Mainline | Current status | Fresh evidence | Blocking truth |
+|---|---|---|---|
+| Self-built Harness | IMPLEMENTED with VERIFIED receipt-bound astropy-20 development subset | `eval_results/harness-uplift-20260810/verified-arms.json`, paired receipt, official raw scorer outputs, checksum and span artifacts | Not a SWE-bench Verified score; Terminal-Bench/tau2 official runs and full release gate remain unfinished |
+| Multimodal RAG | IMPLEMENTED pilot gate; overall BLOCKED | `tests/test_multimodal_pilot.py`: 23 passed; real MinerU OCR fixture contains `MINERU REAL OCR 20260729` | No 120 locked multimodal qrels, visual encoder/index, ViDoRe/bbox bake-off, or production alias gate; real service E2E still pending |
+| Evaluation set | BLOCKED | `sol-review-summary.json`: 180 total, 23 `AI_REVIEWED`, 157 `DISPUTED`, `MODEL_IDENTITY_UNVERIFIED`; split manifest holdout size 0 | No human review; no valid hidden holdout; public dataset manifest still has zero revision/hash placeholders; never score disputed rows |
+| Observability | IMPLEMENTED locally, production closure BLOCKED | OTel schema and in-process trace assertions; Phoenix container is running | Need same current-HEAD run with Go retrieve, embedding/rerank as applicable, official scorer, Phoenix query and machine parent-chain assertion |
+
+### 33.3 Multimodal pilot gate closed in unit/injected integration tests
+
+The pilot now fails closed unless all of the following are true:
+
+1. MinerU is invoked with explicit `-m ocr`; PDF paths reject Tika.
+2. Pipeline status response matches the exact current `runId` and `fileMd5`.
+3. Stages are exactly `parse`, `chunk`, `embed`, `index`, once each, in order,
+   and every status is `SUCCESS` before `verified=true` is emitted.
+4. SearchKnowledge sends the same `runId`, allowing `eval.run_id` retrieval
+   span correlation.
+5. Presigned `objectUrl` is never serialized into manifest, summary, evidence,
+   or checksum artifacts.
+6. Stable document/page/element/bbox citation ids join back to MinerU output.
+
+Fresh focused evidence: `C:\Python312\python.exe -m pytest
+tests/test_multimodal_pilot.py -q` -> `23 passed`; `py_compile` and
+`git diff --check` -> exit 0. This is a contract/injected-service gate, not yet
+the real Go server + worker + Elasticsearch + Phoenix acceptance gate.
+
+### 33.4 Anti-self-deception audit
+
+- The Harness uplift report is limited to an astropy-20 development subset:
+  declared-source A=4/20 and B=9/20; eligible paired outcomes=17. It is not a
+  SWE-bench Verified headline and the known contaminated instance is excluded.
+- The current Sol artifact records `model=deepseek-chat`, `revision=unknown`,
+  and a DeepSeek endpoint despite a requested GPT-5.6 Sol label. Therefore the
+  only permitted labels are `AI_REVIEWED`, `DISPUTED`, and
+  `MODEL_IDENTITY_UNVERIFIED`; never `HUMAN_REVIEWED` or `VERIFIED`.
+- `eval/datasets/manifest.yaml` contains zero revision/hash placeholders for
+  BEIR, MIRACL, BRIGHT, and ViDoRe. Public benchmark execution is BLOCKED until
+  immutable revisions, hashes, licenses, splits, and official scorer pins are
+  captured.
+- `holdout_status=BLOCKED` and `holdout_size=0` are not empty metrics. No
+  holdout score may be emitted, and no dev query may be relabelled as holdout.
+
+### 33.5 Ordered next actions
+
+1. Finish and review the runtime wrapper so it starts only approved Docker
+   services, scopes secrets through `rag-agent-e2e-runtime.ps1`, starts/stops
+   only processes it owns, and retains redacted logs on failure.
+2. Track the PDF fixture in a commit, then run the real MinerU -> Go ingest ->
+   exact four-stage pipeline -> SearchKnowledge -> citation -> Phoenix pilot.
+   Save a unique artifact directory with checksums and before/after data counts.
+3. Add the real pilot trace assertion: one run id, one retrieval span, no raw
+   secret or presigned URL, and explicit stage/citation evidence.
+4. Do not start public benchmark or golden-set scoring until dataset pins,
+   human review, and a net-new hidden holdout are complete.
+5. After the real pilot, rerun full Go/Python suites, run an independent quality
+   review, then stage only the logical groups required for this checkpoint.
+
+Rollback boundary: code changes are revertible by commit; runtime rollback is
+alias-only; do not delete old indices, volumes, caches, database rows, or
+MinIO objects.
+
+### 33.6 Real multimodal RAG acceptance (2026-08-13)
+
+The current-HEAD real pilot is now `VERIFIED` for the non-gold smoke scope.
+This is a runnable integration demo, not a retrieval benchmark or production
+release gate.
+
+```text
+artifact: .tmp/multimodal-rag-pilot/20260813-real-04
+run_id: multimodal-pilot-20260813082110-9887a76a
+source_commit: 6b2c5a030311c4efc0a267fd9cbf7f11ef840240
+file_md5: f75d6778fe737d1e1bdbb9da8273f82a
+trace_id: bc3cb521bc4e05610e31f264de7f44ee
+parser: MinerU 3.4.4, mode=ocr, backend=pipeline
+pipeline: parse/chunk/embed/index = SUCCESS exactly once
+retrieval: one matching hit; citation wiring precision=1.0, recall=1.0
+artifact checksum verification: PASS
+secret/presigned-URL scan: clean
+```
+
+The pilot exposed and fixed two real integration defects that injected-service
+tests did not find:
+
+1. Pipeline `MISSING` and `PROCESSING` are transient states and must be polled;
+   only terminal `FAILED`/`ERROR`, or a completed response containing a
+   non-`SUCCESS` stage, fails closed.
+2. Production indexing deliberately separates logical `document_id` from the
+   file-MD5-derived `page_id`/`element_id` namespace. Citation joins now model
+   those as separate identities and validate the namespace before acceptance.
+
+The four attempted run IDs were retained as audit evidence. Relative to the
+33.1 baseline they added four source/document receipts and twenty run-scoped
+pipeline rows; MinIO added one deduplicated object. The final ES target contains
+two chunks for the fixture, and `knowledge_base_current` still points to
+`knowledge_base_v2_bge_m3`. No automatic cleanup, index deletion, volume
+deletion, or alias mutation occurred.
+
+Updated mainline truth:
+
+- Multimodal RAG real non-gold smoke: `VERIFIED`.
+- Run-scoped Phoenix retrieval span for that same real run: `VERIFIED`.
+- Multimodal qrels, visual encoder/index bake-off, ViDoRe, and production alias
+  gate: still `BLOCKED` or not implemented.
+- Evaluation set: still `BLOCKED` (`holdout_size=0`, 157 disputed rows, public
+  dataset pins unresolved). This smoke result must never be reported as eval.
+- Harness: unchanged receipt-bound astropy-20 development subset only; no new
+  SWE-bench Verified, Terminal-Bench, or tau2-bench claim.

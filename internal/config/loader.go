@@ -31,7 +31,7 @@ type Config struct {
 	WorktreeBaseRef                 string           `json:"worktree_base_ref"`
 	RAGEnabled                      bool             `json:"rag_enabled"`
 	RAGServerURL                    string           `json:"rag_server_url"`
-	RAGInternalSecret               string           `json:"rag_internal_secret"`
+	RAGInternalSecret               string           `json:"-"`
 	RAGUserID                       uint             `json:"rag_user_id"`
 	RAGOrgTag                       string           `json:"rag_org_tag"`
 	RAGIngestPublic                 bool             `json:"rag_ingest_public"`
@@ -100,6 +100,7 @@ func Load(projectRoot string) (Config, error) {
 	}
 
 	applyThinkingEnv(&cfg)
+	applyRAGSecretEnv(&cfg)
 
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" {
@@ -165,6 +166,10 @@ func applyThinkingEnv(cfg *Config) {
 		return
 	}
 	cfg.ThinkingEnabled = raw == "1" || raw == "true" || raw == "yes"
+}
+
+func applyRAGSecretEnv(cfg *Config) {
+	cfg.RAGInternalSecret = strings.TrimSpace(os.Getenv("CODE_AGENT_RAG_INTERNAL_SECRET"))
 }
 
 func readDotenv(path string) (map[string]string, error) {
@@ -273,9 +278,6 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if patch.RAGServerURL != "" {
 		dst.RAGServerURL = patch.RAGServerURL
-	}
-	if patch.RAGInternalSecret != "" {
-		dst.RAGInternalSecret = patch.RAGInternalSecret
 	}
 	if patch.RAGUserID != 0 {
 		dst.RAGUserID = patch.RAGUserID

@@ -89,6 +89,13 @@ func TestRealNewAppRAGIngestThenSearchKnowledge(t *testing.T) {
 		t.Fatalf("real NewApp /ingest did not render a file MD5: %q", rendered)
 	}
 	t.Logf("fileMd5=%s", match[1])
+	pipelineCtx, cancelPipeline := context.WithTimeout(context.Background(), 2*time.Minute)
+	pipeline, err := app.ragClient.WaitForPipelineCompletion(pipelineCtx, requiredAppRAGEnv(t, "CODE_AGENT_RAG_RUN_ID"), match[1], time.Second)
+	cancelPipeline()
+	if err != nil {
+		t.Fatalf("current-run pipeline did not complete: %v", err)
+	}
+	t.Logf("pipeline stages=%+v", pipeline.Stages)
 
 	topHit := waitForAppRAGMarker(t, marker, fileName, match[1], func(ctx context.Context) (tools.ToolResult, error) {
 		return app.executor.Execute(ctx, tools.ToolRequest{
@@ -165,7 +172,7 @@ func realAppRAGConfig(t *testing.T, root string) config.Config {
 	cfg.RAGIngestPublic = false
 	cfg.RAGSourceID = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_ID")
 	cfg.RAGSourcePathPrefix = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_PATH_PREFIX")
-	cfg.RAGSourceURL = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_URL")
+	cfg.RAGSourceURL = strings.TrimSpace(os.Getenv("CODE_AGENT_RAG_SOURCE_URL"))
 	cfg.RAGSourceCommit = requiredAppRAGEnv(t, "CODE_AGENT_RAG_SOURCE_COMMIT")
 	cfg.RAGTargetIndex = requiredAppRAGEnv(t, "CODE_AGENT_RAG_TARGET_INDEX")
 	cfg.RAGCorpusGeneration = requiredAppRAGEnv(t, "CODE_AGENT_RAG_CORPUS_GENERATION")
@@ -223,6 +230,10 @@ func newAppRAGFileName(t *testing.T) string {
 }
 
 func TestMatchingAppRAGHitRequiresAllValuesInOneBlock(t *testing.T) {
+	emptyFileName := "Knowledge search results: 1\n\n[1]\nfileName: \nfileMd5: expected-md5\ntextContent:\nunique-marker"
+	if _, ok := matchingAppRAGHit(emptyFileName, "unique-marker", "expected.txt", "expected-md5"); !ok {
+		t.Fatal("run-scoped fileMd5 plus marker in one hit must not depend on lossy fileName metadata")
+	}
 	markerInFileName := "Knowledge search results: 1\n\n[1]\nfileName: unique-marker.txt\nfileMd5: expected-md5\ntextContent:\nother text"
 	if _, ok := matchingAppRAGHit(markerInFileName, "unique-marker", "unique-marker.txt", "expected-md5"); ok {
 		t.Fatal("marker in fileName must not count as a textContent match")
@@ -303,7 +314,7 @@ func assertAppRAGMarkerInvisible(t *testing.T, marker string, search func(contex
 
 func matchingAppRAGHit(output, marker, fileName, fileMD5 string) (string, bool) {
 	for _, hit := range parseAppRAGHits(output) {
-		if strings.Contains(hit.textContent, marker) && hit.fileName == fileName && hit.fileMD5 == fileMD5 {
+		if strings.Contains(hit.textContent, marker) && hit.fileMD5 == fileMD5 {
 			return hit.block, true
 		}
 	}
@@ -357,5 +368,5 @@ func isAppRAGHitStart(lines []string, index int) bool {
 	if _, err := strconv.Atoi(line[1 : len(line)-1]); err != nil {
 		return false
 	}
-	return (index == 0 || strings.TrimSpace(lines[index-1]) == "") && index+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index+1]), "fileName: ")
+	return (index == 0 || strings.TrimSpace(lines[index-1]) == "") && index+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index+1]), "fileName:")
 }

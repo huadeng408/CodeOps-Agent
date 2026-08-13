@@ -177,6 +177,37 @@ func TestGetByRunKeyMissing(t *testing.T) {
 	}
 }
 
+func TestListByRunAndFileReturnsOnlyCurrentRunOrderedByStage(t *testing.T) {
+	db := newPipelineTaskDB(t)
+	repo := NewPipelineTaskRepository(db)
+
+	for _, stage := range []string{"index", "parse", "embed", "chunk"} {
+		if _, err := repo.MarkProcessingRun("current-run", "current-md5", stage, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.MarkProcessingRun("historical-run", "current-md5", "parse", -1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MarkProcessingRun("current-run", "other-md5", "parse", -1); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := repo.ListByRunAndFile("current-run", "current-md5")
+	if err != nil {
+		t.Fatalf("ListByRunAndFile: %v", err)
+	}
+	if len(tasks) != 4 {
+		t.Fatalf("task count = %d, want 4: %+v", len(tasks), tasks)
+	}
+	want := []string{"parse", "chunk", "embed", "index"}
+	for i := range want {
+		if tasks[i].Stage != want[i] || tasks[i].RunID != "current-run" || tasks[i].FileMD5 != "current-md5" {
+			t.Fatalf("task[%d] = %+v, want stage %q scoped to current run/file", i, tasks[i], want[i])
+		}
+	}
+}
+
 // TestLegacyMarkProcessingCoexistsWithRunRows is the R1 load-bearing
 // compatibility test: a legacy message (no RunID) and a controlled run
 // message for the SAME file_md5/stage/chunk_id must coexist as two distinct

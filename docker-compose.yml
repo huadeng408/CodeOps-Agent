@@ -161,11 +161,14 @@ services:
       - "8009:8009"
     environment:
       EMBEDDING_MODEL: "BAAI/bge-m3"
-      EMBEDDING_REVISION: "BAAI/bge-m3@8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c"
+      EMBEDDING_REVISION: "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181"
+      EMBEDDING_LOCAL_DIR: "/models/bge-m3"
+      EMBEDDING_DEVICE: "cpu"
       EMBEDDING_THREADS: "2"
       EMBEDDING_OUTPUT_DIMENSIONS: "0"
     volumes:
       - codeagent-embedding-cache:/root/.cache
+      - D:/tools/mineru-models/hf-cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181:/models/bge-m3:ro
 
   reranker:
     build:

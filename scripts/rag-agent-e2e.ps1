@@ -2,21 +2,40 @@
 param(
     [string]$ServerUrl = "http://127.0.0.1:8081",
     [string]$MinerUCommand = "D:/tools/mineru-3.4.4-cpython/Scripts/mineru.exe",
-    [int]$StartupTimeoutSeconds = 600
+    [int]$StartupTimeoutSeconds = 600,
+    [string]$ArtifactRoot = ".tmp/rag-agent-e2e"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+trap {
+    $message = "$($_.Exception.Message)"
+    $secret = [Environment]::GetEnvironmentVariable("CODE_AGENT_RAG_INTERNAL_SECRET")
+    if (-not [string]::IsNullOrEmpty($secret)) {
+        $message = $message.Replace($secret, "[REDACTED]")
+    }
+    Write-Error "RAG agent E2E terminated with a failure: $message"
+    exit 1
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "rag-agent-e2e-runtime.ps1")
 $serverProcess = $null
 $serverStartedHere = $false
+$workerProcess = $null
+$workerStartedHere = $false
 $completed = $false
 $runId = "{0}-{1}" -f (Get-Date -Format "yyyyMMddHHmmss"), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
 $serverStdout = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-e2e-$runId.stdout.log"
 $serverStderr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-e2e-$runId.stderr.log"
 $serverExecutable = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-e2e-$runId.exe"
+$workerStdout = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-worker-$runId.stdout.log"
+$workerStderr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-worker-$runId.stderr.log"
+$artifactDir = Join-Path (Join-Path $repoRoot $ArtifactRoot) $runId
+$snapshotBefore = Join-Path $artifactDir "data-before.json"
+$snapshotAfter = Join-Path $artifactDir "data-after.json"
 $trackedEnvironmentNames = @(
     "CODE_AGENT_MINERU_COMMAND",
     "CODE_AGENT_MINERU_BACKEND",
@@ -24,6 +43,7 @@ $trackedEnvironmentNames = @(
     "CODE_AGENT_RUN_RAG_E2E",
     "CODE_AGENT_RAG_SERVER_URL",
     "CODE_AGENT_RAG_INTERNAL_SECRET",
+    "ORCHESTRATOR_SHARED_SECRET",
     "CODE_AGENT_RAG_USER_ID",
     "CODE_AGENT_RAG_ORG_TAG",
     "CODE_AGENT_RAG_SOURCE_ID",
@@ -98,16 +118,49 @@ function Test-InitContainerSucceeded {
 
 function Resolve-InternalSecret {
     $fromEnvironment = [Environment]::GetEnvironmentVariable("CODE_AGENT_RAG_INTERNAL_SECRET")
-    if (-not [string]::IsNullOrWhiteSpace($fromEnvironment)) {
-        return $fromEnvironment
+    if ([string]::IsNullOrWhiteSpace($fromEnvironment)) {
+        throw "CODE_AGENT_RAG_INTERNAL_SECRET must be set in the environment"
     }
+    return $fromEnvironment
+}
 
-    $configPath = Join-Path $repoRoot "configs/server.yaml"
-    $match = Select-String -Path $configPath -Pattern '^\s+shared_secret:\s*["'']?([^"''#]+)' | Select-Object -Last 1
-    if ($null -eq $match -or $match.Matches.Count -eq 0) {
-        throw "internal shared secret is not configured; set CODE_AGENT_RAG_INTERNAL_SECRET"
+function Test-EmbeddingReady {
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:8009/health" -TimeoutSec 5
+        return $health.ready -eq $true `
+            -and $health.model -eq "BAAI/bge-m3" `
+            -and $health.model_revision -eq "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181" `
+            -and [int]$health.dimensions -eq 1024
     }
-    return $match.Matches[0].Groups[1].Value.Trim()
+    catch {
+        return $false
+    }
+}
+
+function Write-DataSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $mysqlRows = & docker exec -e MYSQL_PWD=codeagent codeagent-mysql mysql -ucodeagent -Dcodeagent -N -e "SELECT 'knowledge_source',COUNT(*) FROM knowledge_source UNION ALL SELECT 'knowledge_document',COUNT(*) FROM knowledge_document UNION ALL SELECT 'document_vectors',COUNT(*) FROM document_vectors UNION ALL SELECT 'file_upload',COUNT(*) FROM file_upload UNION ALL SELECT 'chunk_info',COUNT(*) FROM chunk_info UNION ALL SELECT 'pipeline_task',COUNT(*) FROM pipeline_task;"
+    if ($LASTEXITCODE -ne 0) { throw "MySQL snapshot failed" }
+    $mysql = @{}
+    foreach ($row in $mysqlRows) {
+        $parts = "$row" -split "`t", 2
+        if ($parts.Count -eq 2) { $mysql[$parts[0]] = [int64]$parts[1] }
+    }
+    $es = @{}
+    foreach ($index in @("knowledge_base", "knowledge_base_v2_bge_m3", "conversation_memory")) {
+        $es[$index] = [int64](Invoke-RestMethod -Uri "http://127.0.0.1:9200/$index/_count" -TimeoutSec 10).count
+    }
+    $minioText = & docker exec codeagent-minio sh -c "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin >/dev/null && mc ls --recursive local/uploads | wc -l"
+    if ($LASTEXITCODE -ne 0) { throw "MinIO snapshot failed" }
+    [ordered]@{
+        run_id = $runId
+        captured_at = (Get-Date).ToUniversalTime().ToString("o")
+        git_sha = (& git rev-parse HEAD).Trim()
+        mysql = $mysql
+        elasticsearch = $es
+        minio_upload_objects = [int64]("$minioText".Trim())
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding utf8
 }
 
 function Resolve-CorpusSetting {
@@ -178,6 +231,7 @@ function Invoke-GoTest {
 
 Push-Location $repoRoot
 try {
+    New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
     if (-not (Test-Path -LiteralPath $MinerUCommand -PathType Leaf)) {
         throw "MinerU executable not found at $MinerUCommand"
     }
@@ -206,7 +260,7 @@ try {
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9000/minio/health/live" } "MinIO HTTP health" $StartupTimeoutSeconds
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9998/" } "Tika HTTP endpoint" $StartupTimeoutSeconds
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9200/_cluster/health" } "Elasticsearch HTTP health" $StartupTimeoutSeconds
-    Wait-Until { Test-HttpEndpoint "http://127.0.0.1:8009/health" } "embedding HTTP health" $StartupTimeoutSeconds
+    Wait-Until { Test-EmbeddingReady } "native BGE-M3 embedding readiness" $StartupTimeoutSeconds
     Wait-Until {
         & docker compose exec -T kafka kafka-topics --bootstrap-server kafka:29092 --list 2>$null | Out-Null
         return $LASTEXITCODE -eq 0
@@ -227,17 +281,29 @@ try {
 	if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
 		throw "cannot resolve an auditable source commit from git HEAD"
 	}
-	$sourceUrl = (& git remote get-url origin).Trim()
-	if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceUrl)) {
-		throw "cannot resolve an auditable source URL from git remote origin"
-	}
+    if (-not (Test-HttpEndpoint "http://127.0.0.1:8090/healthz")) {
+        Write-Host "Starting Python ingestion worker for this E2E run..."
+        $workerProcess = Invoke-WithPaismartInternalToken -Secret $internalSecret -Action {
+            Start-Process -FilePath "C:\Python312\python.exe" `
+                -ArgumentList "-m", "uvicorn", "orchestrator.rag.main:app", "--host", "127.0.0.1", "--port", "8090" `
+                -WorkingDirectory $repoRoot -RedirectStandardOutput $workerStdout -RedirectStandardError $workerStderr `
+                -WindowStyle Hidden -PassThru
+        }
+        $workerStartedHere = $true
+        Wait-Until { Test-HttpEndpoint "http://127.0.0.1:8090/healthz" } "Python ingestion worker" $StartupTimeoutSeconds
+    }
+    else {
+        Write-Host "Using the Python ingestion worker already listening at http://127.0.0.1:8090"
+    }
     if (-not (Test-HttpEndpoint "$ServerUrl/healthz")) {
         Write-Host "Starting Go server for this E2E run..."
         & go build -o $serverExecutable ./cmd/server
         if ($LASTEXITCODE -ne 0) {
             throw "building Go server failed"
         }
-        $serverProcess = Start-Process -FilePath $serverExecutable -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr -WindowStyle Hidden -PassThru
+        $serverProcess = Invoke-WithOrchestratorSharedSecret -Secret $internalSecret -Action {
+            Start-Process -FilePath $serverExecutable -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr -WindowStyle Hidden -PassThru
+        }
         $serverStartedHere = $true
         Wait-Until { Test-HttpEndpoint "$ServerUrl/healthz" } "Go server" $StartupTimeoutSeconds
     }
@@ -245,6 +311,7 @@ try {
         Write-Host "Using the Go server already listening at $ServerUrl"
     }
 	Invoke-RAGInternalProbe -ServerUrl $ServerUrl -InternalSecret $internalSecret
+	Write-DataSnapshot -Path $snapshotBefore
 
     $env:CODE_AGENT_RUN_RAG_E2E = "1"
     $env:CODE_AGENT_RAG_SERVER_URL = $ServerUrl
@@ -253,7 +320,9 @@ try {
     $env:CODE_AGENT_RAG_ORG_TAG = ""
     $env:CODE_AGENT_RAG_SOURCE_ID = "localcode-rag-e2e-$runId"
     $env:CODE_AGENT_RAG_SOURCE_PATH_PREFIX = "e2e/$runId"
-    $env:CODE_AGENT_RAG_SOURCE_URL = $sourceUrl
+    # The synthetic file does not exist in the Git tree. Keep sourceUrl empty
+    # instead of fabricating a repository URL that cannot locate its bytes.
+    $env:CODE_AGENT_RAG_SOURCE_URL = ""
     $env:CODE_AGENT_RAG_SOURCE_COMMIT = $sourceCommit
     $env:CODE_AGENT_RAG_TARGET_INDEX = $targetIndex
     $env:CODE_AGENT_RAG_CORPUS_GENERATION = $corpusGeneration
@@ -261,11 +330,19 @@ try {
 
     Write-Host "Running real RAG ingest and SearchKnowledge integrations..."
     Invoke-GoTest @("test", "./internal/rag", "./internal/cli", "-run", "TestRealRAGIngestThenSearchKnowledge|TestRealNewAppRAGIngestThenSearchKnowledge", "-count=1", "-v")
+    Write-DataSnapshot -Path $snapshotAfter
     $completed = $true
     Write-Host "Real MinerU and RAG agent E2E tests passed."
 }
 finally {
 	try {
+		if ($workerStartedHere -and $null -ne $workerProcess) {
+			if (-not $workerProcess.HasExited) {
+				Stop-Process -Id $workerProcess.Id -Force -ErrorAction SilentlyContinue
+			}
+			try { $workerProcess.WaitForExit() } catch { }
+			$workerProcess.Dispose()
+		}
 		if ($serverStartedHere -and $null -ne $serverProcess) {
 			if (-not $serverProcess.HasExited) {
 				Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
@@ -277,8 +354,8 @@ finally {
             Remove-Item -LiteralPath $serverExecutable -Force -ErrorAction SilentlyContinue
 		}
 		if ($completed) {
-			Remove-Item -LiteralPath $serverStdout, $serverStderr -Force -ErrorAction SilentlyContinue
-			$remainingLogs = @(@($serverStdout, $serverStderr) | Where-Object { Test-Path -LiteralPath $_ })
+			Remove-Item -LiteralPath $serverStdout, $serverStderr, $workerStdout, $workerStderr -Force -ErrorAction SilentlyContinue
+			$remainingLogs = @(@($serverStdout, $serverStderr, $workerStdout, $workerStderr) | Where-Object { Test-Path -LiteralPath $_ })
 			if ($remainingLogs.Count -ne 0) {
 				throw "E2E passed, but temporary server logs could not be removed: $($remainingLogs -join ', ')"
 			}
@@ -287,6 +364,8 @@ finally {
             Write-Host "E2E failed. Server logs were retained at:"
             Write-Host "  stdout: $serverStdout"
             Write-Host "  stderr: $serverStderr"
+            Write-Host "  worker stdout: $workerStdout"
+            Write-Host "  worker stderr: $workerStderr"
 		}
 	}
 	finally {

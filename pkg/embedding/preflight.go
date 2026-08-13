@@ -62,7 +62,7 @@ func (c *openAICompatibleClient) Preflight(ctx context.Context) error {
 	if !c.cfg.RequireNativeDimensions {
 		return nil
 	}
-	if err := c.checkHealth(ctx); err != nil {
+	if err := c.checkHealth(ctx, expected); err != nil {
 		return err
 	}
 	// Fixed UTF-8 bilingual sample: every preflight must prove both the
@@ -87,7 +87,7 @@ func (c *openAICompatibleClient) Preflight(ctx context.Context) error {
 	return nil
 }
 
-func (c *openAICompatibleClient) checkHealth(ctx context.Context) error {
+func (c *openAICompatibleClient) checkHealth(ctx context.Context, expected int) error {
 	path := c.cfg.HealthPath
 	if strings.TrimSpace(path) == "" {
 		path = "/health"
@@ -109,9 +109,28 @@ func (c *openAICompatibleClient) checkHealth(ctx context.Context) error {
 		Model         string `json:"model"`
 		Revision      string `json:"revision"`
 		ModelRevision string `json:"model_revision"`
+		Ready         *bool  `json:"ready"`
+		Dimensions    *int   `json:"dimensions"`
+		LastError     string `json:"last_error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		return fmt.Errorf("failed to decode embedding health: %w", err)
+	}
+	if health.Ready == nil {
+		return fmt.Errorf("embedding health is missing explicit readiness")
+	}
+	if !*health.Ready {
+		detail := strings.TrimSpace(health.LastError)
+		if detail == "" {
+			detail = "model is not loaded"
+		}
+		return fmt.Errorf("embedding service is not ready: %s", detail)
+	}
+	if health.Dimensions == nil {
+		return fmt.Errorf("embedding health is missing native dimensions")
+	}
+	if *health.Dimensions != expected {
+		return fmt.Errorf("embedding health dimensions mismatch: expected native %d, got %d", expected, *health.Dimensions)
 	}
 	if health.Model != "" && health.Model != c.cfg.Model {
 		return fmt.Errorf("embedding health model mismatch: expected %s, got %s", c.cfg.Model, health.Model)

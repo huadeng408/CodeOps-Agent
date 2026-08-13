@@ -23,6 +23,7 @@ data/**/*.rc      -text
 # Test fixtures compared or hashed as bytes (e.g. MinerU middle.json).
 tests/fixtures/**/*.json  -text
 tests/fixtures/**/*.jsonl -text
+tests/fixtures/**/*.pdf   -text
 
 # Normalize source to LF in the repository; checkout may localise it freely.
 *.py   text eol=lf

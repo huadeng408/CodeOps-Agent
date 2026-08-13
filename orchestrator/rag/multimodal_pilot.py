@@ -198,8 +198,8 @@ def run_pilot(
             document_id=document_id,
             element_namespace=element_namespace,
         )
-        ocr_element_ids = {item.element_id for item in elements}
-        citations = [_citation_from_hit(item, ocr_element_ids) for item in hits[:1]]
+        ocr_elements = {item.element_id: item for item in elements}
+        citations = [_citation_from_hit(item, ocr_elements) for item in hits[:1]]
         citation_report = evaluate_citations(citations, hits)
         if not citation_report["passed"]:
             raise RuntimeError("citation does not point to an actual retrieval hit")
@@ -297,16 +297,28 @@ def _write_ocr_artifact(parsed: dict[str, Any], name: str, destination: Path) ->
     raise RuntimeError(f"MinerU OCR artifact is missing: {name}")
 
 
-def _citation_from_hit(hit: SearchHit, ocr_element_ids: set[str]) -> Citation:
+def _citation_from_hit(hit: SearchHit, ocr_elements: dict[str, Any]) -> Citation:
     element_ids = list(hit.element_ids or [])
     bbox_refs = list(hit.bbox_refs or [])
     if not hit.document_id or not hit.page_id or not element_ids or not bbox_refs or not hit.citation_key:
         raise RuntimeError("retrieval hit is missing stable citation provenance")
-    missing = sorted(set(element_ids) - ocr_element_ids)
+    missing = sorted(set(element_ids) - set(ocr_elements))
     if missing:
         raise RuntimeError(f"citation elements are absent from MinerU artifacts: {missing}")
+    page_prefix = f"{hit.page_id}:e"
+    if any(not element_id.startswith(page_prefix) for element_id in element_ids):
+        raise RuntimeError("citation elements do not belong to the cited page")
+    expected_refs = {
+        f"{element_id}:{','.join(str(value) for value in ocr_elements[element_id].bbox)}"
+        for element_id in element_ids
+    }
+    if set(bbox_refs) != expected_refs or len(bbox_refs) != len(expected_refs):
+        raise RuntimeError("citation bboxRefs do not match MinerU element geometry")
+    expected_key = f"{hit.document_id}/{hit.page_id}/{element_ids[0]}"
+    if hit.citation_key != expected_key:
+        raise RuntimeError("citationKey does not match the production citation contract")
     return Citation(
-        citation_key=hit.citation_key,
+        citation_key=expected_key,
         document_id=hit.document_id,
         page_id=hit.page_id,
         element_ids=element_ids,

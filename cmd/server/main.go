@@ -150,13 +150,18 @@ func main() {
 	adminService := service.NewAdminService(orgTagRepo, userRepository, conversationRepo, pipelineTaskRepo, uploadRepo, documentRepo, nil)
 	uploadService := service.NewUploadService(uploadRepo, userRepository, cfg.MinIO)
 	documentService := service.NewDocumentService(uploadRepo, userRepository, orgTagRepo, docVectorRepo, pipelineTaskRepo, cfg.MinIO, cfg.Elasticsearch.IndexName, documentParser)
+	searchIndex, err := searchReadIndex(cfg)
+	if err != nil {
+		log.Errorf("search service configuration invalid: %v", err)
+		return
+	}
 	searchService := service.NewSearchService(
 		embeddingClient,
 		rerankerClient,
 		es.ESClient,
 		userService,
 		uploadRepo,
-		cfg.Elasticsearch.IndexName,
+		searchIndex,
 		cfg.Retrieval,
 		cfg.Embedding.Model,
 		cfg.Embedding.Dimensions,
@@ -303,6 +308,7 @@ func main() {
 			corpusIngestService := service.NewCorpusIngestService(corpusSourceRepo, corpusDocRepo, cfg.Corpus, nil)
 			knowledgeIngestHandler := handler.NewKnowledgeIngestHandler(corpusIngestService, cfg.MinIO)
 			knowledgeDocumentHandler := handler.NewKnowledgeDocumentHandler(corpusDocRepo, cfg.Corpus)
+			pipelineStatusHandler := handler.NewPipelineStatusHandler(pipelineTaskRepo)
 			internalGroup.POST("/orchestrator/session", orchHandler.LoadSession)
 			internalGroup.POST("/orchestrator/retrieve", orchHandler.RetrieveContext)
 			internalGroup.POST("/orchestrator/prompt-context", orchHandler.PreparePromptContext)
@@ -314,6 +320,7 @@ func main() {
 			// Read-only document status query the importer polls after an
 			// ingestion; InternalAuthMiddleware already guards the group.
 			internalGroup.GET("/orchestrator/knowledge-documents", knowledgeDocumentHandler.List)
+			internalGroup.GET("/orchestrator/pipeline-status", pipelineStatusHandler.Get)
 		}
 	}
 
@@ -337,6 +344,14 @@ func main() {
 		log.Fatalf("failed to shutdown server: %v", err)
 	}
 	log.Info("server stopped")
+}
+
+func searchReadIndex(cfg serverconfig.Config) (string, error) {
+	readAlias := strings.TrimSpace(cfg.Corpus.ReadAlias)
+	if readAlias == "" {
+		return "", fmt.Errorf("corpus.read_alias must be configured for search")
+	}
+	return readAlias, nil
 }
 
 // healthzHandler serves the liveness endpoint, reporting the embedding

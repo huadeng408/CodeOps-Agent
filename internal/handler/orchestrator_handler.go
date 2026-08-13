@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 
 	"code-agent/internal/model"
 	"code-agent/internal/service"
@@ -100,6 +101,9 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 			genai.TopNKV(req.TopK),
 			genai.RetrievalModeKV(string(req.Mode)),
 		)
+		if runID := strings.TrimSpace(req.RunID); runID != "" && len(runID) <= 96 {
+			retrieveSpan.SetAttributes(genai.EvalRunIDKV(runID))
+		}
 		defer retrieveSpan.End()
 	}
 

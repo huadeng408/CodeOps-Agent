@@ -10,6 +10,7 @@ COPY deployments/embedding/requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
 
 COPY scripts/embedding_server.py /app/scripts/embedding_server.py
+COPY scripts/embedding_contract.py /app/scripts/embedding_contract.py
 
 EXPOSE 8009
 

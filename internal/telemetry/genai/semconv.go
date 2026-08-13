@@ -57,11 +57,11 @@ const (
 	AttrUsageCachedInputTokens = "gen_ai.usage.cache_read.input_tokens"
 
 	// Tool
-	AttrToolName        = "gen_ai.tool.name"
-	AttrToolCallID      = "gen_ai.tool.call.id"
-	AttrToolCallArgs    = "gen_ai.tool.call.arguments"
-	AttrToolCallResult  = "gen_ai.tool.call.result"
-	AttrToolType        = "gen_ai.tool.type"
+	AttrToolName       = "gen_ai.tool.name"
+	AttrToolCallID     = "gen_ai.tool.call.id"
+	AttrToolCallArgs   = "gen_ai.tool.call.arguments"
+	AttrToolCallResult = "gen_ai.tool.call.result"
+	AttrToolType       = "gen_ai.tool.type"
 
 	// Agent / response
 	AttrAgentName     = "gen_ai.agent.name"
@@ -92,6 +92,7 @@ const (
 	// Privacy-safe content (hash/length only; never raw documents)
 	AttrDocumentHash   = "rag.document_hash"
 	AttrDocumentLength = "rag.document_length"
+	AttrEvalRunID      = "eval.run_id"
 )
 
 // ---------------------------------------------------------------------------
@@ -132,6 +133,11 @@ func GenAIAttributes(operation, provider string) []attribute.KeyValue {
 
 func AgentNameKV(name string) attribute.KeyValue {
 	return attribute.String(AttrAgentName, name)
+}
+
+// EvalRunIDKV joins a production span to an explicit evaluation or pilot run.
+func EvalRunIDKV(runID string) attribute.KeyValue {
+	return attribute.String(AttrEvalRunID, runID)
 }
 
 func ToolNameKV(name string) attribute.KeyValue {

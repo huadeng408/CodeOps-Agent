@@ -21,7 +21,7 @@ func TestDefaultRAGConfigurationIsDisabledAndLocal(t *testing.T) {
 	}
 }
 
-func TestApplyJSONPatchMergesRAGConfiguration(t *testing.T) {
+func TestApplyJSONPatchDoesNotLoadRAGSecretFromSettings(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -29,7 +29,7 @@ func TestApplyJSONPatchMergesRAGConfiguration(t *testing.T) {
 	data := []byte(`{
 		"rag_enabled": true,
 		"rag_server_url": "http://rag.internal:9090/",
-		"rag_internal_secret": "internal-secret",
+		"rag_internal_secret": 42,
 		"rag_user_id": 77,
 		"rag_org_tag": "platform",
 		"rag_ingest_public": true,
@@ -49,11 +49,26 @@ func TestApplyJSONPatchMergesRAGConfiguration(t *testing.T) {
 	if err := applyJSONPatch(path, &cfg); err != nil {
 		t.Fatalf("applyJSONPatch: %v", err)
 	}
-	if !cfg.RAGEnabled || cfg.RAGServerURL != "http://rag.internal:9090/" || cfg.RAGInternalSecret != "internal-secret" || cfg.RAGUserID != 77 || cfg.RAGOrgTag != "platform" || !cfg.RAGIngestPublic {
+	if !cfg.RAGEnabled || cfg.RAGServerURL != "http://rag.internal:9090/" || cfg.RAGUserID != 77 || cfg.RAGOrgTag != "platform" || !cfg.RAGIngestPublic {
 		t.Fatalf("unexpected merged RAG config: %+v", cfg)
+	}
+	if cfg.RAGInternalSecret != "" {
+		t.Fatalf("RAGInternalSecret loaded from settings JSON; secrets must be environment-only")
 	}
 	if cfg.RAGSourceID != "pilot-corpus" || cfg.RAGSourcePathPrefix != "workspace" || cfg.RAGSourceURL != "https://example.invalid/corpus" || cfg.RAGSourceCommit != "0123456789abcdef0123456789abcdef01234567" || cfg.RAGTargetIndex != "knowledge_pilot_v1" || cfg.RAGCorpusGeneration != "pilot-20260813" || cfg.RAGIngestRunID != "pilot-run-001" {
 		t.Fatalf("unexpected merged RAG provenance config: %+v", cfg)
+	}
+}
+
+func TestLoadRAGSecretOnlyFromEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODE_AGENT_RAG_INTERNAL_SECRET", "environment-secret")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RAGInternalSecret != "environment-secret" {
+		t.Fatalf("RAGInternalSecret = %q, want environment value", cfg.RAGInternalSecret)
 	}
 }
 

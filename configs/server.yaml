@@ -140,4 +140,4 @@ ai:
     base_url: "http://127.0.0.1:8090"
     timeout_ms: 120000
     ingestion_timeout_ms: 3600000
-    shared_secret: "${ORCHESTRATOR_SHARED_SECRET:codeagent-internal-dev}"
+    shared_secret: "${ORCHESTRATOR_SHARED_SECRET:}"

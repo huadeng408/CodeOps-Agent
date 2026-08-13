@@ -2,9 +2,9 @@
 package repository
 
 import (
+	"code-agent/internal/model"
 	"errors"
 	"fmt"
-	"code-agent/internal/model"
 
 	"gorm.io/gorm"
 )
@@ -22,6 +22,7 @@ type PipelineTaskRepository interface {
 	// SUCCESS row (which carries the old file_md5:stage:chunk_id key). Legacy
 	// methods above keep their original semantics for messages without RunID.
 	GetByRunKey(runID, fileMD5, stage string, chunkID int) (*model.PipelineTask, error)
+	ListByRunAndFile(runID, fileMD5 string) ([]model.PipelineTask, error)
 	MarkProcessingRun(runID, fileMD5, stage string, chunkID int) (*model.PipelineTask, error)
 	MarkSuccessRun(runID, fileMD5, stage string, chunkID int) error
 	MarkRetryRun(runID, fileMD5, stage string, chunkID int, lastError string) (int, error)
@@ -126,6 +127,17 @@ func (r *pipelineTaskRepository) GetByRunKey(runID, fileMD5, stage string, chunk
 		return nil, err
 	}
 	return &task, nil
+}
+
+// ListByRunAndFile returns only tasks created for one controlled run and file.
+func (r *pipelineTaskRepository) ListByRunAndFile(runID, fileMD5 string) ([]model.PipelineTask, error) {
+	var tasks []model.PipelineTask
+	err := r.db.
+		Where("run_id = ? AND file_md5 = ?", runID, fileMD5).
+		Order("CASE stage WHEN 'parse' THEN 1 WHEN 'chunk' THEN 2 WHEN 'embed' THEN 3 WHEN 'index' THEN 4 ELSE 5 END").
+		Order("chunk_id ASC").
+		Find(&tasks).Error
+	return tasks, err
 }
 
 // MarkProcessingRun upserts a PROCESSING row scoped to runID. Re-marking the

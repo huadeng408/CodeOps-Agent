@@ -44,6 +44,37 @@
 - After any other identical tool/argument error occurs twice, stop retrying,
   reread the tool contract, identify the root cause, and switch tools before a
   third attempt.
+- **Subagent work disables `functions.wait` by default.** When the intended
+  state change is a subagent result, use only `collaboration.list_agents` or
+  `collaboration.wait_agent`. Do not select a wait tool by name similarity.
+  `functions.wait` is allowed only when the immediately preceding `exec`
+  returned an exact live cell ID and the commentary update already named that
+  process cell's exit condition. If either fact is absent, treat
+  `functions.wait` as unavailable for the task.
+- A repeated wrong-namespace wait is a decision-path failure, not a transient
+  tool failure. After the first occurrence, write down the intended namespace
+  and schema before the next wait-like call; after the second, disable that
+  tool for the rest of the task and record the recurrence in the progress log.
+- If the active runtime nevertheless routes another subagent-status check to
+  `functions.wait`, stop all wait/poll calls for the turn. Use an immediate
+  agent listing at a natural checkpoint or continue independent work; never
+  test the disabled path with placeholder IDs such as `bad`, `wrong`, or
+  `disabled`.
+- **2026-08-13 recurrence:** cell `660` timed out and was closed, but was then
+  incorrectly passed to `functions.wait` twice. After the first `cell not
+  found`, the written stop rule was acknowledged but not enforced. Treat this
+  as a controller decision failure: once any cell is terminal, add it to a
+  per-turn denylist before the next tool selection. After one missing-cell
+  response, disable `functions.wait` for the rest of the turn; do not rely on
+  narration alone to prevent a second call.
+- **2026-08-13 second recurrence:** cell `771` returned `Script completed`, but
+  was incorrectly passed to `functions.wait` again while attempting to collect
+  output that had already been captured from its redirected log. This confirms
+  that a prose-only denylist is insufficient. After any terminal wait result,
+  set `functions.wait` unavailable for the entire remaining turn, even for
+  other cells; use redirected logs plus process exit codes for terminal jobs,
+  and the collaboration namespace for agents. Never call wait to obtain a
+  second copy of output already available in a log or terminal result.
 
 ## Skill 优先原则
 

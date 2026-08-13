@@ -109,6 +109,7 @@ type OrchestratorKnowledgeSearchRequest struct {
 	TopK          int              `json:"topK"`
 	DisableRerank bool             `json:"disableRerank"`
 	Mode          RetrievalMode    `json:"mode"`
+	RunID         string           `json:"runId,omitempty"`
 }
 
 // OrchestratorKnowledgeSearchResponse returns knowledge retrieval results.

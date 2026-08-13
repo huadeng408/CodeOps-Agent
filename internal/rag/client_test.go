@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ func TestClientSearchSendsContractAndDecodesEnvelope(t *testing.T) {
 		TopK          int    `json:"topK"`
 		Mode          string `json:"mode"`
 		DisableRerank bool   `json:"disableRerank"`
+		RunID         string `json:"runId"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -52,11 +54,12 @@ func TestClientSearchSendsContractAndDecodesEnvelope(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(Config{
-		Enabled:       true,
-		BaseURL:       server.URL + "/",
-		InternalToken: "test-secret",
-		UserID:        42,
-		OrgTag:        "engineering",
+		Enabled:          true,
+		BaseURL:          server.URL + "/",
+		InternalToken:    "test-secret",
+		UserID:           42,
+		OrgTag:           "engineering",
+		IngestProvenance: IngestProvenanceConfig{RunID: "rag-run-20260813"},
 	})
 	results, err := client.Search(context.Background(), SearchOptions{
 		Query:         "mineru ocr",
@@ -68,7 +71,7 @@ func TestClientSearchSendsContractAndDecodesEnvelope(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 
-	if received.User.ID != 42 || received.User.OrgTags != "engineering" || received.User.PrimaryOrg != "engineering" || received.Query != "mineru ocr" || received.TopK != 8 || received.Mode != "hybrid" || !received.DisableRerank {
+	if received.User.ID != 42 || received.User.OrgTags != "engineering" || received.User.PrimaryOrg != "engineering" || received.Query != "mineru ocr" || received.TopK != 8 || received.Mode != "hybrid" || !received.DisableRerank || received.RunID != "rag-run-20260813" {
 		t.Fatalf("unexpected request: %+v", received)
 	}
 	want := []SearchResult{{
@@ -428,6 +431,146 @@ func TestClientIngestWithOptionsSendsAuditableProvenanceAndRawBytesSHA256(t *tes
 	})
 	if err != nil {
 		t.Fatalf("IngestWithOptions: %v", err)
+	}
+}
+
+func TestClientIngestDoesNotLeakAbsoluteLocalPath(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "private", "report.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("knowledge"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var sourcePath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		sourcePath = r.FormValue("sourcePath")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"code":202,"data":{"fileMd5":"abc","fileName":"report.txt"}}`)
+	}))
+	defer server.Close()
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1, IngestProvenance: testIngestProvenance()})
+	if _, err := client.Ingest(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if sourcePath != "report.txt" {
+		t.Fatalf("sourcePath = %q, want basename without local path disclosure", sourcePath)
+	}
+}
+
+func TestClientPipelineStatusUsesExactRunAndFileScope(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/internal/orchestrator/pipeline-status" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("runId") != "run-20260813" || r.URL.Query().Get("fileMd5") != "0123456789abcdef0123456789abcdef" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		if r.Header.Get("X-Internal-Token") != "secret" {
+			t.Fatal("missing internal token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"runId":"run-20260813","fileMd5":"0123456789abcdef0123456789abcdef","complete":false,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"MISSING"},{"stage":"embed","status":"MISSING"},{"stage":"index","status":"MISSING"}]}`)
+	}))
+	defer server.Close()
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1})
+	status, err := client.PipelineStatus(context.Background(), "run-20260813", "0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Complete || len(status.Stages) != 4 || status.Stages[1].Status != "MISSING" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestWaitForPipelineCompletionPollsUntilAllStagesSucceed(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		complete := requests == 2
+		status := "PROCESSING"
+		if complete {
+			status = "SUCCESS"
+		}
+		_, _ = fmt.Fprintf(w, `{"runId":"run-1","fileMd5":"0123456789abcdef0123456789abcdef","complete":%t,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"SUCCESS"},{"stage":"embed","status":"SUCCESS"},{"stage":"index","status":%q}]}`, complete, status)
+	}))
+	defer server.Close()
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	status, err := client.WaitForPipelineCompletion(ctx, "run-1", "0123456789abcdef0123456789abcdef", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Complete || requests != 2 {
+		t.Fatalf("status=%+v requests=%d", status, requests)
+	}
+}
+
+func TestWaitForPipelineCompletionFailsImmediatelyOnFailedStage(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"runId":"run-2","fileMd5":"abcdef0123456789abcdef0123456789","complete":false,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"SUCCESS"},{"stage":"embed","status":"FAILED","lastError":"pipeline stage failed"},{"stage":"index","status":"MISSING"}]}`)
+	}))
+	defer server.Close()
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1})
+	_, err := client.WaitForPipelineCompletion(context.Background(), "run-2", "abcdef0123456789abcdef0123456789", time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "embed") || !strings.Contains(err.Error(), "pipeline stage failed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientPipelineStatusRejectsWrongScopeOrIncompleteCompletion(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		`{"runId":"wrong","fileMd5":"0123456789abcdef0123456789abcdef","complete":true,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"SUCCESS"},{"stage":"embed","status":"SUCCESS"},{"stage":"index","status":"SUCCESS"}]}`,
+		`{"runId":"run-1","fileMd5":"wrong","complete":true,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"SUCCESS"},{"stage":"embed","status":"SUCCESS"},{"stage":"index","status":"SUCCESS"}]}`,
+		`{"runId":"run-1","fileMd5":"0123456789abcdef0123456789abcdef","complete":true,"stages":[{"stage":"index","status":"SUCCESS"}]}`,
+		`{"runId":"run-1","fileMd5":"0123456789abcdef0123456789abcdef","complete":true,"stages":[{"stage":"parse","status":"SUCCESS"},{"stage":"chunk","status":"SUCCESS"},{"stage":"embed","status":"PROCESSING"},{"stage":"index","status":"SUCCESS"}]}`,
+	}
+	for _, payload := range tests {
+		payload := payload
+		t.Run(payload, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, payload) }))
+			defer server.Close()
+			client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1})
+			if _, err := client.PipelineStatus(context.Background(), "run-1", "0123456789abcdef0123456789abcdef"); err == nil {
+				t.Fatal("PipelineStatus accepted invalid completion evidence")
+			}
+		})
+	}
+}
+
+func TestConfiguredSourceURLIsAlreadyACompleteDocumentURL(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(path, []byte("knowledge"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var sourceURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		sourceURL = r.FormValue("sourceUrl")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"code":202,"data":{"fileMd5":"abc","fileName":"report.txt"}}`)
+	}))
+	defer server.Close()
+	config := testIngestProvenance()
+	config.SourceURL = "https://example.invalid/repo/blob/0123456789abcdef0123456789abcdef01234567/report.txt"
+	client := NewClient(Config{Enabled: true, BaseURL: server.URL, InternalToken: "secret", UserID: 1, IngestProvenance: config})
+	if _, err := client.Ingest(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if sourceURL != config.SourceURL {
+		t.Fatalf("sourceUrl = %q, want exact configured document URL %q", sourceURL, config.SourceURL)
 	}
 }
 
