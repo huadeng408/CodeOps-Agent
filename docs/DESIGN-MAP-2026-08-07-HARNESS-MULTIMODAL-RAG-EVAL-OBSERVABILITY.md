@@ -2865,3 +2865,54 @@ source evidence through an authorized review process, then rerun two complete
 independent real OpenAI GPT-5.6 Sol passes and issue a qrels-bound receipt from
 the controlled signer. Do not copy either existing value merely to obtain exit
 3 or a green report.
+
+## 36. E5 replay-closure checkpoint (2026-08-13)
+
+This checkpoint records the second anti-replay pass. It changes no gold label,
+qrel, threshold, split membership, index, or production data.
+
+### 36.1 Binding contract now enforced
+
+- Query bytes are a first-class input. `queries.text.jsonl` must contain the
+  exact qid set from qrels, and its SHA-256 is included in both review and
+  canonical-run bindings.
+- Dirty state is computed from the HEAD-relative binary diff plus every
+  non-ignored untracked path and its raw bytes. A staged-only, unstaged-only,
+  or untracked change therefore invalidates a previously signed run.
+- Canonical index metadata must bind `index_alias`, its exact
+  `index_alias_target`, a 64-hex `index_mapping_hash`, and a positive
+  `index_document_count`. Alias drift, mapping drift, and an empty index are
+  data faults.
+- The canonical scorer must provide valid `scorer/report.json` and
+  `scorer/per-query.jsonl`. The reporter deterministically recomputes official
+  metrics from current qrels and predictions and rejects any numeric mismatch.
+- Predictions may omit a qid to represent an empty retrieval, but may not use a
+  foreign qid or repeat the same `(query_id, document_id, section_path)` hit.
+- Pure-negative qrels are reported in their own empty/false-positive fields and
+  are excluded from relevance macro averages. A corpus with no positive qrel
+  is rejected with the named `METRIC_REQUESTED_WHILE_INELIGIBLE` fault instead
+  of emitting a bare empty-mean exception.
+
+### 36.2 Fresh verification
+
+- `python -m pytest tests/eval/test_release_report.py -q`: `70 passed`.
+- The new all-pure-negative scorer regression was observed failing with the
+  previous bare `StatisticsError`, then passing after the fail-closed fix.
+- Full `tests/eval` is `1052 passed, 13 skipped`; the targeted Python modules
+  compile, `go test ./...` passes, `git diff --check` has no whitespace errors,
+  and the policy file hash matches its sidecar and the code trust root.
+- The real E5 command was rerun and returned exit `2` with
+  `REVIEW_QREL_MISMATCH`; the requested report path is absent by contract.
+
+### 36.3 Release truth and next gate
+
+The real E5 command must still be treated as a data-contract audit, not a score:
+it exits `2` with `REVIEW_QREL_MISMATCH` because `kb-q021.language` and
+`kb-q023.language` are `zh` in qrels but `en` in both review sidecars. No report
+or metrics are valid while this mismatch remains. There is still no real
+GPT-5.6 Sol attestation, production public key, human review, or hidden holdout.
+Resolve those labels from original source evidence under controlled review;
+never copy one side to make the files agree.
+
+Policy SHA-256 for this checkpoint:
+`eb6b5dc238a36fd0401e7c435e641420f31f79538ba0ced07f554b5ee7547129`.

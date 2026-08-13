@@ -94,6 +94,15 @@ def _write_qrels(tmp_path: Path, rows: list[dict]) -> Path:
     return path
 
 
+def _write_queries(tmp_path: Path, rows: list[dict[str, str]]) -> Path:
+    path = tmp_path / "queries.jsonl"
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _write_review_pass(
     tmp_path: Path, pass_id: str, rows: list[dict], *, duplicate_ids: bool = False
 ) -> Path:
@@ -197,7 +206,12 @@ def _verified_split_manifest() -> dict:
 
 def _write_binding_artifacts(
     tmp_path: Path, *, manifest_overrides: Mapping[str, Any] | None = None,
-    qids: list[str] | None = None, qrels_hash: str | None = None
+    qids: list[str] | None = None, qrels_hash: str | None = None,
+    distinct_prediction_hits: bool = False,
+    include_scorer_report: bool = True,
+    qrel_rows: list[dict[str, Any]] | None = None,
+    scorer_overall_overrides: Mapping[str, Any] | None = None,
+    queries_hash: str | None = None,
 ) -> tuple[Path, str]:
     root = tmp_path / "canonical-run"
     (root / "scorer").mkdir(parents=True)
@@ -209,18 +223,34 @@ def _write_binding_artifacts(
             text=True,
             encoding="utf-8",
         ).stdout.strip(),
-        "dirty_hash": "0" * 64,
+        "dirty_hash": rr.current_dirty_hash(),
+        "index_alias": "knowledge_base_current",
+        "index_alias_target": "knowledge_base_v2_bge_m3",
         "physical_index": "knowledge_base_v2_bge_m3",
+        "index_mapping_hash": "c" * 64,
+        "index_document_count": 3012,
         "corpus_generation": "techdocs-v2",
         "model_revision": "BAAI/bge-m3@revision",
     }
     if qrels_hash is not None:
         manifest["qrels_hash"] = qrels_hash
+    if queries_hash is not None:
+        manifest["queries_hash"] = queries_hash
     manifest.update(manifest_overrides or {})
     prediction_qids = qids or ["q1"]
     predictions = "".join(
-        json.dumps({"query_id": qid, "document_id": f"doc-{qid}"}) + "\n"
-        for qid in prediction_qids
+        json.dumps(
+            {
+                "query_id": qid,
+                "document_id": (
+                    f"doc-{qid}-{index}" if distinct_prediction_hits else f"doc-{qid}"
+                ),
+                "section_path": [],
+                "score": float(len(prediction_qids) - index),
+            }
+        )
+        + "\n"
+        for index, qid in enumerate(prediction_qids)
     )
     files = {
         "run-manifest.json": json.dumps(manifest) + "\n",
@@ -229,6 +259,22 @@ def _write_binding_artifacts(
             {"scorer_name": "techdocs-document-scorer", "scorer_version": "1.0.0"}
         ) + "\n",
     }
+    if include_scorer_report:
+        scoring_qrels = qrel_rows or [
+            _row(qid, doc=f"qrel-{qid}") for qid in sorted(set(prediction_qids))
+        ]
+        parsed_predictions = [json.loads(line) for line in predictions.splitlines()]
+        overall, per_query = rr._official_scorer_results(
+            {str(row["query_id"]): row for row in scoring_qrels}, parsed_predictions
+        )
+        overall.update(scorer_overall_overrides or {})
+        files["scorer/report.json"] = json.dumps(
+            {"overall": overall}
+        ) + "\n"
+        files["scorer/per-query.jsonl"] = "".join(
+            json.dumps({"query_id": qid, **metrics}) + "\n"
+            for qid, metrics in sorted(per_query.items())
+        )
     for rel, content in files.items():
         (root / rel).write_text(content, encoding="utf-8")
     checksums = []
@@ -271,6 +317,7 @@ def _sign_review_attestation(
     qids: set[str],
     *,
     qrels_sha256: str,
+    queries_sha256: str | None = None,
 ) -> tuple[Path, str]:
     identity, digest = rr.load_review_identity(pass_a, pass_b, expected_qids=qids)
     private_key = Ed25519PrivateKey.generate()
@@ -280,12 +327,15 @@ def _sign_review_attestation(
             format=serialization.PublicFormat.Raw,
         )
     ).decode("ascii")
+    signed_payload = {
+        "sidecars_sha256": digest,
+        "qrels_sha256": qrels_sha256,
+        "identity": identity,
+    }
+    if queries_sha256 is not None:
+        signed_payload["queries_sha256"] = queries_sha256
     message = json.dumps(
-        {
-            "sidecars_sha256": digest,
-            "qrels_sha256": qrels_sha256,
-            "identity": identity,
-        },
+        signed_payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -296,6 +346,11 @@ def _sign_review_attestation(
             {
                 "sidecars_sha256": digest,
                 "qrels_sha256": qrels_sha256,
+                **(
+                    {"queries_sha256": queries_sha256}
+                    if queries_sha256 is not None
+                    else {}
+                ),
                 "signature_b64": base64.b64encode(private_key.sign(message)).decode("ascii"),
             }
         ),
@@ -624,6 +679,22 @@ def test_r13_pure_negative_never_enters_macro_average(tmp_path: Path) -> None:
         rr.macro_average({"q1": 1.0}, pure_negative_qids={"q1"}, policy=policy)
 
 
+def test_r13b_official_scorer_rejects_qrels_without_positive_queries() -> None:
+    qrels = {
+        "q-negative": {
+            "query_id": "q-negative",
+            "document_id": "doc-1",
+            "section_path": ["root"],
+            "relevance": 0,
+        }
+    }
+
+    with pytest.raises(
+        ValueError, match="METRIC_REQUESTED_WHILE_INELIGIBLE.*scoreable queries"
+    ):
+        rr._official_scorer_results(qrels, [])
+
+
 def test_r14_report_missing_binding_raises(tmp_path: Path) -> None:
     policy = rr.load_policy(_write_policy(tmp_path))
     with pytest.raises(ValueError, match="BINDING_MISSING"):
@@ -643,6 +714,9 @@ def test_r15_cli_returns_3_for_not_release_eligible(
 ) -> None:
     rows = [_row(f"ok{i:03d}") for i in range(23)]
     qrels = _write_qrels(tmp_path, rows)
+    queries = _write_queries(
+        tmp_path, [{"query_id": row["query_id"], "query": "fixture query"} for row in rows]
+    )
     pass_a = _write_review_pass(tmp_path, "A", rows)
     pass_b = _write_review_pass(tmp_path, "B", rows)
     policy_path = _write_policy(tmp_path)
@@ -653,6 +727,7 @@ def test_r15_cli_returns_3_for_not_release_eligible(
     )
     rc = rr.main([
         "--qrels", str(qrels), "--policy", str(policy_path),
+        "--queries", str(queries),
         "--review-pass-a", str(pass_a), "--review-pass-b", str(pass_b),
         "--out", str(out),
     ])
@@ -921,6 +996,42 @@ def test_r24g_signed_review_attestation_cannot_replay_against_other_qrels(
         )
 
 
+def test_r24g2_signed_review_attestation_cannot_replay_changed_query_text(
+    tmp_path: Path,
+) -> None:
+    rows = [_row("q1")]
+    qrels = _write_qrels(tmp_path, rows)
+    original_queries = _write_queries(
+        tmp_path, [{"query_id": "q1", "query": "What does git rebase do?"}]
+    )
+    qrels_sha256 = hashlib.sha256(qrels.read_bytes()).hexdigest()
+    original_queries_sha256 = hashlib.sha256(original_queries.read_bytes()).hexdigest()
+    pass_a = _write_review_pass(tmp_path, "A", rows)
+    pass_b = _write_review_pass(tmp_path, "B", rows)
+    attestation, public_key = _sign_review_attestation(
+        tmp_path,
+        pass_a,
+        pass_b,
+        {"q1"},
+        qrels_sha256=qrels_sha256,
+        queries_sha256=original_queries_sha256,
+    )
+    changed_queries = _write_queries(
+        tmp_path, [{"query_id": "q1", "query": "How do I delete a Git branch?"}]
+    )
+
+    with pytest.raises(ValueError, match="MODEL_ATTESTATION_INVALID"):
+        rr.load_review_identity(
+            pass_a,
+            pass_b,
+            expected_qids={"q1"},
+            expected_qrels_sha256=qrels_sha256,
+            expected_queries_sha256=hashlib.sha256(changed_queries.read_bytes()).hexdigest(),
+            attestation_path=attestation,
+            attestation_public_key_b64=public_key,
+        )
+
+
 @pytest.mark.parametrize("status", [None, "", "UNKNOWN", "HUMAN_REVIEWED"])
 def test_r24h_review_sidecar_requires_exact_ai_reviewed_status(
     tmp_path: Path, status: str | None
@@ -962,6 +1073,7 @@ def test_r25_release_eligible_report_still_requires_every_provenance_binding(
         policy=policy,
         policy_hash="a" * 64,
         qrels_hash="b" * 64,
+        queries_hash="e" * 64,
         qrels_path=str(qrels),
         split_manifest_hash="c" * 64,
         model_identity_hash="d" * 64,
@@ -1009,10 +1121,15 @@ def test_r26_cli_accepts_external_canonical_bindings_on_eligible_path(
     pass_b = _write_review_pass(tmp_path, "B", rows)
     split = tmp_path / "split.json"
     split.write_text(json.dumps(_verified_split_manifest()), encoding="utf-8")
+    queries = _write_queries(
+        tmp_path, [{"query_id": row["query_id"], "query": "fixture query"} for row in rows]
+    )
     bindings, artifact_public_key = _write_binding_artifacts(
         tmp_path,
         qids=[row["query_id"] for row in rows],
         qrels_hash=hashlib.sha256(qrels.read_bytes()).hexdigest(),
+        qrel_rows=rows,
+        queries_hash=hashlib.sha256(queries.read_bytes()).hexdigest(),
     )
     policy_payload = json.loads(policy_path.read_text(encoding="utf-8"))
     policy_payload["scoring"]["artifact_attestation_public_key_b64"] = artifact_public_key
@@ -1034,7 +1151,8 @@ def test_r26_cli_accepts_external_canonical_bindings_on_eligible_path(
 
     rc = rr.main(
         [
-            "--qrels", str(qrels),
+                "--qrels", str(qrels),
+                "--queries", str(queries),
             "--policy", str(policy_path),
             "--review-pass-a", str(pass_a),
             "--review-pass-b", str(pass_b),
@@ -1059,6 +1177,13 @@ def test_r26_cli_accepts_external_canonical_bindings_on_eligible_path(
         (artifact_root / "predictions.jsonl").read_bytes()
     ).hexdigest()
     assert report["qrels_sha256"] == hashlib.sha256(qrels.read_bytes()).hexdigest()
+    assert report["metrics"]["queries"] == sum(
+        float(row["relevance"]) > 0 for row in rows
+    )
+    assert report["metrics"]["pure_negative_queries"] == sum(
+        float(row["relevance"]) <= 0 for row in rows
+    )
+    assert set(report["metrics"]) >= {"recall@5", "mrr@10", "ndcg@10"}
 
 
 def test_r27_external_bindings_cannot_override_reporter_owned_hashes(
@@ -1142,8 +1267,34 @@ def test_r28e_signed_artifact_must_bind_current_qrels_and_query_set(tmp_path: Pa
         )
 
 
-def test_r28f_predictions_must_have_unique_qids_matching_qrels(tmp_path: Path) -> None:
-    binding, public_key = _write_binding_artifacts(tmp_path, qids=["q1", "q1"], qrels_hash="a" * 64)
+def test_r28e2_signed_artifact_cannot_replay_changed_query_text(tmp_path: Path) -> None:
+    original_queries = _write_queries(
+        tmp_path, [{"query_id": "q1", "query": "What does git rebase do?"}]
+    )
+    original_hash = hashlib.sha256(original_queries.read_bytes()).hexdigest()
+    binding, public_key = _write_binding_artifacts(
+        tmp_path,
+        qrels_hash="a" * 64,
+        queries_hash=original_hash,
+    )
+    changed_queries = _write_queries(
+        tmp_path, [{"query_id": "q1", "query": "How do I delete a Git branch?"}]
+    )
+
+    with pytest.raises(ValueError, match="BINDING_QUERIES_MISMATCH"):
+        rr.load_external_bindings(
+            binding,
+            attestation_public_key_b64=public_key,
+            expected_qrels_sha256="a" * 64,
+            expected_qids={"q1"},
+            expected_queries_sha256=hashlib.sha256(changed_queries.read_bytes()).hexdigest(),
+        )
+
+
+def test_r28f_predictions_must_not_duplicate_the_same_hit(tmp_path: Path) -> None:
+    binding, public_key = _write_binding_artifacts(
+        tmp_path, qids=["q1", "q1"], qrels_hash="a" * 64
+    )
     with pytest.raises(ValueError, match="BINDING_PREDICTIONS_QID_MISMATCH"):
         rr.load_external_bindings(
             binding,
@@ -1151,6 +1302,21 @@ def test_r28f_predictions_must_have_unique_qids_matching_qrels(tmp_path: Path) -
             expected_qrels_sha256="a" * 64,
             expected_qids={"q1"},
         )
+
+
+def test_r28f2_predictions_allow_multiple_distinct_hits_per_query(tmp_path: Path) -> None:
+    binding, public_key = _write_binding_artifacts(
+        tmp_path,
+        qids=["q1", "q1"],
+        qrels_hash="a" * 64,
+        distinct_prediction_hits=True,
+    )
+    rr.load_external_bindings(
+        binding,
+        attestation_public_key_b64=public_key,
+        expected_qrels_sha256="a" * 64,
+        expected_qids={"q1"},
+    )
 
 
 def test_r28g_review_sidecar_fields_must_match_qrels(tmp_path: Path) -> None:
@@ -1165,6 +1331,115 @@ def test_r28g_review_sidecar_fields_must_match_qrels(tmp_path: Path) -> None:
             pass_a, pass_b, expected_qids={"q1"},
             expected_qrel_rows={"q1": rows[0]},
         )
+
+
+def test_r28h_signed_artifact_without_official_scorer_output_is_rejected(
+    tmp_path: Path,
+) -> None:
+    binding, public_key = _write_binding_artifacts(tmp_path, include_scorer_report=False)
+    with pytest.raises(ValueError, match="BINDING_MISSING.*scorer/report.json"):
+        rr.load_external_bindings(binding, attestation_public_key_b64=public_key)
+
+
+def test_r28i_signed_artifact_must_match_current_dirty_hash(tmp_path: Path) -> None:
+    current = rr.current_dirty_hash()
+    different = "f" * 64 if current != "f" * 64 else "e" * 64
+    binding, public_key = _write_binding_artifacts(
+        tmp_path, manifest_overrides={"dirty_hash": different}
+    )
+    with pytest.raises(ValueError, match="BINDING_DIRTY_MISMATCH"):
+        rr.load_external_bindings(binding, attestation_public_key_b64=public_key)
+
+
+def test_r28i2_dirty_hash_includes_staged_and_untracked_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"],
+        cwd=repo,
+        check=True,
+    )
+    assert rr.current_dirty_hash(repo) == "0" * 64
+
+    tracked.write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    staged_hash = rr.current_dirty_hash(repo)
+    assert staged_hash != "0" * 64
+
+    untracked = repo / "untracked.txt"
+    untracked.write_bytes(b"untracked\x00bytes\n")
+    assert rr.current_dirty_hash(repo) != staged_hash
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"index_mapping_hash": ""}, "BINDING_INVALID.*index_mapping_hash"),
+        ({"index_document_count": 0}, "BINDING_INVALID.*index_document_count"),
+        ({"index_alias": ""}, "BINDING_INVALID.*index_alias"),
+        (
+            {"index_alias_target": "knowledge_base_other"},
+            "BINDING_INDEX_ALIAS_MISMATCH",
+        ),
+    ],
+)
+def test_r28i3_signed_artifact_requires_complete_index_snapshot(
+    tmp_path: Path, overrides: Mapping[str, Any], error: str
+) -> None:
+    binding, public_key = _write_binding_artifacts(
+        tmp_path, manifest_overrides=overrides
+    )
+
+    with pytest.raises(ValueError, match=error):
+        rr.load_external_bindings(binding, attestation_public_key_b64=public_key)
+
+
+def test_r28j_signed_scorer_metrics_must_match_deterministic_recomputation(
+    tmp_path: Path,
+) -> None:
+    qrels = [_row("q1", doc="doc-q1")]
+    binding, public_key = _write_binding_artifacts(
+        tmp_path,
+        qrels_hash="a" * 64,
+        qrel_rows=qrels,
+        scorer_overall_overrides={"recall@5": 0.123},
+    )
+
+    with pytest.raises(ValueError, match="BINDING_SCORER_MISMATCH"):
+        rr.load_external_bindings(
+            binding,
+            attestation_public_key_b64=public_key,
+            expected_qrels_sha256="a" * 64,
+            expected_qids={"q1"},
+            expected_qrel_rows={"q1": qrels[0]},
+        )
+
+
+def test_r28k_signed_scorer_report_must_be_valid_json(tmp_path: Path) -> None:
+    binding, public_key = _write_binding_artifacts(tmp_path)
+    root = Path(json.loads(binding.read_text(encoding="utf-8"))["artifact_root"])
+    report_path = root / "scorer" / "report.json"
+    report_path.write_text("not-json\n", encoding="utf-8")
+    checksum_path = root / "checksums.sha256"
+    checksums = checksum_path.read_text(encoding="utf-8").splitlines()
+    checksum_path.write_text(
+        "\n".join(
+            f"{hashlib.sha256(report_path.read_bytes()).hexdigest()}  scorer/report.json"
+            if line.endswith("  scorer/report.json")
+            else line
+            for line in checksums
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # The checksum rewrite invalidates the original signature, so this first
+    # proves signature verification still precedes scorer parsing.
+    with pytest.raises(ValueError, match="BINDING_ATTESTATION_INVALID"):
+        rr.load_external_bindings(binding, attestation_public_key_b64=public_key)
 
 
 def test_r29_ineligible_or_unbound_report_is_never_written_as_release_eligible(

@@ -68,8 +68,10 @@ __all__ = [
     "KNOWN_POLICY_VERSIONS",
     "POLICY_PATH",
     "QRELS_PATH",
+    "QUERIES_PATH",
     "SPLIT_MANIFEST_PATH",
     "bootstrap_ci",
+    "current_dirty_hash",
     "evaluate_gates",
     "load_policy",
     "load_external_bindings",
@@ -94,6 +96,7 @@ def _repo_root() -> Path:
 REPO_ROOT = _repo_root()
 POLICY_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "release-policy.v1.json"
 QRELS_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "qrels.sol-review.jsonl"
+QUERIES_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "queries.text.jsonl"
 SPLIT_MANIFEST_PATH = (
     REPO_ROOT / "data" / "eval" / "techdocs" / "splits" / "split-manifest.v1.json"
 )
@@ -113,11 +116,12 @@ EXIT_ELIGIBLE = 0
 EXIT_RESERVED_UNUSED = 1
 EXIT_DATA_FAULT = 2
 EXIT_NOT_ELIGIBLE = 3
-TRUSTED_POLICY_SHA256 = "68e154d4464cc2e17168463e4f9d153fe4e4b619bdbfbba3fb673ba0ecda77f6"
+TRUSTED_POLICY_SHA256 = "eb6b5dc238a36fd0401e7c435e641420f31f79538ba0ced07f554b5ee7547129"
 
 _REPORTER_OWNED_BINDINGS = frozenset(
     {
         "qrels_sha256",
+        "queries_sha256",
         "policy_sha256",
         "split_manifest_sha256",
         "model_identity_sha256",
@@ -130,12 +134,17 @@ _EXTERNAL_BINDINGS = frozenset(
         "scorer_name",
         "scorer_version",
         "index_name",
+        "index_alias",
+        "index_mapping_hash",
+        "index_document_count",
         "index_corpus_generation",
         "index_model_version",
         "predictions_sha256",
     }
 )
-_SHA256_BINDINGS = frozenset({"dirty_hash", "predictions_sha256"})
+_SHA256_BINDINGS = frozenset(
+    {"dirty_hash", "index_mapping_hash", "predictions_sha256"}
+)
 _REVIEW_QREL_FIELDS = (
     "document_id",
     "section_path",
@@ -377,6 +386,7 @@ def load_review_identity(
     expected_qrel_rows: Mapping[str, Mapping[str, Any]] | None = None,
     expected_review_statuses: Mapping[str, str] | None = None,
     expected_qrels_sha256: str | None = None,
+    expected_queries_sha256: str | None = None,
     attestation_path: Path | str | None = None,
     attestation_public_key_b64: str = "",
 ) -> tuple[dict[str, Any], str]:
@@ -501,13 +511,21 @@ def load_review_identity(
             expected_qrels_digest = expected_qrels_sha256.strip().lower()
             if not re.fullmatch(r"[0-9a-f]{64}", expected_qrels_digest):
                 raise ValueError("current qrels digest is not SHA-256")
+            expected_queries_digest = None
+            if expected_queries_sha256 is not None:
+                expected_queries_digest = expected_queries_sha256.strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_queries_digest):
+                    raise ValueError("current queries digest is not SHA-256")
             attestation = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
+            signed_payload = {
+                "sidecars_sha256": digest,
+                "qrels_sha256": expected_qrels_digest,
+                "identity": identity,
+            }
+            if expected_queries_digest is not None:
+                signed_payload["queries_sha256"] = expected_queries_digest
             message = json.dumps(
-                {
-                    "sidecars_sha256": digest,
-                    "qrels_sha256": expected_qrels_digest,
-                    "identity": identity,
-                },
+                signed_payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -521,6 +539,8 @@ def load_review_identity(
                 raise ValueError("MODEL_ATTESTATION_INVALID: sidecar digest does not match")
             if str(attestation.get("qrels_sha256", "")).lower() != expected_qrels_digest:
                 raise ValueError("MODEL_ATTESTATION_INVALID: qrels digest does not match")
+            if expected_queries_digest is not None and str(attestation.get("queries_sha256", "")).lower() != expected_queries_digest:
+                raise ValueError("MODEL_ATTESTATION_INVALID: queries digest does not match")
             identity["attestation_status"] = "MODEL_IDENTITY_ATTESTED"
         except (KeyError, ValueError, TypeError, InvalidSignature, base64.binascii.Error) as exc:
             raise ValueError(f"MODEL_ATTESTATION_INVALID: {exc}") from exc
@@ -821,13 +841,105 @@ def require_bindings(
         )
 
 
+def current_dirty_hash(repo_root: Path | str = REPO_ROOT) -> str:
+    """Hash all HEAD-relative changes, including non-ignored untracked files."""
+    root = Path(repo_root).resolve()
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        top_level = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"BINDING_GIT_UNAVAILABLE: {exc}") from exc
+    if not diff and not untracked:
+        return "0" * 64
+    digest = hashlib.sha256(b"tracked\0" + diff + b"\0untracked\0")
+    for encoded_path in sorted(path for path in untracked.split(b"\0") if path):
+        relative = encoded_path.decode("utf-8", errors="surrogateescape")
+        target = top_level / relative
+        digest.update(encoded_path)
+        digest.update(b"\0")
+        digest.update(target.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _official_scorer_results(
+    qrel_rows: Mapping[str, Mapping[str, Any]], predictions: list[dict[str, Any]]
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    from orchestrator.eval.runner import _score_query
+
+    hits_by_qid: dict[str, list[dict[str, Any]]] = {}
+    for prediction in predictions:
+        hits_by_qid.setdefault(str(prediction["query_id"]), []).append(prediction)
+    per_query: dict[str, dict[str, Any]] = {}
+    for qid in sorted(qrel_rows):
+        hits = sorted(
+            hits_by_qid.get(qid, []),
+            key=lambda hit: (
+                -float(hit.get("score", 0.0)),
+                str(hit["document_id"]),
+                tuple(hit.get("section_path") or []),
+            ),
+        )
+        per_query[qid] = _score_query([dict(qrel_rows[qid])], hits)
+    scoreable_qids = [
+        qid for qid, row in qrel_rows.items() if float(row.get("relevance", 0.0)) > 0
+    ]
+    if not scoreable_qids:
+        raise ValueError(
+            "METRIC_REQUESTED_WHILE_INELIGIBLE: no scoreable queries, so official "
+            "metrics cannot be computed for a pure-negative qrels set"
+        )
+    pure_negative_qids = [qid for qid in qrel_rows if qid not in scoreable_qids]
+    values = [per_query[qid] for qid in scoreable_qids]
+    pure_negative_values = [per_query[qid] for qid in pure_negative_qids]
+    overall = {
+        "queries": len(values),
+        "recall@5": statistics.fmean(v["recall@5"] for v in values),
+        "mrr@10": statistics.fmean(v["mrr@10"] for v in values),
+        "ndcg@10": statistics.fmean(v["ndcg@10"] for v in values),
+        "empty_results": sum(v["empty"] for v in values),
+        "wrong_hits": sum(v["wrong_hits"] for v in values),
+        "pure_negative_queries": len(pure_negative_values),
+        "pure_negative_empty_results": sum(v["empty"] for v in pure_negative_values),
+        "pure_negative_false_positive_rate": (
+            statistics.fmean(float(not v["empty"]) for v in pure_negative_values)
+            if pure_negative_values
+            else 0.0
+        ),
+    }
+    return overall, per_query
+
+
 def load_external_bindings(
     path: Path | str,
     *,
     attestation_public_key_b64: str = "",
     expected_qrels_sha256: str | None = None,
+    expected_queries_sha256: str | None = None,
     expected_qids: set[str] | None = None,
-) -> dict[str, str]:
+    expected_qrel_rows: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Load provenance owned by the canonical retrieval/scorer run.
 
     Reporter-owned hashes are always derived from the bytes consumed by this
@@ -891,7 +1003,13 @@ def load_external_bindings(
             raise ValueError(f"BINDING_CHECKSUM_MISMATCH: {rel}")
         pinned[rel.replace("\\", "/")] = actual
 
-    required_files = {"run-manifest.json", "predictions.jsonl", "scorer/metadata.json"}
+    required_files = {
+        "run-manifest.json",
+        "predictions.jsonl",
+        "scorer/metadata.json",
+        "scorer/report.json",
+        "scorer/per-query.jsonl",
+    }
     missing = sorted(required_files - set(pinned))
     if missing:
         raise ValueError("BINDING_MISSING: unpinned canonical artifacts: " + ", ".join(missing))
@@ -905,34 +1023,55 @@ def load_external_bindings(
             raise ValueError(
                 "BINDING_QRELS_MISMATCH: canonical run was not produced for current qrels"
             )
-    if expected_qids is not None:
-        prediction_qids: list[str] = []
-        predictions_path = root / "predictions.jsonl"
-        for line_no, line in enumerate(
-            predictions_path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                prediction = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"BINDING_PREDICTIONS_INVALID: line {line_no} is not JSON"
-                ) from exc
-            if not isinstance(prediction, dict) or not str(
-                prediction.get("query_id", "")
-            ).strip():
-                raise ValueError(
-                    f"BINDING_PREDICTIONS_INVALID: line {line_no} lacks query_id"
-                )
-            prediction_qids.append(str(prediction["query_id"]))
+    if expected_queries_sha256 is not None:
+        manifest_queries_hash = str(manifest.get("queries_hash", "")).strip().lower()
+        if manifest_queries_hash != expected_queries_sha256.lower():
+            raise ValueError(
+                "BINDING_QUERIES_MISMATCH: canonical run was not produced for current queries"
+            )
+    predictions: list[dict[str, Any]] = []
+    prediction_keys: list[tuple[str, str, str]] = []
+    predictions_path = root / "predictions.jsonl"
+    for line_no, line in enumerate(
+        predictions_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            prediction = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"BINDING_PREDICTIONS_INVALID: line {line_no} is not JSON"
+            ) from exc
         if (
-            len(prediction_qids) != len(set(prediction_qids))
-            or set(prediction_qids) != expected_qids
+            not isinstance(prediction, dict)
+            or not str(prediction.get("query_id", "")).strip()
+            or not str(prediction.get("document_id", "")).strip()
         ):
             raise ValueError(
-                "BINDING_PREDICTIONS_QID_MISMATCH: predictions query IDs must be "
-                "unique and exactly match current qrels"
+                f"BINDING_PREDICTIONS_INVALID: line {line_no} lacks query_id or document_id"
+            )
+        section_path = prediction.get("section_path") or []
+        if not isinstance(section_path, list):
+            raise ValueError(
+                f"BINDING_PREDICTIONS_INVALID: line {line_no} section_path is not a list"
+            )
+        prediction["section_path"] = section_path
+        predictions.append(prediction)
+        prediction_keys.append(
+            (
+                str(prediction["query_id"]),
+                str(prediction["document_id"]),
+                json.dumps(section_path, ensure_ascii=False, separators=(",", ":")),
+            )
+        )
+    prediction_qids = {key[0] for key in prediction_keys}
+    if expected_qids is not None:
+        if len(prediction_keys) != len(set(prediction_keys)) or not prediction_qids <= expected_qids:
+            raise ValueError(
+                "BINDING_PREDICTIONS_QID_MISMATCH: predictions must contain no "
+                "foreign qid and no duplicate query/document/section hit; an absent "
+                "qid represents an empty result"
             )
     git_sha = str(manifest.get("git_sha", "")).strip()
     try:
@@ -948,17 +1087,27 @@ def load_external_bindings(
         raise ValueError(f"BINDING_GIT_UNAVAILABLE: {exc}") from exc
     if git_sha != current_git:
         raise ValueError("BINDING_GIT_MISMATCH: canonical run is not for current HEAD")
+    dirty_hash = str(manifest.get("dirty_hash", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", dirty_hash):
+        raise ValueError("BINDING_INVALID: dirty_hash is not a SHA-256 digest")
+    if dirty_hash != current_dirty_hash():
+        raise ValueError(
+            "BINDING_DIRTY_MISMATCH: canonical run is not for the current tracked diff"
+        )
     bindings = {
         "git_sha": git_sha,
-        "dirty_hash": str(manifest.get("dirty_hash", "")),
+        "dirty_hash": dirty_hash,
         "scorer_name": str(scorer.get("scorer_name", "")),
         "scorer_version": str(scorer.get("scorer_version", "")),
         "index_name": str(manifest.get("physical_index", "")),
+        "index_alias": str(manifest.get("index_alias", "")),
+        "index_mapping_hash": str(manifest.get("index_mapping_hash", "")).lower(),
+        "index_document_count": str(manifest.get("index_document_count", "")),
         "index_corpus_generation": str(manifest.get("corpus_generation", "")),
         "index_model_version": str(manifest.get("model_revision", "")),
         "predictions_sha256": pinned["predictions.jsonl"],
     }
-    missing_values = sorted(key for key, value in bindings.items() if not value.strip())
+    missing_values = sorted(key for key, value in bindings.items() if not str(value).strip())
     if missing_values:
         raise ValueError(
             "BINDING_INVALID: canonical metadata has empty fields: "
@@ -968,6 +1117,43 @@ def load_external_bindings(
         value = bindings[key].lower()
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise ValueError(f"BINDING_INVALID: {key} is not a SHA-256 digest")
+    index_alias_target = str(manifest.get("index_alias_target", "")).strip()
+    if not index_alias_target:
+        raise ValueError("BINDING_INVALID: index_alias_target is empty")
+    if index_alias_target != bindings["index_name"]:
+        raise ValueError(
+            "BINDING_INDEX_ALIAS_MISMATCH: index_alias_target does not match physical_index"
+        )
+    try:
+        index_document_count = int(bindings["index_document_count"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BINDING_INVALID: index_document_count is not an integer") from exc
+    if index_document_count <= 0:
+        raise ValueError("BINDING_INVALID: index_document_count must be positive")
+    try:
+        scorer_report = json.loads(
+            (root / "scorer" / "report.json").read_text(encoding="utf-8")
+        )
+        per_query_rows, _ = _read_review_sidecar(root / "scorer" / "per-query.jsonl")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"BINDING_SCORER_MISMATCH: invalid scorer output: {exc}") from exc
+    signed_per_query = {str(row["query_id"]): {k: v for k, v in row.items() if k != "query_id"} for row in per_query_rows}
+    if len(signed_per_query) != len(per_query_rows):
+        raise ValueError("BINDING_SCORER_MISMATCH: duplicate per-query scorer rows")
+    if expected_qrel_rows is not None:
+        recomputed_overall, recomputed_per_query = _official_scorer_results(
+            expected_qrel_rows, predictions
+        )
+        if (
+            not isinstance(scorer_report, dict)
+            or scorer_report.get("overall") != recomputed_overall
+            or signed_per_query != recomputed_per_query
+        ):
+            raise ValueError(
+                "BINDING_SCORER_MISMATCH: signed scorer output does not match "
+                "deterministic recomputation from current qrels and predictions"
+            )
+        bindings["official_metrics"] = recomputed_overall
     return bindings
 
 
@@ -1023,11 +1209,14 @@ def _build_report(
     policy: Mapping[str, Any],
     policy_hash: str,
     qrels_hash: str,
+    queries_hash: str,
     qrels_path: str,
     split_manifest_hash: str,
     model_identity_hash: str,
-    external_bindings: Mapping[str, str] | None = None,
+    external_bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    external = dict(external_bindings or {})
+    official_metrics = external.pop("official_metrics", {})
     report = {
         "report_kind": "e5-rag-release-report",
         "policy_id": policy.get("policy_id", ""),
@@ -1035,6 +1224,7 @@ def _build_report(
         "policy_sha256": policy_hash,
         "qrels_path": qrels_path,
         "qrels_sha256": qrels_hash,
+        "queries_sha256": queries_hash,
         "split_manifest_sha256": split_manifest_hash,
         "model_identity_sha256": model_identity_hash,
         "verdict": "RELEASE_ELIGIBLE" if result.eligible else "NOT_RELEASE_ELIGIBLE",
@@ -1055,9 +1245,9 @@ def _build_report(
         "holdout_status": result.holdout_status,
         "granularity": policy.get("scoring", {}).get("granularity", "document"),
         # Empty by contract while ineligible: no metric may escape a failed gate.
-        "metrics": {},
+        "metrics": official_metrics if result.eligible else {},
     }
-    report.update(dict(external_bindings or {}))
+    report.update(external)
     return report
 
 
@@ -1068,6 +1258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="E5 RAG release report (refuses to score an ineligible set)",
     )
     parser.add_argument("--qrels", default=str(QRELS_PATH))
+    parser.add_argument("--queries", default=str(QUERIES_PATH))
     parser.add_argument("--policy", default=str(POLICY_PATH))
     parser.add_argument("--out", default="")
     parser.add_argument("--review-pass-a", default=str(REVIEW_PASS_A_PATH))
@@ -1103,6 +1294,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         qrels_path = Path(args.qrels)
         qrel_rows = _load_qrels(qrels_path)
         expected_qids = {str(row["query_id"]) for row in qrel_rows}
+        queries_path = Path(args.queries)
+        query_rows, _ = _read_review_sidecar(queries_path)
+        query_qids = [str(row["query_id"]) for row in query_rows]
+        if len(query_qids) != len(set(query_qids)) or set(query_qids) != expected_qids:
+            raise ValueError(
+                "QUERIES_QID_MISMATCH: queries must contain each qrels qid exactly once"
+            )
+        queries_hash = hashlib.sha256(queries_path.read_bytes()).hexdigest()
         expected_review_statuses = {
             str(row["query_id"]): str(row["review_status"]) for row in qrel_rows
         }
@@ -1115,6 +1314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_qrel_rows=expected_qrel_rows,
             expected_review_statuses=expected_review_statuses,
             expected_qrels_sha256=qrels_hash,
+            expected_queries_sha256=queries_hash,
             attestation_path=args.review_attestation,
             attestation_public_key_b64=str(
                 policy.get("gates", {}).get("model_identity", {}).get(
@@ -1148,7 +1348,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 ),
                 expected_qrels_sha256=qrels_hash,
+                expected_queries_sha256=queries_hash,
                 expected_qids=expected_qids,
+                expected_qrel_rows=expected_qrel_rows,
             )
             if args.bindings
             else {}
@@ -1166,6 +1368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy=policy,
         policy_hash=policy_hash,
         qrels_hash=qrels_hash,
+        queries_hash=queries_hash,
         qrels_path=str(qrels_path),
         split_manifest_hash=split_manifest_hash,
         model_identity_hash=model_identity_hash,
