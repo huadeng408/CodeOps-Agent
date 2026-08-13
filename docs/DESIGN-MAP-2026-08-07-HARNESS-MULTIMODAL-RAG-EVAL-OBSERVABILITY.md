@@ -3168,3 +3168,13 @@ At this snapshot, the compose reranker container starts but is not ready:
 FastEmbed cannot download the configured Jina model because its container
 network returns `Network is unreachable`. This is an environment/cache blocker,
 not a model score or successful rerank receipt.
+
+### 43.3 Reranker readiness recovery
+
+The `reranker` compose service now receives a scoped proxy pointing to the
+already-available host proxy via `host.docker.internal:7890`, with an explicit
+internal `NO_PROXY` list. The proxy is not applied to Docker Desktop or any
+other service. After recreating only this container, FastEmbed downloaded and
+preloaded the configured Jina model; `/health` reported `ready=true` and a real
+`/rerank` request returned HTTP 200. This resolves the service readiness
+blocker only; it does not create an O3 trace or benchmark receipt.
