@@ -3212,3 +3212,21 @@ assertion, exporter/flush ordering, privacy validation, O3 runner wiring to an
 official scorer, and one current-HEAD checksum-valid real receipt containing
 agent/tool/chat/retrieve/embedding/rerank/scorer. No status label or isolated
 test may substitute for that receipt.
+## 45. O3 strict shared trace contract v2 progress (2026-08-13)
+
+The only evaluator, `evaluate_trace_contract`, is now version `v2` and accepts
+an explicit `profile`. Default behavior remains compatible with generic
+benchmarks. `profile="o3"` requires rerank and the closed evidence topology:
+one root, instance children, agent child, SearchKnowledge tool child, W3C
+tool-to-retrieve edge, retrieve-to-embedding/rerank edges, and scorer child of
+the instance. It rejects duplicate identities, missing parents, cycles,
+detached trees, unended spans, error/cancel/timeout/skip state, degraded
+retrieval/rerank, instance mismatch, credential-shaped values, and raw
+tool/query/prompt/document fields.
+
+`HarnessRun` passes configured profile, capabilities, and completed instance
+IDs to that evaluator before checksum creation. Fresh local contract,
+capability, and artifact lifecycle regressions passed (`56 passed`). This is a
+strict executable gate only. It does not replace Phoenix readback or constitute
+an O3 receipt; the next dependency is a Phoenix source adapter followed by a
+current-HEAD real run.

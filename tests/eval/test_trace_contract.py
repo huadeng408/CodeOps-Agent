@@ -391,3 +391,76 @@ def test_error_spans_are_counted_not_dropped() -> None:
     report = evaluate_trace_contract(spans, run_id="run-1")
     assert report["error_span_count"] == 1
     assert report["span_count"] == len(spans)
+
+
+# ---------------------------------------------------------------------------
+# O3 strict parent-chain profile
+# ---------------------------------------------------------------------------
+
+
+def _o3_capture() -> list[CapturedSpan]:
+    """The one permitted O3 topology, using real remote-parent identity."""
+    shared = {"git.commit": "abc1234"}
+    rag = {
+        "rag.query_hash": "qh",
+        "rag.corpus_generation": "techdocs-2026-07-30-v1",
+        "rag.index_name": "knowledge_base_v2_bge_m3",
+        "rag.retrieval_mode": "hybrid",
+        "rag.reranker_applied": True,
+        "rag.degraded": False,
+        "rag.reranker_timeout": False,
+    }
+    return [
+        _span(SPAN_EVAL_RUN, span_id="run", attributes=shared),
+        _span(SPAN_EVAL_INSTANCE, span_id="instance", parent_span_id="run"),
+        _span("invoke_agent", span_id="agent", parent_span_id="instance"),
+        _span("chat", span_id="chat", parent_span_id="agent"),
+        _span("execute_tool SearchKnowledge", span_id="tool", parent_span_id="agent"),
+        _span("rag.retrieve", span_id="retrieve", parent_span_id="tool", attributes=rag),
+        _span("embedding", span_id="embedding", parent_span_id="retrieve"),
+        _span("rerank", span_id="rerank", parent_span_id="retrieve"),
+        _span(SPAN_SCORER_OFFICIAL, span_id="scorer", parent_span_id="instance"),
+    ]
+
+
+def test_o3_profile_requires_full_real_parent_chain() -> None:
+    report = evaluate_trace_contract(
+        _o3_capture(), run_id="run-1", capabilities=("rag", "rerank"), profile="o3"
+    )
+    assert report["verdict"] == VERDICT_PASS, report["problems"]
+
+
+def test_o3_profile_rejects_retrieve_not_parented_by_search_knowledge_tool() -> None:
+    spans = _o3_capture()
+    spans[5] = _span(
+        "rag.retrieve",
+        span_id="retrieve",
+        parent_span_id="agent",
+        attributes=dict(spans[5].attributes),
+    )
+    report = evaluate_trace_contract(
+        spans, run_id="run-1", capabilities=("rag", "rerank"), profile="o3"
+    )
+    assert report["verdict"] == VERDICT_FAIL
+    assert any("SearchKnowledge" in problem for problem in report["problems"])
+
+
+def test_o3_profile_rejects_cycle_or_detached_subtree() -> None:
+    spans = _o3_capture()
+    spans[2] = _span("invoke_agent", span_id="agent", parent_span_id="chat")
+    spans[3] = _span("chat", span_id="chat", parent_span_id="agent")
+    report = evaluate_trace_contract(
+        spans, run_id="run-1", capabilities=("rag", "rerank"), profile="o3"
+    )
+    assert report["verdict"] == VERDICT_FAIL
+    assert any("cycle" in problem or "detached" in problem for problem in report["problems"])
+
+
+def test_o3_profile_rejects_raw_tool_or_document_attributes() -> None:
+    spans = _o3_capture()
+    spans[4].attributes["gen_ai.tool.call.arguments"] = "harmless but prohibited"
+    report = evaluate_trace_contract(
+        spans, run_id="run-1", capabilities=("rag", "rerank"), profile="o3"
+    )
+    assert report["verdict"] == VERDICT_FAIL
+    assert any("prohibited sensitive attribute" in problem for problem in report["problems"])

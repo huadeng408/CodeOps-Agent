@@ -563,7 +563,11 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
         # span kind required: silence can only make the contract stricter.
         capabilities = harness.config.get("trace_capabilities")
         assertion = evaluate_trace_contract(
-            spans, run_id=harness.run_id, capabilities=capabilities
+            spans,
+            run_id=harness.run_id,
+            capabilities=capabilities,
+            profile=harness.config.get("trace_profile", "default"),
+            expected_instance_ids=tuple(harness._completed),
         )
         harness.artifacts.record_trace(TRACE_SUMMARY_FILENAME, trace_summary)
         harness.artifacts.record_trace(SPAN_ASSERTION_FILENAME, assertion)

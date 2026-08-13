@@ -51,7 +51,11 @@ from typing import Any, Iterable, Sequence
 #: Bumped whenever the required-kind set or a rule changes, so an artifact's
 #: verdict stays interpretable after the schema moves on.  An artifact that
 #: records only "PASS" without a version cannot be re-checked later.
-CONTRACT_VERSION = "v1"
+CONTRACT_VERSION = "v2"
+
+TRACE_PROFILE_DEFAULT = "default"
+TRACE_PROFILE_O3 = "o3"
+_KNOWN_PROFILES = frozenset({TRACE_PROFILE_DEFAULT, TRACE_PROFILE_O3})
 
 # -- span names -------------------------------------------------------------
 # Harness-owned names are defined here; the agent/orchestrator names match what
@@ -246,6 +250,7 @@ class CapturedSpan:
     status: str = "UNSET"
     attributes: dict[str, Any] = field(default_factory=dict)
     links: tuple[str, ...] = ()
+    ended: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -256,6 +261,7 @@ class CapturedSpan:
             "status": self.status,
             "attributes": dict(self.attributes),
             "links": list(self.links),
+            "ended": self.ended,
         }
 
 
@@ -270,6 +276,20 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("bearer-token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{16,}")),
     ("dsn-with-password", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^/\s@]+@")),
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+)
+
+_O3_PROHIBITED_ATTRIBUTE_KEYS = frozenset(
+    {
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+        "rag.query",
+        "gen_ai.prompt",
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+        "document.content",
+        "textContent",
+        "text_content",
+    }
 )
 
 
@@ -319,6 +339,8 @@ def evaluate_trace_contract(
     spans: Iterable[CapturedSpan],
     run_id: str,
     capabilities: Iterable[str] | None = None,
+    profile: str = TRACE_PROFILE_DEFAULT,
+    expected_instance_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Evaluate *spans* against the contract; return the span-assertion report.
 
@@ -336,6 +358,9 @@ def evaluate_trace_contract(
     """
     span_list = list(spans)
     problems: list[str] = []
+
+    if profile not in _KNOWN_PROFILES:
+        problems.append(f"unknown trace profile {profile!r}")
 
     declared = ALL_CAPABILITIES if capabilities is None else frozenset(capabilities)
     unknown = sorted(declared - ALL_CAPABILITIES)
@@ -424,6 +449,9 @@ def evaluate_trace_contract(
                     "§9.2 forbids recording credentials in spans"
                 )
 
+    if profile == TRACE_PROFILE_O3:
+        _evaluate_o3_topology(span_list, problems, expected_instance_ids)
+
     if not span_list:
         problems.append(
             "no spans were captured; a run that produced no trace cannot "
@@ -439,6 +467,7 @@ def evaluate_trace_contract(
 
     return {
         "contract_version": CONTRACT_VERSION,
+        "profile": profile,
         "run_id": run_id,
         "verdict": verdict,
         "primary_trace_id": primary_trace_id,
@@ -457,3 +486,110 @@ def evaluate_trace_contract(
         "join_attributes": list(JOIN_ATTRIBUTES),
         "problems": problems,
     }
+
+
+def _evaluate_o3_topology(
+    spans: Sequence[CapturedSpan],
+    problems: list[str],
+    expected_instance_ids: Iterable[str],
+) -> None:
+    """Enforce the non-negotiable, real O3 evidence topology.
+
+    Generic harness runs may legitimately omit RAG or emit partial evidence.
+    O3 is the strict end-to-end receipt and cannot use those degradations.
+    """
+    by_id: dict[str, CapturedSpan] = {}
+    by_kind: dict[str, list[CapturedSpan]] = {}
+    for span in spans:
+        if not span.ended:
+            problems.append(f"span {span.name!r} was not ended")
+        if span.span_id in by_id:
+            problems.append(f"duplicate span identity {span.trace_id!r}/{span.span_id!r}")
+        else:
+            by_id[span.span_id] = span
+        for kind in _SPAN_KINDS:
+            if _matches_kind(span.name, kind.name):
+                by_kind.setdefault(kind.name, []).append(span)
+                break
+        status = str(span.status).upper()
+        if status in {"ERROR", "CANCELLED", "TIMEOUT", "SKIPPED"}:
+            problems.append(f"O3 success chain includes {status} span {span.name!r}")
+        for attr in ("rag.degraded", "rag.reranker_timeout"):
+            if span.attributes.get(attr) is True:
+                problems.append(f"O3 success chain has {attr}=true on {span.name!r}")
+        for key in span.attributes:
+            if key in _O3_PROHIBITED_ATTRIBUTE_KEYS:
+                problems.append(
+                    f"O3 span {span.name!r} has prohibited sensitive attribute {key!r}"
+                )
+
+    for child in spans:
+        if child.parent_span_id and child.parent_span_id not in by_id:
+            problems.append(f"span {child.name!r} has missing parent {child.parent_span_id!r}")
+
+    roots = by_kind.get(SPAN_EVAL_RUN, [])
+    if len(roots) != 1:
+        problems.append(f"O3 requires exactly one eval.run root, found {len(roots)}")
+        return
+    root = roots[0]
+    if root.parent_span_id:
+        problems.append("O3 eval.run must be a root span")
+
+    # Every O3 evidence span must reach the sole root through parent pointers.
+    # This catches a self-consistent detached mini-tree that happens to have
+    # plausible local parents, as well as explicit cycles.
+    for span in spans:
+        seen: set[str] = set()
+        cursor = span
+        while cursor.parent_span_id:
+            if cursor.span_id in seen:
+                problems.append(f"O3 parent cycle includes span {cursor.span_id!r}")
+                break
+            seen.add(cursor.span_id)
+            parent = by_id.get(cursor.parent_span_id)
+            if parent is None:
+                break
+            cursor = parent
+        else:
+            if cursor.span_id != root.span_id:
+                problems.append(f"O3 span {span.name!r} is detached from eval.run")
+
+    instances = by_kind.get(SPAN_EVAL_INSTANCE, [])
+    if not instances:
+        problems.append("O3 requires at least one eval.instance")
+    for instance in instances:
+        if instance.parent_span_id != root.span_id:
+            problems.append("O3 eval.instance must be a direct child of eval.run")
+
+    expected = set(expected_instance_ids)
+    actual = {str(span.attributes.get("eval.instance_id", "")) for span in instances}
+    if expected and actual != expected:
+        problems.append(f"O3 eval.instance IDs {sorted(actual)!r} do not match expected {sorted(expected)!r}")
+
+    agents = by_kind.get(SPAN_INVOKE_AGENT, [])
+    tools = [span for span in by_kind.get(SPAN_EXECUTE_TOOL, []) if _matches_kind(span.name, "execute_tool SearchKnowledge")]
+    retrieves = by_kind.get(SPAN_RAG_RETRIEVE, [])
+    embeddings = by_kind.get(SPAN_EMBEDDING, [])
+    reranks = by_kind.get(SPAN_RERANK, [])
+    scorers = by_kind.get(SPAN_SCORER_OFFICIAL, [])
+    if not reranks:
+        problems.append("O3 requires a real rerank span")
+    for agent in agents:
+        if agent.parent_span_id not in {span.span_id for span in instances}:
+            problems.append("O3 invoke_agent must be a child of eval.instance")
+    for tool in tools:
+        if tool.parent_span_id not in {span.span_id for span in agents}:
+            problems.append("O3 SearchKnowledge tool must be a child of invoke_agent")
+    tool_ids = {span.span_id for span in tools}
+    for retrieve in retrieves:
+        if retrieve.parent_span_id not in tool_ids:
+            problems.append("O3 rag.retrieve must have execute_tool SearchKnowledge as its W3C parent")
+        if retrieve.attributes.get("rag.reranker_applied") is not True:
+            problems.append("O3 rag.retrieve must record rag.reranker_applied=true")
+    retrieve_ids = {span.span_id for span in retrieves}
+    for span in [*embeddings, *reranks]:
+        if span.parent_span_id not in retrieve_ids:
+            problems.append(f"O3 {span.name!r} must be a child of rag.retrieve")
+    for scorer in scorers:
+        if scorer.parent_span_id not in {span.span_id for span in instances}:
+            problems.append("O3 scorer.official must be a child of eval.instance")

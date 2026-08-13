@@ -182,6 +182,23 @@ def test_span_assertion_records_run_id_for_the_join(tmp_path: Path) -> None:
     assert assertion["primary_trace_id"]
 
 
+def test_o3_trace_profile_is_explicitly_written_to_assertion(tmp_path: Path) -> None:
+    harness = _harness(
+        tmp_path,
+        config={
+            "trace_profile": "o3",
+            "trace_capabilities": ("rag", "rerank"),
+            "corpus_generation": "techdocs-2026-07-30-v1",
+            "qrels_hash": "a" * 64,
+            "index_name": "knowledge_base_v2_bge_m3",
+        },
+    )
+    harness.run([EvalInstance(instance_id="inst-1", task_description="t")])
+
+    assertion = _read(harness.artifacts.root, SPAN_ASSERTION)
+    assert assertion["profile"] == "o3"
+
+
 def test_resume_skipped_instances_get_a_span_with_skipped_status(tmp_path: Path) -> None:
     """§20.6.4 item 2 names 'skipped' explicitly, and §20.1 rule 7 keeps
     skipped instances in the denominator."""
