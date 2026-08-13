@@ -10,7 +10,72 @@ import (
 	"testing"
 
 	"code-agent/internal/model"
+	"code-agent/internal/serverconfig"
+	"code-agent/internal/telemetry/genai"
+	"code-agent/pkg/reranker"
+
+	"go.opentelemetry.io/otel/attribute"
 )
+
+type recordedSearchSpan struct {
+	name       string
+	operation  string
+	attributes []attribute.KeyValue
+	ended      bool
+	errors     []error
+}
+
+func (s *recordedSearchSpan) End() { s.ended = true }
+func (s *recordedSearchSpan) SetAttributes(attributes ...attribute.KeyValue) {
+	s.attributes = append(s.attributes, attributes...)
+}
+func (s *recordedSearchSpan) RecordError(err error) { s.errors = append(s.errors, err) }
+func (s *recordedSearchSpan) AddEvent(string)       {}
+
+type recordedSearchTracer struct{ spans []*recordedSearchSpan }
+
+func (t *recordedSearchTracer) StartSpan(ctx context.Context, name, operation, _ string) (context.Context, genai.Span) {
+	span := &recordedSearchSpan{name: name, operation: operation}
+	t.spans = append(t.spans, span)
+	return ctx, span
+}
+func (t *recordedSearchTracer) Shutdown(context.Context) error { return nil }
+
+type successfulReranker struct{}
+
+func (successfulReranker) Enabled() bool { return true }
+func (successfulReranker) Rerank(_ context.Context, _ string, _ []reranker.Document, _ int) ([]reranker.Result, error) {
+	return []reranker.Result{{Index: 0, Score: 0.9}}, nil
+}
+
+func TestRerankHitsCreatesAndEndsRealRerankSpan(t *testing.T) {
+	tracer := &recordedSearchTracer{}
+	service := &searchService{
+		rerankerClient: successfulReranker{},
+		retrievalCfg: normalizeRetrievalConfig(serverconfig.RetrievalConfig{
+			RerankTopN: 2, RerankTimeoutMs: 1000,
+		}),
+		tracer: tracer,
+	}
+
+	_, applied, timedOut := service.rerankHits(context.Background(), "safe query", []retrievalHit{
+		{ID: "one", Source: model.EsDocument{TextContent: "first document"}},
+	}, 1)
+
+	if !applied || timedOut {
+		t.Fatalf("rerank state = applied:%t timedOut:%t, want true:false", applied, timedOut)
+	}
+	if len(tracer.spans) != 1 {
+		t.Fatalf("span count = %d, want 1", len(tracer.spans))
+	}
+	span := tracer.spans[0]
+	if !strings.Contains(span.name, "rerank") || span.operation != genai.OperationRerank {
+		t.Fatalf("span = name:%q operation:%q, want rerank operation", span.name, span.operation)
+	}
+	if !span.ended {
+		t.Fatal("rerank span was not ended")
+	}
+}
 
 func TestBuildPermissionFilterACLInQuery(t *testing.T) {
 	filter := buildPermissionFilter(7, []string{"research", "engineering"})

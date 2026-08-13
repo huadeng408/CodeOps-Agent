@@ -3137,3 +3137,34 @@ Phoenix retrieve trace. The pilot requests `mode=bm25` and
 agent/tool/chat parent linkage, official scorer linkage, visual retrieval, or
 a multimodal benchmark score. Those remain separate O1-O3 and visual-gate
 tasks.
+
+## 43. O1/O2 trace join and real reranker call-site correction (2026-08-13)
+
+### 43.1 Implemented and focused-verified
+
+- The live Phoenix CLI query now selects a trace by `eval.run_id`, including
+  both flattened Phoenix attributes and `context.trace_id`. The legacy
+  `TRACE_E2E_FIXTURE` marker remains historical connectivity-test behavior and
+  is no longer the association contract for a RAG/evaluation run.
+- `searchService.rerankHits()` now creates `rerank rerankHits` around the real
+  `rerankerClient.Rerank()` call. It records a query hash and candidate count
+  only, records an error when the call fails, and always ends the span. No raw
+  query or document content is added to telemetry.
+- Both changes were made test-first: the trace query test failed under the old
+  marker lookup, and the rerank test observed zero spans before the call-site
+  instrumentation. The focused Python and Go tests pass after the minimal
+  implementation.
+
+### 43.2 Boundary and next dependency
+
+This is not O3 acceptance. `eval/driver_headless.py` still lacks a
+`SearchKnowledge` tool handler, so it cannot yet produce the required real
+agent/tool/chat -> Go retrieve -> embedding/rerank parentage in one run. O3
+remains incomplete until that bridge, W3C propagation, strict shared contract,
+Phoenix readback, official scorer linkage, and checksum-valid canonical
+artifact are all implemented and exercised together.
+
+At this snapshot, the compose reranker container starts but is not ready:
+FastEmbed cannot download the configured Jina model because its container
+network returns `Network is unreachable`. This is an environment/cache blocker,
+not a model score or successful rerank receipt.

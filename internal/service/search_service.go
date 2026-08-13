@@ -496,12 +496,27 @@ func (s *searchService) rerankHits(ctx context.Context, query string, fusedHits 
 		})
 	}
 
+	// The reranker is an external model call.  Keep its trace payload
+	// privacy-safe: only the query hash and candidate count leave this process.
+	var rerankSpan genai.Span
+	if s.tracer != nil {
+		ctx, rerankSpan = s.tracer.StartSpan(ctx, "rerank rerankHits", genai.OperationRerank, genai.SystemGenAI)
+		rerankSpan.SetAttributes(
+			genai.QueryHashKV(genai.HashQuery(query)),
+			genai.DocumentLengthKV(len(docs)),
+		)
+		defer rerankSpan.End()
+	}
+
 	timeout := time.Duration(s.retrievalCfg.RerankTimeoutMs) * time.Millisecond
 	rerankCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	results, err := s.rerankerClient.Rerank(rerankCtx, query, docs, returnTopK)
 	if err != nil {
+		if rerankSpan != nil {
+			rerankSpan.RecordError(err)
+		}
 		timeoutHit := isTimeoutError(err) || errors.Is(rerankCtx.Err(), context.DeadlineExceeded)
 		log.Warnf("[SearchService] rerank degraded for query=%q timeout=%t: %v", query, timeoutHit, err)
 		return truncateHits(fusedHits, returnTopK), false, timeoutHit

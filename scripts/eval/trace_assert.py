@@ -79,22 +79,30 @@ def find_run_trace(
     run_id: str,
     start_time: str,
 ) -> tuple[str, list[dict]]:
-    """Find the trace carrying the run_id marker; returns (trace_id, spans)."""
+    """Find the unique trace carrying the run-scoped join attribute."""
     url = _spans_url(phoenix_url, project, start_time)
     payload = _get_json(url)
     spans = payload.get("data", []) if isinstance(payload, dict) else payload
-    marker = f"TRACE_E2E_FIXTURE:{run_id}"
     matching = [
         item for item in spans
-        if marker in str(_nested(item.get("attributes", {}), "gen_ai.tool.call.result") or "")
+        if str(_nested(item.get("attributes", {}), "eval.run_id") or "") == run_id
     ]
     if not matching:
-        raise AssertionError(f"no span carries run marker {marker}")
-    trace_ids = {item.get("trace_id") for item in matching}
+        raise AssertionError(f"no span carries eval.run_id={run_id!r}")
+    trace_ids = {
+        item.get("trace_id") or (item.get("context") or {}).get("trace_id")
+        for item in matching
+    }
+    trace_ids.discard(None)
+    trace_ids.discard("")
     if len(trace_ids) != 1:
-        raise AssertionError(f"run marker matched multiple traces: {sorted(trace_ids)}")
+        raise AssertionError(f"eval.run_id={run_id!r} matched multiple traces: {sorted(trace_ids)}")
     trace_id = next(iter(trace_ids))
-    return trace_id, [item for item in spans if item.get("trace_id") == trace_id]
+    return trace_id, [
+        item
+        for item in spans
+        if (item.get("trace_id") or (item.get("context") or {}).get("trace_id")) == trace_id
+    ]
 
 
 def assert_span_kinds(trace_id: str, spans: list[dict], required: list[str]) -> list[str]:
@@ -122,6 +130,8 @@ def assert_rag_schema(trace_id: str, spans: list[dict]) -> None:
 
 
 def _nested(attributes: dict, dotted: str) -> object:
+    if dotted in attributes:
+        return attributes[dotted]
     parts = dotted.split(".")
     current: object = attributes
     for part in parts:
