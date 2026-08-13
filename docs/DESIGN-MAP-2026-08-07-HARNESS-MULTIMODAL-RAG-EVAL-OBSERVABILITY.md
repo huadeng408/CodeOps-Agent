@@ -2881,8 +2881,11 @@ qrel, threshold, split membership, index, or production data.
   or untracked change therefore invalidates a previously signed run.
 - Canonical index metadata must bind `index_alias`, its exact
   `index_alias_target`, a 64-hex `index_mapping_hash`, and a positive
-  `index_document_count`. Alias drift, mapping drift, and an empty index are
-  data faults.
+  `index_document_count`. Current code verifies only the internal consistency
+  of this signed index snapshot: alias-target equality, mapping-hash format,
+  and a positive document count. It does not yet query Elasticsearch, so live
+  alias, mapping, and document-count drift remain an O3 production-closure
+  requirement rather than a detected data fault.
 - The canonical scorer must provide valid `scorer/report.json` and
   `scorer/per-query.jsonl`. The reporter deterministically recomputes official
   metrics from current qrels and predictions and rejects any numeric mismatch.
@@ -2916,3 +2919,26 @@ never copy one side to make the files agree.
 
 Policy SHA-256 for this checkpoint:
 `eb6b5dc238a36fd0401e7c435e641420f31f79538ba0ced07f554b5ee7547129`.
+
+## 37. E5 low-level canonical binding closure (2026-08-13)
+
+The canonical artifact reader is also a library API, so caller discipline is
+not a security boundary. Every successful `load_external_bindings()` result
+now requires `run-manifest.json` to contain both a syntactically valid
+`qrels_hash` and `queries_hash` SHA-256 digest, even when a low-level caller
+does not pass either expected digest. When the reporter supplies current-byte
+digests, they are compared exactly as before. Missing or malformed query
+binding fails as `BINDING_QUERIES_MISMATCH`; missing or malformed qrels binding
+fails as `BINDING_QRELS_MISMATCH`.
+
+This closes the path in which a signed canonical artifact could be accepted by
+an alternate caller without declaring which query corpus it scored. It changes
+no gold label, qrel, threshold, split, index, database, Docker state, model
+identity evidence, or production key. The focused regression was first
+observed failing because an empty `queries_hash` was accepted without expected
+hashes, then passed after the library-level contract was enforced.
+
+`index_alias`, `index_mapping_hash`, and `index_document_count` remain signed
+snapshot fields only. A future O3 live verifier must independently fetch an ES
+snapshot and compare those values before the design map may call live index
+drift detected.

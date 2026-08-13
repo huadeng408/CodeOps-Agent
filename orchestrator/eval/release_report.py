@@ -508,22 +508,21 @@ def load_review_identity(
         try:
             if expected_qrels_sha256 is None:
                 raise ValueError("current qrels digest was not supplied")
+            if expected_queries_sha256 is None:
+                raise ValueError("current queries digest was not supplied")
             expected_qrels_digest = expected_qrels_sha256.strip().lower()
             if not re.fullmatch(r"[0-9a-f]{64}", expected_qrels_digest):
                 raise ValueError("current qrels digest is not SHA-256")
-            expected_queries_digest = None
-            if expected_queries_sha256 is not None:
-                expected_queries_digest = expected_queries_sha256.strip().lower()
-                if not re.fullmatch(r"[0-9a-f]{64}", expected_queries_digest):
-                    raise ValueError("current queries digest is not SHA-256")
+            expected_queries_digest = expected_queries_sha256.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_queries_digest):
+                raise ValueError("current queries digest is not SHA-256")
             attestation = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
             signed_payload = {
                 "sidecars_sha256": digest,
                 "qrels_sha256": expected_qrels_digest,
                 "identity": identity,
             }
-            if expected_queries_digest is not None:
-                signed_payload["queries_sha256"] = expected_queries_digest
+            signed_payload["queries_sha256"] = expected_queries_digest
             message = json.dumps(
                 signed_payload,
                 ensure_ascii=False,
@@ -539,7 +538,7 @@ def load_review_identity(
                 raise ValueError("MODEL_ATTESTATION_INVALID: sidecar digest does not match")
             if str(attestation.get("qrels_sha256", "")).lower() != expected_qrels_digest:
                 raise ValueError("MODEL_ATTESTATION_INVALID: qrels digest does not match")
-            if expected_queries_digest is not None and str(attestation.get("queries_sha256", "")).lower() != expected_queries_digest:
+            if str(attestation.get("queries_sha256", "")).lower() != expected_queries_digest:
                 raise ValueError("MODEL_ATTESTATION_INVALID: queries digest does not match")
             identity["attestation_status"] = "MODEL_IDENTITY_ATTESTED"
         except (KeyError, ValueError, TypeError, InvalidSignature, base64.binascii.Error) as exc:
@@ -888,11 +887,21 @@ def _official_scorer_results(
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     from orchestrator.eval.runner import _score_query
 
+    scoreable_rows = {
+        qid: row
+        for qid, row in qrel_rows.items()
+        if str(row.get("review_status", "")) == ELIGIBLE_REVIEW_STATUS
+    }
+    if not scoreable_rows:
+        raise ValueError(
+            "METRIC_REQUESTED_WHILE_INELIGIBLE: no scoreable queries; no AI_REVIEWED "
+            "qrels are available for official scoring"
+        )
     hits_by_qid: dict[str, list[dict[str, Any]]] = {}
     for prediction in predictions:
         hits_by_qid.setdefault(str(prediction["query_id"]), []).append(prediction)
     per_query: dict[str, dict[str, Any]] = {}
-    for qid in sorted(qrel_rows):
+    for qid in sorted(scoreable_rows):
         hits = sorted(
             hits_by_qid.get(qid, []),
             key=lambda hit: (
@@ -901,16 +910,18 @@ def _official_scorer_results(
                 tuple(hit.get("section_path") or []),
             ),
         )
-        per_query[qid] = _score_query([dict(qrel_rows[qid])], hits)
+        per_query[qid] = _score_query([dict(scoreable_rows[qid])], hits)
     scoreable_qids = [
-        qid for qid, row in qrel_rows.items() if float(row.get("relevance", 0.0)) > 0
+        qid
+        for qid, row in scoreable_rows.items()
+        if float(row.get("relevance", 0.0)) > 0
     ]
     if not scoreable_qids:
         raise ValueError(
             "METRIC_REQUESTED_WHILE_INELIGIBLE: no scoreable queries, so official "
             "metrics cannot be computed for a pure-negative qrels set"
         )
-    pure_negative_qids = [qid for qid in qrel_rows if qid not in scoreable_qids]
+    pure_negative_qids = [qid for qid in scoreable_rows if qid not in scoreable_qids]
     values = [per_query[qid] for qid in scoreable_qids]
     pure_negative_values = [per_query[qid] for qid in pure_negative_qids]
     overall = {
@@ -1017,18 +1028,28 @@ def load_external_bindings(
     scorer = json.loads((root / "scorer" / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(scorer, dict):
         raise ValueError("BINDING_INVALID: canonical metadata must be JSON objects")
-    if expected_qrels_sha256 is not None:
-        manifest_qrels_hash = str(manifest.get("qrels_hash", "")).strip().lower()
-        if manifest_qrels_hash != expected_qrels_sha256.lower():
-            raise ValueError(
-                "BINDING_QRELS_MISMATCH: canonical run was not produced for current qrels"
-            )
-    if expected_queries_sha256 is not None:
-        manifest_queries_hash = str(manifest.get("queries_hash", "")).strip().lower()
-        if manifest_queries_hash != expected_queries_sha256.lower():
-            raise ValueError(
-                "BINDING_QUERIES_MISMATCH: canonical run was not produced for current queries"
-            )
+    manifest_qrels_hash = str(manifest.get("qrels_hash", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_qrels_hash):
+        raise ValueError(
+            "BINDING_QRELS_MISMATCH: canonical run does not bind a qrels SHA-256 digest"
+        )
+    manifest_queries_hash = str(manifest.get("queries_hash", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_queries_hash):
+        raise ValueError(
+            "BINDING_QUERIES_MISMATCH: canonical run does not bind a queries SHA-256 digest"
+        )
+    if expected_qrels_sha256 is not None and manifest_qrels_hash != expected_qrels_sha256.lower():
+        raise ValueError(
+            "BINDING_QRELS_MISMATCH: canonical run was not produced for current qrels"
+        )
+    if expected_queries_sha256 is not None and manifest_queries_hash != expected_queries_sha256.lower():
+        raise ValueError(
+            "BINDING_QUERIES_MISMATCH: canonical run was not produced for current queries"
+        )
+    if expected_qrels_sha256 is not None and expected_queries_sha256 is None:
+        raise ValueError(
+            "BINDING_QUERIES_MISMATCH: current queries digest was not supplied"
+        )
     predictions: list[dict[str, Any]] = []
     prediction_keys: list[tuple[str, str, str]] = []
     predictions_path = root / "predictions.jsonl"

@@ -231,6 +231,8 @@ def _write_binding_artifacts(
         "index_document_count": 3012,
         "corpus_generation": "techdocs-v2",
         "model_revision": "BAAI/bge-m3@revision",
+        "qrels_hash": "a" * 64,
+        "queries_hash": "b" * 64,
     }
     if qrels_hash is not None:
         manifest["qrels_hash"] = qrels_hash
@@ -695,6 +697,32 @@ def test_r13b_official_scorer_rejects_qrels_without_positive_queries() -> None:
         rr._official_scorer_results(qrels, [])
 
 
+def test_r13c_official_scorer_excludes_disputed_rows() -> None:
+    qrels = {
+        "q-golden": _row("q-golden", status="AI_REVIEWED"),
+        "q-disputed": _row("q-disputed", status="DISPUTED"),
+    }
+    predictions = [
+        {
+            "query_id": "q-golden",
+            "document_id": qrels["q-golden"]["document_id"],
+            "section_path": qrels["q-golden"]["section_path"],
+            "score": 1.0,
+        },
+        {
+            "query_id": "q-disputed",
+            "document_id": qrels["q-disputed"]["document_id"],
+            "section_path": qrels["q-disputed"]["section_path"],
+            "score": 1.0,
+        },
+    ]
+
+    overall, per_query = rr._official_scorer_results(qrels, predictions)
+
+    assert overall["queries"] == 1
+    assert set(per_query) == {"q-golden"}
+
+
 def test_r14_report_missing_binding_raises(tmp_path: Path) -> None:
     policy = rr.load_policy(_write_policy(tmp_path))
     with pytest.raises(ValueError, match="BINDING_MISSING"):
@@ -926,10 +954,16 @@ def test_r24e_valid_signed_review_attestation_verifies_identity(tmp_path: Path) 
     rows = [_row("q1")]
     qrels = _write_qrels(tmp_path, rows)
     qrels_sha256 = hashlib.sha256(qrels.read_bytes()).hexdigest()
+    queries_sha256 = "b" * 64
     pass_a = _write_review_pass(tmp_path, "A", rows)
     pass_b = _write_review_pass(tmp_path, "B", rows)
     attestation, public_key = _sign_review_attestation(
-        tmp_path, pass_a, pass_b, {"q1"}, qrels_sha256=qrels_sha256
+        tmp_path,
+        pass_a,
+        pass_b,
+        {"q1"},
+        qrels_sha256=qrels_sha256,
+        queries_sha256=queries_sha256,
     )
 
     identity, _ = rr.load_review_identity(
@@ -937,11 +971,35 @@ def test_r24e_valid_signed_review_attestation_verifies_identity(tmp_path: Path) 
         pass_b,
         expected_qids={"q1"},
         expected_qrels_sha256=qrels_sha256,
+        expected_queries_sha256=queries_sha256,
         attestation_path=attestation,
         attestation_public_key_b64=public_key,
     )
 
     assert rr.validate_model_identity(identity)[0] == "VERIFIED"
+
+
+def test_r24e2_signed_review_attestation_requires_current_query_digest(
+    tmp_path: Path,
+) -> None:
+    rows = [_row("q1")]
+    qrels = _write_qrels(tmp_path, rows)
+    qrels_sha256 = hashlib.sha256(qrels.read_bytes()).hexdigest()
+    pass_a = _write_review_pass(tmp_path, "A", rows)
+    pass_b = _write_review_pass(tmp_path, "B", rows)
+    attestation, public_key = _sign_review_attestation(
+        tmp_path, pass_a, pass_b, {"q1"}, qrels_sha256=qrels_sha256
+    )
+
+    with pytest.raises(ValueError, match="MODEL_ATTESTATION_INVALID.*queries digest"):
+        rr.load_review_identity(
+            pass_a,
+            pass_b,
+            expected_qids={"q1"},
+            expected_qrels_sha256=qrels_sha256,
+            attestation_path=attestation,
+            attestation_public_key_b64=public_key,
+        )
 
 
 def test_r24f_signed_review_attestation_breaks_after_sidecar_tamper(
@@ -1247,13 +1305,18 @@ def test_r28d_signed_artifact_still_rejects_malformed_dirty_hash(tmp_path: Path)
 def test_r28e_signed_artifact_must_bind_current_qrels_and_query_set(tmp_path: Path) -> None:
     qrels = _eligible_qrels(tmp_path)
     qids = [json.loads(line)["query_id"] for line in qrels.read_text().splitlines()]
+    queries_hash = "b" * 64
     binding, public_key = _write_binding_artifacts(
-        tmp_path, qids=qids, qrels_hash=hashlib.sha256(qrels.read_bytes()).hexdigest()
+        tmp_path,
+        qids=qids,
+        qrels_hash=hashlib.sha256(qrels.read_bytes()).hexdigest(),
+        queries_hash=queries_hash,
     )
     rr.load_external_bindings(
         binding,
         attestation_public_key_b64=public_key,
         expected_qrels_sha256=hashlib.sha256(qrels.read_bytes()).hexdigest(),
+        expected_queries_sha256=queries_hash,
         expected_qids=set(qids),
     )
 
@@ -1263,6 +1326,7 @@ def test_r28e_signed_artifact_must_bind_current_qrels_and_query_set(tmp_path: Pa
             binding,
             attestation_public_key_b64=public_key,
             expected_qrels_sha256=hashlib.sha256(tampered_qrels.read_bytes()).hexdigest(),
+            expected_queries_sha256=queries_hash,
             expected_qids=set(qids[:-1]),
         )
 
@@ -1291,15 +1355,47 @@ def test_r28e2_signed_artifact_cannot_replay_changed_query_text(tmp_path: Path) 
         )
 
 
+def test_r28e3_canonical_run_requires_current_query_digest(tmp_path: Path) -> None:
+    binding, public_key = _write_binding_artifacts(
+        tmp_path, qrels_hash="a" * 64, manifest_overrides={"queries_hash": ""}
+    )
+
+    with pytest.raises(ValueError, match="BINDING_QUERIES_MISMATCH"):
+        rr.load_external_bindings(
+            binding,
+            attestation_public_key_b64=public_key,
+            expected_qrels_sha256="a" * 64,
+            expected_qids={"q1"},
+        )
+
+
+def test_r28e4_canonical_run_requires_both_dataset_digests_without_expected_hashes(
+    tmp_path: Path,
+) -> None:
+    """Low-level callers cannot obtain an unbound canonical run."""
+    binding, public_key = _write_binding_artifacts(
+        tmp_path,
+        qrels_hash="a" * 64,
+        manifest_overrides={"queries_hash": ""},
+    )
+
+    with pytest.raises(ValueError, match="BINDING_QUERIES_MISMATCH"):
+        rr.load_external_bindings(
+            binding,
+            attestation_public_key_b64=public_key,
+        )
+
+
 def test_r28f_predictions_must_not_duplicate_the_same_hit(tmp_path: Path) -> None:
     binding, public_key = _write_binding_artifacts(
-        tmp_path, qids=["q1", "q1"], qrels_hash="a" * 64
+        tmp_path, qids=["q1", "q1"], qrels_hash="a" * 64, queries_hash="b" * 64
     )
     with pytest.raises(ValueError, match="BINDING_PREDICTIONS_QID_MISMATCH"):
         rr.load_external_bindings(
             binding,
             attestation_public_key_b64=public_key,
             expected_qrels_sha256="a" * 64,
+            expected_queries_sha256="b" * 64,
             expected_qids={"q1"},
         )
 
@@ -1309,12 +1405,14 @@ def test_r28f2_predictions_allow_multiple_distinct_hits_per_query(tmp_path: Path
         tmp_path,
         qids=["q1", "q1"],
         qrels_hash="a" * 64,
+        queries_hash="b" * 64,
         distinct_prediction_hits=True,
     )
     rr.load_external_bindings(
         binding,
         attestation_public_key_b64=public_key,
         expected_qrels_sha256="a" * 64,
+        expected_queries_sha256="b" * 64,
         expected_qids={"q1"},
     )
 
@@ -1405,6 +1503,7 @@ def test_r28j_signed_scorer_metrics_must_match_deterministic_recomputation(
     binding, public_key = _write_binding_artifacts(
         tmp_path,
         qrels_hash="a" * 64,
+        queries_hash="b" * 64,
         qrel_rows=qrels,
         scorer_overall_overrides={"recall@5": 0.123},
     )
@@ -1413,7 +1512,8 @@ def test_r28j_signed_scorer_metrics_must_match_deterministic_recomputation(
         rr.load_external_bindings(
             binding,
             attestation_public_key_b64=public_key,
-            expected_qrels_sha256="a" * 64,
+                expected_qrels_sha256="a" * 64,
+                expected_queries_sha256="b" * 64,
             expected_qids={"q1"},
             expected_qrel_rows={"q1": qrels[0]},
         )
