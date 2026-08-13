@@ -441,10 +441,16 @@ class HTTPPilotServices:
             stage_names = [item.get("stage") if isinstance(item, dict) else None for item in stages]
             if stage_names != list(expected_stages):
                 raise RuntimeError("pipeline status stages are incomplete or duplicated")
-            if any(not isinstance(item, dict) or item.get("status") != "SUCCESS" for item in stages):
-                raise RuntimeError("pipeline status contains a non-SUCCESS stage")
             if payload.get("complete") is True:
+                if any(not isinstance(item, dict) or item.get("status") != "SUCCESS" for item in stages):
+                    raise RuntimeError("pipeline status contains a non-SUCCESS stage")
                 return {"verified": True, "run_id": self.provenance["run_id"], "file_md5": file_md5, "stages": stages}
+            terminal_failures = [
+                item for item in stages
+                if isinstance(item, dict) and str(item.get("status", "")).upper() in {"FAILED", "ERROR"}
+            ]
+            if terminal_failures:
+                raise RuntimeError("pipeline status contains a failed stage")
             time.sleep(1)
         raise RuntimeError(f"pipeline did not complete for current run/file: {last_status}")
 
