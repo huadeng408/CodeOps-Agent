@@ -1,5 +1,6 @@
 param(
-    [string]$RunId = ("current-head-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    [string]$RunId = ("current-head-" + (Get-Date -Format "yyyyMMdd-HHmmss")),
+    [string]$VerifierProxy = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +43,7 @@ repo = Path(os.environ["LOCALCODE_REPO_ROOT"])
 sys.path.insert(0, str(repo))
 
 from eval.benchmarks.terminalbench import _patch_terminal_bench_windows
+from eval.swebench_work.terminalbench_proxy import scoped_verifier_proxy
 from terminal_bench.harness import Harness
 
 for stream in (sys.stdout, sys.stderr):
@@ -54,23 +56,27 @@ run_id = os.environ["TERMINALBENCH_RUN_ID"]
 output = Path(os.environ["TERMINALBENCH_OUTPUT_DIR"])
 output.mkdir(parents=True, exist_ok=False)
 _patch_terminal_bench_windows()
-harness = Harness(
-    output_path=output,
-    run_id=run_id,
-    agent_import_path="eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent",
-    agent_kwargs={
-        "api_key": os.environ["LOCAL_LLM_API_KEY"],
-        "base_url": os.environ["LOCAL_LLM_BASE_URL"],
-        "model": "gpt-5.6-sol",
-        "wire_api": "responses",
-    },
-    dataset_path=repo / "eval" / "benchmark_data" / "terminalbench" / "tasks",
-    task_ids=["break-filter-js-from-html"],
-    n_concurrent_trials=1,
-    n_attempts=1,
-    cleanup=False,
-)
-results = harness.run()
+with scoped_verifier_proxy(
+    os.environ.get("TERMINALBENCH_RECEIPT_VERIFIER_PROXY") or None,
+    Path(os.environ["TERMINALBENCH_RECEIPT_ROOT"]),
+):
+    harness = Harness(
+        output_path=output,
+        run_id=run_id,
+        agent_import_path="eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent",
+        agent_kwargs={
+            "api_key": os.environ["LOCAL_LLM_API_KEY"],
+            "base_url": os.environ["LOCAL_LLM_BASE_URL"],
+            "model": "gpt-5.6-sol",
+            "wire_api": "responses",
+        },
+        dataset_path=repo / "eval" / "benchmark_data" / "terminalbench" / "tasks",
+        task_ids=["break-filter-js-from-html"],
+        n_concurrent_trials=1,
+        n_attempts=1,
+        cleanup=False,
+    )
+    results = harness.run()
 print(json.dumps({
     "run_id": run_id,
     "n_resolved": results.n_resolved,
@@ -107,6 +113,12 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:TERMINALBENCH_RUN_ID = $RunId
 $env:TERMINALBENCH_OUTPUT_DIR = $upstreamRoot
+$env:TERMINALBENCH_RECEIPT_ROOT = $runRoot
+if ($VerifierProxy) {
+    $env:TERMINALBENCH_RECEIPT_VERIFIER_PROXY = $VerifierProxy
+} else {
+    Remove-Item Env:TERMINALBENCH_RECEIPT_VERIFIER_PROXY -ErrorAction SilentlyContinue
+}
 
 $process = Start-Process -FilePath "powershell.exe" `
     -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath, "-DriverPath", $driverPath, "-ExitPath", $exitPath) `

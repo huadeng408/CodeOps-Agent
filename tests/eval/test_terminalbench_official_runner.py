@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 
 def _write_dataset(root: Path) -> None:
@@ -225,3 +228,76 @@ def test_terminalbench_agent_waits_for_each_command_before_collecting_feedback(m
     assert session.calls == [
         (["printf ready", "Enter"], {"block": True, "max_timeout_sec": 120})
     ]
+
+
+def test_terminalbench_verifier_proxy_is_disabled_by_default_and_records_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from eval.swebench_work.terminalbench_proxy import scoped_verifier_proxy
+    from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
+
+    monkeypatch.delenv("TERMINALBENCH_VERIFIER_PROXY", raising=False)
+    original = DockerComposeManager.get_docker_compose_command
+    monkeypatch.setattr(
+        DockerComposeManager,
+        "get_docker_compose_command",
+        lambda self, command: ["docker", "compose", "-f", "base.yaml", *command],
+    )
+
+    with scoped_verifier_proxy(None, tmp_path):
+        command = DockerComposeManager.get_docker_compose_command(object(), ["up", "-d"])
+
+    assert command == ["docker", "compose", "-f", "base.yaml", "up", "-d"]
+    assert os.environ.get("TERMINALBENCH_VERIFIER_PROXY") is None
+    assert json.loads((tmp_path / "verifier-proxy-manifest.json").read_text(encoding="utf-8")) == {
+        "enabled": False,
+        "proxy": None,
+        "no_proxy": None,
+        "scope": "official Terminal-Bench verifier container only",
+    }
+    monkeypatch.setattr(DockerComposeManager, "get_docker_compose_command", original)
+
+
+def test_terminalbench_verifier_proxy_uses_ephemeral_compose_overlay_and_restores_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from eval.swebench_work.terminalbench_proxy import scoped_verifier_proxy
+    from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
+
+    monkeypatch.delenv("TERMINALBENCH_VERIFIER_PROXY", raising=False)
+    monkeypatch.delenv("TERMINALBENCH_VERIFIER_NO_PROXY", raising=False)
+    original = DockerComposeManager.get_docker_compose_command
+    monkeypatch.setattr(
+        DockerComposeManager,
+        "get_docker_compose_command",
+        lambda self, command: ["docker", "compose", "-f", "base.yaml", *command],
+    )
+
+    with scoped_verifier_proxy("http://host.docker.internal:7890", tmp_path):
+        command = DockerComposeManager.get_docker_compose_command(object(), ["up", "-d"])
+        assert command[:6] == [
+            "docker",
+            "compose",
+            "-f",
+            "base.yaml",
+            "-f",
+            str(tmp_path / "terminalbench-verifier-proxy.compose.yaml"),
+        ]
+        assert os.environ["TERMINALBENCH_VERIFIER_PROXY"] == "http://host.docker.internal:7890"
+        assert os.environ["TERMINALBENCH_VERIFIER_NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+    assert os.environ.get("TERMINALBENCH_VERIFIER_PROXY") is None
+    assert os.environ.get("TERMINALBENCH_VERIFIER_NO_PROXY") is None
+    overlay = (tmp_path / "terminalbench-verifier-proxy.compose.yaml").read_text(encoding="utf-8")
+    assert "HTTP_PROXY: ${TERMINALBENCH_VERIFIER_PROXY}" in overlay
+    assert "NO_PROXY: ${TERMINALBENCH_VERIFIER_NO_PROXY}" in overlay
+    assert json.loads((tmp_path / "verifier-proxy-manifest.json").read_text(encoding="utf-8"))["enabled"] is True
+    monkeypatch.setattr(DockerComposeManager, "get_docker_compose_command", original)
+
+
+def test_terminalbench_verifier_proxy_rejects_credentials(tmp_path: Path) -> None:
+    from eval.swebench_work.terminalbench_proxy import scoped_verifier_proxy
+
+    with pytest.raises(ValueError, match="must not contain credentials"):
+        with scoped_verifier_proxy("http://username:password@proxy.example:7890", tmp_path):
+            pass
