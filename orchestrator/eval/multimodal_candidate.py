@@ -14,7 +14,7 @@ from eval.manifest import ALLOWED_LICENSES
 
 SCHEMA_VERSION = "multimodal-evidence-candidate/v1"
 CANDIDATE_STATUS = "AI_CANDIDATE"
-COORDINATE_SYSTEM = "page_pixels_xywh"
+COORDINATE_SYSTEM = "page_1000_xyxy"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _QREL_ONLY_FIELDS = frozenset(
     {
@@ -63,9 +63,9 @@ def validate_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(bbox, list) or len(bbox) != 4 or not all(
         isinstance(value, (int, float)) and not isinstance(value, bool) for value in bbox
     ):
-        raise CandidateContractError("bbox must be [x, y, width, height] numbers")
-    if bbox[2] <= 0 or bbox[3] <= 0:
-        raise CandidateContractError("bbox must have positive width and height")
+        raise CandidateContractError("bbox must be [x1, y1, x2, y2] numbers")
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise CandidateContractError("bbox must satisfy x2 > x1 and y2 > y1")
 
     _require_sha256(candidate, "page_image_sha256")
     mineru = candidate.get("mineru")

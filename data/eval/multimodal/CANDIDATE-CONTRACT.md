@@ -15,7 +15,7 @@ The validator accepts only `candidate_status=AI_CANDIDATE` and requires:
 
 - allowlisted source license plus pinned source revision;
 - stable document, page, and element identifiers;
-- a positive `page_pixels_xywh` bbox and a page-image SHA-256;
+- a positive-area `page_1000_xyxy` bbox and a page-image SHA-256;
 - MinerU version, content SHA-256, and `ocr_mode=explicit` provenance.
 
 It rejects qrel-only fields such as `relevance`, `review_status`,

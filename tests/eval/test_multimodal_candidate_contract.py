@@ -21,7 +21,7 @@ def _candidate() -> dict:
         "page_id": "page-002",
         "element_id": "element-004",
         "bbox": [10.0, 20.0, 30.0, 40.0],
-        "coordinate_system": "page_pixels_xywh",
+        "coordinate_system": "page_1000_xyxy",
         "page_image_sha256": "a" * 64,
         "mineru": {
             "version": "3.4.4",
@@ -44,7 +44,7 @@ def test_valid_candidate_is_not_a_qrel() -> None:
     [
         ("candidate_status", "HUMAN_REVIEWED", "candidate_status"),
         ("relevance", 1, "qrel-only field"),
-        ("bbox", [10, 20, 0, 40], "positive width and height"),
+        ("bbox", [10, 20, 10, 40], "x2 > x1 and y2 > y1"),
         ("coordinate_system", "normalized", "coordinate_system"),
         ("page_image_sha256", "not-a-hash", "page_image_sha256"),
     ],
@@ -64,6 +64,14 @@ def test_candidate_contract_requires_explicit_mineru_ocr() -> None:
     candidate["mineru"] = {"version": "3.4.4", "ocr_mode": "auto", "content_sha256": "b" * 64}
 
     with pytest.raises(CandidateContractError, match="mineru.ocr_mode"):
+        validate_candidate(candidate)
+
+
+def test_candidate_contract_rejects_xywh_disguised_as_xyxy() -> None:
+    candidate = _candidate()
+    candidate["bbox"] = [100, 100, 50, 50]
+
+    with pytest.raises(CandidateContractError, match="x2 > x1 and y2 > y1"):
         validate_candidate(candidate)
 
 
