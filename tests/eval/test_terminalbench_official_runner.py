@@ -344,3 +344,48 @@ def test_terminalbench_receipt_runner_maps_the_short_harness_output_to_a_receipt
 
     assert receipt["status"] == "OFFICIAL_FAILURE"
     assert (tmp_path / "receipt" / "scorer" / "terminalbench-results.json").is_file()
+
+
+def test_terminalbench_receipt_script_wires_trace_before_final_checksums() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-terminalbench-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "from eval.harness.trace_capture import TraceCapture" in script
+    assert "from eval.harness.official_receipt_trace import" in script
+    assert "capture.install(" in script
+    assert "with OfficialReceiptTrace(run_id, \"break-filter-js-from-html\")" in script
+    assert "write_official_receipt_trace(" in script
+    assert "refresh_receipt_checksums(" in script
+
+
+def test_terminalbench_receipt_script_configures_and_reads_back_phoenix() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-terminalbench-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '[string]$PhoenixUrl = "http://127.0.0.1:6006"' in script
+    assert 'TERMINALBENCH_PHOENIX_OTLP_ENDPOINT' in script
+    assert 'TERMINALBENCH_PHOENIX_START_TIME' in script
+    assert 'force_flush' in script
+    assert 'phoenix_url=os.environ.get("TERMINALBENCH_PHOENIX_URL", "")' in script
+    assert 'phoenix_start_time=os.environ.get("TERMINALBENCH_PHOENIX_START_TIME", "")' in script
+
+
+def test_terminalbench_receipt_script_finalizes_checksums_after_driver_exit() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-terminalbench-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    finalizer = script.split("@'\nparam(\n    [string]$DriverPath", maxsplit=1)[1]
+    assert "& \"C:\\Python312\\python.exe\" $DriverPath" in finalizer
+    assert "refresh_receipt_checksums" in finalizer
+    assert finalizer.index("& \"C:\\Python312\\python.exe\" $DriverPath") < finalizer.index(
+        "refresh_receipt_checksums"
+    )
