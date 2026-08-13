@@ -2987,3 +2987,53 @@ counts must sum to at most 10. Retry-heavy remediation runs should use a lower
 total and bounded exponential backoff. A 429 or exhausted retry remains a
 failed pass and therefore `DISPUTED`; concurrency control must never be used to
 reinterpret transport failure as a valid negative or successful review.
+
+## 40. Recoverable blocker audit and Sol retry closure (2026-08-13)
+
+This checkpoint replaces the operational-failure portion of section 38. It
+does not reinterpret a valid review disagreement as a pass.
+
+### 40.1 Sol recovery evidence
+
+- `VERIFIED`: the original relay tree remains immutable at
+  `data/eval/techdocs/reviews/beeapi-openai-relay-20260813/`. Its 27 failed
+  pass-A rows and 72 failed pass-B rows were retried at aggregate concurrency
+  four with `OPENAI_MAX_RETRIES=6`.
+- `VERIFIED`: the new attempt-specific tree
+  `data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/`
+  contains 180 unique qids in each merged A sidecar, merged B sidecar, and
+  arbitration output. Both passes now have `pass_*_failed=0`.
+- `VERIFIED`: all 99 retry-selected calls returned parseable verdicts. The
+  recovered arbitration is 37 `AI_REVIEWED` and 143 `DISPUTED`.
+- `IMPLEMENTED`: `orchestrator.eval.sol_reviewer` now has an explicit recovery
+  contract. It accepts immutable A/B source sidecars plus a recovery attempt,
+  retries only `parse_failed`, `validate_failed`, and `llm_error:*` rows, writes
+  qrels-ordered merged sidecars with replacement provenance, and refuses
+  incomplete, mismatched, or in-place source/output inputs.
+
+The 143 remaining disputes are not transport failures: their leading reasons
+are `disagreement:section_correct` (30), `both_false:section_correct` (19),
+and `both_false:answerable,relevance_correct,section_correct,evidence_sufficient`
+(15). They require original-corpus evidence adjudication and remain excluded
+from scoring. No qrel, threshold, gold label, or review status was changed to
+improve this count.
+
+### 40.2 Similar label-only blockers across the four main lines
+
+| Main line | Previously label-only item | Classification | Required closure evidence |
+| --- | --- | --- | --- |
+| Evaluation set | relay `DISPUTED` rows caused by malformed/429/504 output | automatic, now closed | immutable source, recovery provenance, 180-qid merged A/B/arbitration, zero failed passes |
+| Evaluation set | 143 valid Sol disagreements; 0-row hidden holdout; human review | controlled evidence / external | source-evidence worksheet, net-new unseen queries, real reviewer decisions; never relabel by retry |
+| Harness | Terminal-Bench and tau2-bench adapter code without an official raw-score run | automatic preflight then buildable run | a pinned offline task family, official runner output, canonical Harness artifact and checksum-verified scorer files |
+| Harness | astropy-20 receipt treated as a broad benchmark score | evidence boundary | retain it as development evidence only; run separately pinned official samples for each claimed benchmark |
+| Multimodal RAG | MinerU pilot labelled as a complete multimodal benchmark | buildable | locked multimodal qrels, visual encoder/index, ViDoRe/bbox and latency/VRAM bake-off, alias gate |
+| Multimodal RAG | prior pilot failure labels | automatic rerun-capable | current-HEAD MinerU OCR -> ingest -> retrieve -> citation artifact; do not use Tika for PDF |
+| Observability | in-process traces or a single pilot trace labelled as O1-O3 closure | buildable | same current-HEAD run with retrieve, embedding/rerank where enabled, official scorer, Phoenix API query, and machine parent-chain assertion |
+| Public benchmarks | license/pin `BLOCKED` labels | external/legal plus buildable | authoritative license resolution plus byte-level revision and SHA pins; no score before both gates pass |
+
+Execution order is: run official Harness adapter preflight; run a small pinned
+official sample when the preflight names only missing local inputs; rerun the
+current-HEAD MinerU pilot into a new receipt; query Phoenix programmatically
+against that receipt; then build the multimodal qrels and visual bake-off. A
+license conflict, missing independent human decision, or absent net-new holdout
+is not an operational retry and must remain visibly blocked.

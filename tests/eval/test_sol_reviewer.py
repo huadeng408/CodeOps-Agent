@@ -33,9 +33,12 @@ from orchestrator.eval.sol_reviewer import (
     redact_text,
     review_prompt_hash,
     run_pass,
+    select_retry_qids,
+    merge_recovered_sidecars,
     summarize,
     validate_verdict_fields,
     write_sidecar_row,
+    write_sidecar_rows,
     _verdict_to_row,
 )
 
@@ -306,6 +309,92 @@ class TestReviewConcurrency:
 
         assert len(results) == 12
         assert peak == 10
+
+
+class TestRecoverySidecars:
+    def test_parser_accepts_per_pass_recovery_sources(self):
+        args = build_parser().parse_args(
+            [
+                "--qrels-path", "qrels.jsonl",
+                "--queries-path", "queries.jsonl",
+                "--recovery-source-pass-a", "source-a.jsonl",
+                "--recovery-source-pass-b", "source-b.jsonl",
+                "--recovery-attempt", "recovery-01",
+            ]
+        )
+
+        assert args.recovery_source_pass_a == "source-a.jsonl"
+        assert args.recovery_source_pass_b == "source-b.jsonl"
+        assert args.recovery_attempt == "recovery-01"
+
+    def test_select_retry_qids_includes_only_retryable_failed_rows(self):
+        rows = {
+            "parse": {
+                "review_status": "DISPUTED",
+                "verdicts": {"fail_reason": "parse_failed"},
+            },
+            "rate-limit": {
+                "review_status": "DISPUTED",
+                "verdicts": {"fail_reason": "llm_error: OpenAI HTTP 429"},
+            },
+            "semantic": {
+                "review_status": "DISPUTED",
+                "verdicts": {},
+            },
+            "accepted": {
+                "review_status": "AI_REVIEWED",
+                "verdicts": {},
+            },
+        }
+
+        assert select_retry_qids(rows) == {"parse", "rate-limit"}
+
+    def test_merge_recovered_sidecars_replaces_only_retryable_rows(self):
+        source = {
+            "q1": {
+                "query_id": "q1",
+                "review_status": "DISPUTED",
+                "verdicts": {"fail_reason": "parse_failed"},
+            },
+            "q2": {
+                "query_id": "q2",
+                "review_status": "AI_REVIEWED",
+                "verdicts": {"confidence": 0.9},
+            },
+        }
+        recovered = {
+            "q1": {
+                "query_id": "q1",
+                "review_status": "AI_REVIEWED",
+                "verdicts": {"confidence": 0.91},
+            },
+            "q2": {
+                "query_id": "q2",
+                "review_status": "AI_REVIEWED",
+                "verdicts": {"confidence": 0.1},
+            },
+        }
+
+        merged = merge_recovered_sidecars(
+            source,
+            recovered,
+            recovery_attempt="beeapi-openai-relay-recovery-20260813-01",
+        )
+
+        assert merged["q1"]["review_status"] == "AI_REVIEWED"
+        assert merged["q1"]["recovery_attempt"] == (
+            "beeapi-openai-relay-recovery-20260813-01"
+        )
+        assert merged["q1"]["recovery_replaced_failure"] == "parse_failed"
+        assert merged["q2"] == source["q2"]
+
+    def test_write_sidecar_rows_rejects_missing_recovery_qids(self, tmp_path):
+        with pytest.raises(ValueError, match="recovery sidecar qid mismatch"):
+            write_sidecar_rows(
+                tmp_path / "merged.jsonl",
+                {},
+                [_SAMPLE_QREL],
+            )
 
 
 class TestDryRunWithoutModelEnv:

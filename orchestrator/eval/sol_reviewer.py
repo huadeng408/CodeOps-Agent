@@ -286,6 +286,67 @@ def load_sidecar(path: str | Path) -> dict[str, dict[str, Any]]:
     return completed
 
 
+_RECOVERABLE_FAILURES = frozenset({"parse_failed", "validate_failed"})
+
+
+def select_retry_qids(sidecar: dict[str, dict[str, Any]]) -> set[str]:
+    """Return only qids whose completed pass row failed operationally.
+
+    A/B semantic disagreements exist only after arbitration and have no pass
+    failure reason, so they must never enter this retry selection.
+    """
+    selected: set[str] = set()
+    for qid, row in sidecar.items():
+        if row.get("review_status") != "DISPUTED":
+            continue
+        verdicts = row.get("verdicts")
+        reason = verdicts.get("fail_reason") if isinstance(verdicts, dict) else ""
+        if reason in _RECOVERABLE_FAILURES or str(reason).startswith("llm_error:"):
+            selected.add(str(qid))
+    return selected
+
+
+def merge_recovered_sidecars(
+    source: dict[str, dict[str, Any]],
+    recovered: dict[str, dict[str, Any]],
+    recovery_attempt: str,
+) -> dict[str, dict[str, Any]]:
+    """Replace only retry-selected rows and attach recovery provenance."""
+    merged = dict(source)
+    retry_qids = select_retry_qids(source)
+    for qid in sorted(retry_qids & set(recovered)):
+        prior = source[qid]
+        replacement = dict(recovered[qid])
+        verdicts = prior.get("verdicts")
+        replacement["recovery_attempt"] = recovery_attempt
+        replacement["recovery_replaced_failure"] = (
+            verdicts.get("fail_reason", "") if isinstance(verdicts, dict) else ""
+        )
+        merged[qid] = replacement
+    return merged
+
+
+def write_sidecar_rows(
+    path: str | Path,
+    rows: dict[str, dict[str, Any]],
+    qrels: list[dict[str, Any]],
+) -> None:
+    """Write complete sidecar rows in qrels order after recovery merging."""
+    expected_qids = [str(qrel["query_id"]) for qrel in qrels]
+    missing = set(expected_qids) - set(rows)
+    unexpected = set(rows) - set(expected_qids)
+    if missing or unexpected:
+        raise ValueError(
+            "recovery sidecar qid mismatch: "
+            f"missing={sorted(missing)[:5]} unexpected={sorted(unexpected)[:5]}"
+        )
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as fh:
+        for qid in expected_qids:
+            fh.write(redact_text(json.dumps(rows[qid], ensure_ascii=False)) + "\n")
+
+
 def write_sidecar_row(path: str | Path, row: dict[str, Any]) -> None:
     """Append one JSON line to a sidecar file (with flush for crash resilience)."""
     text = json.dumps(row, ensure_ascii=False)
@@ -1491,6 +1552,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Concurrent relay requests per process (hard maximum: 10)",
     )
     p.add_argument(
+        "--recovery-source-pass-a",
+        default=None,
+        help="Immutable Pass A sidecar to retry only operational failures from",
+    )
+    p.add_argument(
+        "--recovery-source-pass-b",
+        default=None,
+        help="Immutable Pass B sidecar to retry only operational failures from",
+    )
+    p.add_argument(
+        "--recovery-attempt",
+        default=None,
+        help="Required provenance identifier when recovery sources are supplied",
+    )
+    p.add_argument(
         "--only",
         choices=["passA", "passB", "arbitrate"],
         default=None,
@@ -1571,6 +1647,94 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("dry-run: input validation passed (zero writes, zero LLM calls)")
         return 0
+
+    recovery_sources = {
+        "A": args.recovery_source_pass_a,
+        "B": args.recovery_source_pass_b,
+    }
+    if any(recovery_sources.values()):
+        if not all(recovery_sources.values()) or not args.recovery_attempt:
+            print(
+                "fatal: recovery requires both --recovery-source-pass-a / "
+                "--recovery-source-pass-b and --recovery-attempt",
+                file=sys.stderr,
+            )
+            return 1
+        if args.only is not None:
+            print("fatal: --only cannot be combined with recovery sources", file=sys.stderr)
+            return 1
+        output_paths = {"A": Path(args.pass_a_out), "B": Path(args.pass_b_out)}
+        if any(
+            Path(recovery_sources[pass_id]).resolve() == output_paths[pass_id].resolve()
+            for pass_id in PASSES
+        ):
+            print("fatal: recovery output must differ from its immutable source", file=sys.stderr)
+            return 1
+
+        source_sidecars = {
+            pass_id: load_sidecar(recovery_sources[pass_id]) for pass_id in PASSES
+        }
+        expected_qids = {str(qrel["query_id"]) for qrel in qrels}
+        if any(set(sidecar) != expected_qids for sidecar in source_sidecars.values()):
+            print("fatal: recovery source sidecar qids do not match qrels", file=sys.stderr)
+            return 1
+
+        client = OpenAIClient.from_env()
+        if client is None:
+            print(
+                "fatal: OpenAIClient.from_env() returned None - "
+                "set OPENAI_API_KEY / OPENAI_BASE_URL in the environment",
+                file=sys.stderr,
+            )
+            return 1
+        client.model = model
+
+        for pass_id in PASSES:
+            retry_qids = select_retry_qids(source_sidecars[pass_id])
+            recovery_out = output_paths[pass_id].with_suffix(
+                output_paths[pass_id].suffix + ".recovered"
+            )
+            recovery_out.unlink(missing_ok=True)
+            if retry_qids:
+                retry_qrels = [qrel for qrel in qrels if str(qrel["query_id"]) in retry_qids]
+                retry_queries = {qid: text for qid, text in queries.items() if qid in retry_qids}
+                asyncio.run(
+                    run_pass(
+                        client=client,
+                        pass_id=pass_id,
+                        qrels=retry_qrels,
+                        queries=retry_queries,
+                        es_url=args.es_url,
+                        index=args.index,
+                        out_path=str(recovery_out),
+                        model=model,
+                        revision=revision,
+                        resume=False,
+                        max_evidence_chars=args.max_evidence_chars,
+                        concurrency=args.concurrency,
+                    )
+                )
+            recovered = load_sidecar(recovery_out)
+            merged = merge_recovered_sidecars(
+                source_sidecars[pass_id], recovered, args.recovery_attempt
+            )
+            write_sidecar_rows(output_paths[pass_id], merged, qrels)
+
+        return main([
+            "--qrels-path", args.qrels_path,
+            "--queries-path", args.queries_path,
+            "--pass-a-out", args.pass_a_out,
+            "--pass-b-out", args.pass_b_out,
+            "--arbitrated-out", args.arbitrated_out,
+            "--summary-path", args.summary_path,
+            "--es-url", args.es_url,
+            "--index", args.index,
+            "--model", model,
+            "--revision", revision,
+            "--confidence-threshold", str(args.confidence_threshold),
+            "--concurrency", str(args.concurrency),
+            "--only", "arbitrate",
+        ])
 
     # Resolve client — must have env vars set
     client = OpenAIClient.from_env()
