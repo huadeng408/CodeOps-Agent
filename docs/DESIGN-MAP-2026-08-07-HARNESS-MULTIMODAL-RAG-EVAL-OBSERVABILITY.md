@@ -3280,3 +3280,40 @@ receipt; a real runner must still exercise the full contract.
   grounding lane with screenshot/instruction/bbox labels. It is not document
   retrieval, DocVQA, ViDoRe, or visual-alias evidence. The document-native
   question/page/evidence/bbox gap remains open.
+
+## 49. Terminal-Bench official execution evidence and architecture boundary (2026-08-14)
+
+- `IMPLEMENTED`: `eval.benchmarks.terminalbenchofficial` is an isolated
+  receipt boundary for official `terminal-bench` `0.2.18`. It validates a
+  pinned public data fingerprint, provider-qualified model name, task id and
+  concurrency 1-10, copies only official `results.json` and
+  `run_metadata.json`, and derives `OFFICIAL_PASS` exclusively from official
+  `is_resolved=true`. It cannot convert an execution error into a pass.
+- `VERIFIED`: three current-HEAD single-task public receipts used the fixed
+  `break-filter-js-from-html` task and source SHA-256
+  `4bab83828d145cdb8378eea9f00c2fec5c90b32f3f4cd076c4111d6e4191c353`,
+  one trial and concurrency one. All have copied official raw outputs and
+  recursive checksums under `eval_results/terminalbenchofficial/`:
+  `143d082d` was `unknown_agent_error` caused by a Chat Completions/Responses
+  wire mismatch; `ba56e1f3` reached the real Responses relay (4505 input / 649
+  output tokens) but wrote no solution file; `9f17b709` reached the full
+  command contract (4739 input / 53 output tokens), inspected task files, then
+  stopped without writing a solution and ended `parse_error`. The last raw
+  result SHA-256 is
+  `c275b07ab67c905bb5486f118bf967a00c4ac1bb07d2b28af0fa488160ca0b47`.
+- `VERIFIED`: Docker image build, container lifecycle and official cleanup all
+  worked; the prior Docker Desktop proxy-pull blocker is invalidated by these
+  runs and must not be repeated as the present blocker. A minimal real
+  BeeAPI Responses health call also returned output and a response id.
+- `BLOCKED`: the present `DeepSeekTBAgent` is a one-shot command-plan sender,
+  despite its historical multi-turn comment. It does not call
+  `TmuxSession.get_incremental_output()` or supply terminal feedback to the
+  next model turn. The third official verifier also failed downloading `uv`
+  from GitHub, so it could not emit a valid test summary. These are separate
+  agent and verifier-reproducibility gaps, not model-score evidence.
+- Stop rule: three distinct real hypotheses are exhausted. Do not run a fourth
+  unchanged one-shot receipt. The next implementation must be a bounded
+  multi-turn terminal-feedback agent with transcript artifacts and explicit
+  turn/token limits, plus an optional process-scoped, manifest-recorded
+  verifier proxy. Never patch public task assets, official tests, or scorer
+  output to make this pass.
