@@ -65,7 +65,7 @@ class DeepSeekTBAgent(BaseAgent):
                 )
 
             for command in commands:
-                session.send_keys([command, "Enter"], block=False, max_timeout_sec=30)
+                session.send_keys([command, "Enter"], block=True, max_timeout_sec=120)
             feedback = session.get_incremental_output()
             transcript.append(
                 {"turn": turn, "commands": commands, "terminal_output": feedback}

@@ -197,3 +197,31 @@ def test_terminalbench_agent_multiturn_mode_rejects_protected_path_commands(monk
     result = agent.perform_task("solve the task", object())
 
     assert result.failure_mode is FailureMode.FATAL_LLM_PARSE_ERROR
+
+
+def test_terminalbench_agent_waits_for_each_command_before_collecting_feedback(monkeypatch) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, dict[str, object]]] = []
+
+        def send_keys(self, keys, **kwargs) -> None:
+            self.calls.append((keys, kwargs))
+
+        def get_incremental_output(self) -> str:
+            return "command completed"
+
+    agent = DeepSeekTBAgent(max_turns=1)
+    monkeypatch.setattr(
+        agent,
+        "_request_commands",
+        lambda instruction, system_prompt="": ("```bash\nprintf ready\n```", 1, 1),
+    )
+    session = FakeSession()
+
+    agent.perform_task("solve", session)
+
+    assert session.calls == [
+        (["printf ready", "Enter"], {"block": True, "max_timeout_sec": 120})
+    ]
