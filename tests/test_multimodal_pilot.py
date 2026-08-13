@@ -515,10 +515,11 @@ def test_http_pipeline_adapter_rejects_wrong_scope_or_incomplete_stages(monkeypa
         service._wait_pipeline("fixture-md5")
 
 
-def test_run_pilot_uses_retrieval_document_namespace_for_mineru_join(tmp_path: Path) -> None:
+def test_run_pilot_separates_logical_document_id_from_element_namespace(tmp_path: Path) -> None:
     from orchestrator.rag.multimodal_pilot import run_pilot
 
-    document_id = "file-md5-derived"
+    document_id = "logical-source-id"
+    element_namespace = "file-md5-derived"
     result = run_pilot(
         tmp_path / "artifact",
         marker="JOIN",
@@ -530,14 +531,14 @@ def test_run_pilot_uses_retrieval_document_namespace_for_mineru_join(tmp_path: P
         ingest=lambda pdf: IngestReceipt("abc123", pdf.name, True, pipeline={"verified": True, "stages": []}),
         search=lambda _query: [SearchHit(
             file_md5="abc123", file_name="join.pdf", chunk_id=0, text="JOIN",
-            document_id=document_id, page_id=f"{document_id}:p0",
-            element_ids=[f"{document_id}:p0:e0"],
-            bbox_refs=[f"{document_id}:p0:e0:0,0,10,10"],
-            citation_key=f"{document_id}#{document_id}:p0#{document_id}:p0:e0",
+            document_id=document_id, page_id=f"{element_namespace}:p0",
+            element_ids=[f"{element_namespace}:p0:e0"],
+            bbox_refs=[f"{element_namespace}:p0:e0:0,0,10,10"],
+            citation_key=f"{document_id}#{element_namespace}:p0#{element_namespace}:p0:e0",
         )],
         trace=lambda: TraceStatus(True, "fixture", "a" * 32, verified=True),
         pdf_factory=lambda path, _marker: path.write_bytes(b"%PDF-join"),
         provenance={"document_id": "logical-source-id"},
     )
     manifest = json.loads((result.output_dir / "manifest.json").read_text())
-    assert manifest["ocr_provenance"]["elements"][0]["page_id"] == f"{document_id}:p0"
+    assert manifest["ocr_provenance"]["elements"][0]["page_id"] == f"{element_namespace}:p0"

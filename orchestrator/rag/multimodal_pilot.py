@@ -186,15 +186,18 @@ def run_pilot(
             "pipeline": verified_pipeline,
         }
         hits = _poll_hits(search, marker, receipt.file_md5, poll_timeout_seconds, poll_interval_seconds)
-        # The indexed citation namespace is authoritative for the join.  The
-        # source provenance document id may be a logical URI while the current
-        # structured worker uses fileMd5-derived ids for MinerU elements.
         document_id = str(hits[0].document_id).strip()
         if not document_id:
             raise RuntimeError("retrieval hit is missing stable documentId")
         if any(str(item.document_id).strip() != document_id for item in hits):
             raise RuntimeError("retrieval hits contain multiple documentId namespaces")
-        elements = map_mineru_output(content_list_path, middle_path, document_id=document_id)
+        element_namespace = _element_namespace(hits[0])
+        elements = map_mineru_output(
+            content_list_path,
+            middle_path,
+            document_id=document_id,
+            element_namespace=element_namespace,
+        )
         ocr_element_ids = {item.element_id for item in elements}
         citations = [_citation_from_hit(item, ocr_element_ids) for item in hits[:1]]
         citation_report = evaluate_citations(citations, hits)
@@ -228,7 +231,7 @@ def run_pilot(
                 "elements": [
                     {
                         "element_id": item.element_id,
-                        "page_id": f"{item.document_id}:p{item.page_index}",
+                        "page_id": f"{element_namespace}:p{item.page_index}",
                         "page_index": item.page_index,
                         "bbox": item.bbox,
                         "type": item.type,
@@ -309,6 +312,16 @@ def _citation_from_hit(hit: SearchHit, ocr_element_ids: set[str]) -> Citation:
         element_ids=element_ids,
         bbox_refs=bbox_refs,
     )
+
+
+def _element_namespace(hit: SearchHit) -> str:
+    page_suffix = hit.page_id.rsplit(":p", 1)
+    if len(page_suffix) != 2 or not page_suffix[0].strip():
+        raise RuntimeError("retrieval hit pageId has no stable element namespace")
+    namespace = page_suffix[0].strip()
+    if any(not value.startswith(f"{namespace}:p") for value in (hit.element_ids or [])):
+        raise RuntimeError("retrieval elementIds do not match pageId namespace")
+    return namespace
 
 
 def _poll_hits(search: Callable[[str], list[SearchHit]], query: str, file_md5: str, timeout: float, interval: float) -> list[SearchHit]:

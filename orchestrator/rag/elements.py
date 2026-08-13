@@ -59,7 +59,13 @@ class Element(BaseModel):
         return [float(item) for item in value]
 
 
-def map_mineru_output(content_list_path: Path, middle_path: Path, *, document_id: str) -> list[Element]:
+def map_mineru_output(
+    content_list_path: Path,
+    middle_path: Path,
+    *,
+    document_id: str,
+    element_namespace: str | None = None,
+) -> list[Element]:
     """Map stable MinerU JSON outputs into the internal element contract."""
     content_payload = _read_json(content_list_path)
     middle_payload = _read_json(middle_path)
@@ -85,7 +91,8 @@ def map_mineru_output(content_list_path: Path, middle_path: Path, *, document_id
         if element_type == "heading":
             level = max(1, int(raw.get("text_level", 1) or 1))
             heading_path = heading_path[: level - 1] + [text]
-        element_id = f"{document_id}:p{int(raw.get('page_idx', 0) or 0)}:e{reading_order}"
+        namespace = (element_namespace or document_id).strip()
+        element_id = f"{namespace}:p{int(raw.get('page_idx', 0) or 0)}:e{reading_order}"
         element = Element(
             document_id=document_id,
             element_id=element_id,
