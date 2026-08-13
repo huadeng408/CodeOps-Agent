@@ -233,6 +233,22 @@ def test_validate_manifest_rejects_missing_field_and_stale_policy_hash(
         validate_manifest(stale)
 
 
+def test_validate_manifest_rejects_forged_nonempty_v1_holdout(tmp_path: Path) -> None:
+    target = tmp_path / "split-manifest.v1.json"
+    generate_manifest(path=target)
+    forged = json.loads(target.read_text(encoding="utf-8"))
+    forged.update(
+        {
+            "holdout_size": 24,
+            "holdout_status": "VERIFIED",
+            "holdout_qids_sha256": "b" * 64,
+        }
+    )
+
+    with pytest.raises(ValueError, match="MANIFEST_MEMBERSHIP_MISMATCH"):
+        validate_manifest(forged)
+
+
 def test_holdout_size_must_be_a_whole_number() -> None:
     """A fractional or non-numeric holdout size is nonsense and must refuse.
 

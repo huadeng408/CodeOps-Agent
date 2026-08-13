@@ -94,6 +94,7 @@ class _FakeClient:
     def __init__(self, response: Any):
         self._response = response
         self.model = "gpt-5.6-sol"
+        self.base_url = "https://api.openai.com/v1"
 
     async def chat(self, request):  # noqa: ANN001
         if isinstance(self._response, Exception):
@@ -134,6 +135,7 @@ class TestReviewOneCapturesIdentity:
         assert verdict.failed is False
         assert verdict.model_identity.get("reported_model") == "gpt-5.6-sol-2026-07"
         assert verdict.model_identity.get("system_fingerprint") == "fp_deadbeef01"
+        assert verdict.model_identity.get("endpoint_host") == "api.openai.com"
         assert resolve_identity_status([verdict.model_identity]) == IDENTITY_VERIFIED
 
     def test_silent_provider_yields_unverified_not_backfilled(self):
@@ -182,7 +184,8 @@ class TestReviewOneCapturesIdentity:
 
         verdict = _review(_Legacy())
         assert verdict.failed is False
-        assert verdict.model_identity == {}
+        assert verdict.model_identity == {"endpoint_host": "api.openai.com"}
+        assert resolve_identity_status([verdict.model_identity]) == IDENTITY_UNVERIFIED
 
     def test_captured_identity_never_carries_credentials(self):
         verdict = _review(

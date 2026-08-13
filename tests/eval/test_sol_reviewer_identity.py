@@ -52,6 +52,7 @@ _SAMPLE_QREL = {
 }
 
 _VERIFIED_IDENTITY = {
+    "endpoint_host": "api.openai.com",
     "requested_model": "gpt-5.6-sol",
     "reported_model": "gpt-5.6-sol-2026-07",
     "response_id": "chatcmpl-abc123",
@@ -146,6 +147,7 @@ class TestSidecarRowCarriesIdentity:
         assert row["reviewer_reported_model"] == "gpt-5.6-sol-2026-07"
         assert row["reviewer_system_fingerprint"] == "fp_deadbeef01"
         assert row["reviewer_response_id"] == "chatcmpl-abc123"
+        assert row["reviewer_endpoint_host"] == "api.openai.com"
 
     def test_row_identity_status_verified(self):
         v = _make_verdict(model_identity=_VERIFIED_IDENTITY)

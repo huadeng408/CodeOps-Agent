@@ -2698,3 +2698,170 @@ page/element/bbox geometry against MinerU, and the Go completion client now
 rejects wrong run/file scope, missing/duplicate/out-of-order stages, and any
 completed response with a non-SUCCESS stage. The `real-05` evidence above was
 generated after those fixes were committed.
+
+## 34. 2026-08-13 evaluation evidence-chain authority override
+
+This section supersedes earlier evaluation-set status and runtime snapshots.
+Earlier sections remain audit history and must not be used as current release
+truth when they conflict with this section or fresh commands.
+
+### 34.1 Current boundary
+
+```text
+branch: main
+baseline before this checkpoint: b600cee7
+Docker Desktop: stopped; docker ps empty
+database/index/object counts: last verified in section 33.6; not re-queried here
+```
+
+No model was called, no qrel label was changed, no hidden holdout was invented,
+and no AI review was promoted to `HUMAN_REVIEWED` in this checkpoint.
+
+### 34.2 Implemented anti-forgery gates
+
+- E5 reads both raw A/B review sidecars. Each sidecar must contain exactly the
+  qid membership in qrels, with no missing or duplicate qid. Their exact bytes
+  are combined into one SHA-256 bound into the release report.
+- Every review response must preserve endpoint hostname, provider-reported
+  model, response ID and system fingerprint. Request model names and
+  caller-written `identity_verified=true` are not identity evidence. A/B
+  response ID sets must be disjoint.
+- Release policy v1 requires `api.openai.com`, requested model
+  `gpt-5.6-sol`, and a provider-reported model matching exactly
+  `gpt-5.6-sol` or the defined `gpt-5.6-sol-YYYY-MM` version grammar.
+  Arbitrary suffixes, DeepSeek, Terra or another endpoint fail with
+  `MODEL_PROVIDER_MISMATCH`.
+- E3 manifest validation recomputes actual dev/holdout membership, counts and
+  hashes. The current 180-dev/0-holdout policy cannot be bypassed by editing
+  `holdout_size`, status or a hash in the manifest.
+- The report binds policy, qrels, split manifest and review sidecars. External
+  canonical Git/scorer/index/predictions provenance is accepted through
+  `--bindings`; reporter-owned hashes cannot be supplied or overridden. This
+  makes a legitimate release-success path reachable without weakening gates.
+- The canonical policy is a code-pinned trust root, so an alternate CLI policy
+  cannot disable release gates. Review identity becomes attestable only when
+  an Ed25519 signature verifies the exact A/B sidecar digest and derived
+  identity payload; editing either sidecar invalidates that signature. The
+  derived `passes_independent` field must be explicitly `true`, not merely
+  absent or non-false.
+- `--bindings` names a canonical artifact tree, not caller-written provenance.
+  The reporter verifies `run-manifest.json`, `predictions.jsonl`,
+  `scorer/metadata.json`, and `checksums.sha256`, requires artifact `git_sha` to
+  match current HEAD, then verifies an Ed25519 signature over the checksum
+  file. Rewriting both an artifact and its checksum is therefore insufficient.
+  A valid signature proves byte integrity but does not waive schema checks:
+  every canonical binding must be non-empty, and `dirty_hash` plus the derived
+  predictions digest must be valid SHA-256 values.
+- The signed canonical artifact is also bound to this exact qrels byte hash.
+  Its predictions must contain each current qid exactly once. A signed run from
+  another qrels revision cannot be replayed against the current release gate.
+- Each A/B sidecar row must match qrels in `document_id`, `section_path`,
+  `relevance`, `source_id`, `language`, and `query_type`; qid equality alone is
+  insufficient. A signed review receipt cannot be replayed after label edits.
+- Policy v1 exposes both attestation public-key fields as explicit empty
+  strings. This records the honest current state: no trusted review or artifact
+  signing key is configured. A release-looking path remains fail closed until
+  real public keys are installed by a separately controlled process; fake or
+  test keys must never be committed as production evidence.
+
+### 34.3 Current evidence-contract status
+
+```text
+exit: 2 (data fault; nothing measured)
+report artifact: absent by contract
+blocking code: REVIEW_QREL_MISMATCH
+known mismatches: kb-q021.language, kb-q023.language
+qrels value: zh
+A/B sidecar value: en
+metrics emitted: none
+```
+
+The previous `NOT_RELEASE_ELIGIBLE` report was deleted because it was produced
+before the row-level qrels/sidecar binding existed. The old A/B sidecars disagree
+with current qrels on two language labels, lack response-side identity fields,
+endpoint hostname and an independently signed attestation, and therefore cannot
+prove either their label revision or GPT-5.6 Sol. Current split policy v1 also
+contains no holdout, and policy v1 deliberately contains no review/artifact
+attestation public key. These are genuine blockers, not values to patch around.
+
+### 34.4 Ordered next work across the four mainlines
+
+1. Evaluation set: resolve `kb-q021` and `kb-q023` language labels from source
+   evidence under a documented review process. Do not copy either current value
+   merely to make files agree. Then obtain authorized real OpenAI credentials,
+   run two complete independent `gpt-5.6-sol` review passes, retain response
+   identity per row, and keep outcomes `AI_REVIEWED`/`DISPUTED` until a real
+   person reviews them.
+2. Evaluation set: author net-new queries against previously unused documents,
+   isolate them from evaluated agents, create split policy v2, and perform real
+   label review. Never resample, rewrite or renumber the existing 180 dev qids
+   to manufacture a holdout.
+3. Harness + RAG: generate a canonical predictions/scorer/index run and pass its
+   Git, dirty-state, scorer, index and predictions hashes through `--bindings`.
+   The official scorer output and predictions must be checksum-pinned artifacts.
+4. Multimodal RAG: keep the real MinerU OCR smoke `VERIFIED` only for non-gold
+   integration. Continue isolated visual encoder/index and ViDoRe/bbox bake-off;
+   every PDF path remains MinerU plus explicit OCR, while Tika remains limited
+   to non-PDF Office formats.
+5. Observability: bind the same eligible evaluation run to the production
+   retrieve/embed/rerank/scorer parent trace and machine-query it from Phoenix.
+
+Release remains `BLOCKED` until all applicable gates above pass on current HEAD.
+Tests or synthetic fixtures demonstrate implementation, never model identity,
+human review, holdout quality, benchmark score or production release readiness.
+
+## 35. E5 signed-evidence semantic binding checkpoint (2026-08-13)
+
+This checkpoint strengthens section 34 without changing any gold label or
+release threshold.
+
+### 35.1 Required review attestation message
+
+An accepted review signature must cover the canonical JSON encoding of all
+three values below:
+
+```text
+sidecars_sha256 = SHA256("pass-a\0" + exact_A_bytes + "\0pass-b\0" + exact_B_bytes)
+qrels_sha256    = SHA256(exact qrels bytes consumed by the reporter)
+identity         = identity derived from response-side fields in A/B
+```
+
+The signed receipt must repeat the same `sidecars_sha256` and `qrels_sha256`.
+Binding only qids, verdicts or sidecar bytes is insufficient: it would allow a
+valid review to be replayed after document, section, relevance, source,
+language or query-type labels changed.
+
+### 35.2 Exact review-state vocabulary
+
+For an AI-reviewed row, both passes must carry the literal status
+`AI_REVIEWED`. Missing, empty, unknown, `DISPUTED`, or `HUMAN_REVIEWED` values
+are not eligible, regardless of verdict booleans. `HUMAN_REVIEWED` remains
+reserved for a separately evidenced real-person workflow and cannot be
+manufactured by the two AI passes.
+
+### 35.3 Stale-output fail-closed rule
+
+When `--out` is supplied, the reporter removes that exact previous report
+before reading release inputs. If validation later returns exit 2, no report
+artifact may remain. This prevents an old eligible-looking JSON from surviving
+a current policy, qrels, review, split, signature or canonical-run fault.
+
+### 35.4 Current status and evidence
+
+- `IMPLEMENTED`: qrels-bound review signatures, exact AI status checks,
+  canonical-run qrels/prediction binding, and stale-output removal.
+- `VERIFIED`: `tests/eval/test_release_report.py` reports `57 passed`; full
+  `tests/eval` reports `1039 passed, 13 skipped`.
+- `BLOCKED`: the real command exits 2 on `kb-q021.language` first; the complete
+  audit finds the same `zh` qrels versus `en` A/B mismatch for `kb-q021` and
+  `kb-q023`. The target E5 report is absent by contract.
+- No real review attestation exists and no production public key is configured.
+  Pytest-generated Ed25519 fixtures prove code paths only; they do not prove a
+  GPT-5.6 Sol call, independent review quality, human review, or release
+  eligibility.
+
+Ordered continuation remains unchanged: resolve the two labels from original
+source evidence through an authorized review process, then rerun two complete
+independent real OpenAI GPT-5.6 Sol passes and issue a qrels-bound receipt from
+the controlled signer. Do not copy either existing value merely to obtain exit
+3 or a green report.

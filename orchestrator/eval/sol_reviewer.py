@@ -26,6 +26,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,6 +137,7 @@ IDENTITY_UNVERIFIED: str = "MODEL_IDENTITY_UNVERIFIED"
 # allowlist (not a denylist) keeps a future provider field — or an accidental
 # credential-bearing key — from leaking into a sidecar row.
 _IDENTITY_ARTIFACT_KEYS: tuple[str, ...] = (
+    "endpoint_host",
     "reported_model",
     "system_fingerprint",
     "response_id",
@@ -146,6 +148,7 @@ _IDENTITY_ARTIFACT_KEYS: tuple[str, ...] = (
 # provenance to keep in memory, but still an allowlist so an unexpected
 # credential-bearing key is dropped at capture time rather than at write time.
 _IDENTITY_CAPTURE_KEYS: tuple[str, ...] = (
+    "endpoint_host",
     "requested_model",
     "reported_model",
     "response_id",
@@ -679,6 +682,9 @@ async def review_one(
     except AttributeError:
         raw_identity = None
     identity = sanitize_identity(raw_identity)
+    endpoint_host = urllib.parse.urlparse(str(getattr(client, "base_url", ""))).hostname or ""
+    if endpoint_host:
+        identity["endpoint_host"] = endpoint_host.lower()
 
     parsed = parse_verdict_json(response.text)
     if parsed is None:
@@ -797,6 +803,7 @@ def _row_to_verdict(row: dict[str, Any], qid: str, pass_id: str) -> PassVerdict:
     disputed = row.get("review_status") == "DISPUTED"
     identity = sanitize_identity(
         {
+            "endpoint_host": row.get("reviewer_endpoint_host", ""),
             "reported_model": row.get("reviewer_reported_model", ""),
             "system_fingerprint": row.get("reviewer_system_fingerprint", ""),
             "response_id": row.get("reviewer_response_id", ""),

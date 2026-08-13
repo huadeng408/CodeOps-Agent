@@ -39,15 +39,25 @@ crash can never be read as a release decision.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import random
+import re
 import statistics
+import subprocess
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+except ImportError:  # pragma: no cover
+    InvalidSignature = ValueError  # type: ignore[assignment,misc]
+    Ed25519PublicKey = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "EXIT_ELIGIBLE",
@@ -58,15 +68,21 @@ __all__ = [
     "KNOWN_POLICY_VERSIONS",
     "POLICY_PATH",
     "QRELS_PATH",
+    "SPLIT_MANIFEST_PATH",
     "bootstrap_ci",
     "evaluate_gates",
     "load_policy",
+    "load_external_bindings",
+    "load_review_identity",
     "macro_average",
     "main",
     "policy_sha256",
+    "validate_model_identity",
+    "validate_split_manifest",
     "require_bindings",
     "require_granularity_allowed",
     "require_metric_emission_allowed",
+    "require_release_bindings",
     "select_scoreable_rows",
 ]
 
@@ -78,6 +94,11 @@ def _repo_root() -> Path:
 REPO_ROOT = _repo_root()
 POLICY_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "release-policy.v1.json"
 QRELS_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "qrels.sol-review.jsonl"
+SPLIT_MANIFEST_PATH = (
+    REPO_ROOT / "data" / "eval" / "techdocs" / "splits" / "split-manifest.v1.json"
+)
+REVIEW_PASS_A_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "qrels.sol-review-pass-a.jsonl"
+REVIEW_PASS_B_PATH = REPO_ROOT / "data" / "eval" / "techdocs" / "qrels.sol-review-pass-b.jsonl"
 
 KNOWN_POLICY_VERSIONS = ("v1",)
 
@@ -92,6 +113,37 @@ EXIT_ELIGIBLE = 0
 EXIT_RESERVED_UNUSED = 1
 EXIT_DATA_FAULT = 2
 EXIT_NOT_ELIGIBLE = 3
+TRUSTED_POLICY_SHA256 = "68e154d4464cc2e17168463e4f9d153fe4e4b619bdbfbba3fb673ba0ecda77f6"
+
+_REPORTER_OWNED_BINDINGS = frozenset(
+    {
+        "qrels_sha256",
+        "policy_sha256",
+        "split_manifest_sha256",
+        "model_identity_sha256",
+    }
+)
+_EXTERNAL_BINDINGS = frozenset(
+    {
+        "git_sha",
+        "dirty_hash",
+        "scorer_name",
+        "scorer_version",
+        "index_name",
+        "index_corpus_generation",
+        "index_model_version",
+        "predictions_sha256",
+    }
+)
+_SHA256_BINDINGS = frozenset({"dirty_hash", "predictions_sha256"})
+_REVIEW_QREL_FIELDS = (
+    "document_id",
+    "section_path",
+    "relevance",
+    "source_id",
+    "language",
+    "query_type",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +230,8 @@ class GateResult:
     pure_negative_rows: int
     pure_negative_golden_rows: int
     missing_sources: tuple[str, ...]
+    model_identity_status: str = "MODEL_IDENTITY_UNVERIFIED"
+    holdout_status: str = "BLOCKED"
     golden_sources: Mapping[str, int] = field(default_factory=dict)
     detail: Mapping[str, str] = field(default_factory=dict)
 
@@ -212,6 +266,13 @@ def _load_qrels(path: Path | str) -> list[dict[str, Any]]:
         rows.append(row)
     if not rows:
         raise ValueError(f"QRELS_MISSING: {target} contains no rows")
+    qids = [str(row["query_id"]) for row in rows]
+    duplicates = sorted({qid for qid in qids if qids.count(qid) > 1})
+    if duplicates:
+        raise ValueError(
+            "QRELS_DUPLICATE_QID: duplicate query_id values would inflate release "
+            f"thresholds: {', '.join(duplicates)}"
+        )
     return rows
 
 
@@ -225,10 +286,274 @@ def _relevance(row: Mapping[str, Any]) -> float:
         ) from exc
 
 
+def validate_model_identity(identity: Mapping[str, Any] | None) -> tuple[str, str]:
+    """Validate response-side identity for two independent review passes.
+
+    Requested model names and caller-supplied booleans are inputs, not
+    evidence.  Each pass must preserve the provider-reported model, response
+    ID and immutable revision/fingerprint.  The passes must be distinct and
+    must identify the same provider revision.
+    """
+    if not isinstance(identity, Mapping):
+        return "MODEL_IDENTITY_UNVERIFIED", "no response-side model identity artifact"
+    if identity.get("attestation_status") != "MODEL_IDENTITY_ATTESTED":
+        return "MODEL_IDENTITY_UNVERIFIED", "independent signed review attestation is absent"
+
+    endpoint_host = str(identity.get("endpoint_host", "")).strip().lower()
+    passes = identity.get("passes")
+    if not endpoint_host or not isinstance(passes, list) or len(passes) != 2:
+        return (
+            "MODEL_IDENTITY_UNVERIFIED",
+            "endpoint host and exactly two response-side review pass identities are required",
+        )
+    if identity.get("passes_independent") is not True:
+        return (
+            "MODEL_REVIEW_PASSES_NOT_INDEPENDENT",
+            "review pass response ID disjointness was not explicitly attested",
+        )
+
+    normalized: list[tuple[str, str, str, str]] = []
+    for index, item in enumerate(passes, start=1):
+        if not isinstance(item, Mapping):
+            return "MODEL_IDENTITY_UNVERIFIED", f"review pass {index} identity is not an object"
+        requested = str(item.get("requested_model", "")).strip()
+        reported = str(item.get("reported_model", "")).strip()
+        response_id = str(item.get("response_id", "")).strip()
+        revision = str(item.get("immutable_revision", "")).strip()
+        if not reported or not response_id or not revision or revision.lower() == "unknown":
+            return (
+                "MODEL_IDENTITY_UNVERIFIED",
+                f"review pass {index} lacks reported_model, response_id, or immutable_revision",
+            )
+        if not requested:
+            return (
+                "MODEL_IDENTITY_UNVERIFIED",
+                f"review pass {index} lacks requested_model provenance",
+            )
+        normalized.append((requested, reported, response_id, revision))
+
+    if normalized[0][2] == normalized[1][2]:
+        return (
+            "MODEL_REVIEW_PASSES_NOT_INDEPENDENT",
+            "both review passes carry the same provider response ID",
+        )
+    if normalized[0][1] != normalized[1][1] or normalized[0][3] != normalized[1][3]:
+        return (
+            "MODEL_IDENTITY_UNVERIFIED",
+            "review passes do not identify the same provider model revision",
+        )
+    return "VERIFIED", "two independent response-side identities pin one provider model revision"
+
+
+def _read_review_sidecar(path: Path) -> tuple[list[dict[str, Any]], bytes]:
+    if not path.is_file():
+        raise ValueError(f"MODEL_IDENTITY_MISSING: no review sidecar at {path}")
+    raw = path.read_bytes()
+    rows: list[dict[str, Any]] = []
+    for line_no, line in enumerate(raw.decode("utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"MODEL_IDENTITY_INVALID: {path} line {line_no} is not JSON"
+            ) from exc
+        if not isinstance(row, dict) or not str(row.get("query_id", "")).strip():
+            raise ValueError(
+                f"MODEL_IDENTITY_INVALID: {path} line {line_no} lacks query_id"
+            )
+        rows.append(row)
+    if not rows:
+        raise ValueError(f"MODEL_IDENTITY_INVALID: {path} contains no review rows")
+    return rows, raw
+
+
+def load_review_identity(
+    pass_a_path: Path | str,
+    pass_b_path: Path | str,
+    *,
+    expected_qids: set[str],
+    expected_qrel_rows: Mapping[str, Mapping[str, Any]] | None = None,
+    expected_review_statuses: Mapping[str, str] | None = None,
+    expected_qrels_sha256: str | None = None,
+    attestation_path: Path | str | None = None,
+    attestation_public_key_b64: str = "",
+) -> tuple[dict[str, Any], str]:
+    """Build a hash-bound identity artifact from the two raw review sidecars."""
+    pass_rows: list[list[dict[str, Any]]] = []
+    raw_parts: list[bytes] = []
+    for label, source in (("A", Path(pass_a_path)), ("B", Path(pass_b_path))):
+        rows, raw = _read_review_sidecar(source)
+        qids = [str(row["query_id"]) for row in rows]
+        if len(qids) != len(set(qids)) or set(qids) != expected_qids:
+            raise ValueError(
+                f"MODEL_IDENTITY_QID_MISMATCH: review pass {label} does not match qrels"
+            )
+        pass_rows.append(rows)
+        raw_parts.append(raw)
+
+    if expected_qrel_rows is not None:
+        for label, rows in zip(("A", "B"), pass_rows, strict=True):
+            for row in rows:
+                qid = str(row["query_id"])
+                expected = expected_qrel_rows.get(qid)
+                if expected is None:
+                    raise ValueError(
+                        f"REVIEW_QREL_MISMATCH: pass {label} has unknown query_id {qid}"
+                    )
+                mismatched = [
+                    field
+                    for field in _REVIEW_QREL_FIELDS
+                    if row.get(field) != expected.get(field)
+                ]
+                if mismatched:
+                    raise ValueError(
+                        "REVIEW_QREL_MISMATCH: review pass "
+                        f"{label} row {qid} differs from qrels in "
+                        + ", ".join(mismatched)
+                    )
+
+    if expected_review_statuses is not None:
+        by_pass = [{str(row["query_id"]): row for row in rows} for rows in pass_rows]
+        boolean_fields = (
+            "answerable", "language_correct", "query_type_correct",
+            "relevance_correct", "section_correct", "evidence_sufficient",
+        )
+        for qid in sorted(expected_qids):
+            a = by_pass[0][qid]
+            b = by_pass[1][qid]
+            av = a.get("verdicts") if isinstance(a.get("verdicts"), dict) else {}
+            bv = b.get("verdicts") if isinstance(b.get("verdicts"), dict) else {}
+            valid = (
+                a.get("review_status") == ELIGIBLE_REVIEW_STATUS
+                and b.get("review_status") == ELIGIBLE_REVIEW_STATUS
+                and all(av.get(field) is True and bv.get(field) is True for field in boolean_fields)
+                and av.get("contamination_risk") == "none"
+                and bv.get("contamination_risk") == "none"
+                and min(float(av.get("confidence", 0)), float(bv.get("confidence", 0))) >= 0.7
+            )
+            derived = "AI_REVIEWED" if valid else "DISPUTED"
+            if expected_review_statuses.get(qid) != derived:
+                raise ValueError(
+                    "REVIEW_STATUS_MISMATCH: qrels status for "
+                    f"{qid} is {expected_review_statuses.get(qid)!r}, but A/B "
+                    f"verdicts deterministically derive {derived!r}"
+                )
+
+    identities: list[dict[str, str]] = []
+    response_id_sets: list[set[str]] = []
+    endpoint_hosts: set[str] | None = None
+    for rows in pass_rows:
+        hosts = {str(row.get("reviewer_endpoint_host", "")).strip().lower() for row in rows} - {""}
+        requested = {str(row.get("reviewer_model", "")).strip() for row in rows} - {""}
+        reported = {
+            str(row.get("reviewer_reported_model", "")).strip() for row in rows
+        } - {""}
+        revisions = {
+            str(row.get("reviewer_system_fingerprint", "")).strip() for row in rows
+        } - {""}
+        response_ids = {
+            str(row.get("reviewer_response_id", "")).strip() for row in rows
+        } - {""}
+        complete = (
+            len(hosts) == 1
+            and len(requested) == 1
+            and len(reported) == 1
+            and len(revisions) == 1
+            and len(response_ids) == len(rows)
+            and all(
+                row.get("reviewer_identity_status") == "MODEL_IDENTITY_VERIFIED"
+                for row in rows
+            )
+        )
+        identities.append(
+            {
+                "requested_model": next(iter(requested), "") if complete else "",
+                "reported_model": next(iter(reported), "") if complete else "",
+                "response_id": (
+                    hashlib.sha256("\n".join(sorted(response_ids)).encode("utf-8")).hexdigest()
+                    if complete
+                    else ""
+                ),
+                "immutable_revision": next(iter(revisions), "") if complete else "",
+            }
+        )
+        response_id_sets.append(response_ids)
+        endpoint_hosts = hosts if endpoint_hosts is None else endpoint_hosts & hosts
+
+    digest = hashlib.sha256(
+        b"pass-a\0" + raw_parts[0] + b"\0pass-b\0" + raw_parts[1]
+    ).hexdigest()
+    identity: dict[str, Any] = {
+            "endpoint_host": next(iter(endpoint_hosts or ()), ""),
+            "passes": identities,
+            "passes_independent": not bool(response_id_sets[0] & response_id_sets[1]),
+        }
+    if (
+        attestation_public_key_b64
+        and attestation_path is not None
+        and Path(attestation_path).is_file()
+    ):
+        try:
+            if expected_qrels_sha256 is None:
+                raise ValueError("current qrels digest was not supplied")
+            expected_qrels_digest = expected_qrels_sha256.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_qrels_digest):
+                raise ValueError("current qrels digest is not SHA-256")
+            attestation = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
+            message = json.dumps(
+                {
+                    "sidecars_sha256": digest,
+                    "qrels_sha256": expected_qrels_digest,
+                    "identity": identity,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            signature = base64.b64decode(str(attestation["signature_b64"]), validate=True)
+            public_key = base64.b64decode(attestation_public_key_b64, validate=True)
+            if Ed25519PublicKey is None:
+                raise ValueError("MODEL_ATTESTATION_UNAVAILABLE: cryptography is not installed")
+            Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+            if attestation.get("sidecars_sha256") != digest:
+                raise ValueError("MODEL_ATTESTATION_INVALID: sidecar digest does not match")
+            if str(attestation.get("qrels_sha256", "")).lower() != expected_qrels_digest:
+                raise ValueError("MODEL_ATTESTATION_INVALID: qrels digest does not match")
+            identity["attestation_status"] = "MODEL_IDENTITY_ATTESTED"
+        except (KeyError, ValueError, TypeError, InvalidSignature, base64.binascii.Error) as exc:
+            raise ValueError(f"MODEL_ATTESTATION_INVALID: {exc}") from exc
+    return identity, digest
+
+
+def validate_split_manifest(manifest: Mapping[str, Any] | None) -> tuple[str, str]:
+    """Require a non-empty, hash-bound hidden holdout declaration."""
+    if not isinstance(manifest, Mapping):
+        return "HOLDOUT_NOT_MEASURABLE", "no split manifest was supplied"
+
+    size = manifest.get("holdout_size")
+    status = str(manifest.get("holdout_status", "")).strip()
+    qids_hash = str(manifest.get("holdout_qids_sha256", "")).strip().lower()
+    policy_hash = str(manifest.get("policy_sha256", "")).strip().lower()
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return "HOLDOUT_NOT_MEASURABLE", "hidden holdout is empty or has an invalid size"
+    if status != "VERIFIED":
+        return "HOLDOUT_NOT_MEASURABLE", f"hidden holdout status is {status!r}, not VERIFIED"
+    for label, digest in (("holdout membership", qids_hash), ("split policy", policy_hash)):
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            return "HOLDOUT_NOT_MEASURABLE", f"{label} SHA-256 is missing or invalid"
+        if digest == "0" * 64 or digest == hashlib.sha256(b"").hexdigest():
+            return "HOLDOUT_NOT_MEASURABLE", f"{label} SHA-256 cannot identify an empty set"
+    return "VERIFIED", "non-empty hidden holdout is status- and hash-bound"
+
+
 def evaluate_gates(
     qrels_path: Path | str | None = None,
     *,
     policy: Mapping[str, Any] | None = None,
+    model_identity: Mapping[str, Any] | None = None,
+    split_manifest: Mapping[str, Any] | None = None,
 ) -> GateResult:
     """Evaluate every release gate. A gate that cannot be evaluated FAILS.
 
@@ -260,6 +585,65 @@ def evaluate_gates(
 
     failed: list[str] = []
     detail: dict[str, str] = {}
+
+    identity_status, identity_detail = validate_model_identity(model_identity)
+    identity_policy = gates.get("model_identity", {})
+    if identity_status == "VERIFIED" and isinstance(identity_policy, Mapping):
+        endpoint_host = str((model_identity or {}).get("endpoint_host", "")).lower()
+        allowed_hosts = {
+            str(host).strip().lower()
+            for host in identity_policy.get("allowed_endpoint_hosts", [])
+            if str(host).strip()
+        }
+        required_model = str(
+            identity_policy.get("required_requested_model", "")
+        ).strip()
+        reported_prefixes = tuple(
+            str(prefix).strip()
+            for prefix in identity_policy.get("allowed_reported_model_prefixes", [])
+            if str(prefix).strip()
+        )
+        requested_models = {
+            str(item.get("requested_model", "")).strip()
+            for item in (model_identity or {}).get("passes", [])
+            if isinstance(item, Mapping)
+        }
+        reported_models = {
+            str(item.get("reported_model", "")).strip()
+            for item in (model_identity or {}).get("passes", [])
+            if isinstance(item, Mapping)
+        }
+        if (
+            (allowed_hosts and endpoint_host not in allowed_hosts)
+            or (required_model and requested_models != {required_model})
+            or (
+                reported_prefixes
+                and any(
+                    not any(
+                        re.fullmatch(
+                            re.escape(prefix) + r"(?:-[0-9]{4}-[0-9]{2})?",
+                            model,
+                        )
+                        is not None
+                        for prefix in reported_prefixes
+                    )
+                    for model in reported_models
+                )
+            )
+        ):
+            identity_status = "MODEL_PROVIDER_MISMATCH"
+            identity_detail = (
+                "review endpoint host or requested model does not match the "
+                "versioned release policy"
+            )
+    if gates.get("require_model_identity", False) and identity_status != "VERIFIED":
+        failed.append(identity_status)
+        detail[identity_status] = identity_detail
+
+    holdout_status, holdout_detail = validate_split_manifest(split_manifest)
+    if gates.get("require_hidden_holdout", False) and holdout_status != "VERIFIED":
+        failed.append(holdout_status)
+        detail[holdout_status] = holdout_detail
 
     min_rows = int(gates.get("min_golden_rows", 0))
     if len(golden) < min_rows:
@@ -322,6 +706,8 @@ def evaluate_gates(
         pure_negative_rows=len(pure_negative),
         pure_negative_golden_rows=len(pure_negative_golden),
         missing_sources=missing_sources,
+        model_identity_status=identity_status,
+        holdout_status=holdout_status,
         golden_sources=golden_sources,
         detail=detail,
     )
@@ -435,6 +821,167 @@ def require_bindings(
         )
 
 
+def load_external_bindings(
+    path: Path | str,
+    *,
+    attestation_public_key_b64: str = "",
+    expected_qrels_sha256: str | None = None,
+    expected_qids: set[str] | None = None,
+) -> dict[str, str]:
+    """Load provenance owned by the canonical retrieval/scorer run.
+
+    Reporter-owned hashes are always derived from the bytes consumed by this
+    process and therefore cannot be supplied or overridden by a caller.
+    """
+    target = Path(path)
+    if not target.is_file():
+        raise ValueError(f"BINDING_MISSING: no external binding manifest at {target}")
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"BINDING_INVALID: {target} is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("BINDING_INVALID: external binding manifest is not an object")
+
+    reserved = sorted(set(payload) & _REPORTER_OWNED_BINDINGS)
+    if reserved:
+        raise ValueError(
+            "BINDING_RESERVED: reporter-owned fields cannot be supplied: "
+            + ", ".join(reserved)
+        )
+    unknown = sorted(set(payload) - {"artifact_root", "attestation_path"})
+    if unknown:
+        raise ValueError("BINDING_INVALID: unknown external fields: " + ", ".join(unknown))
+    root = Path(str(payload.get("artifact_root", ""))).resolve()
+    checksum_path = root / "checksums.sha256"
+    if not checksum_path.is_file():
+        raise ValueError("BINDING_MISSING: canonical artifact checksums.sha256 is absent")
+    if not attestation_public_key_b64:
+        raise ValueError("BINDING_ATTESTATION_MISSING: policy has no artifact trust root")
+    attestation_path = Path(str(payload.get("attestation_path", "")))
+    if not attestation_path.is_file():
+        raise ValueError("BINDING_ATTESTATION_MISSING: signed artifact receipt is absent")
+    try:
+        attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        signature = base64.b64decode(str(attestation["signature_b64"]), validate=True)
+        public_key = base64.b64decode(attestation_public_key_b64, validate=True)
+        checksum_bytes = checksum_path.read_bytes()
+        if attestation.get("checksums_sha256") != hashlib.sha256(checksum_bytes).hexdigest():
+            raise ValueError("signed checksum digest does not match")
+        if Ed25519PublicKey is None:
+            raise ValueError("cryptography is not installed")
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, checksum_bytes)
+    except (KeyError, ValueError, TypeError, InvalidSignature, base64.binascii.Error) as exc:
+        raise ValueError(f"BINDING_ATTESTATION_INVALID: {exc}") from exc
+
+    pinned: dict[str, str] = {}
+    for line in checksum_path.read_text(encoding="utf-8").splitlines():
+        digest, sep, rel = line.partition("  ")
+        if not sep or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            raise ValueError(f"BINDING_INVALID: malformed checksum entry {line!r}")
+        artifact = (root / rel).resolve()
+        try:
+            artifact.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"BINDING_INVALID: artifact escapes root: {rel}") from exc
+        if not artifact.is_file():
+            raise ValueError(f"BINDING_CHECKSUM_MISMATCH: missing {rel}")
+        actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        if actual != digest.lower():
+            raise ValueError(f"BINDING_CHECKSUM_MISMATCH: {rel}")
+        pinned[rel.replace("\\", "/")] = actual
+
+    required_files = {"run-manifest.json", "predictions.jsonl", "scorer/metadata.json"}
+    missing = sorted(required_files - set(pinned))
+    if missing:
+        raise ValueError("BINDING_MISSING: unpinned canonical artifacts: " + ", ".join(missing))
+    manifest = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+    scorer = json.loads((root / "scorer" / "metadata.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(scorer, dict):
+        raise ValueError("BINDING_INVALID: canonical metadata must be JSON objects")
+    if expected_qrels_sha256 is not None:
+        manifest_qrels_hash = str(manifest.get("qrels_hash", "")).strip().lower()
+        if manifest_qrels_hash != expected_qrels_sha256.lower():
+            raise ValueError(
+                "BINDING_QRELS_MISMATCH: canonical run was not produced for current qrels"
+            )
+    if expected_qids is not None:
+        prediction_qids: list[str] = []
+        predictions_path = root / "predictions.jsonl"
+        for line_no, line in enumerate(
+            predictions_path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            try:
+                prediction = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"BINDING_PREDICTIONS_INVALID: line {line_no} is not JSON"
+                ) from exc
+            if not isinstance(prediction, dict) or not str(
+                prediction.get("query_id", "")
+            ).strip():
+                raise ValueError(
+                    f"BINDING_PREDICTIONS_INVALID: line {line_no} lacks query_id"
+                )
+            prediction_qids.append(str(prediction["query_id"]))
+        if (
+            len(prediction_qids) != len(set(prediction_qids))
+            or set(prediction_qids) != expected_qids
+        ):
+            raise ValueError(
+                "BINDING_PREDICTIONS_QID_MISMATCH: predictions query IDs must be "
+                "unique and exactly match current qrels"
+            )
+    git_sha = str(manifest.get("git_sha", "")).strip()
+    try:
+        current_git = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"BINDING_GIT_UNAVAILABLE: {exc}") from exc
+    if git_sha != current_git:
+        raise ValueError("BINDING_GIT_MISMATCH: canonical run is not for current HEAD")
+    bindings = {
+        "git_sha": git_sha,
+        "dirty_hash": str(manifest.get("dirty_hash", "")),
+        "scorer_name": str(scorer.get("scorer_name", "")),
+        "scorer_version": str(scorer.get("scorer_version", "")),
+        "index_name": str(manifest.get("physical_index", "")),
+        "index_corpus_generation": str(manifest.get("corpus_generation", "")),
+        "index_model_version": str(manifest.get("model_revision", "")),
+        "predictions_sha256": pinned["predictions.jsonl"],
+    }
+    missing_values = sorted(key for key, value in bindings.items() if not value.strip())
+    if missing_values:
+        raise ValueError(
+            "BINDING_INVALID: canonical metadata has empty fields: "
+            + ", ".join(missing_values)
+        )
+    for key in _SHA256_BINDINGS:
+        value = bindings[key].lower()
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"BINDING_INVALID: {key} is not a SHA-256 digest")
+    return bindings
+
+
+def require_release_bindings(
+    result: GateResult,
+    report: Mapping[str, Any],
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> None:
+    """Require full provenance only when a report would claim eligibility."""
+    if result.eligible:
+        require_bindings(report, policy=policy)
+
+
 def bootstrap_ci(
     values: Sequence[float],
     *,
@@ -470,15 +1017,26 @@ def bootstrap_ci(
 # ---------------------------------------------------------------------------
 
 
-def _build_report(result: GateResult, *, policy: Mapping[str, Any], policy_hash: str,
-                  qrels_hash: str, qrels_path: str) -> dict[str, Any]:
-    return {
+def _build_report(
+    result: GateResult,
+    *,
+    policy: Mapping[str, Any],
+    policy_hash: str,
+    qrels_hash: str,
+    qrels_path: str,
+    split_manifest_hash: str,
+    model_identity_hash: str,
+    external_bindings: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    report = {
         "report_kind": "e5-rag-release-report",
         "policy_id": policy.get("policy_id", ""),
         "policy_version": policy.get("policy_version", ""),
         "policy_sha256": policy_hash,
         "qrels_path": qrels_path,
         "qrels_sha256": qrels_hash,
+        "split_manifest_sha256": split_manifest_hash,
+        "model_identity_sha256": model_identity_hash,
         "verdict": "RELEASE_ELIGIBLE" if result.eligible else "NOT_RELEASE_ELIGIBLE",
         "failed_codes": list(result.failed_codes),
         "failed_detail": dict(result.detail),
@@ -493,10 +1051,14 @@ def _build_report(result: GateResult, *, policy: Mapping[str, Any], policy_hash:
         },
         "golden_sources": dict(result.golden_sources),
         "missing_sources": list(result.missing_sources),
+        "model_identity_status": result.model_identity_status,
+        "holdout_status": result.holdout_status,
         "granularity": policy.get("scoring", {}).get("granularity", "document"),
         # Empty by contract while ineligible: no metric may escape a failed gate.
         "metrics": {},
     }
+    report.update(dict(external_bindings or {}))
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -508,14 +1070,89 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--qrels", default=str(QRELS_PATH))
     parser.add_argument("--policy", default=str(POLICY_PATH))
     parser.add_argument("--out", default="")
+    parser.add_argument("--review-pass-a", default=str(REVIEW_PASS_A_PATH))
+    parser.add_argument("--review-pass-b", default=str(REVIEW_PASS_B_PATH))
+    parser.add_argument(
+        "--review-attestation",
+        default=str(REPO_ROOT / "data" / "eval" / "techdocs" / "sol-review-attestation.json"),
+    )
+    parser.add_argument("--split-manifest", default=str(SPLIT_MANIFEST_PATH))
+    parser.add_argument(
+        "--bindings",
+        default="",
+        help="JSON manifest containing canonical Git/scorer/index/predictions bindings",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.out:
+        stale_out = Path(args.out)
+        if stale_out.is_file():
+            try:
+                stale_out.unlink()
+            except OSError as exc:
+                print(f"ERROR: REPORT_STALE_OUTPUT: {exc}", file=sys.stderr)
+                return EXIT_DATA_FAULT
 
     try:
         policy = load_policy(args.policy)
         policy_hash = policy_sha256(args.policy)
+        if policy_hash != TRUSTED_POLICY_SHA256:
+            raise ValueError(
+                "POLICY_UNTRUSTED: release policy is not pinned by the code trust root"
+            )
         qrels_path = Path(args.qrels)
-        result = evaluate_gates(qrels_path, policy=policy)
+        qrel_rows = _load_qrels(qrels_path)
+        expected_qids = {str(row["query_id"]) for row in qrel_rows}
+        expected_review_statuses = {
+            str(row["query_id"]): str(row["review_status"]) for row in qrel_rows
+        }
+        expected_qrel_rows = {str(row["query_id"]): row for row in qrel_rows}
         qrels_hash = hashlib.sha256(qrels_path.read_bytes()).hexdigest()
+        model_identity, model_identity_hash = load_review_identity(
+            args.review_pass_a,
+            args.review_pass_b,
+            expected_qids=expected_qids,
+            expected_qrel_rows=expected_qrel_rows,
+            expected_review_statuses=expected_review_statuses,
+            expected_qrels_sha256=qrels_hash,
+            attestation_path=args.review_attestation,
+            attestation_public_key_b64=str(
+                policy.get("gates", {}).get("model_identity", {}).get(
+                    "attestation_public_key_b64", ""
+                )
+            ),
+        )
+        split_path = Path(args.split_manifest)
+        if not split_path.is_file():
+            raise ValueError(f"SPLIT_MANIFEST_MISSING: no split manifest at {split_path}")
+        split_bytes = split_path.read_bytes()
+        loaded_split = json.loads(split_bytes)
+        if not isinstance(loaded_split, dict):
+            raise ValueError("SPLIT_MANIFEST_INVALID: split manifest is not an object")
+        from orchestrator.eval.split import validate_manifest
+
+        validate_manifest(loaded_split)
+        split_manifest_hash = hashlib.sha256(split_bytes).hexdigest()
+        result = evaluate_gates(
+            qrels_path,
+            policy=policy,
+            model_identity=model_identity,
+            split_manifest=loaded_split,
+        )
+        external_bindings = (
+            load_external_bindings(
+                args.bindings,
+                attestation_public_key_b64=str(
+                    policy.get("scoring", {}).get(
+                        "artifact_attestation_public_key_b64", ""
+                    )
+                ),
+                expected_qrels_sha256=qrels_hash,
+                expected_qids=expected_qids,
+            )
+            if args.bindings
+            else {}
+        )
     except ValueError as exc:
         # Any named failure code above means nothing was measured.
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -530,13 +1167,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_hash=policy_hash,
         qrels_hash=qrels_hash,
         qrels_path=str(qrels_path),
+        split_manifest_hash=split_manifest_hash,
+        model_identity_hash=model_identity_hash,
+        external_bindings=external_bindings,
     )
+
+    if result.eligible:
+        try:
+            require_release_bindings(result, report, policy=policy)
+            require_metric_emission_allowed(result)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return EXIT_DATA_FAULT
 
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        out.write_bytes(
+            (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         )
 
     print(f"verdict      : {report['verdict']}")
@@ -550,11 +1198,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not result.eligible:
         return EXIT_NOT_ELIGIBLE
 
-    try:
-        require_metric_emission_allowed(result)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return EXIT_DATA_FAULT
     return EXIT_ELIGIBLE
 
 

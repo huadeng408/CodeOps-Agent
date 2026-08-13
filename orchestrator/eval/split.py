@@ -376,6 +376,24 @@ def validate_manifest(manifest: dict, *, policy: dict | None = None) -> None:
             f"but the policy on disk hashes to {current}."
         )
 
+    expected_dev = dev_qids()
+    expected_holdout = holdout_qids()
+    expected = {
+        "dev_size": len(expected_dev),
+        "dev_qids_sha256": qid_set_hash(expected_dev),
+        "holdout_size": len(expected_holdout),
+        "holdout_qids_sha256": qid_set_hash(expected_holdout),
+        "holdout_status": set_holdout_status(
+            policy["holdout"]["status"], holdout_size=len(expected_holdout)
+        ),
+    }
+    mismatched = [key for key, value in expected.items() if manifest.get(key) != value]
+    if mismatched:
+        raise ValueError(
+            "MANIFEST_MEMBERSHIP_MISMATCH: split manifest does not match the "
+            f"policy-bound query membership for {', '.join(mismatched)}"
+        )
+
 
 # --------------------------------------------------------------------------
 # Evaluation firewall

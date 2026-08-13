@@ -65,6 +65,14 @@
     "declared_sources": ["docker", "git", "go", "kubernetes", "postgresql", "python"],
     "max_disputed_fraction": 0.2,
     "require_model_identity": true,
+    "require_hidden_holdout": true,
+    "model_identity": {
+      "allowed_endpoint_hosts": ["api.openai.com"],
+      "required_requested_model": "gpt-5.6-sol",
+      "allowed_reported_model_prefixes": ["gpt-5.6-sol"],
+      "attestation_public_key_b64": "",
+      "evidence_note": "endpoint_host is transport configuration evidence; reported_model, response_id, and system_fingerprint must still come from every provider response body in both passes"
+    },
     "require_section_path_resolvable": false,
     "require_section_path_resolvable_note": "false at v1 because section metrics are forbidden outright; document-level scoring does not depend on section_path. Setting this true in a future version requires re-authored labels, not re-derived ones.",
     "gate_rationale": {
@@ -76,6 +84,7 @@
 
   "scoring": {
     "granularity": "document",
+    "artifact_attestation_public_key_b64": "",
     "granularity_locked_reason": "section_path is unresolvable for 178 of 180 rows (see section_path_defect)",
     "eligible_rows_rule": "review_status == AI_REVIEWED only. DISPUTED rows are never scored, never averaged, and never counted in a denominator.",
     "pure_negative_handling": "Reported separately as false-positive rate and empty-rate. Pure negatives must NEVER enter the macro-average of a relevance metric: a query with no relevant document scores 0.0 by construction and would silently deflate the mean.",
@@ -85,6 +94,8 @@
       "dirty_hash",
       "qrels_sha256",
       "policy_sha256",
+      "split_manifest_sha256",
+      "model_identity_sha256",
       "scorer_name",
       "scorer_version",
       "index_name",
@@ -120,6 +131,14 @@
     {"code": "PURE_NEGATIVE_IN_MACRO_AVERAGE", "condition": "a pure-negative qid reaches the macro-average of a relevance metric", "behaviour": "raise", "exit_code": 2},
     {"code": "DISPUTED_ROW_SCORED", "condition": "a DISPUTED row reaches the scorer", "behaviour": "raise", "exit_code": 2},
     {"code": "BINDING_MISSING", "condition": "any required_bindings entry is absent or empty in the report", "behaviour": "raise", "exit_code": 2},
+    {"code": "BINDING_QRELS_MISMATCH", "condition": "the signed canonical run manifest qrels hash differs from the qrels bytes consumed by the reporter", "behaviour": "raise", "exit_code": 2},
+    {"code": "BINDING_PREDICTIONS_QID_MISMATCH", "condition": "signed predictions contain duplicate query IDs or do not exactly match current qrels membership", "behaviour": "raise", "exit_code": 2},
+    {"code": "REVIEW_QREL_MISMATCH", "condition": "either review sidecar differs from current qrels in document_id, section_path, relevance, source_id, language, or query_type", "behaviour": "raise", "exit_code": 2},
+    {"code": "MODEL_IDENTITY_UNVERIFIED", "condition": "two independent review passes do not preserve provider-reported model, response ID, and immutable revision evidence", "behaviour": "fail release gate", "exit_code": 3, "forbidden_fallback": "requested model name or caller-supplied verified boolean"},
+    {"code": "MODEL_REVIEW_PASSES_NOT_INDEPENDENT", "condition": "both review passes reuse the same provider response ID", "behaviour": "fail release gate", "exit_code": 3},
+    {"code": "MODEL_PROVIDER_MISMATCH", "condition": "review endpoint host or requested model differs from the versioned golden-review policy", "behaviour": "fail release gate", "exit_code": 3},
+    {"code": "HOLDOUT_NOT_MEASURABLE", "condition": "the policy-bound split manifest has no non-empty, hash-bound VERIFIED hidden holdout", "behaviour": "fail release gate", "exit_code": 3, "forbidden_fallback": "dev resampling, a handwritten non-empty size, or an empty-set hash"},
+    {"code": "MANIFEST_MEMBERSHIP_MISMATCH", "condition": "split manifest counts or hashes do not match policy-bound query membership", "behaviour": "raise", "exit_code": 2},
     {"code": "NOT_RELEASE_ELIGIBLE", "condition": "gates evaluated successfully and at least one failed", "behaviour": "report and exit 3", "exit_code": 3, "note": "This is an honest completed verdict, not an error. It is deliberately NOT exit 1."}
   ],
 
