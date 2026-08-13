@@ -75,6 +75,15 @@
   other cells; use redirected logs plus process exit codes for terminal jobs,
   and the collaboration namespace for agents. Never call wait to obtain a
   second copy of output already available in a log or terminal result.
+- **2026-08-13 third recurrence:** while waiting for an independent reviewer,
+  `functions.wait` was repeatedly called without its required `cell_id`. Every
+  call failed immediately, yet the same invalid schema was retried many times
+  with no state change. This is a hard circuit-breaker event: after the first
+  wait schema or namespace error, mark that exact tool unavailable for the rest
+  of the turn and perform the next productive action immediately. Agent status
+  may only use the collaboration namespace. Do not issue a second wait-like
+  call until a valid live target identifier has been obtained from the matching
+  namespace; repeated identical validation errors are never transient.
 
 ## Skill 优先原则
 
