@@ -39,6 +39,14 @@ eval = [
     # numpy 2.0 removed APIs these modules have not been re-checked against.
     "numpy>=1.26,<2",
 ]
+visual-eval = [
+    # Pinned model revisions are recorded by the runner; these are the runtime
+    # libraries needed to reproduce the public visual and late-interaction arms.
+    "colpali-engine==0.3.17",
+    "datasets>=3,<5",
+    "peft>=0.17,<0.21",
+    "pillow>=10,<12",
+]
 
 [tool.setuptools.packages.find]
 include = ["codeagent*", "orchestrator*"]
