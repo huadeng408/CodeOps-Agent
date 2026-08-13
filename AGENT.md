@@ -144,3 +144,18 @@ Count only requirements with fresh, reproducible verification evidence. Do not
 increase a percentage merely because code, a plan, a label, a synthetic fixture,
 or a preflight exists. State the source of material uncertainty and revise the
 estimate downward when an acceptance gate is missing or invalidated.
+
+## 2026-08-14 continuation state
+
+- Branch: `main`; latest pushed commit at the time of this note: `cec5e0cd`.
+- Verified current-head receipts include a real MinerU OCR PDF to RAG E2E,
+  Terminal-Bench official failure (model payload failure, not infrastructure),
+  DocVQA page-level qualification, and Phoenix O3 multi-instance trace evidence.
+- Current evidence-weighted estimates: Harness 90%, multimodal RAG 84%,
+  evaluation set 74%, observability 89%. These are not completion claims.
+- Highest-impact gaps: license-clear document-native element+bbox qrels with
+  genuine human review; unified Phoenix joins for official Terminal-Bench/tau2
+  runs; long-running metrics, persistence, and actionable alerts; a new clean
+  holdout and a passing official benchmark sample.
+- Preserve failed receipts and do not tune fixed public tasks until they pass;
+  do not convert AI review into human review or labels into acceptance evidence.
