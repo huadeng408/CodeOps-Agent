@@ -106,6 +106,49 @@ def test_encoder_encode_requires_enabled() -> None:
     assert "disabled" in str(exc.value)
 
 
+def test_clip_encoder_requires_immutable_revision() -> None:
+    from orchestrator.rag.visual.encoder import CLIPVisualEncoder
+
+    with pytest.raises(ValueError, match="immutable"):
+        CLIPVisualEncoder(model_id="openai/clip-vit-base-patch32", revision="main", device="cpu")
+
+
+def test_clip_encoder_validates_image_payload_before_model_load() -> None:
+    from orchestrator.rag.visual.encoder import CLIPVisualEncoder
+
+    encoder = CLIPVisualEncoder(
+        model_id="openai/clip-vit-base-patch32",
+        revision="3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="valid image"):
+        encoder.encode_page(b"not-an-image")
+
+
+def test_clip_encoder_rejects_empty_query_before_model_load() -> None:
+    from orchestrator.rag.visual.encoder import CLIPVisualEncoder
+
+    encoder = CLIPVisualEncoder(
+        model_id="openai/clip-vit-base-patch32",
+        revision="3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="query must not be empty"):
+        encoder.encode_query("   ")
+
+
+def test_clip_encoder_rejects_empty_batch_before_model_load() -> None:
+    from orchestrator.rag.visual.encoder import CLIPVisualEncoder
+
+    encoder = CLIPVisualEncoder(
+        model_id="openai/clip-vit-base-patch32",
+        revision="3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="must not be empty"):
+        encoder.encode_queries(["valid", " "])
+
+
 def test_artifacts_serialize_to_json_for_es() -> None:
     artifact = page_artifact("doc-1", 2, "images/p2.png", "s" * 64)
     # Must serialize to the ES doc shape without custom encoders.

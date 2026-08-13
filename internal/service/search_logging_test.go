@@ -54,4 +54,22 @@ func TestRetrievalMetricsLogsOnlyQueryHash(t *testing.T) {
 	if !strings.Contains(logged, `"latencyMs":12.5`) {
 		t.Fatalf("retrieval metrics log is missing metrics: %s", logged)
 	}
+	for _, field := range []string{`"windowSamples":1`, `"totalRequests":1`, `"health":"insufficient_samples"`} {
+		if !strings.Contains(logged, field) {
+			t.Fatalf("retrieval metrics log is missing health field %s: %s", field, logged)
+		}
+	}
+}
+
+func TestRetrievalObserverAlertsOnlyAfterMinimumSampleWindow(t *testing.T) {
+	observer := newRetrievalObserver(8)
+	for range 24 {
+		observer.Record(retrievalObservation{LatencyMs: 10_000, RerankTimeout: true})
+	}
+	if snapshot := observer.Record(retrievalObservation{LatencyMs: 10_000, RerankTimeout: true}); snapshot.Health != "alert" {
+		t.Fatalf("health = %q, want alert after minimum sample window", snapshot.Health)
+	}
+	if snapshot := newRetrievalObserver(8).Record(retrievalObservation{LatencyMs: 10_000, RerankTimeout: true}); snapshot.Health != "insufficient_samples" {
+		t.Fatalf("health = %q, want insufficient_samples before minimum window", snapshot.Health)
+	}
 }

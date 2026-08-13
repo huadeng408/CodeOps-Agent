@@ -17,7 +17,7 @@ from eval.retrieval.multimodal_metrics import Hit
 
 
 def _load_ranked(path: str | None) -> dict[str, list[Hit]]:
-    """Load ranked hits from JSON lines; None/empty => disabled path."""
+    """Load ranked hits from JSON lines; absent optional paths are not scored."""
     ranked: dict[str, list[Hit]] = {}
     if not path or not Path(path).exists():
         return ranked
@@ -52,10 +52,19 @@ def main(argv: list[str] | None = None) -> int:
     late = _load_ranked(args.late)
 
     results = compare_paths(text, visual, late, qrels)
+    paths = []
+    for result, source in zip(results, (args.text, args.visual, args.late), strict=True):
+        paths.append({
+            **result.to_dict(),
+            "status": "SCORED" if source else "NOT_RUN",
+            "source": str(Path(source).resolve()) if source else "",
+        })
+    bbox_labeled_qrels = sum(1 for qrel in qrels if qrel.bbox is not None)
     report = {
         "qrels": str(Path(args.qrels).resolve()),
         "query_count": len({q.query_id for q in qrels}),
-        "paths": [r.to_dict() for r in results],
+        "paths": paths,
+        "bbox": {"status": "SCORED" if bbox_labeled_qrels else "NOT_APPLICABLE", "labeled_qrels": bbox_labeled_qrels},
         "gpu_required": False,  # scoring is offline; encoding happens upstream
         "alias_created": False,
     }

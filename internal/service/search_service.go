@@ -103,7 +103,16 @@ type retrievalObservation struct {
 type retrievalSnapshot struct {
 	LatencyP95Ms      float64
 	RerankTimeoutRate float64
+	WindowSamples     int
+	TotalRequests     int64
+	Health            string
 }
+
+const (
+	retrievalHealthMinimumSamples = 25
+	retrievalLatencyP95AlertMs    = 5000.0
+	rerankTimeoutRateAlert        = 0.10
+)
 
 // retrievalObserver represents a retrieval observer.
 type retrievalObserver struct {
@@ -631,6 +640,9 @@ func (s *searchService) logRetrievalMetrics(query string, obs retrievalObservati
 		"rerankApplied", obs.RerankApplied,
 		"rerankTimeout", obs.RerankTimeout,
 		"rerankTimeoutRate", snapshot.RerankTimeoutRate,
+		"windowSamples", snapshot.WindowSamples,
+		"totalRequests", snapshot.TotalRequests,
+		"health", snapshot.Health,
 	)
 }
 
@@ -921,9 +933,19 @@ func (o *retrievalObserver) Record(obs retrievalObservation) retrievalSnapshot {
 		timeoutRate = float64(o.timeoutCount) / float64(o.totalRequests)
 	}
 
+	health := "healthy"
+	if o.totalRequests < retrievalHealthMinimumSamples {
+		health = "insufficient_samples"
+	} else if percentile(sorted, 0.95) > retrievalLatencyP95AlertMs || timeoutRate > rerankTimeoutRateAlert {
+		health = "alert"
+	}
+
 	return retrievalSnapshot{
 		LatencyP95Ms:      percentile(sorted, 0.95),
 		RerankTimeoutRate: timeoutRate,
+		WindowSamples:     len(sorted),
+		TotalRequests:     o.totalRequests,
+		Health:            health,
 	}
 }
 
