@@ -96,6 +96,13 @@ function Test-InitContainerSucceeded {
     return $LASTEXITCODE -eq 0 -and "$state".Trim() -eq "exited 0"
 }
 
+function Test-KafkaBrokerReady {
+    # A container can be briefly running while its broker has no usable
+    # listener. Query broker metadata before starting consumers/producers.
+    docker exec codeagent-kafka kafka-topics --bootstrap-server localhost:29092 --list 1>$null 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
 function Resolve-CorpusSetting {
     param([Parameter(Mandatory = $true)][string]$Name)
     $configPath = Join-Path $repoRoot "configs/server.yaml"
@@ -191,6 +198,7 @@ try {
     Wait-Until { Test-ContainerState "codeagent-zookeeper" @("healthy", "running") } "ZooKeeper"
     Wait-Until { Test-ContainerState "codeagent-kafka" @("healthy", "running") } "Kafka"
     Wait-Until { Test-InitContainerSucceeded "codeagent-kafka-init" } "Kafka topic initialization"
+    Wait-Until { Test-KafkaBrokerReady } "Kafka broker metadata"
     Wait-Until { Test-ContainerState "codeagent-es" @("healthy", "running") } "Elasticsearch container"
     Wait-Until { Test-ContainerState "codeagent-embedding" @("healthy", "running") } "embedding container"
     Wait-Until { Test-ContainerState "codeagent-phoenix" @("healthy", "running") } "Phoenix container"

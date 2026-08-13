@@ -318,6 +318,16 @@ def test_powershell_wrapper_waits_for_every_required_dependency() -> None:
     assert "Wait-Until" in source
 
 
+def test_powershell_wrapper_requires_kafka_metadata_before_starting_services() -> None:
+    """A running container is insufficient when the host broker is unavailable."""
+    wrapper = Path(__file__).parents[1] / "scripts" / "multimodal-rag-pilot.ps1"
+    source = wrapper.read_text(encoding="utf-8")
+
+    assert "function Test-KafkaBrokerReady" in source
+    assert "kafka-topics --bootstrap-server localhost:29092 --list" in source
+    assert 'Wait-Until { Test-KafkaBrokerReady } "Kafka broker metadata"' in source
+
+
 def test_powershell_wrapper_retains_redacted_logs_only_on_failure() -> None:
     wrapper = Path(__file__).parents[1] / "scripts" / "multimodal-rag-pilot.ps1"
     source = wrapper.read_text(encoding="utf-8")

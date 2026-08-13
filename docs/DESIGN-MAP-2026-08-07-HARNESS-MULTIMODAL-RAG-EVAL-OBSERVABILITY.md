@@ -3090,3 +3090,50 @@ is not an operational retry and must remain visibly blocked.
 The next automatic work must target real runner/artifact/trace evidence. A
 status marker, synthetic artifact, or retry of a valid semantic disagreement
 does not close any row in this table.
+
+## 42. Current-worktree MinerU RAG receipt and Kafka readiness closure (2026-08-13)
+
+### 42.1 Root cause and minimal recovery
+
+- `VERIFIED`: the first current-worktree pilot failed closed at internal
+  knowledge ingestion with HTTP 500. Go logs showed that Kafka consumers and
+  producers could not connect to `127.0.0.1:9092`.
+- `VERIFIED`: the direct infrastructure cause was not MinerU, embedding, or
+  Phoenix. Kafka had exited during startup with ZooKeeper
+  `NodeExistsException` for stale broker id `1`; Docker had briefly reported a
+  running container before the broker became usable.
+- `IMPLEMENTED`: `scripts/multimodal-rag-pilot.ps1` now waits for actual Kafka
+  metadata (`kafka-topics --bootstrap-server localhost:29092 --list`) before it
+  starts the Go server. Container status and TCP reachability alone are no
+  longer accepted as broker readiness. This is a startup gate only; it neither
+  deletes Kafka data nor alters the pipeline.
+
+### 42.2 New real receipt
+
+- `VERIFIED`: after a non-destructive ZooKeeper/Kafka restart and the metadata
+  readiness check, the second pilot completed at
+  `.tmp/multimodal-rag-pilot/20260813-current-head-02`.
+- The receipt is checksum-verified with `verify_artifact()`. It records MinerU
+  `3.4.4`, `ocr` mode, `pipeline` backend, source SHA-256
+  `05f87847014ec583bc00e6042c000e07bbaa56042b97b1907e29d13193a1040d`, and
+  four OCR elements with page and bbox provenance.
+- Run `multimodal-pilot-20260813223246-9a45ea1d` has exactly one successful
+  parse, chunk, embed, and index stage. It retrieved one result, its citation
+  wiring reports one supported citation and no unsupported citation, and the
+  Phoenix API returned one run-scoped `retrieve orchestrator /knowledge-search`
+  span on trace `82ea7696fa2b0c401088c5aa552b4471`.
+- An independent Elasticsearch lookup by the receipt's immutable
+  `document_id` found two indexed chunks containing the OCR text plus page,
+  element, bbox, file MD5, and corpus-generation provenance. The receipt
+  remains `non_gold_smoke`, `UNREVIEWED`, and `NOT_EVALUATED` for citation
+  quality.
+
+### 42.3 Evidence boundary
+
+This receipt proves the current worktree can execute MinerU explicit OCR ->
+internal ingest -> parse/chunk/embed/index -> BM25 retrieval -> citation ->
+Phoenix retrieve trace. The pilot requests `mode=bm25` and
+`disableRerank=true`; it does not prove vector retrieval, a reranker call,
+agent/tool/chat parent linkage, official scorer linkage, visual retrieval, or
+a multimodal benchmark score. Those remain separate O1-O3 and visual-gate
+tasks.
