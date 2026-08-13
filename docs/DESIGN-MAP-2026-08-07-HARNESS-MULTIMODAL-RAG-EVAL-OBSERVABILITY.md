@@ -3247,3 +3247,12 @@ error results in an explicit profile-tagged `FAIL` assertion. Fresh combined
 regressions passed (`59 passed`), and the local Phoenix health plus real API
 response shape were checked. A real O3 receipt is still absent; runner and
 official-scorer integration remains the next dependency.
+## 47. O3 exporter-before-run progress (2026-08-13)
+
+For `trace_profile="o3"`, the harness now passes its explicit Phoenix OTLP
+endpoint into `TraceCapture` before opening `eval.run`. `TraceCapture` attaches
+an OTLP batch exporter whether it creates a new SDK provider or receives an
+existing SDK provider, and marks the endpoint to avoid duplicate attachment.
+Focused capture/artifact regressions passed (`24 passed`). This removes the
+known local-capture-only root-span gap but is still not a current-HEAD O3
+receipt; a real runner must still exercise the full contract.

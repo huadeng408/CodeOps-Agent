@@ -242,6 +242,26 @@ def test_o3_trace_profile_uses_phoenix_readback_as_contract_source(
     assert assertion["verdict"] != VERDICT_PASS
 
 
+def test_o3_installs_phoenix_exporter_before_run_span(monkeypatch, tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def fake_install(self, otlp_endpoint: str = ""):  # noqa: ANN001
+        seen.append(otlp_endpoint)
+        return False
+
+    monkeypatch.setattr("eval.harness.runner.TraceCapture.install", fake_install)
+    harness = _harness(
+        tmp_path,
+        config={
+            "trace_profile": "o3",
+            "phoenix_otlp_endpoint": "http://127.0.0.1:6006/v1/traces",
+        },
+    )
+    harness.run([EvalInstance(instance_id="inst-1", task_description="t")])
+
+    assert seen == ["http://127.0.0.1:6006/v1/traces"]
+
+
 def test_resume_skipped_instances_get_a_span_with_skipped_status(tmp_path: Path) -> None:
     """§20.6.4 item 2 names 'skipped' explicitly, and §20.1 rule 7 keeps
     skipped instances in the denominator."""

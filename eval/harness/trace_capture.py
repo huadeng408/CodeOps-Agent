@@ -178,7 +178,7 @@ class TraceCapture:
             pass
         return True
 
-    def install(self) -> bool:
+    def install(self, otlp_endpoint: str = "") -> bool:
         """Attach to the global tracer provider, creating one if needed.
 
         Two paths, both required:
@@ -198,18 +198,39 @@ class TraceCapture:
 
         try:
             provider = trace_api.get_tracer_provider()
+            if otlp_endpoint:
+                self._attach_otlp_exporter(provider, otlp_endpoint)
             if self.attach_to_provider(provider):
                 return True
 
             from opentelemetry.sdk.trace import TracerProvider
 
             new_provider = TracerProvider()
+            if otlp_endpoint:
+                self._attach_otlp_exporter(new_provider, otlp_endpoint)
             if not self.attach_to_provider(new_provider):
                 return False
             trace_api.set_tracer_provider(new_provider)
             return True
         except Exception:  # noqa: BLE001 - telemetry must never break the run
             return False
+
+    @staticmethod
+    def _attach_otlp_exporter(provider: Any, endpoint: str) -> None:
+        """Add one Phoenix exporter to an SDK provider, never duplicating it."""
+        marker = "_code_agent_otlp_exporter_endpoint"
+        if getattr(provider, marker, "") == endpoint:
+            return
+        add = getattr(provider, "add_span_processor", None)
+        if not callable(add):
+            return
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        add(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        setattr(provider, marker, endpoint)
 
     # -- readout -----------------------------------------------------------
 

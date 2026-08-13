@@ -142,3 +142,18 @@ def test_summary_declares_no_collector_dependency(provider: TracerProvider) -> N
     summary = capture.summary()
     assert summary["collector"] == "none"
     assert summary["phoenix_verified"] is False
+
+
+def test_o3_exporter_can_attach_to_existing_sdk_provider(monkeypatch, provider: TracerProvider) -> None:
+    capture = TraceCapture()
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        TraceCapture,
+        "_attach_otlp_exporter",
+        staticmethod(lambda _provider, endpoint: recorded.append(endpoint)),
+    )
+    # Bypass global registration and exercise the existing-provider branch.
+    monkeypatch.setattr(trace_api, "get_tracer_provider", lambda: provider)
+
+    assert capture.install("http://phoenix/v1/traces") is True
+    assert recorded == ["http://phoenix/v1/traces"]

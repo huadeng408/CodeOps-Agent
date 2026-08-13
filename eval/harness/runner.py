@@ -254,7 +254,10 @@ class HarnessRun:
         tracer = None
         if self.config.get("trace_capture", True):
             capture = TraceCapture()
-            if capture.install():
+            otlp_endpoint = ""
+            if self.config.get("trace_profile", "default") == "o3":
+                otlp_endpoint = str(self.config.get("phoenix_otlp_endpoint", "")).strip()
+            if capture.install(otlp_endpoint=otlp_endpoint):
                 tracer = _get_tracer()
         self._capture = capture
 
