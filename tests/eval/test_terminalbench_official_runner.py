@@ -301,3 +301,15 @@ def test_terminalbench_verifier_proxy_rejects_credentials(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="must not contain credentials"):
         with scoped_verifier_proxy("http://username:password@proxy.example:7890", tmp_path):
             pass
+
+
+def test_terminalbench_receipt_uses_a_short_internal_harness_run_id() -> None:
+    from eval.swebench_work.terminalbench_proxy import internal_harness_run_id
+
+    receipt_id = "current-head-20260814-081501-proxy-debug"
+
+    run_id = internal_harness_run_id(receipt_id)
+
+    assert run_id == "tb-" + hashlib.sha256(receipt_id.encode("utf-8")).hexdigest()[:12]
+    assert len(run_id) == 15
+    assert internal_harness_run_id(receipt_id) == run_id

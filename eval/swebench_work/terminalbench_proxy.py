@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -17,6 +18,11 @@ from urllib.parse import urlparse
 
 _PROXY_ENV_KEYS = ("TERMINALBENCH_VERIFIER_PROXY", "TERMINALBENCH_VERIFIER_NO_PROXY")
 _DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
+
+
+def internal_harness_run_id(receipt_run_id: str) -> str:
+    """Return a stable short run id so Windows paths remain below MAX_PATH."""
+    return "tb-" + hashlib.sha256(receipt_run_id.encode("utf-8")).hexdigest()[:12]
 
 
 @contextmanager

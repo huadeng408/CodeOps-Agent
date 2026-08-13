@@ -43,7 +43,7 @@ repo = Path(os.environ["LOCALCODE_REPO_ROOT"])
 sys.path.insert(0, str(repo))
 
 from eval.benchmarks.terminalbench import _patch_terminal_bench_windows
-from eval.swebench_work.terminalbench_proxy import scoped_verifier_proxy
+from eval.swebench_work.terminalbench_proxy import internal_harness_run_id, scoped_verifier_proxy
 from terminal_bench.harness import Harness
 
 for stream in (sys.stdout, sys.stderr):
@@ -53,6 +53,7 @@ for stream in (sys.stdout, sys.stderr):
         pass
 
 run_id = os.environ["TERMINALBENCH_RUN_ID"]
+internal_run_id = internal_harness_run_id(run_id)
 output = Path(os.environ["TERMINALBENCH_OUTPUT_DIR"])
 output.mkdir(parents=True, exist_ok=False)
 _patch_terminal_bench_windows()
@@ -62,7 +63,7 @@ with scoped_verifier_proxy(
 ):
     harness = Harness(
         output_path=output,
-        run_id=run_id,
+        run_id=internal_run_id,
         agent_import_path="eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent",
         agent_kwargs={
             "api_key": os.environ["LOCAL_LLM_API_KEY"],
@@ -79,6 +80,7 @@ with scoped_verifier_proxy(
     results = harness.run()
 print(json.dumps({
     "run_id": run_id,
+    "harness_run_id": internal_run_id,
     "n_resolved": results.n_resolved,
     "n_unresolved": results.n_unresolved,
     "accuracy": results.accuracy,
