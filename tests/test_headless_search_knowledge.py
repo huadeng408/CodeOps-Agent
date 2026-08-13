@@ -6,7 +6,8 @@ from threading import Thread
 
 from opentelemetry import trace
 
-from eval.driver_headless import LocalToolExecutor
+from eval.adapter import EvalInstance, EvalResult
+from eval.driver_headless import HeadlessDriver, LocalToolExecutor
 from eval.harness.trace_join import eval_join_context
 
 
@@ -64,7 +65,8 @@ def test_search_knowledge_calls_go_endpoint_with_o3_policy_and_run_id(
         )
         with trace.use_span(trace.NonRecordingSpan(span_context)):
             with eval_join_context("o3-run", "o3-instance"):
-                result = LocalToolExecutor(str(tmp_path)).execute(
+                executor = LocalToolExecutor(str(tmp_path))
+                result = executor.execute(
                     "SearchKnowledge", json.dumps({"query": "What is an interface?"})
                 )
     finally:
@@ -78,7 +80,8 @@ def test_search_knowledge_calls_go_endpoint_with_o3_policy_and_run_id(
     assert "What is an interface?" not in result.output
     assert received["path"] == "/internal/orchestrator/knowledge-search"
     assert received["authorization"] == "test-only-internal-secret"
-    assert received["traceparent"] == f"00-{'1' * 32}-{'2' * 16}-01"
+    assert str(received["traceparent"]).startswith(f"00-{'1' * 32}-")
+    assert str(received["traceparent"]).endswith("-01")
     assert "eval.run_id=o3-run" in str(received["baggage"])
     assert "eval.instance_id=o3-instance" in str(received["baggage"])
     assert received["payload"] == {
@@ -88,6 +91,16 @@ def test_search_knowledge_calls_go_endpoint_with_o3_policy_and_run_id(
         "mode": "hybrid",
         "disableRerank": False,
         "runId": "o3-run",
+    }
+    assert executor.safe_evidence() == {
+        "retrieval_hits": [
+            {
+                "rank": 1,
+                "document_id": "go-spec",
+                "chunk_id": 4,
+                "score": 0.91,
+            }
+        ]
     }
 
 
@@ -149,3 +162,58 @@ def test_search_knowledge_fails_closed_when_response_has_no_stable_hit(
 
     assert result.exit_code == 1
     assert "stable hit" in result.error
+
+
+def test_strict_o3_runner_failure_never_falls_back_or_mutates_task(
+    monkeypatch, tmp_path
+) -> None:
+    driver = HeadlessDriver(strict_o3=True)
+    instance = EvalInstance(
+        instance_id="o3-instance",
+        task_description="Use SearchKnowledge to answer from the pinned corpus.",
+    )
+    original_description = instance.task_description
+
+    def fail_runner(*_args, **_kwargs):
+        raise RuntimeError("runner protocol failed")
+
+    def direct_call(*_args, **_kwargs):
+        raise AssertionError("strict O3 must never call the direct LLM fallback")
+
+    monkeypatch.setattr(driver, "_solve_with_runner", fail_runner)
+    monkeypatch.setattr(driver, "_solve_direct", direct_call)
+
+    result = driver._do_solve_inner(
+        instance,
+        str(tmp_path),
+        "trace-123",
+        cancel_event=None,
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.instance_id == "o3-instance"
+    assert result.trace_id == "trace-123"
+    assert "strict O3 ConversationRunner failure" in result.error
+    assert "runner protocol failed" in result.error
+    assert instance.task_description == original_description
+
+
+def test_strict_o3_rejects_direct_only_execution(tmp_path) -> None:
+    driver = HeadlessDriver(use_runner=False, strict_o3=True)
+    result = driver._do_solve_inner(
+        EvalInstance(instance_id="o3-instance", task_description="answer"),
+        str(tmp_path),
+        "trace-123",
+        cancel_event=None,
+    )
+
+    assert "requires ConversationRunner" in result.error
+
+
+def test_strict_o3_tool_executor_denies_non_rag_tools(tmp_path) -> None:
+    executor = LocalToolExecutor(str(tmp_path), allowed_tools=frozenset({"SearchKnowledge"}))
+
+    result = executor.execute("Read", json.dumps({"path": "anything.txt"}))
+
+    assert result.exit_code == 1
+    assert "not allowed" in result.error

@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +64,10 @@ class EvalResult:
     trace_id: str = ""
     error: str = ""
     wall_time_s: float = 0.0
+    # Only profile-approved, non-content evidence may be stored here. O3 uses
+    # stable retrieval identifiers/ranks/scores; queries, prompt text, qrels,
+    # and document bodies are forbidden.
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

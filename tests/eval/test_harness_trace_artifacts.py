@@ -183,8 +183,21 @@ def test_span_assertion_records_run_id_for_the_join(tmp_path: Path) -> None:
 
 
 def test_o3_trace_profile_is_explicitly_written_to_assertion(tmp_path: Path) -> None:
+    class O3Adapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                answer="answer",
+                evidence={
+                    "retrieval_hits": [
+                        {"rank": 1, "document_id": "doc", "chunk_id": 1, "score": 0.9}
+                    ]
+                },
+            )
+
     harness = _harness(
         tmp_path,
+        adapter=O3Adapter(),
         config={
             "trace_profile": "o3",
             "trace_capabilities": ("rag", "rerank"),
@@ -215,8 +228,21 @@ def test_o3_trace_profile_uses_phoenix_readback_as_contract_source(
         return []
 
     monkeypatch.setattr("eval.harness.phoenix.read_run_spans", fake_readback)
+    class O3Adapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                answer="answer",
+                evidence={
+                    "retrieval_hits": [
+                        {"rank": 1, "document_id": "doc", "chunk_id": 1, "score": 0.9}
+                    ]
+                },
+            )
+
     harness = _harness(
         tmp_path,
+        adapter=O3Adapter(),
         config={
             "trace_profile": "o3",
             "trace_capabilities": ("rag", "rerank"),

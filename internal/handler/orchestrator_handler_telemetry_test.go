@@ -42,6 +42,15 @@ func (telemetrySupportService) PersistTurn(context.Context, *model.OrchestratorP
 
 var _ service.OrchestratorSupportService = telemetrySupportService{}
 
+type rerankTelemetrySupportService struct{ telemetrySupportService }
+
+func (rerankTelemetrySupportService) SearchKnowledge(ctx context.Context, _ *model.OrchestratorKnowledgeSearchRequest) (*model.OrchestratorKnowledgeSearchResponse, error) {
+	service.MarkRerankApplied(ctx)
+	return &model.OrchestratorKnowledgeSearchResponse{}, nil
+}
+
+var _ service.OrchestratorSupportService = rerankTelemetrySupportService{}
+
 type telemetrySpan struct{ attributes []attribute.KeyValue }
 
 func (*telemetrySpan) End() {}
@@ -114,5 +123,43 @@ func TestSearchKnowledgeRejectsRunIDThatDisagreesWithW3CBaggage(t *testing.T) {
 	}
 	if tracer.span != nil {
 		t.Fatal("mismatched run ID must not create a retrieve span")
+	}
+}
+
+func TestSearchKnowledgeRecordsConfiguredPinsAndActualRerankOutcome(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tracer := &telemetryTracer{}
+	handler := NewOrchestratorHandler(rerankTelemetrySupportService{})
+	handler.SetTracer(tracer)
+	handler.SetRAGTracePins("techdocs-2026-07-30-v1", "knowledge_base_v2_bge_m3")
+	router := gin.New()
+	router.Use(middleware.TraceContextMiddleware())
+	router.POST("/internal/orchestrator/knowledge-search", handler.SearchKnowledge)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/orchestrator/knowledge-search", strings.NewReader(`{"user":{"id":7},"query":"interface","topK":5,"mode":"hybrid","runId":"run-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("traceparent", "00-11111111111111111111111111111111-2222222222222222-01")
+	req.Header.Set("baggage", "eval.run_id=run-1,eval.instance_id=instance-1")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if tracer.span == nil {
+		t.Fatal("expected retrieve span")
+	}
+	values := map[attribute.Key]attribute.Value{}
+	for _, kv := range tracer.span.attributes {
+		values[kv.Key] = kv.Value
+	}
+	if got, want := values[attribute.Key("rag.corpus_generation")].AsString(), "techdocs-2026-07-30-v1"; got != want {
+		t.Fatalf("corpus generation = %q, want %q", got, want)
+	}
+	if got, want := values[attribute.Key("rag.index_name")].AsString(), "knowledge_base_v2_bge_m3"; got != want {
+		t.Fatalf("physical index = %q, want %q", got, want)
+	}
+	if !values[attribute.Key(genai.AttrRerankerApplied)].AsBool() {
+		t.Fatal("reranker outcome must report the real successful call")
 	}
 }

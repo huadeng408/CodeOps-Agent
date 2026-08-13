@@ -70,3 +70,19 @@ def test_search_knowledge_schema_is_bounded_and_auto_allowed() -> None:
     assert props["top_k"] == {"type": "integer", "minimum": 1, "maximum": 50}
     assert props["mode"]["enum"] == ["hybrid", "bm25", "vector"]
     assert props["disable_rerank"]["type"] == "boolean"
+
+
+def test_registry_allowlist_hides_other_tools_and_mcp_entries(tmp_path) -> None:
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".agent" / "mcp-tools.json").write_text(
+        '{"tools":[{"name":"external_tool","input_schema":{"type":"object"}}]}',
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry(str(tmp_path), allowed_tools=frozenset({"SearchKnowledge"}))
+
+    assert [tool.name for tool in registry.list()] == ["SearchKnowledge"]
+    assert [schema["function"]["name"] for schema in registry.openai_schemas()] == [
+        "SearchKnowledge"
+    ]
+    assert registry.get("Read") is None

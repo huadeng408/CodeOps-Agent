@@ -100,8 +100,18 @@ class LocalToolExecutor:
     Unsupported tools return a stub error so the LLM can adapt.
     """
 
-    def __init__(self, working_dir: str) -> None:
+    def __init__(
+        self,
+        working_dir: str,
+        allowed_tools: frozenset[str] | None = None,
+    ) -> None:
         self._cwd = Path(working_dir).resolve()
+        self._safe_evidence: dict[str, list[dict[str, Any]]] = {"retrieval_hits": []}
+        self._allowed_tools = allowed_tools
+
+    def safe_evidence(self) -> dict[str, list[dict[str, Any]]]:
+        """Return only stable, non-content evidence from the last RAG call."""
+        return {"retrieval_hits": [dict(hit) for hit in self._safe_evidence["retrieval_hits"]]}
 
     # -- public API ---------------------------------------------------------
 
@@ -129,6 +139,11 @@ class LocalToolExecutor:
             return result
 
     def _execute_inner(self, tool_name: str, params_json: str) -> _LocalToolResult:
+        if self._allowed_tools is not None and tool_name not in self._allowed_tools:
+            return _LocalToolResult(
+                error=f"Tool not allowed in this evaluation profile: {tool_name}",
+                exit_code=1,
+            )
         params: dict[str, Any] = {}
         try:
             params = json.loads(params_json or "{}")
@@ -505,6 +520,7 @@ class LocalToolExecutor:
             )
 
         lines: list[str] = []
+        evidence_hits: list[dict[str, Any]] = []
         for rank, item in enumerate(results, start=1):
             if not isinstance(item, dict):
                 continue
@@ -512,6 +528,22 @@ class LocalToolExecutor:
             chunk_id = str(item.get("chunkId", "")).strip()
             if not document_id or not chunk_id:
                 continue
+            try:
+                safe_chunk_id: int | str = int(chunk_id)
+            except ValueError:
+                safe_chunk_id = chunk_id
+            try:
+                safe_score = float(item.get("score", 0.0))
+            except (TypeError, ValueError):
+                safe_score = 0.0
+            evidence_hits.append(
+                {
+                    "rank": rank,
+                    "document_id": document_id,
+                    "chunk_id": safe_chunk_id,
+                    "score": safe_score,
+                }
+            )
             lines.append(
                 "[rank {rank}] document={document} chunk={chunk} score={score}\n{text}".format(
                     rank=rank,
@@ -526,6 +558,7 @@ class LocalToolExecutor:
                 error="SearchKnowledge response has no stable hit",
                 exit_code=1,
             )
+        self._safe_evidence = {"retrieval_hits": evidence_hits}
         output, truncated = self._truncate("\n\n".join(lines) if lines else "(no results)")
         return _LocalToolResult(output=output, truncated=truncated)
 
@@ -574,6 +607,9 @@ class HeadlessDriver(DefaultAgentAdapter):
     use_runner:
         If ``True``, always attempt the ConversationRunner path first.
         Default ``True``.
+    strict_o3:
+        Require the ConversationRunner execution path. When it fails, return
+        an error instead of issuing a direct LLM fallback request.
     timeout_s:
         Per-request timeout in seconds.
     """
@@ -584,6 +620,7 @@ class HeadlessDriver(DefaultAgentAdapter):
         base_url: str | None = None,
         api_key: str | None = None,
         use_runner: bool = True,
+        strict_o3: bool = False,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> None:
         super().__init__()
@@ -596,6 +633,7 @@ class HeadlessDriver(DefaultAgentAdapter):
         self.api_key = api_key or os.environ.get("LOCAL_LLM_API_KEY", "ollama")
         self.timeout_s = timeout_s
         self.use_runner = use_runner
+        self.strict_o3 = strict_o3
 
         # Lazy-initialised LLM client
         self._llm: Any = None
@@ -634,10 +672,25 @@ class HeadlessDriver(DefaultAgentAdapter):
         cancel_event: Any,
     ) -> EvalResult:
         # ---- path 1: full ConversationRunner ----
+        if self.strict_o3 and not self.use_runner:
+            return EvalResult(
+                instance_id=instance.instance_id,
+                error="strict O3 requires ConversationRunner; direct-only execution is forbidden",
+                trace_id=trace_id,
+            )
         if self.use_runner:
             try:
                 return self._solve_with_runner(instance, working_dir, trace_id, cancel_event)
             except Exception as exc:
+                if self.strict_o3:
+                    return EvalResult(
+                        instance_id=instance.instance_id,
+                        error=(
+                            "strict O3 ConversationRunner failure: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        trace_id=trace_id,
+                    )
                 # Log and fall through to direct path
                 sys.stderr.write(
                     f"[eval] ConversationRunner path failed for {instance.instance_id}, "
@@ -706,7 +759,10 @@ class HeadlessDriver(DefaultAgentAdapter):
 
         # Build the orchestrator components
         graph = build_graph()
-        tools = ToolRegistry(working_dir)
+        tools = ToolRegistry(
+            working_dir,
+            allowed_tools=frozenset({"SearchKnowledge"}) if self.strict_o3 else None,
+        )
         todo_mgr = TodoManager()
         memory_mgr = MemoryManager(str(Path(working_dir) / ".agent" / "memory"))
         skills_mgr = SkillManager()
@@ -756,7 +812,10 @@ class HeadlessDriver(DefaultAgentAdapter):
             cancel_event=cancel_event,
         )
 
-        tool_executor = LocalToolExecutor(working_dir)
+        tool_executor = LocalToolExecutor(
+            working_dir,
+            allowed_tools=frozenset({"SearchKnowledge"}) if self.strict_o3 else None,
+        )
         final_text_parts: list[str] = []
         tokens_in = 0
         tokens_out = 0
@@ -894,6 +953,9 @@ class HeadlessDriver(DefaultAgentAdapter):
             error = ""
         else:
             error = "runner ended without success and produced no patch or answer"
+        evidence = tool_executor.safe_evidence() if self.strict_o3 else {}
+        if self.strict_o3 and not evidence["retrieval_hits"]:
+            error = "strict O3 requires a successful SearchKnowledge call with stable hits"
 
         return EvalResult(
             instance_id=instance.instance_id,
@@ -904,6 +966,7 @@ class HeadlessDriver(DefaultAgentAdapter):
             tokens_out=tokens_out,
             trace_id=trace_id,
             error=error,
+            evidence=evidence,
         )
 
     # ------------------------------------------------------------------
@@ -1076,6 +1139,7 @@ def create_driver(
     base_url: str | None = None,
     api_key: str | None = None,
     use_runner: bool = True,
+    strict_o3: bool = False,
 ) -> HeadlessDriver:
     """Create a :class:`HeadlessDriver` with the given or env-default settings.
 
@@ -1090,5 +1154,9 @@ def create_driver(
     order explicit argument -> ``LOCAL_LLM_API_KEY`` -> ``"ollama"``.
     """
     return HeadlessDriver(
-        model=model, base_url=base_url, api_key=api_key, use_runner=use_runner
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        use_runner=use_runner,
+        strict_o3=strict_o3,
     )

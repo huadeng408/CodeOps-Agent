@@ -10,13 +10,16 @@ import (
 	"code-agent/pkg/log"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 )
 
 // OrchestratorHandler serves internal endpoints consumed by the external LangGraph service.
 type OrchestratorHandler struct {
-	supportService service.OrchestratorSupportService
-	tracer         genai.Tracer
+	supportService   service.OrchestratorSupportService
+	tracer           genai.Tracer
+	corpusGeneration string
+	indexName        string
 }
 
 // NewOrchestratorHandler creates a new internal orchestrator handler.
@@ -27,6 +30,13 @@ func NewOrchestratorHandler(supportService service.OrchestratorSupportService) *
 // SetTracer injects a genai.Tracer for creating retrieve/rerank spans.
 func (h *OrchestratorHandler) SetTracer(t genai.Tracer) {
 	h.tracer = t
+}
+
+// SetRAGTracePins supplies the immutable corpus generation and physical index
+// selected at server startup for retrieval evidence spans.
+func (h *OrchestratorHandler) SetRAGTracePins(corpusGeneration, indexName string) {
+	h.corpusGeneration = strings.TrimSpace(corpusGeneration)
+	h.indexName = strings.TrimSpace(indexName)
 }
 
 // LoadSession returns the current conversation id and history for a user.
@@ -91,7 +101,7 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, rerankOutcome := service.WithRerankOutcome(c.Request.Context())
 	if baggageRunID := strings.TrimSpace(baggage.FromContext(ctx).Member(genai.AttrEvalRunID).Value()); baggageRunID != "" && req.RunID != "" && baggageRunID != req.RunID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "evaluation run context does not match request"})
 		return
@@ -106,6 +116,12 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 			genai.TopNKV(req.TopK),
 			genai.RetrievalModeKV(string(req.Mode)),
 		)
+		if h.corpusGeneration != "" {
+			retrieveSpan.SetAttributes(genai.CorpusGenerationKV(h.corpusGeneration))
+		}
+		if h.indexName != "" {
+			retrieveSpan.SetAttributes(attribute.String("rag.index_name", h.indexName))
+		}
 		if runID := strings.TrimSpace(req.RunID); runID != "" && len(runID) <= 96 {
 			retrieveSpan.SetAttributes(genai.EvalRunIDKV(runID))
 			if instanceID := strings.TrimSpace(baggage.FromContext(ctx).Member(genai.AttrEvalInstanceID).Value()); instanceID != "" && len(instanceID) <= 96 {
@@ -123,6 +139,9 @@ func (h *OrchestratorHandler) SearchKnowledge(c *gin.Context) {
 		log.Errorf("[OrchestratorHandler] knowledge search failed query=%q mode=%s err=%v", req.Query, req.Mode, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search knowledge"})
 		return
+	}
+	if retrieveSpan != nil {
+		retrieveSpan.SetAttributes(genai.RerankerAppliedKV(rerankOutcome.Applied()))
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": resp, "message": "success"})

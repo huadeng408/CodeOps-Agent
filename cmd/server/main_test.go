@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,53 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestResolveSearchTraceIndexRequiresSingleExpectedAliasTarget(t *testing.T) {
+	resolve := func(_ context.Context, alias string) ([]string, error) {
+		if alias != "knowledge_base_current" {
+			t.Fatalf("alias = %q", alias)
+		}
+		return []string{"knowledge_base_v2_bge_m3"}, nil
+	}
+
+	got, err := resolveSearchTraceIndex(context.Background(), "knowledge_base_current", "knowledge_base_v2_bge_m3", resolve)
+	if err != nil {
+		t.Fatalf("resolveSearchTraceIndex: %v", err)
+	}
+	if got != "knowledge_base_v2_bge_m3" {
+		t.Fatalf("physical index = %q", got)
+	}
+}
+
+func TestResolveSearchTraceIndexRejectsAliasDrift(t *testing.T) {
+	resolve := func(_ context.Context, _ string) ([]string, error) {
+		return []string{"knowledge_base", "knowledge_base_v2_bge_m3"}, nil
+	}
+
+	_, err := resolveSearchTraceIndex(context.Background(), "knowledge_base_current", "knowledge_base_v2_bge_m3", resolve)
+	if err == nil || !strings.Contains(err.Error(), "exactly one expected physical index") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveTraceIndexForStartupDegradesOutsideStrictO3(t *testing.T) {
+	resolve := func(_ context.Context, _ string) ([]string, error) {
+		return nil, fmt.Errorf("elasticsearch unavailable")
+	}
+
+	got, err := resolveTraceIndexForStartup(context.Background(), false, "knowledge_base_current", "knowledge_base_v2_bge_m3", resolve)
+	if err != nil {
+		t.Fatalf("non-strict startup must preserve ES degradation: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("non-strict startup physical pin = %q, want empty", got)
+	}
+
+	_, err = resolveTraceIndexForStartup(context.Background(), true, "knowledge_base_current", "knowledge_base_v2_bge_m3", resolve)
+	if err == nil || !strings.Contains(err.Error(), "elasticsearch unavailable") {
+		t.Fatalf("strict O3 startup error = %v", err)
+	}
+}
 
 func TestHealthzReportsEmbeddingPreflightOK(t *testing.T) {
 	gin.SetMode(gin.TestMode)

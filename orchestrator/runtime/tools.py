@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Collection
 
 from codeagent import orchestrator_pb2
 
@@ -27,17 +27,24 @@ class ToolSpec:
 
 
 class ToolRegistry:
-    def __init__(self, project_root: str | None = None) -> None:
+    def __init__(
+        self,
+        project_root: str | None = None,
+        allowed_tools: Collection[str] | None = None,
+    ) -> None:
         self._project_root = Path(project_root).resolve() if project_root else None
         self._mcp_manifest_path = (
             self._project_root / ".agent" / "mcp-tools.json" if self._project_root else None
         )
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tool_names: set[str] = set()
+        self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         for spec in self._default_tools():
             self.register(spec, builtin=True)
 
     def register(self, spec: ToolSpec, builtin: bool = False) -> None:
+        if self._allowed_tools is not None and spec.name not in self._allowed_tools:
+            return
         self._tools[spec.name] = spec
         if not builtin:
             self._mcp_tool_names.add(spec.name)
@@ -80,6 +87,8 @@ class ToolRegistry:
                 continue
             name = str(raw.get("name", "")).strip()
             if not name:
+                continue
+            if self._allowed_tools is not None and name not in self._allowed_tools:
                 continue
             description = str(raw.get("description", "")).strip() or "MCP tool"
             server = str(raw.get("server", "")).strip()

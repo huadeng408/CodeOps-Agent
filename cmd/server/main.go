@@ -155,6 +155,23 @@ func main() {
 		log.Errorf("search service configuration invalid: %v", err)
 		return
 	}
+	strictTracePins := strings.EqualFold(strings.TrimSpace(os.Getenv("CODE_AGENT_STRICT_TRACE_PINS")), "true")
+	traceIndex, err := resolveTraceIndexForStartup(
+		context.Background(),
+		strictTracePins,
+		searchIndex,
+		cfg.Corpus.TextIndex,
+		func(ctx context.Context, alias string) ([]string, error) {
+			if es.ESClient == nil {
+				return nil, fmt.Errorf("elasticsearch client is unavailable")
+			}
+			return es.NewKnowledgeIndexManager(es.ESClient, cfg.Elasticsearch.Addresses).ReadAlias(ctx, alias)
+		},
+	)
+	if err != nil {
+		log.Errorf("search trace provenance invalid in strict mode: %v", err)
+		return
+	}
 	searchService := service.NewSearchService(
 		embeddingClient,
 		rerankerClient,
@@ -298,11 +315,12 @@ func main() {
 			}
 		}
 
-	internalGroup := r.Group("/internal")
-	internalGroup.Use(middleware.TraceContextMiddleware(), middleware.InternalAuthMiddleware())
+		internalGroup := r.Group("/internal")
+		internalGroup.Use(middleware.TraceContextMiddleware(), middleware.InternalAuthMiddleware())
 		{
 			orchHandler := handler.NewOrchestratorHandler(orchestratorSupportService)
 			orchHandler.SetTracer(telemetry)
+			orchHandler.SetRAGTracePins(cfg.Corpus.Generation, traceIndex)
 			corpusSourceRepo := repository.NewKnowledgeSourceRepository(database.DB)
 			corpusDocRepo := repository.NewKnowledgeDocumentRepository(database.DB)
 			corpusIngestService := service.NewCorpusIngestService(corpusSourceRepo, corpusDocRepo, cfg.Corpus, nil)
@@ -352,6 +370,38 @@ func searchReadIndex(cfg serverconfig.Config) (string, error) {
 		return "", fmt.Errorf("corpus.read_alias must be configured for search")
 	}
 	return readAlias, nil
+}
+
+type aliasResolver func(context.Context, string) ([]string, error)
+
+// resolveSearchTraceIndex binds the configured read alias to the physical
+// index that the live Elasticsearch cluster actually returns. O3 evidence may
+// only claim a pin after this single-target, expected-index check succeeds.
+func resolveSearchTraceIndex(ctx context.Context, readAlias, expectedIndex string, resolve aliasResolver) (string, error) {
+	readAlias = strings.TrimSpace(readAlias)
+	expectedIndex = strings.TrimSpace(expectedIndex)
+	if readAlias == "" || expectedIndex == "" {
+		return "", fmt.Errorf("read alias and expected physical index are required")
+	}
+	targets, err := resolve(ctx, readAlias)
+	if err != nil {
+		return "", fmt.Errorf("resolve read alias %q: %w", readAlias, err)
+	}
+	if len(targets) != 1 || strings.TrimSpace(targets[0]) != expectedIndex {
+		return "", fmt.Errorf("read alias %q must resolve to exactly one expected physical index %q, got %v", readAlias, expectedIndex, targets)
+	}
+	return expectedIndex, nil
+}
+
+// resolveTraceIndexForStartup keeps the normal server's documented ES
+// degradation behavior. O3 explicitly opts into strict pins and then must not
+// start unless the live read alias resolves to the intended physical index.
+func resolveTraceIndexForStartup(ctx context.Context, strict bool, readAlias, expectedIndex string, resolve aliasResolver) (string, error) {
+	index, err := resolveSearchTraceIndex(ctx, readAlias, expectedIndex, resolve)
+	if err != nil && !strict {
+		return "", nil
+	}
+	return index, err
 }
 
 // healthzHandler serves the liveness endpoint, reporting the embedding

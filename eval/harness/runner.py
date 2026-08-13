@@ -468,6 +468,8 @@ class HarnessRun:
             "error": result.error,
             "wall_time_s": result.wall_time_s,
         }
+        if self.config.get("trace_profile", "default") == "o3":
+            prediction["evidence"] = _validate_o3_evidence(result.evidence)
 
         # Scorer
         if self.scorer is not None:
@@ -626,6 +628,46 @@ def _write_trace_artifacts(harness: HarnessRun) -> None:
 
 class ScorerError(Exception):
     """Raised when the scorer callback fails; classified as ERROR_SCORER."""
+
+
+def _validate_o3_evidence(evidence: Any) -> dict[str, list[dict[str, Any]]]:
+    """Validate the only evidence shape that an O3 artifact may persist.
+
+    It deliberately does not tolerate arbitrary nested metadata: an O3 receipt
+    may attest to the real retrieved IDs and ranks, but not raw query/prompt,
+    tool output, document text, scorer labels, or credentials.
+    """
+    if not isinstance(evidence, dict) or set(evidence) != {"retrieval_hits"}:
+        raise ValueError("O3 evidence must contain only retrieval_hits")
+    hits = evidence["retrieval_hits"]
+    if not isinstance(hits, list) or not hits:
+        raise ValueError("O3 evidence requires at least one retrieval hit")
+    safe_hits: list[dict[str, Any]] = []
+    allowed = {"rank", "document_id", "chunk_id", "score"}
+    for hit in hits:
+        if not isinstance(hit, dict) or set(hit) != allowed:
+            raise ValueError("O3 retrieval evidence has an unsafe hit shape")
+        rank = hit["rank"]
+        document_id = hit["document_id"]
+        chunk_id = hit["chunk_id"]
+        score = hit["score"]
+        if not isinstance(rank, int) or rank <= 0:
+            raise ValueError("O3 retrieval evidence rank must be a positive integer")
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ValueError("O3 retrieval evidence document_id is required")
+        if not isinstance(chunk_id, (int, str)) or isinstance(chunk_id, bool):
+            raise ValueError("O3 retrieval evidence chunk_id is invalid")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            raise ValueError("O3 retrieval evidence score is invalid")
+        safe_hits.append(
+            {
+                "rank": rank,
+                "document_id": document_id,
+                "chunk_id": chunk_id,
+                "score": float(score),
+            }
+        )
+    return {"retrieval_hits": safe_hits}
 
 
 

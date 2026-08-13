@@ -521,6 +521,7 @@ func (s *searchService) rerankHits(ctx context.Context, query string, fusedHits 
 		log.Warnf("[SearchService] rerank degraded for query=%q timeout=%t: %v", query, timeoutHit, err)
 		return truncateHits(fusedHits, returnTopK), false, timeoutHit
 	}
+	MarkRerankApplied(ctx)
 
 	reranked := make([]retrievalHit, 0, minInt(returnTopK, len(candidates)))
 	seen := make(map[int]struct{}, len(results))
