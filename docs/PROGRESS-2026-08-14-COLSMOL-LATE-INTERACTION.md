@@ -72,9 +72,12 @@ The visual alias stays untouched.
 - `docling-project/DocLayNet` has crowd-sourced page-layout boxes, but it is a
   layout-detection corpus rather than question-to-evidence retrieval qrels.
   It must not be merged with DocVQA and reported as a bbox retrieval score.
-- `NTT-hil-insight/VisualMRC` is a visual QA corpus, but this investigation did
-  not establish a compatible question-to-evidence bbox schema from its public
-  metadata. It is not selected as a bbox evaluation source.
+- `NTT-hil-insight/VisualMRC` does expose `question`, `relevant`, and
+  `bounding_boxes` in its public schema, so it is technically a compatible
+  candidate. It is gated, however, and its evaluation license permits only
+  internal evaluation while prohibiting transfer or distribution. It is
+  therefore `LICENSE_BLOCKED`: no bytes were downloaded, no access terms were
+  accepted, and it is not selected as project data.
 - A pinned public source with jointly licensed question/evidence/page/bbox
   labels remains required before running localization metrics.
 
