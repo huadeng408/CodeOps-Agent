@@ -41,3 +41,20 @@
 多模态 qrels 生成后复用 `orchestrator/eval/annotation_export.py` 的同一套导出与
 计数接口（`export_worksheet` / `validate_counts` / `count_reviewed`），确保文本与
 多模态两套人工复核流程一致。
+## 2026-08-14 Candidate Materialization
+
+`orchestrator.eval.mineru_page_candidates.materialize_page_candidates()` is
+now the supported pre-review importer. It accepts only the existing MinerU
+`content_list.json` / `middle.json`, rendered page assets, their pixel
+dimensions, an explicit OCR declaration, and source pin/license metadata. It
+normalizes each element bbox to `page_1000_xyxy`, hashes both the OCR payload
+and the rendered page image, requires `middle.json` itself to declare explicit
+OCR, records its hash, and validates PNG/JPEG page dimensions before it emits
+only `AI_CANDIDATE` records.
+
+Candidates are not Qrels and are not scoreable. They must flow through
+`export_review_worksheet()` and `freeze_human_reviewed_evidence()` with a real
+signed human decision before a separate Qrels-release process can be designed.
+The current repository has no license-clear document-native
+question/page/element/bbox source material, so no candidate file or Qrels has
+been generated from the test fixtures.
