@@ -35,7 +35,7 @@ def _public_key_b64(private_key: Ed25519PrivateKey) -> str:
     ).decode("ascii")
 
 
-def _signed_receipt(payload: dict[str, str], private_key: Ed25519PrivateKey) -> dict[str, str]:
+def _signed_receipt(payload: dict[str, object], private_key: Ed25519PrivateKey) -> dict[str, object]:
     message = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
         **payload,
@@ -43,11 +43,11 @@ def _signed_receipt(payload: dict[str, str], private_key: Ed25519PrivateKey) -> 
     }
 
 
-def _candidate() -> dict:
+def _candidate(index: int = 1) -> dict:
     return {
         "schema_version": "multimodal-evidence-candidate/v1",
         "candidate_status": "AI_CANDIDATE",
-        "candidate_id": "candidate-001",
+        "candidate_id": f"candidate-{index:03d}",
         "document_id": "dude@pin:sample.pdf",
         "page_id": "dude@pin:sample.pdf:p0",
         "element_id": "dude@pin:sample.pdf:p0:e1",
@@ -69,18 +69,18 @@ def _candidate() -> dict:
     }
 
 
-def _inputs(tmp_path: Path) -> dict[str, object]:
-    candidates = _write_jsonl(tmp_path / "candidates.jsonl", [_candidate()])
+def _inputs(tmp_path: Path, count: int = 1) -> dict[str, object]:
+    candidates = _write_jsonl(tmp_path / "candidates.jsonl", [_candidate(index) for index in range(1, count + 1)])
     decisions = _write_jsonl(
         tmp_path / "decisions.jsonl",
         [{
-            "candidate_id": "candidate-001",
+            "candidate_id": f"candidate-{index:03d}",
             "review_decision": "ACCEPT",
             "corrected_bbox": None,
             "review_note": "The page element is readable and accurately bounded.",
             "reviewed_at": "2026-08-14T00:00:00Z",
             "reviewer_id": "evidence-reviewer",
-        }],
+        } for index in range(1, count + 1)],
     )
     evidence_key = Ed25519PrivateKey.generate()
     evidence_key_id = "evidence-reviewer-key-1"
@@ -98,13 +98,13 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
     links = _write_jsonl(
         tmp_path / "query-links.jsonl",
         [{
-            "query_id": "dude-q001",
-            "query": "What grade did the person receive out of 100?",
-            "candidate_id": "candidate-001",
+            "query_id": f"dude-q{index:03d}",
+            "query": "What grade did the person receive out of 100?" if count == 1 else f"What grade did the person receive out of 100? ({index})",
+            "candidate_id": f"candidate-{index:03d}",
             "review_note": "The selected element contains the requested grade.",
             "reviewed_at": "2026-08-14T00:01:00Z",
             "reviewer_id": "qrel-reviewer",
-        }],
+        } for index in range(1, count + 1)],
     )
     allowlist = _write_json(
         tmp_path / "license-allowlist.json",
@@ -130,9 +130,10 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
             "middle_sha256": "c" * 64,
         },
     )
-    candidate = json.loads(candidates.read_text(encoding="utf-8"))
-    candidate["mineru"]["receipt_sha256"] = _sha256(ocr_receipt)
-    _write_jsonl(candidates, [candidate])
+    candidate_rows = [json.loads(line) for line in candidates.read_text(encoding="utf-8").splitlines()]
+    for candidate in candidate_rows:
+        candidate["mineru"]["receipt_sha256"] = _sha256(ocr_receipt)
+    _write_jsonl(candidates, candidate_rows)
     evidence_receipt = _write_json(
         tmp_path / "evidence-receipt.json",
         _signed_receipt(
@@ -287,4 +288,233 @@ def test_materialize_page_qrels_rejects_document_missing_from_signed_allowlist(t
             license_allowlist_path=inputs["allowlist"],
             ocr_receipts_by_document={"dude@pin:sample.pdf": inputs["ocr_receipt"]},
             out_dir=tmp_path / "page-qrels",
+        )
+
+
+def _materialization_kwargs(inputs: dict[str, object]) -> dict[str, object]:
+    return {
+        "candidates_path": inputs["candidates"],
+        "decisions_path": inputs["decisions"],
+        "evidence_receipt_path": inputs["evidence_receipt"],
+        "evidence_reviewer_public_key_b64": inputs["evidence_key"],
+        "expected_evidence_reviewer_key_id": inputs["evidence_key_id"],
+        "query_links_path": inputs["links"],
+        "query_links_receipt_path": inputs["link_receipt"],
+        "link_reviewer_public_key_b64": inputs["link_key"],
+        "expected_link_reviewer_key_id": inputs["link_key_id"],
+        "license_allowlist_path": inputs["allowlist"],
+        "ocr_receipts_by_document": {"dude@pin:sample.pdf": inputs["ocr_receipt"]},
+    }
+
+
+def _write_release_inputs(page_qrels_dir: Path, count: int) -> tuple[dict[str, object], Path, Path, Path, Path, Path, str, str]:
+    from orchestrator.eval.multimodal_page_qrels import materialize_human_reviewed_page_qrels
+
+    inputs = _inputs(page_qrels_dir.parent, count=count)
+    materialize_human_reviewed_page_qrels(**_materialization_kwargs(inputs), out_dir=page_qrels_dir)
+    qrels = page_qrels_dir / "qrels.jsonl"
+    release_key = Ed25519PrivateKey.generate()
+    release_key_id = "release-workflow-key-1"
+    contamination_report = (page_qrels_dir / "contamination-report.jsonl")
+    contamination_report.write_text('{"layer":"exact","verdict":"clean"}\n', encoding="utf-8")
+    scorer_predictions = page_qrels_dir / "scorer-predictions.jsonl"
+    scorer_predictions.write_text('{"query_id":"dude-q001","page_id":"dude@pin:sample.pdf:p0"}\n', encoding="utf-8")
+    split = _write_json(
+        page_qrels_dir / "split-freeze.json",
+        _signed_receipt({
+            "schema_version": "multimodal-qrels-split-freeze/v1",
+            "qrels_sha256": _sha256(qrels),
+            "split": "test",
+            "split_frozen": True,
+            "reviewer_key_id": release_key_id,
+        }, release_key),
+    )
+    contamination = _write_json(
+        page_qrels_dir / "contamination.json",
+        _signed_receipt({
+            "schema_version": "multimodal-qrels-contamination/v1",
+            "qrels_sha256": _sha256(qrels),
+            "report_sha256": _sha256(contamination_report),
+            "verdict": "CLEAN",
+            "layers_completed": ["exact", "containment", "minhash", "embedding"],
+            "reviewer_key_id": release_key_id,
+        }, release_key),
+    )
+    scorer = _write_json(
+        page_qrels_dir / "scorer.json",
+        _signed_receipt({
+            "schema_version": "multimodal-qrels-independent-scorer/v1",
+            "qrels_sha256": _sha256(qrels),
+            "scorer_id": "official-vidore",
+            "predictions_sha256": _sha256(scorer_predictions),
+            "independent": True,
+            "reviewer_key_id": release_key_id,
+        }, release_key),
+    )
+    return inputs, split, contamination, contamination_report, scorer, scorer_predictions, _public_key_b64(release_key), release_key_id
+
+
+def test_release_page_qrels_rejects_less_than_120_unique_queries(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=119)
+
+    with pytest.raises(HumanPageQrelsError, match="PAGE_QRELS_MINIMUM_QUERY_COUNT"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
+        )
+
+
+def test_release_page_qrels_hash_binds_all_required_release_receipts(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import release_human_reviewed_page_qrels
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+
+    released = release_human_reviewed_page_qrels(
+        page_qrels_dir=page_qrels_dir,
+        source_materialization_kwargs=_materialization_kwargs(inputs),
+        split_freeze_receipt_path=split,
+        contamination_receipt_path=contamination,
+        contamination_report_path=contamination_report,
+        independent_scorer_receipt_path=scorer,
+        scorer_predictions_path=scorer_predictions,
+        release_reviewer_public_key_b64=release_key,
+        expected_release_reviewer_key_id=release_key_id,
+        out_dir=tmp_path / "released",
+    )
+
+    manifest = json.loads((released / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "HUMAN_REVIEWED_PAGE_QRELS_RELEASED"
+    assert manifest["scoreable"] is True
+    assert manifest["qrels_count"] == 120
+    assert manifest["split_freeze_receipt_sha256"] == _sha256(split)
+    assert manifest["contamination_receipt_sha256"] == _sha256(contamination)
+    assert manifest["independent_scorer_receipt_sha256"] == _sha256(scorer)
+
+
+def test_release_page_qrels_requires_materialized_human_and_ocr_provenance(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    manifest_path = page_qrels_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["query_links_receipt_sha256"]
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(HumanPageQrelsError, match="PAGE_QRELS_SOURCE_INVALID"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
+        )
+
+
+def test_release_page_qrels_rejects_malformed_contamination_layers(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    contamination_payload = json.loads(contamination.read_text(encoding="utf-8"))
+    contamination_payload["layers_completed"] = 4
+    _write_json(contamination, contamination_payload)
+
+    with pytest.raises(HumanPageQrelsError, match="CONTAMINATION_RECEIPT_INVALID"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
+        )
+
+
+def test_release_page_qrels_rejects_qrels_rewritten_after_materialization(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    qrels_path = page_qrels_dir / "qrels.jsonl"
+    rows = [json.loads(line) for line in qrels_path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["query"] = "rewritten after signed materialization"
+    _write_jsonl(qrels_path, rows)
+    manifest_path = page_qrels_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["qrels_sha256"] = _sha256(qrels_path)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(HumanPageQrelsError, match="PAGE_QRELS_SOURCE_REBUILD_INVALID"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
+        )
+
+
+def test_release_page_qrels_rejects_tampered_signed_contamination_receipt(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    receipt = json.loads(contamination.read_text(encoding="utf-8"))
+    receipt["verdict"] = "CLEAN_BUT_TAMPERED"
+    _write_json(contamination, receipt)
+
+    with pytest.raises(HumanPageQrelsError, match="CONTAMINATION_RECEIPT_INVALID"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
         )
