@@ -3482,3 +3482,24 @@ has actual human evidence, the PDF document-native bbox gate remains blocked.
   model result, aggregate benchmark, document retrieval result, PDF RAG test,
   answer-quality score, visual-alias gate, or human review. Its four unrelated
   gates are all explicitly `NOT_APPLICABLE`.
+
+## 55. Sol recovery and release-gate readback (2026-08-14)
+
+- **VERIFIED**: the immutable recovery tree
+  `data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/`
+  contains 180 unique qids in both merged passes and arbitration. The historic
+  recovery retried all 99 operationally failed pass/qid calls at aggregate
+  concurrency four; both pass failure counts are now zero. Its arbitration is
+  `AI_REVIEWED=37`, `DISPUTED=143`. The remaining 143 rows are semantic or
+  evidence disagreements, not retry candidates.
+- **VERIFIED**: `python -m orchestrator.eval.release_report` was run against
+  these explicit recovery paths, not the stale top-level sidecars. It returned
+  its documented business refusal exit code `3` and wrote a
+  `NOT_RELEASE_ELIGIBLE` report with SHA-256
+  `ce5df84a983b7a01a6dde4b52e422d143c53f7ec916b0de687bd147ba74fb24a`.
+  No model was called for this readback.
+- **BLOCKED**: this recovery cannot become release evidence. It lacks a signed
+  model-identity attestation, has an empty policy-bound hidden holdout, only
+  37 golden rows, no eligible negative rows, missing Docker coverage, and a
+  disputed fraction of `143/180`. It must not overwrite the default sidecars,
+  be promoted to `HUMAN_REVIEWED`, or emit retrieval metrics.
