@@ -209,6 +209,8 @@ def _validate_xyxy_bbox(value: Any) -> None:
         raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
     if not all(math.isfinite(item) for item in value):
         raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
+    if not all(0.0 <= item <= 1000.0 for item in value):
+        raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
     if value[2] <= value[0] or value[3] <= value[1]:
         raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
 

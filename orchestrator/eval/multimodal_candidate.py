@@ -67,6 +67,8 @@ def validate_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         raise CandidateContractError("bbox must be [x1, y1, x2, y2] numbers")
     if not all(math.isfinite(value) for value in bbox):
         raise CandidateContractError("bbox coordinates must be finite")
+    if not all(0.0 <= value <= 1000.0 for value in bbox):
+        raise CandidateContractError("bbox coordinates must be within page_1000_xyxy")
     if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
         raise CandidateContractError("bbox must satisfy x2 > x1 and y2 > y1")
 

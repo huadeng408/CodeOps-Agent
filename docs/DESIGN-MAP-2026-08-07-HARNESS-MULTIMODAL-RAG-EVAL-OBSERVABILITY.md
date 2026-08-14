@@ -3481,11 +3481,11 @@ has actual human evidence, the PDF document-native bbox gate remains blocked.
 ### 53.4 Non-finite review geometry rejection (2026-08-14)
 
 - **IMPLEMENTED and VERIFIED**: candidate bbox validation and the separately
-  signed human `CORRECT` path both reject `NaN`, positive infinity, and
-  negative infinity before any evidence manifest can be written. The prior
-  order-only comparisons allowed `NaN` and positive infinity through Python
-  JSON parsing; focused candidate/human-review regression coverage is now
-  `20 passed`.
+  signed human `CORRECT` path both reject `NaN`, positive infinity, negative
+  infinity, and coordinates outside the fixed `page_1000_xyxy` range before
+  any evidence manifest can be written. The prior order-only comparisons
+  allowed `NaN`, positive infinity, and finite out-of-page values through;
+  focused candidate/human-review regression coverage is now `24 passed`.
 - **AUDITED**: no historical frozen multimodal `HUMAN_REVIEWED` artifact
   exists, and `freeze_human_reviewed_evidence()` has no production call site.
   Therefore this is a forward validation hardening, not a retrospective data

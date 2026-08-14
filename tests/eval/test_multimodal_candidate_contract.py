@@ -84,6 +84,15 @@ def test_candidate_contract_rejects_non_finite_bbox_coordinates(coordinate: floa
         validate_candidate(candidate)
 
 
+@pytest.mark.parametrize("bbox", [[-1.0, 20.0, 30.0, 40.0], [10.0, 20.0, 1001.0, 40.0]])
+def test_candidate_contract_rejects_bbox_outside_page_coordinate_system(bbox: list[float]) -> None:
+    candidate = _candidate()
+    candidate["bbox"] = bbox
+
+    with pytest.raises(CandidateContractError, match="within page_1000_xyxy"):
+        validate_candidate(candidate)
+
+
 def test_candidate_contract_rejects_license_outside_project_allowlist() -> None:
     candidate = _candidate()
     candidate["source"] = {**candidate["source"], "license_spdx": "OpenRAIL"}
