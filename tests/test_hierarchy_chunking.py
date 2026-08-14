@@ -105,3 +105,30 @@ def test_code_splits_on_complete_lines_and_image_caption_enters_embedding_text()
     assert "Architecture diagram" in image.embedding_text
     assert "OCR labels" in image.embedding_text
     assert image.asset_refs == ["images/diagram.png"]
+
+
+def test_python_function_is_a_hard_code_chunk_boundary() -> None:
+    source = "\n".join(
+        [
+            "def first():",
+            "    alpha = 1",
+            "    return alpha",
+            "",
+            "def second():",
+            "    beta = 2",
+            "    return beta",
+        ]
+    )
+    elements = [
+        Element(
+            document_id="doc-1", element_id="code", type="code", text=source,
+            heading_path=["Guide"], page_index=0, bbox=[0, 0, 10, 20],
+        )
+    ]
+
+    chunks = chunk_elements(elements, child_tokens=4, parent_tokens=20)
+
+    assert [item.text for item in chunks] == [
+        "def first():\n    alpha = 1\n    return alpha",
+        "def second():\n    beta = 2\n    return beta",
+    ]

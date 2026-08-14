@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 
 from .elements import Element
@@ -143,7 +144,7 @@ def _chunk_section(
         if element.type == "table":
             pieces = _split_table(element, child_tokens)
         elif element.type == "code":
-            pieces = _split_lines(source, child_tokens)
+            pieces = _split_code(source, child_tokens)
         else:
             pieces = [source]
         for piece in pieces:
@@ -225,6 +226,43 @@ def _split_lines(text: str, limit: int) -> list[str]:
     if current:
         pieces.append("\n".join(current))
     return pieces
+
+
+def _split_code(text: str, limit: int) -> list[str]:
+    """Keep Python definitions atomic; use line chunks for other code safely."""
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _split_lines(text, limit)
+
+    lines = text.splitlines()
+    protected = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
+    ]
+    if not protected:
+        return _split_lines(text, limit)
+
+    pieces: list[str] = []
+    cursor = 0
+    for node in protected:
+        decorator_lines = [decorator.lineno for decorator in getattr(node, "decorator_list", [])]
+        start = min([node.lineno, *decorator_lines]) - 1
+        end = node.end_lineno or node.lineno
+        prefix = "\n".join(lines[cursor:start]).strip()
+        if prefix:
+            pieces.extend(_split_lines(prefix, limit))
+        body = "\n".join(lines[start:end]).strip()
+        if body:
+            pieces.append(body)
+        cursor = end
+
+    suffix = "\n".join(lines[cursor:]).strip()
+    if suffix:
+        pieces.extend(_split_lines(suffix, limit))
+    return pieces or _split_lines(text, limit)
 
 
 def _split_table(element: Element, limit: int) -> list[str]:
