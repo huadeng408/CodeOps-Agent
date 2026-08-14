@@ -31,3 +31,15 @@ def test_portal_embedded_javascript_has_valid_node_syntax() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_portal_declares_safe_source_and_holdout_exports() -> None:
+    html = PORTAL.read_text(encoding="utf-8")
+
+    assert 'id="source-declaration-form"' in html
+    assert 'id="export-source-declaration"' in html
+    assert 'id="holdout-intake-form"' in html
+    assert 'id="export-holdout-intake"' in html
+    assert "UNSUBMITTED_SOURCE_DECLARATION" in html
+    assert "UNSUBMITTED_HOLDOUT_INTAKE" in html
+    assert "Create holdout" not in html

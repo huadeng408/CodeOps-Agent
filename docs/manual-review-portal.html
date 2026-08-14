@@ -290,7 +290,18 @@
       <section class="panel" id="source-declaration" aria-labelledby="source-declaration-title">
         <div class="panel-head"><div><p class="eyebrow">Task 02</p><h2 id="source-declaration-title">语料来源声明</h2></div><span class="status status-ready">可填写</span></div>
         <p>记录一个候选语料来源的授权边界。此声明不是法律意见，也不会自动加入来源白名单。</p>
-        <div class="instruction"><strong>需要填写：</strong>本地路径或 URL、版本或修订号、许可证，以及 OCR、页面渲染、向量化、内部评测和公开展示的许可。</div>
+        <form id="source-declaration-form" class="review-card">
+          <div class="field"><label for="source-location">本地路径或 URL</label><input id="source-location" name="source_location" required></div>
+          <div class="field"><label for="source-revision">版本、commit 或修订号</label><input id="source-revision" name="source_revision" required></div>
+          <div class="field"><label for="source-license">许可证</label><input id="source-license" name="license" required></div>
+          <div class="field"><label for="source-ocr-permission">允许 OCR 吗？</label><select id="source-ocr-permission" name="ocr_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="source-render-permission">允许页面渲染吗？</label><select id="source-render-permission" name="page_render_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="source-vector-permission">允许向量化吗？</label><select id="source-vector-permission" name="vectorization_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="source-eval-permission">允许内部评测吗？</label><select id="source-eval-permission" name="internal_evaluation_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="source-display-permission">允许公开展示吗？</label><select id="source-display-permission" name="public_display_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="source-notes">补充说明（可选）</label><textarea id="source-notes" name="notes"></textarea></div>
+          <button id="export-source-declaration" class="action-button" type="button" disabled>下载未提交来源声明</button>
+        </form>
       </section>
 
       <section class="panel" id="multimodal-review" aria-labelledby="multimodal-review-title">
@@ -304,6 +315,19 @@
       <section class="panel" id="holdout" aria-labelledby="holdout-title">
         <div class="panel-head"><div><p class="eyebrow">Task 04</p><h2 id="holdout-title">Holdout 声明</h2></div><span class="status status-blocked">不能创建评测集</span></div>
         <div class="blocked-note"><strong>当前 split 清单是 180 条开发集、0 条 holdout，状态为 BLOCKED。</strong><p>不能把这 180 条现有问题重新标注为 holdout。本页只会收集未来独立来源的计划和授权信息。</p></div>
+        <form id="holdout-intake-form" class="review-card">
+          <h3>登记未来独立来源</h3><p class="review-meta">这只是一份来源计划，不会创建 split、qrels 或指标。</p>
+          <div class="field"><label for="holdout-location">候选来源路径或 URL</label><input id="holdout-location" name="source_location" required></div>
+          <div class="field"><label for="holdout-revision">版本、commit 或修订号</label><input id="holdout-revision" name="source_revision" required></div>
+          <div class="field"><label for="holdout-license">许可证</label><input id="holdout-license" name="license" required></div>
+          <div class="field"><label for="holdout-ocr-permission">允许 OCR 吗？</label><select id="holdout-ocr-permission" name="ocr_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="holdout-render-permission">允许页面渲染吗？</label><select id="holdout-render-permission" name="page_render_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="holdout-vector-permission">允许向量化吗？</label><select id="holdout-vector-permission" name="vectorization_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="holdout-eval-permission">允许内部评测吗？</label><select id="holdout-eval-permission" name="internal_evaluation_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="holdout-display-permission">允许公开展示吗？</label><select id="holdout-display-permission" name="public_display_permission" required><option value="">请选择</option><option value="yes">允许</option><option value="no">不允许</option></select></div>
+          <div class="field"><label for="holdout-notes">规划备注（可选）</label><textarea id="holdout-notes" name="notes"></textarea></div>
+          <button id="export-holdout-intake" class="action-button" type="button" disabled>下载未提交 holdout 来源计划</button>
+        </form>
       </section>
 
       <section class="panel" id="signing" aria-labelledby="signing-title">
@@ -339,6 +363,10 @@
     const nextRow = document.querySelector('#next-row');
     const clearTextDraft = document.querySelector('#clear-text-draft');
     const exportTextDraft = document.querySelector('#export-text-draft');
+    const sourceForm = document.querySelector('#source-declaration-form');
+    const sourceExport = document.querySelector('#export-source-declaration');
+    const holdoutForm = document.querySelector('#holdout-intake-form');
+    const holdoutExport = document.querySelector('#export-holdout-intake');
     const answerFields = ['verdict_relevant', 'verdict_answerable', 'verdict_language_correct', 'verdict_query_type_correct', 'verdict_evidence_sufficient', 'reviewer_notes'];
     const forbiddenWorksheetFields = new Set(['relevance', 'pass_a_verdict', 'pass_b_verdict', 'dispute_reason', 'review_status', 'review_confidence', 'review_evidence']);
     let reviewState = { rows: [], index: 0, storageKey: '', worksheetSha256: '' };
@@ -492,6 +520,15 @@
     incompleteFilter.addEventListener('change', () => { if (incompleteFilter.checked && isComplete(activeRow())) { const next = reviewState.rows.findIndex((row) => !isComplete(row)); if (next >= 0) reviewState.index = next; } renderReview(); });
     clearTextDraft.addEventListener('click', () => { if (reviewState.storageKey && confirm('只清除当前工作包的浏览器本地草稿，是否继续？')) { try { localStorage.removeItem(reviewState.storageKey); } catch {} reviewState.rows.forEach((row) => answerFields.forEach((field) => { row[field] = ''; })); renderReview(); } });
     exportTextDraft.addEventListener('click', () => { storeActiveAnswers(); if (reviewState.rows.some((row) => !isComplete(row))) return; downloadJson('UNSUBMITTED_REVIEW_DRAFT.json', { artifact_type: 'UNSUBMITTED_REVIEW_DRAFT', worksheet_sha256: reviewState.worksheetSha256, exported_at: new Date().toISOString(), decisions: reviewState.rows.map((row) => Object.fromEntries(['row_hash', ...answerFields].map((field) => [field, row[field] || '']))) }); });
+
+    function syncDeclarationButton(form, button) { button.disabled = !form.checkValidity(); }
+    function exportDeclaration(form, artifactType, filename) {
+      if (!form.reportValidity()) return;
+      downloadJson(filename, { artifact_type: artifactType, exported_at: new Date().toISOString(), declaration: Object.fromEntries(new FormData(form).entries()) });
+    }
+    [sourceForm, holdoutForm].forEach((form) => form.addEventListener('input', () => syncDeclarationButton(form, form === sourceForm ? sourceExport : holdoutExport)));
+    sourceExport.addEventListener('click', () => exportDeclaration(sourceForm, 'UNSUBMITTED_SOURCE_DECLARATION', 'UNSUBMITTED_SOURCE_DECLARATION.json'));
+    holdoutExport.addEventListener('click', () => exportDeclaration(holdoutForm, 'UNSUBMITTED_HOLDOUT_INTAKE', 'UNSUBMITTED_HOLDOUT_INTAKE.json'));
   </script>
 </body>
 </html>
