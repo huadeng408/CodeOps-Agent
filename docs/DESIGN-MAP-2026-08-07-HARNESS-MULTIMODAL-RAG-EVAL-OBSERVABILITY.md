@@ -3510,6 +3510,26 @@ has actual human evidence, the PDF document-native bbox gate remains blocked.
   answer-quality score, visual-alias gate, or human review. Its four unrelated
   gates are all explicitly `NOT_APPLICABLE`.
 
+## 56. Local manual-review portal (2026-08-14)
+
+- **IMPLEMENTED**: `docs/manual-review-portal.html` exposes all remaining
+  user-operated gates in one offline file. The text path accepts only a
+  user-selected blind worksheet with evidence, keeps answers in local browser
+  storage, and exports `UNSUBMITTED_REVIEW_DRAFT`; source and holdout paths
+  export explicit unsigned declarations. The page does not call a service,
+  execute a command, modify qrels, create a release, or collect a private key.
+- **VERIFIED**: dedicated fixture-backed checks in
+  `tests/test_manual_review_portal.py` cover the required DOM contracts,
+  unsigned artifact types, absence of a holdout-creation control, and embedded
+  JavaScript syntax (`3 passed`). The user manually confirmed direct local-file
+  rendering. Codex in-app browser policy forbids automated `file:` navigation;
+  this entry intentionally does not claim screenshot evidence.
+- **BOUNDARY**: a form cannot turn `DISPUTED` into `HUMAN_REVIEWED`, manufacture
+  the currently absent MinerU/OCR multimodal evidence, convert 180 dev rows to
+  holdout, or provide an Ed25519 receipt. All four project gates stay at their
+  prior evidence-weighted completion values until those separate human/data
+  prerequisites are satisfied.
+
 ## 55. Sol recovery and release-gate readback (2026-08-14)
 
 - **VERIFIED**: the immutable recovery tree
