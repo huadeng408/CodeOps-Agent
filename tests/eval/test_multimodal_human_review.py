@@ -195,6 +195,38 @@ def test_freeze_uses_human_corrected_bbox_not_ai_candidate_bbox(tmp_path: Path) 
     assert evidence[0]["review_decision"] == "CORRECT"
 
 
+@pytest.mark.parametrize("coordinate", [float("nan"), float("inf"), float("-inf")])
+def test_freeze_rejects_non_finite_human_corrected_bbox(
+    tmp_path: Path, coordinate: float
+) -> None:
+    candidates = _write_jsonl(tmp_path / "candidates.jsonl", [_candidate()])
+    decisions = _write_jsonl(
+        tmp_path / "decisions.jsonl",
+        [{
+            "candidate_id": "candidate-001",
+            "review_decision": "CORRECT",
+            "corrected_bbox": [11.0, 21.0, coordinate, 41.0],
+            "review_note": "Adjusted to the visible element boundary.",
+            "reviewed_at": "2026-08-14T00:00:00+00:00",
+            "reviewer_id": "reviewer-1",
+        }],
+    )
+    private_key = Ed25519PrivateKey.generate()
+    receipt, public_key_b64 = _sign_receipt(candidates, decisions, private_key)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(HumanReviewContractError, match="CORRECTED_BBOX_INVALID"):
+        freeze_human_reviewed_evidence(
+            candidates,
+            decisions,
+            receipt_path,
+            tmp_path / "frozen.json",
+            reviewer_public_key_b64=public_key_b64,
+            expected_reviewer_key_id="controlled-human-reviewer-1",
+        )
+
+
 def test_freeze_rejects_missing_trust_root(tmp_path: Path) -> None:
     candidates = _write_jsonl(tmp_path / "candidates.jsonl", [_candidate()])
     decisions = _write_jsonl(

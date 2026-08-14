@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -205,6 +206,8 @@ def _validate_xyxy_bbox(value: Any) -> None:
     if not isinstance(value, list) or len(value) != 4 or not all(
         isinstance(item, (int, float)) and not isinstance(item, bool) for item in value
     ):
+        raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
+    if not all(math.isfinite(item) for item in value):
         raise HumanReviewContractError("CORRECTED_BBOX_INVALID")
     if value[2] <= value[0] or value[3] <= value[1]:
         raise HumanReviewContractError("CORRECTED_BBOX_INVALID")

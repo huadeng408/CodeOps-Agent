@@ -6,6 +6,7 @@ qrels: a candidate never carries relevance, scores, or a human review state.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -64,6 +65,8 @@ def validate_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         isinstance(value, (int, float)) and not isinstance(value, bool) for value in bbox
     ):
         raise CandidateContractError("bbox must be [x1, y1, x2, y2] numbers")
+    if not all(math.isfinite(value) for value in bbox):
+        raise CandidateContractError("bbox coordinates must be finite")
     if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
         raise CandidateContractError("bbox must satisfy x2 > x1 and y2 > y1")
 

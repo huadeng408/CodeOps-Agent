@@ -75,6 +75,15 @@ def test_candidate_contract_rejects_xywh_disguised_as_xyxy() -> None:
         validate_candidate(candidate)
 
 
+@pytest.mark.parametrize("coordinate", [float("nan"), float("inf"), float("-inf")])
+def test_candidate_contract_rejects_non_finite_bbox_coordinates(coordinate: float) -> None:
+    candidate = _candidate()
+    candidate["bbox"] = [10.0, 20.0, coordinate, 40.0]
+
+    with pytest.raises(CandidateContractError, match="finite"):
+        validate_candidate(candidate)
+
+
 def test_candidate_contract_rejects_license_outside_project_allowlist() -> None:
     candidate = _candidate()
     candidate["source"] = {**candidate["source"], "license_spdx": "OpenRAIL"}
