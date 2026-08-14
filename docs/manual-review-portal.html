@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>人工审核工作台</title>
+  <style>
+    :root {
+      --ink: #172025;
+      --muted: #59666d;
+      --canvas: #f4f6f7;
+      --surface: #ffffff;
+      --rule: #cbd4d8;
+      --teal: #156b5a;
+      --amber: #a85d14;
+      --red: #a33b29;
+      --focus: #075a9a;
+      --shadow: 0 12px 28px rgb(23 32 37 / 8%);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: "Segoe UI", "Noto Sans SC", Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    button, input, select, textarea { font: inherit; }
+
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .app-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 28px;
+      color: #fff;
+      background: var(--ink);
+    }
+
+    .app-header h1 {
+      margin: 0;
+      font-family: Georgia, "Noto Serif SC", serif;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .app-header p { margin: 0; color: #c8d3d7; font-size: 14px; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 16rem minmax(0, 1fr);
+      max-width: 1440px;
+      min-height: calc(100vh - 74px);
+      margin: 0 auto;
+    }
+
+    .task-nav {
+      padding: 22px 14px;
+      border-right: 1px solid var(--rule);
+      background: #e9eef0;
+    }
+
+    .nav-label {
+      display: block;
+      margin: 0 10px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .task-button {
+      display: grid;
+      grid-template-columns: 1.8rem 1fr;
+      width: 100%;
+      margin: 2px 0;
+      padding: 11px 10px;
+      color: var(--ink);
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .task-button:hover { background: #fff; border-color: var(--rule); }
+    .task-button[aria-current="page"] { color: #fff; background: var(--teal); border-color: var(--teal); }
+    .task-index { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .task-button small { display: block; margin-top: 1px; opacity: .8; }
+
+    main { padding: 38px clamp(22px, 4vw, 64px); }
+
+    .panel { display: none; max-width: 940px; }
+    .panel.is-active { display: block; }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0;
+      font-family: Georgia, "Noto Serif SC", serif;
+      font-size: clamp(26px, 4vw, 38px);
+      letter-spacing: 0;
+      line-height: 1.18;
+    }
+
+    h3 { margin: 26px 0 8px; font-size: 18px; }
+    p { max-width: 76ch; }
+
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+
+    .status {
+      display: inline-block;
+      flex: 0 0 auto;
+      padding: 3px 8px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .status-ready { color: var(--teal); }
+    .status-needs-package { color: var(--amber); }
+    .status-blocked { color: var(--red); }
+
+    .instruction, .blocked-note, .facts {
+      margin-top: 26px;
+      padding: 18px 20px;
+      background: var(--surface);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+    }
+
+    .blocked-note { border-left: 5px solid var(--red); }
+    .facts { border-left: 5px solid var(--teal); }
+
+    code {
+      padding: 1px 4px;
+      color: #3c2922;
+      background: #f2eae5;
+      border-radius: 3px;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: .91em;
+    }
+
+    pre {
+      overflow-x: auto;
+      padding: 16px;
+      color: #d8e2e5;
+      background: #1d282d;
+      border-radius: 5px;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    a { color: #075a9a; font-weight: 650; }
+    .plain-list { padding-left: 1.2rem; }
+    .plain-list li { margin: 7px 0; }
+
+    .review-tool { margin-top: 26px; }
+    .tool-bar, .review-actions, .question-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    .tool-bar { justify-content: space-between; }
+    .file-label, .action-button, .secondary-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 8px 12px;
+      border: 1px solid var(--teal);
+      border-radius: 5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .file-label, .action-button { color: #fff; background: var(--teal); }
+    .secondary-button { color: var(--ink); background: #fff; border-color: var(--rule); }
+    .action-button:disabled, .secondary-button:disabled { color: #7a858a; background: #e7ecee; border-color: #d7dfe2; cursor: not-allowed; }
+    .file-label input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .review-card { margin-top: 18px; padding: 20px; background: #fff; border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow); }
+    .review-card[hidden] { display: none; }
+    .review-meta { margin: 0; color: var(--muted); font-size: 14px; }
+    .review-query { margin: 10px 0 18px; font-size: 21px; line-height: 1.35; }
+    fieldset { margin: 20px 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--rule); }
+    legend { padding: 0 8px 0 0; font-weight: 800; }
+    .choice-row { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 9px; }
+    .choice-row label, .field label { cursor: pointer; }
+    .field { display: grid; gap: 6px; margin: 14px 0; }
+    select, textarea { width: 100%; padding: 9px; color: var(--ink); background: #fff; border: 1px solid #9eabb0; border-radius: 4px; }
+    textarea { min-height: 90px; resize: vertical; }
+    .evidence-list { display: grid; gap: 10px; margin: 14px 0; }
+    .evidence-item { padding: 12px; background: #eef3f4; border-left: 3px solid var(--teal); }
+    .evidence-item p { margin: 6px 0 0; white-space: pre-wrap; }
+    .error-message { margin: 12px 0; color: var(--red); font-weight: 700; }
+
+    #status-message {
+      min-height: 24px;
+      margin: 18px 0 0;
+      color: var(--muted);
+    }
+
+    @media (max-width: 760px) {
+      .app-header { align-items: flex-start; flex-direction: column; gap: 3px; padding: 16px 18px; }
+      .workspace { display: block; }
+      .task-nav { display: flex; gap: 6px; overflow-x: auto; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--rule); }
+      .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+      .task-button { display: block; min-width: 9.5rem; margin: 0; }
+      .task-index { display: inline; margin-right: 5px; }
+      .task-button small { display: inline; }
+      main { padding: 27px 18px 40px; }
+      .panel-head { flex-direction: column; gap: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>人工审核工作台</h1>
+    <p>本地草稿工具 · 不写入 qrels · 不上传数据 · 不处理私钥</p>
+  </header>
+
+  <div class="workspace">
+    <nav class="task-nav" aria-label="人工审核任务">
+      <span class="nav-label">待办清单</span>
+      <button class="task-button" type="button" data-target="text-review" aria-current="page"><span class="task-index">01</span><span>文本仲裁<small>143 条待人工复核</small></span></button>
+      <button class="task-button" type="button" data-target="source-declaration"><span class="task-index">02</span><span>语料来源声明<small>可立即填写</small></span></button>
+      <button class="task-button" type="button" data-target="multimodal-review"><span class="task-index">03</span><span>多模态证据复核<small>尚无候选</small></span></button>
+      <button class="task-button" type="button" data-target="holdout"><span class="task-index">04</span><span>Holdout 声明<small>当前为 0 条</small></span></button>
+      <button class="task-button" type="button" data-target="signing"><span class="task-index">05</span><span>本地签名与提交<small>受控流程</small></span></button>
+    </nav>
+
+    <main>
+      <div id="status-message" role="status" aria-live="polite">请选择一个任务开始。</div>
+
+      <section class="panel is-active" id="text-review" aria-labelledby="text-review-title">
+        <div class="panel-head"><div><p class="eyebrow">Task 01</p><h2 id="text-review-title">文本仲裁</h2></div><span class="status status-needs-package">需要工作包</span></div>
+        <p>当前有 143 条争议条目。必须先生成含真实检索证据的盲审工作包，页面才会允许逐条填写结论。</p>
+        <div class="instruction">
+          <h3>先生成工作包</h3>
+          <p>权威输入是 <a href="../data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/qrels.sol-review-arbitrated.jsonl">当前仲裁 qrels</a> 和 <a href="../data/eval/techdocs/queries.text.jsonl">查询原文</a>。不要使用旧的 <code>disputed-worksheet.md</code>。</p>
+          <pre>python orchestrator/eval/dispute_worksheet.py `
+  --qrels data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/qrels.sol-review-arbitrated.jsonl `
+  --queries data/eval/techdocs/queries.text.jsonl `
+  --out data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/human-review-worksheet.jsonl `
+  --markdown data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/human-review-worksheet.md `
+  --reviewer local-human-1</pre>
+          <p>该命令需要 Elasticsearch 提供证据。不要传 <code>--no-evidence</code>；没有证据的工作包不能用于人工仲裁。</p>
+        </div>
+        <div class="review-tool" aria-labelledby="worksheet-title">
+          <div class="tool-bar"><div><h3 id="worksheet-title">导入并填写工作包</h3><p id="worksheet-meta" class="review-meta">尚未导入工作包。</p></div><label class="file-label">选择 JSONL 工作包<input id="worksheet-file" type="file" accept=".jsonl,application/jsonl"></label></div>
+          <p id="worksheet-error" class="error-message" role="alert" hidden></p>
+          <div id="review-empty" class="facts"><strong>导入条件：</strong>每条记录都必须有查询、文档 ID 和至少一段真实 <code>document_sections</code> 证据。无证据、重复行或包含既有答案的文件会被拒绝，且不会覆盖已有本地草稿。</div>
+          <div id="review-card" class="review-card" hidden>
+            <div class="tool-bar"><p id="review-progress" class="review-meta"></p><label><input id="incomplete-filter" type="checkbox"> 只看未完成</label></div>
+            <p id="review-identity" class="review-meta"></p><p id="review-query" class="review-query"></p>
+            <p id="claimed-section" class="review-meta"></p><h3>检索到的证据</h3><div id="evidence-list" class="evidence-list"></div>
+            <form id="review-form">
+              <fieldset><legend>这个文档是否与查询相关？</legend><div class="choice-row"><label><input type="radio" name="verdict_relevant" value="yes"> 相关</label><label><input type="radio" name="verdict_relevant" value="no"> 不相关</label></div></fieldset>
+              <div class="field"><label for="verdict-answerable">查询是否可回答？（可选）</label><select id="verdict-answerable"><option value="">未填写</option><option value="yes">是</option><option value="no">否</option></select></div>
+              <div class="field"><label for="verdict-language">语言是否正确？（可选）</label><select id="verdict-language"><option value="">未填写</option><option value="yes">是</option><option value="no">否</option></select></div>
+              <div class="field"><label for="verdict-query-type">问题类型是否正确？（可选）</label><select id="verdict-query-type"><option value="">未填写</option><option value="yes">是</option><option value="no">否</option></select></div>
+              <div class="field"><label for="verdict-evidence">证据是否充分？（可选）</label><select id="verdict-evidence"><option value="">未填写</option><option value="yes">是</option><option value="no">否</option></select></div>
+              <div class="field"><label for="reviewer-notes">审核备注（可选）</label><textarea id="reviewer-notes"></textarea></div>
+            </form>
+            <div class="tool-bar"><div class="question-nav"><button id="previous-row" class="secondary-button" type="button">上一条</button><button id="next-row" class="secondary-button" type="button">下一条</button></div><div class="review-actions"><button id="clear-text-draft" class="secondary-button" type="button">清除本地草稿</button><button id="export-text-draft" class="action-button" type="button" disabled>下载未提交草稿</button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="source-declaration" aria-labelledby="source-declaration-title">
+        <div class="panel-head"><div><p class="eyebrow">Task 02</p><h2 id="source-declaration-title">语料来源声明</h2></div><span class="status status-ready">可填写</span></div>
+        <p>记录一个候选语料来源的授权边界。此声明不是法律意见，也不会自动加入来源白名单。</p>
+        <div class="instruction"><strong>需要填写：</strong>本地路径或 URL、版本或修订号、许可证，以及 OCR、页面渲染、向量化、内部评测和公开展示的许可。</div>
+      </section>
+
+      <section class="panel" id="multimodal-review" aria-labelledby="multimodal-review-title">
+        <div class="panel-head"><div><p class="eyebrow">Task 03</p><h2 id="multimodal-review-title">多模态证据复核</h2></div><span class="status status-blocked">已阻塞</span></div>
+        <div class="blocked-note"><strong>当前不能开始复核。</strong><p>仓库中尚无多模态候选、PDF 页面图、页面级证据或多模态 qrels。不能在此页面虚构候选或生成金标。</p></div>
+        <h3>候选就绪后的人工字段</h3>
+        <ul class="plain-list"><li><code>review_decision</code>：<code>ACCEPT</code>、<code>CORRECT</code> 或 <code>REJECT</code></li><li><code>corrected_bbox</code>：仅 <code>CORRECT</code> 时填写 <code>[x1, y1, x2, y2]</code>；每个值为 0 到 1000 的有限数，且矩形面积必须为正</li><li><code>review_note</code>、<code>reviewed_at</code>、<code>reviewer_id</code>：均不可为空</li></ul>
+        <p>未来 PDF 页面证据必须经 MinerU 加显式 OCR 产生；不得使用 Tika 处理 PDF。</p>
+      </section>
+
+      <section class="panel" id="holdout" aria-labelledby="holdout-title">
+        <div class="panel-head"><div><p class="eyebrow">Task 04</p><h2 id="holdout-title">Holdout 声明</h2></div><span class="status status-blocked">不能创建评测集</span></div>
+        <div class="blocked-note"><strong>当前 split 清单是 180 条开发集、0 条 holdout，状态为 BLOCKED。</strong><p>不能把这 180 条现有问题重新标注为 holdout。本页只会收集未来独立来源的计划和授权信息。</p></div>
+      </section>
+
+      <section class="panel" id="signing" aria-labelledby="signing-title">
+        <div class="panel-head"><div><p class="eyebrow">Task 05</p><h2 id="signing-title">本地签名与提交</h2></div><span class="status status-needs-package">受控流程</span></div>
+        <p>最终决定文件只能由受控的本地流程导入；Ed25519 回执必须绑定候选文件、决定文件和审核者密钥 ID。</p>
+        <div class="instruction"><strong>本页不会要求任何私钥。</strong><p>完成审核草稿后，交给 <a href="../orchestrator/eval/multimodal_human_review.py">受控审核模块</a> 和批准的本地签名程序处理。私钥不得出现在网页、仓库、日志或聊天中。</p></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const taskButtons = [...document.querySelectorAll('.task-button')];
+    const panels = [...document.querySelectorAll('.panel')];
+    const statusMessage = document.querySelector('#status-message');
+    const worksheetFile = document.querySelector('#worksheet-file');
+    const worksheetMeta = document.querySelector('#worksheet-meta');
+    const worksheetError = document.querySelector('#worksheet-error');
+    const reviewEmpty = document.querySelector('#review-empty');
+    const reviewCard = document.querySelector('#review-card');
+    const reviewProgress = document.querySelector('#review-progress');
+    const reviewIdentity = document.querySelector('#review-identity');
+    const reviewQuery = document.querySelector('#review-query');
+    const claimedSection = document.querySelector('#claimed-section');
+    const evidenceList = document.querySelector('#evidence-list');
+    const relevantInputs = [...document.querySelectorAll('input[name="verdict_relevant"]')];
+    const answerableInput = document.querySelector('#verdict-answerable');
+    const languageInput = document.querySelector('#verdict-language');
+    const queryTypeInput = document.querySelector('#verdict-query-type');
+    const evidenceInput = document.querySelector('#verdict-evidence');
+    const reviewerNotes = document.querySelector('#reviewer-notes');
+    const incompleteFilter = document.querySelector('#incomplete-filter');
+    const previousRow = document.querySelector('#previous-row');
+    const nextRow = document.querySelector('#next-row');
+    const clearTextDraft = document.querySelector('#clear-text-draft');
+    const exportTextDraft = document.querySelector('#export-text-draft');
+    const answerFields = ['verdict_relevant', 'verdict_answerable', 'verdict_language_correct', 'verdict_query_type_correct', 'verdict_evidence_sufficient', 'reviewer_notes'];
+    const forbiddenWorksheetFields = new Set(['relevance', 'pass_a_verdict', 'pass_b_verdict', 'dispute_reason', 'review_status', 'review_confidence', 'review_evidence']);
+    let reviewState = { rows: [], index: 0, storageKey: '', worksheetSha256: '' };
+
+    function selectPanel(targetId) {
+      taskButtons.forEach((button) => button.setAttribute('aria-current', String(button.dataset.target === targetId ? 'page' : 'false')));
+      panels.forEach((panel) => panel.classList.toggle('is-active', panel.id === targetId));
+      const activeButton = taskButtons.find((button) => button.dataset.target === targetId);
+      statusMessage.textContent = activeButton ? `已打开：${activeButton.textContent.trim()}` : '未找到任务。';
+    }
+
+    taskButtons.forEach((button) => button.addEventListener('click', () => selectPanel(button.dataset.target)));
+
+    function setWorksheetError(message) {
+      worksheetError.hidden = !message;
+      worksheetError.textContent = message || '';
+    }
+
+    function validateWorksheetRows(rows) {
+      if (!rows.length) throw new Error('工作包为空。请选择由仲裁脚本生成的 JSONL 文件。');
+      const seen = new Set();
+      for (const row of rows) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('每一行都必须是 JSON 对象。');
+        if (!row.row_hash || seen.has(row.row_hash)) throw new Error('每条记录必须有唯一的 row_hash。');
+        if (!row.query || !row.document_id) throw new Error('每条记录必须包含查询和 document_id。');
+        if (!Array.isArray(row.document_sections) || row.document_sections.length === 0) throw new Error('缺少证据。请用 Elasticsearch 生成含 document_sections 的工作包。');
+        for (const field of forbiddenWorksheetFields) if (Object.hasOwn(row, field)) throw new Error('工作包包含既有答案或 AI 判断，不能用于盲审。');
+        seen.add(row.row_hash);
+      }
+    }
+
+    async function worksheetDigest(text) {
+      if (globalThis.crypto?.subtle) {
+        const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+        return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+      }
+      let hash = 2166136261;
+      for (const char of text) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+      return `local-${(hash >>> 0).toString(16)}`;
+    }
+
+    function readLocalDraft(key) {
+      try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
+    }
+
+    function saveLocalDraft() {
+      if (!reviewState.storageKey) return;
+      const draft = { index: reviewState.index, answers: reviewState.rows.map((row) => ({ row_hash: row.row_hash, ...Object.fromEntries(answerFields.map((field) => [field, row[field] || ''])) })) };
+      try { localStorage.setItem(reviewState.storageKey, JSON.stringify(draft)); } catch { setWorksheetError('浏览器拒绝保存本地草稿；当前填写仍保留到本次页面关闭。'); }
+    }
+
+    function mergeLocalDraft(rows, draft) {
+      const answers = new Map((draft?.answers || []).map((item) => [item.row_hash, item]));
+      return rows.map((row) => ({ ...row, ...Object.fromEntries(answerFields.map((field) => [field, answers.get(row.row_hash)?.[field] || ''])) }));
+    }
+
+    function activeRow() { return reviewState.rows[reviewState.index]; }
+    function isComplete(row) { return row?.verdict_relevant === 'yes' || row?.verdict_relevant === 'no'; }
+
+    function appendEvidence(section) {
+      const item = document.createElement('div');
+      item.className = 'evidence-item';
+      const title = document.createElement('strong');
+      title.textContent = Array.isArray(section.section_path) && section.section_path.length ? section.section_path.join(' / ') : '未命名章节';
+      const text = document.createElement('p');
+      text.textContent = section.text || '该证据段没有文本。';
+      item.append(title, text);
+      evidenceList.append(item);
+    }
+
+    function renderReview() {
+      const row = activeRow();
+      if (!row) return;
+      const completed = reviewState.rows.filter(isComplete).length;
+      worksheetMeta.textContent = `已导入 ${reviewState.rows.length} 条工作包记录；本地草稿键：${reviewState.storageKey || '当前会话'}。`;
+      reviewProgress.textContent = `${reviewState.index + 1} / ${reviewState.rows.length}，已完成 ${completed} 条`;
+      reviewIdentity.textContent = `来源：${row.source_id || '未标明'} · 文档：${row.document_id} · 查询：${row.query_id || '未标明'}`;
+      reviewQuery.textContent = row.query;
+      claimedSection.textContent = `声称章节（需要按实际证据核对）：${Array.isArray(row.section_path_claimed) ? row.section_path_claimed.join(' / ') || '未标明' : '未标明'}`;
+      evidenceList.replaceChildren();
+      row.document_sections.forEach(appendEvidence);
+      relevantInputs.forEach((input) => { input.checked = input.value === row.verdict_relevant; });
+      answerableInput.value = row.verdict_answerable || '';
+      languageInput.value = row.verdict_language_correct || '';
+      queryTypeInput.value = row.verdict_query_type_correct || '';
+      evidenceInput.value = row.verdict_evidence_sufficient || '';
+      reviewerNotes.value = row.reviewer_notes || '';
+      previousRow.disabled = reviewState.index === 0;
+      nextRow.disabled = reviewState.index === reviewState.rows.length - 1;
+      exportTextDraft.disabled = reviewState.rows.some((candidate) => !isComplete(candidate));
+    }
+
+    function storeActiveAnswers() {
+      const row = activeRow();
+      if (!row) return;
+      row.verdict_relevant = relevantInputs.find((input) => input.checked)?.value || '';
+      row.verdict_answerable = answerableInput.value;
+      row.verdict_language_correct = languageInput.value;
+      row.verdict_query_type_correct = queryTypeInput.value;
+      row.verdict_evidence_sufficient = evidenceInput.value;
+      row.reviewer_notes = reviewerNotes.value.trim();
+      saveLocalDraft();
+      renderReview();
+    }
+
+    async function importWorksheet(file) {
+      const text = await file.text();
+      let rows;
+      try { rows = text.split(/\r?\n/).filter(Boolean).map((line, index) => { try { return JSON.parse(line); } catch { throw new Error(`第 ${index + 1} 行不是有效 JSON。`); } }); } catch (error) { throw error; }
+      validateWorksheetRows(rows);
+      const digest = await worksheetDigest(text);
+      const storageKey = `manual-review-portal:${digest}`;
+      const draft = readLocalDraft(storageKey);
+      reviewState = { rows: mergeLocalDraft(rows, draft), index: Math.min(draft?.index || 0, rows.length - 1), storageKey, worksheetSha256: digest };
+      reviewEmpty.hidden = true;
+      reviewCard.hidden = false;
+      setWorksheetError('');
+      renderReview();
+    }
+
+    function moveReview(delta) {
+      storeActiveAnswers();
+      if (!incompleteFilter.checked) reviewState.index = Math.max(0, Math.min(reviewState.rows.length - 1, reviewState.index + delta));
+      else {
+        let cursor = reviewState.index + delta;
+        while (cursor >= 0 && cursor < reviewState.rows.length && isComplete(reviewState.rows[cursor])) cursor += delta;
+        if (cursor >= 0 && cursor < reviewState.rows.length) reviewState.index = cursor;
+      }
+      renderReview();
+    }
+
+    function downloadJson(filename, payload) {
+      const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    worksheetFile.addEventListener('change', async () => {
+      const [file] = worksheetFile.files;
+      if (!file) return;
+      try { await importWorksheet(file); } catch (error) { setWorksheetError(error instanceof Error ? error.message : '无法导入工作包。'); }
+      worksheetFile.value = '';
+    });
+    [...relevantInputs, answerableInput, languageInput, queryTypeInput, evidenceInput, reviewerNotes].forEach((input) => input.addEventListener('change', storeActiveAnswers));
+    previousRow.addEventListener('click', () => moveReview(-1));
+    nextRow.addEventListener('click', () => moveReview(1));
+    incompleteFilter.addEventListener('change', () => { if (incompleteFilter.checked && isComplete(activeRow())) { const next = reviewState.rows.findIndex((row) => !isComplete(row)); if (next >= 0) reviewState.index = next; } renderReview(); });
+    clearTextDraft.addEventListener('click', () => { if (reviewState.storageKey && confirm('只清除当前工作包的浏览器本地草稿，是否继续？')) { try { localStorage.removeItem(reviewState.storageKey); } catch {} reviewState.rows.forEach((row) => answerFields.forEach((field) => { row[field] = ''; })); renderReview(); } });
+    exportTextDraft.addEventListener('click', () => { storeActiveAnswers(); if (reviewState.rows.some((row) => !isComplete(row))) return; downloadJson('UNSUBMITTED_REVIEW_DRAFT.json', { artifact_type: 'UNSUBMITTED_REVIEW_DRAFT', worksheet_sha256: reviewState.worksheetSha256, exported_at: new Date().toISOString(), decisions: reviewState.rows.map((row) => Object.fromEntries(['row_hash', ...answerFields].map((field) => [field, row[field] || '']))) }); });
+  </script>
+</body>
+</html>
