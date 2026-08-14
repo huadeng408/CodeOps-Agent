@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 from collections.abc import Mapping
 from pathlib import Path
@@ -23,6 +24,9 @@ class MinerUPageCandidateError(ValueError):
     """Raised when page evidence cannot be bound to explicit MinerU OCR."""
 
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 def materialize_page_candidates(
     content_list_path: Path | str,
     middle_path: Path | str,
@@ -33,13 +37,15 @@ def materialize_page_candidates(
     source: Mapping[str, str],
     ocr_mode: str,
     out_path: Path | str,
+    ocr_receipt_path: Path | str | None = None,
+    input_pdf_sha256: str = "",
 ) -> Path:
     """Write validated pre-review candidates from OCR elements and page assets.
 
-    MinerU bboxes are supplied in each rendered page's pixel coordinates and
-    are normalized to the project-wide ``page_1000_xyxy`` coordinate system.
-    Rendering happens upstream; accepting rendered page files here makes the
-    asset identity explicit without opening the original PDF a second time.
+    MinerU ``content_list.json`` bboxes use the project-wide
+    ``page_1000_xyxy`` coordinate system already, so this importer preserves
+    them exactly. Rendering happens upstream; accepting rendered page files
+    here binds asset identity without opening the original PDF a second time.
     """
     if ocr_mode != "explicit":
         raise MinerUPageCandidateError("MINERU_OCR_MODE_REQUIRED")
@@ -51,8 +57,21 @@ def materialize_page_candidates(
         middle_metadata = json.loads(middle_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID") from exc
-    if not isinstance(middle_metadata, dict) or middle_metadata.get("ocr_mode") != "explicit":
+    if not isinstance(middle_metadata, dict):
         raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID")
+    middle_mode = middle_metadata.get("ocr_mode")
+    if middle_mode not in (None, "explicit"):
+        raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID")
+    receipt_sha256 = ""
+    if middle_mode != "explicit":
+        if ocr_receipt_path is None:
+            raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID")
+        receipt_sha256 = _verify_explicit_ocr_receipt(
+            Path(ocr_receipt_path),
+            input_pdf_sha256=input_pdf_sha256,
+            content_sha256=content_sha256,
+            middle_sha256=middle_sha256,
+        )
     try:
         elements = map_mineru_output(
             content_file,
@@ -78,7 +97,8 @@ def materialize_page_candidates(
         image_sha256 = _sha256(image_path, "PAGE_IMAGE_MISSING")
         if _image_dimensions(image_path) != dimensions:
             raise MinerUPageCandidateError("PAGE_DIMENSIONS_MISMATCH")
-        bbox = _normalize_bbox(element.bbox, dimensions)
+        # Element coordinates are already the stable page_1000 contract.
+        bbox = element.bbox
         candidate = {
             "schema_version": "multimodal-evidence-candidate/v1",
             "candidate_status": "AI_CANDIDATE",
@@ -95,6 +115,7 @@ def materialize_page_candidates(
                 "ocr_mode": "explicit",
                 "content_sha256": content_sha256,
                 "middle_sha256": middle_sha256,
+                **({"receipt_sha256": receipt_sha256} if receipt_sha256 else {}),
             },
         }
         try:
@@ -131,21 +152,30 @@ def _has_positive_area(bbox: list[float]) -> bool:
     return all(math.isfinite(value) for value in (x1, y1, x2, y2)) and x2 > x1 and y2 > y1
 
 
-def _normalize_bbox(bbox: list[float], dimensions: tuple[int, int]) -> list[float]:
-    if len(dimensions) != 2:
-        raise MinerUPageCandidateError("PAGE_DIMENSIONS_INVALID")
-    width, height = dimensions
-    if isinstance(width, bool) or isinstance(height, bool) or width <= 0 or height <= 0:
-        raise MinerUPageCandidateError("PAGE_DIMENSIONS_INVALID")
+def _verify_explicit_ocr_receipt(
+    receipt_path: Path,
+    *,
+    input_pdf_sha256: str,
+    content_sha256: str,
+    middle_sha256: str,
+) -> str:
     try:
-        x1, y1, x2, y2 = (float(value) for value in bbox)
-    except (TypeError, ValueError) as exc:
-        raise MinerUPageCandidateError("MINERU_BBOX_INVALID") from exc
-    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
-        raise MinerUPageCandidateError("MINERU_BBOX_INVALID")
-    if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
-        raise MinerUPageCandidateError("MINERU_BBOX_OUTSIDE_PAGE")
-    return [x1 * 1000.0 / width, y1 * 1000.0 / height, x2 * 1000.0 / width, y2 * 1000.0 / height]
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID") from exc
+    if not isinstance(receipt, dict):
+        raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID")
+    if (
+        receipt.get("schema_version") != "mineru-explicit-ocr-receipt/v1"
+        or receipt.get("ocr_mode") != "explicit"
+        or receipt.get("exit_code") != 0
+        or not _SHA256_RE.fullmatch(input_pdf_sha256)
+        or receipt.get("input_pdf_sha256") != input_pdf_sha256
+        or receipt.get("content_sha256") != content_sha256
+        or receipt.get("middle_sha256") != middle_sha256
+    ):
+        raise MinerUPageCandidateError("MINERU_OCR_RECEIPT_INVALID")
+    return _sha256(receipt_path, "MINERU_OCR_RECEIPT_INVALID")
 
 
 def _sha256(path: Path, error: str) -> str:

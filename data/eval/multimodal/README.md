@@ -44,13 +44,16 @@
 ## 2026-08-14 Candidate Materialization
 
 `orchestrator.eval.mineru_page_candidates.materialize_page_candidates()` is
-now the supported pre-review importer. It accepts only the existing MinerU
-`content_list.json` / `middle.json`, rendered page assets, their pixel
-dimensions, an explicit OCR declaration, and source pin/license metadata. It
-normalizes each element bbox to `page_1000_xyxy`, hashes both the OCR payload
-and the rendered page image, requires `middle.json` itself to declare explicit
-OCR, records its hash, and validates PNG/JPEG page dimensions before it emits
-only `AI_CANDIDATE` records.
+the supported pre-review importer. It accepts existing MinerU
+`content_list.json` / `middle.json`, rendered page assets and dimensions,
+explicit OCR evidence, and pinned source/license metadata. MinerU 3.4.4 does
+not write `ocr_mode` to `middle.json`; for that raw output, a hash-bound
+`mineru-explicit-ocr-receipt/v1` is mandatory. The receipt must attest to an
+explicit OCR run with exit code zero and bind the input PDF plus unmodified
+content and middle JSON hashes. MinerU `content_list.json` geometry is already
+`page_1000_xyxy`, so the importer preserves it rather than normalizing it a
+second time. It hashes the rendered page image and validates PNG/JPEG page
+dimensions before emitting only `AI_CANDIDATE` records.
 
 Candidates are not Qrels and are not scoreable. They must flow through
 `export_review_worksheet()` and `freeze_human_reviewed_evidence()` with a real
@@ -58,3 +61,21 @@ signed human decision before a separate Qrels-release process can be designed.
 The current repository has no license-clear document-native
 question/page/element/bbox source material, so no candidate file or Qrels has
 been generated from the test fixtures.
+
+## 2026-08-14 Real DUDE local candidate evidence
+
+A local-only DUDE sample has now exercised this path with a genuine PDF:
+`jordyvl/DUDE_loader@b3662175d3b2482d711f18559b7acc2a5bccc600` (dataset
+declaration `CC-BY-4.0`). MinerU `3.4.4` ran `-m ocr -b pipeline` with exit
+code `0` on all 12 pages of PDF
+`3e823ecb634b9f1a76fb8fdad270f979.pdf`. Its immutable local receipt binds
+the PDF, content JSON and middle JSON hashes; candidate materialization wrote
+180 `AI_CANDIDATE` elements and a blank 180-row review worksheet.
+
+These local artifacts are deliberately not tracked. Two native DUDE
+question-to-page/bbox records are retained only as `UPSTREAM_PAGE_BBOX_UNVERIFIED`:
+their source coordinate transform and element association have not received
+human verification. In addition, the dataset-level declaration does not prove
+redistribution rights for every underlying PDF. Therefore this work has not
+created a Qrel, human-reviewed evidence, a scoreable metric, or a repository
+PDF asset.
