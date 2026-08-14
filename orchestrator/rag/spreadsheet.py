@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from io import BytesIO
 
 import openpyxl
@@ -15,6 +16,7 @@ class SpreadsheetArtifact:
     parser_version: str
     source_sha256: str
     elements: list[Element]
+    formula_dependencies: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def parse_xlsx_bytes(content: bytes, *, document_id: str, source_url: str = "") -> SpreadsheetArtifact:
@@ -24,6 +26,7 @@ def parse_xlsx_bytes(content: bytes, *, document_id: str, source_url: str = "") 
     parser_version = openpyxl.__version__
     workbook = openpyxl.load_workbook(BytesIO(content), read_only=True, data_only=False)
     elements: list[Element] = []
+    formula_dependencies: dict[str, tuple[str, ...]] = {}
     order = 0
     for sheet in workbook.worksheets:
         heading_path = [sheet.title]
@@ -67,8 +70,9 @@ def parse_xlsx_bytes(content: bytes, *, document_id: str, source_url: str = "") 
                         latex=cell.value,
                     )
                 )
+                formula_dependencies[f"{sheet.title}!{cell.coordinate}"] = _formula_dependencies(cell.value)
                 order += 1
-    return SpreadsheetArtifact("openpyxl", parser_version, source_sha256, elements)
+    return SpreadsheetArtifact("openpyxl", parser_version, source_sha256, elements, formula_dependencies)
 
 
 def _element(
@@ -100,3 +104,8 @@ def _element(
 
 def _cell_text(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _formula_dependencies(formula: str) -> tuple[str, ...]:
+    references = re.findall(r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?", formula.upper())
+    return tuple(dict.fromkeys(reference.replace("$", "") for reference in references))

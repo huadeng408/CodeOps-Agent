@@ -37,6 +37,10 @@ def test_xlsx_parser_preserves_sheet_table_and_formula_coordinates() -> None:
     assert artifact.elements[2].latex == "=B2*2"
     assert artifact.elements[2].text == "Budget!C2 =B2*2"
     assert artifact.elements[3].latex == "=SUM(B2:B3)"
+    assert artifact.formula_dependencies == {
+        "Budget!C2": ("B2",),
+        "Budget!C3": ("B2:B3",),
+    }
 
 
 class _Response:
