@@ -2,7 +2,11 @@ param(
     [string]$RunId = ("current-head-" + (Get-Date -Format "yyyyMMdd-HHmmss")),
     [string]$CheckoutPath = "D:\vscode\tau2-bench-v1.0.1",
     [string]$PhoenixUrl = "http://127.0.0.1:6006",
-    [string]$ExpectedCommit = "fc0055dc4e0a316c3f83133267fbd6faaa770992"
+    [string]$ExpectedCommit = "fc0055dc4e0a316c3f83133267fbd6faaa770992",
+    [ValidateSet("llm_agent", "llm_agent_solo")]
+    [string]$Agent = "llm_agent",
+    [ValidateSet("user_simulator", "dummy_user")]
+    [string]$User = "user_simulator"
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,6 +100,8 @@ runner = Tau2OfficialRunner(
         seed=42,
         max_concurrency=1,
         domain="mock",
+        agent=os.environ["TAU2_RECEIPT_AGENT"],
+        user=os.environ["TAU2_RECEIPT_USER"],
     )
 )
 if problems := runner.validate():
@@ -179,6 +185,8 @@ $env:TAU2_RECEIPT_CHECKOUT = $CheckoutPath
 $env:TAU2_RECEIPT_EXPECTED_COMMIT = $ExpectedCommit
 $env:TAU2_RECEIPT_API_KEY = $apiKey
 $env:TAU2_RECEIPT_BASE_URL = "https://beeapi.ai/v1"
+$env:TAU2_RECEIPT_AGENT = $Agent
+$env:TAU2_RECEIPT_USER = $User
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 

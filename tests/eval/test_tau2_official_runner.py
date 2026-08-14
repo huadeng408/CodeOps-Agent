@@ -35,6 +35,7 @@ def test_tau2_official_runner_builds_pinned_single_concurrency_command(tmp_path:
 
     assert command == [
         "uv", "run", "tau2", "run", "--domain", "mock",
+        "--agent", "llm_agent", "--user", "user_simulator",
         "--agent-llm", "openai/gpt-5.6-sol",
         "--user-llm", "openai/gpt-5.6-sol",
         "--num-trials", "1", "--num-tasks", "1",
@@ -42,7 +43,34 @@ def test_tau2_official_runner_builds_pinned_single_concurrency_command(tmp_path:
         "--save-to", "receipt-001",
     ]
     assert runner.pins["dataset_revision"] == "fc0055dc4e0a316c3f83133267fbd6faaa770992"
+    assert runner.pins["agent"] == "llm_agent"
+    assert runner.pins["user"] == "user_simulator"
     assert runner.validate() == []
+
+
+def test_tau2_official_runner_allows_solo_agent_only_with_dummy_user(tmp_path: Path) -> None:
+    from eval.benchmarks.tau2official import Tau2OfficialConfig, Tau2OfficialRunner
+
+    checkout = tmp_path / "tau2"
+    _write_checkout(checkout)
+    runner = Tau2OfficialRunner(
+        Tau2OfficialConfig(
+            checkout=checkout,
+            source_commit="f" * 40,
+            data_tree_sha256="a" * 64,
+            model="openai/gpt-5.6-sol",
+            agent="llm_agent_solo",
+            user="dummy_user",
+        )
+    )
+
+    assert "--agent" in runner.command("solo-receipt")
+    assert "llm_agent_solo" in runner.command("solo-receipt")
+    assert "dummy_user" in runner.command("solo-receipt")
+    invalid = Tau2OfficialRunner(
+        Tau2OfficialConfig(checkout, "f" * 40, "a" * 64, "openai/gpt-5.6-sol", agent="llm_agent_solo")
+    )
+    assert "llm_agent_solo requires dummy_user" in invalid.validate()
 
 
 @pytest.mark.parametrize("model", ["gpt-5.6-sol", "deepseek-v4-pro"])

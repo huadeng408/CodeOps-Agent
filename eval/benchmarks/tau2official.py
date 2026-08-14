@@ -50,6 +50,8 @@ class Tau2OfficialConfig:
     seed: int = 42
     max_concurrency: int = 1
     domain: str = "mock"
+    agent: str = "llm_agent"
+    user: str = "user_simulator"
 
 
 class Tau2OfficialRunner:
@@ -65,6 +67,8 @@ class Tau2OfficialRunner:
             "dataset_name": "tau2-bench-v1.0.1-bundled-data",
             "dataset_revision": self.config.source_commit,
             "scorer_name": "tau2 CLI results.json",
+            "agent": self.config.agent,
+            "user": self.config.user,
         }
 
     def validate(self) -> list[str]:
@@ -81,6 +85,12 @@ class Tau2OfficialRunner:
             problems.append("max_concurrency must be between 1 and 10")
         if self.config.domain != "mock":
             problems.append("official smoke domain must be mock")
+        if self.config.agent not in {"llm_agent", "llm_agent_solo"}:
+            problems.append("official smoke agent must be llm_agent or llm_agent_solo")
+        if self.config.agent == "llm_agent_solo" and self.config.user != "dummy_user":
+            problems.append("llm_agent_solo requires dummy_user")
+        if self.config.agent == "llm_agent" and self.config.user != "user_simulator":
+            problems.append("llm_agent requires user_simulator")
         return problems
 
     def command(self, run_name: str) -> list[str]:
@@ -89,6 +99,7 @@ class Tau2OfficialRunner:
             raise ValueError("; ".join(problems))
         return [
             "uv", "run", "tau2", "run", "--domain", self.config.domain,
+            "--agent", self.config.agent, "--user", self.config.user,
             "--agent-llm", self.config.model, "--user-llm", self.config.model,
             "--num-trials", "1", "--num-tasks", "1",
             "--max-concurrency", str(self.config.max_concurrency),
@@ -129,6 +140,8 @@ class Tau2OfficialRunner:
             "seed": self.config.seed,
             "model": self.config.model,
             "max_concurrency": self.config.max_concurrency,
+            "agent": self.config.agent,
+            "user": self.config.user,
             "status": status,
             "rewards": rewards,
             "official_output_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
