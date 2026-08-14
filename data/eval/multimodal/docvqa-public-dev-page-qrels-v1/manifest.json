@@ -1,0 +1,29 @@
+{
+  "schema_version": "public-page-qrels/v1",
+  "status": "PUBLIC_DEV_PAGE_QRELS",
+  "dataset": {
+    "id": "vidore/docvqa_test_subsampled",
+    "revision": "49bf8f13e13c41dd8cdb0cae5314e31c1da1e0d6",
+    "license_spdx": "MIT",
+    "upstream_annotations": "human-labeled"
+  },
+  "selection": {
+    "method": "questionId lexical sort",
+    "count": 120
+  },
+  "source_receipt": {
+    "path": "eval_results/multimodal/docvqa-clip-public-120-20260814-rerun01",
+    "receipt_checksums_sha256": "26a6347f456d07f5c81ec2fc96efe28e491a9efb0b59bca02175b20682eaad69",
+    "manifest_sha256": "7363c2942586b42e31c92ab471ca5080e0904119c407fbb9cdb860b32efc794b",
+    "source_qrels_sha256": "bfc059576d287ed7a01299e7b5465afc47747b079956ed64a20b806eb746ab73"
+  },
+  "qrels_count": 120,
+  "qrels_encoding": "UTF-8 LF",
+  "qrels_sha256": "6e00b1ccbf74935079c49f442377f771b622aa5a9af5487c47cbcf19fe4147ba",
+  "limitations": {
+    "bbox_available": false,
+    "human_reviewed_by_project": false,
+    "hidden_holdout": false,
+    "scoreable_for_page_retrieval_only": true
+  }
+}
