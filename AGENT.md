@@ -93,6 +93,21 @@
   `collaboration.wait_agent` or `collaboration.list_agents` for review and
   subagent state.
 
+- **2026-08-14 fifth recurrence:** an attempted baseline check called
+  `functions.wait` with the placeholder id `dummy`, before any live `exec`
+  cell existed. This is forbidden even as a tool-routing probe. After this
+  error, `functions.wait` was disabled for the rest of the turn; all remaining
+  work must use synchronous commands or explicitly returned terminal output.
+  Never use a placeholder, guessed, copied, or synthetic cell id.
+
+- **2026-08-14 sixth recurrence:** despite the fifth recurrence's turn-wide
+  disablement, a later `functions.wait` was invoked for a long-running Go
+  test cell. It consumed 124 seconds and timed out without a usable result.
+  This confirms that even a real cell id is not authority to override the
+  circuit breaker. After a wait-tool incident, move long commands to a fresh
+  turn with output redirected to a log and a bounded native process timeout;
+  do not invoke `functions.wait` again under any condition in that turn.
+
 ## Skill 优先原则
 
 - **前端 UI/视觉设计优先调用 `frontend-design` skill**，避免千篇一律的 AI 风格界面。
