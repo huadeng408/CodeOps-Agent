@@ -79,3 +79,29 @@ human verification. In addition, the dataset-level declaration does not prove
 redistribution rights for every underlying PDF. Therefore this work has not
 created a Qrel, human-reviewed evidence, a scoreable metric, or a repository
 PDF asset.
+
+## Signed page-Qrels materialization
+
+`orchestrator.eval.multimodal_page_qrels.materialize_human_reviewed_page_qrels()`
+is the only supported transition from reviewed elements to page-Qrels evidence.
+It requires all of the following external, immutable inputs:
+
+1. MinerU candidates, per-candidate human decisions, and their existing
+   Ed25519 review receipt.
+2. A separate human-authored query-to-candidate JSONL and a second Ed25519
+   receipt binding its bytes to the candidate, decision, and license hashes.
+3. A `multimodal-pdf-license-allowlist/v1` document allowlist with an explicit
+   `redistribution_permitted: true` record for every linked PDF.
+4. The hash-bound MinerU explicit-OCR receipt for every linked document. Its
+   input PDF, content, middle JSON, and receipt hashes must agree with both the
+   allowlist and candidate provenance.
+
+It refuses OCR/string heuristics, rejected or unreviewed candidates, source
+bboxes without a human link, answer-bearing query records, unsigned links, and
+unallowlisted PDFs. The output status is
+`HUMAN_REVIEWED_PAGE_QRELS_NOT_RELEASED`: it has auditable page-Qrel rows but
+is deliberately `scoreable=false` until a separate dataset version, split
+freeze, contamination scan, and independent scorer receipt exist.
+Its manifest records the hashes of both review receipts and every consumed
+MinerU OCR receipt, so an audit can resolve the exact signed and OCR evidence
+files rather than only their input projections.
