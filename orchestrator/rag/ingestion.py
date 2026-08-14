@@ -25,6 +25,7 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharac
 from .config import Settings
 from .chunking import chunk_elements
 from .elements import Element, map_mineru_output
+from .spreadsheet import parse_xlsx_bytes
 from .models import (
     ChunkRequestPayload,
     ChunkResponsePayload,
@@ -68,7 +69,8 @@ class IngestionService:
         source_resp = await self._http.get(payload.objectUrl)
         source_resp.raise_for_status()
 
-        is_pdf = _detect_file_type(payload.task.file_name) == "pdf" or source_resp.content.startswith(b"%PDF-")
+        file_type = _detect_file_type(payload.task.file_name)
+        is_pdf = file_type == "pdf" or source_resp.content.startswith(b"%PDF-")
         if is_pdf:
             parsed_artifact = await _parse_pdf_with_mineru(
                 source_resp.content,
@@ -77,6 +79,13 @@ class IngestionService:
                 self._settings,
             )
             parsed = parsed_artifact.parsedText
+        elif payload.task.file_name.lower().endswith(".xlsx"):
+            spreadsheet = parse_xlsx_bytes(
+                source_resp.content,
+                document_id=payload.task.file_md5,
+                source_url=payload.objectUrl,
+            )
+            parsed = "\n\n".join(element.text for element in spreadsheet.elements if element.text)
         else:
             tika_resp = await self._http.put(
                 f"{self._settings.tika_url.rstrip('/')}/tika",
@@ -97,6 +106,15 @@ class IngestionService:
         )
         if is_pdf:
             return parsed_artifact.model_copy(update={"parsedText": parsed_text})
+        if payload.task.file_name.lower().endswith(".xlsx"):
+            return ParseResponsePayload(
+                parsedText=parsed_text,
+                documentId=payload.task.file_md5,
+                parserName=spreadsheet.parser_name,
+                parserVersion=spreadsheet.parser_version,
+                sourceSha256=spreadsheet.source_sha256,
+                elements=spreadsheet.elements,
+            )
         return ParseResponsePayload(parsedText=parsed_text)
 
     async def chunk(self, payload: ChunkRequestPayload) -> ChunkResponsePayload:
