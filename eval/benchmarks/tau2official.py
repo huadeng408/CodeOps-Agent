@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,26 @@ from typing import Any
 TAU2_V101_COMMIT = "fc0055dc4e0a316c3f83133267fbd6faaa770992"
 TAU2_V101_TAG = "v1.0.1"
 TAU2_REPOSITORY = "https://github.com/sierra-research/tau2-bench"
+
+
+def source_data_tree_sha256(checkout: Path) -> str:
+    """Hash tracked ``HEAD:data`` entries, excluding generated simulations.
+
+    tau2 writes official run outputs below ``data/simulations``.  Hashing the
+    live filesystem would therefore turn a benchmark input pin into an output-
+    dependent value.  Git's tree listing provides the immutable source-data
+    boundary for an already pinned checkout.
+    """
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "HEAD", "data"],
+        cwd=checkout,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("cannot read tracked tau2 data tree")
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -99,7 +120,7 @@ class Tau2OfficialRunner:
         destination = artifact_root / "scorer" / "tau2-results.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(raw, destination)
-        return {
+        receipt = {
             "benchmark": "tau2-bench",
             "upstream_repository": TAU2_REPOSITORY,
             "upstream_tag": TAU2_V101_TAG,
@@ -113,3 +134,7 @@ class Tau2OfficialRunner:
             "official_output_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
             "official_output": destination.as_posix(),
         }
+        (artifact_root / "receipt.json").write_text(
+            json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return receipt

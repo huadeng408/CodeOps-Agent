@@ -108,15 +108,24 @@ trace assertion, and Phoenix readback. Record `INCOMPLETE_AGENT_TRACE` if the
 upstream agent does not emit the required spans; do not call it a complete
 trace join.
 
-- [ ] **Step 4: Commit and push only project files**
+- [x] **Step 4: Commit and push only project files**
 
 ### Task 4: tau2 official migration
 
-- [ ] Keep the legacy `tau_bench 0.1.0` adapter and receipts classified as
+- [x] Keep the legacy `tau_bench 0.1.0` adapter and receipts classified as
   development evidence only. Create a separate `tau2-bench v1.0.1`
   (`fc0055dc4e0a316c3f83133267fbd6faaa770992`) adapter from a pinned isolated
   checkout, preserve raw `tau2` output and checksums, and apply this same
   receipt trace contract without synthesizing Agent/Chat spans.
+
+**Evidence:** isolated checkout `D:\vscode\tau2-bench-v1.0.1` was pinned to
+the stated commit. `uv run tau2 --help` and `uv run tau2 check-data` completed
+before one `mock/create_task_1` run with concurrency one. Receipt
+`current-head-20260814-phoenix-readback-source-pin` has official CLI exit `0`,
+score `0.0` (`OFFICIAL_FAILURE`), source-only data tree SHA-256
+`df29afa3d8fbce072dae983c75b166548e1cea48c5e58737e0d5b29349c0441d`,
+Phoenix readback, and 11 verified checksums. It remains
+`INCOMPLETE_AGENT_TRACE`, because no genuine Agent/Chat span was observed.
 
 Stage only source/tests/docs; preserve existing untracked WIP.
 

@@ -97,8 +97,49 @@ official output or trace evidence.
 - 可观测性 89% `[#########-]`: Phoenix now readbacks receipt boundaries, but
   official Terminal-Bench Agent/Chat and long-term metrics/alerts remain.
 
-Most needed next: genuine OTel instrumentation of the real benchmark agent,
-then a clean tau2 official adapter. The least certain point is whether the
-upstream Terminal-Bench agent exposes a sufficient provider boundary without
+Most needed next: genuine OTel instrumentation of the real benchmark agents,
+then an untouched public official sample that passes. The least certain point
+is whether either upstream agent exposes a sufficient provider boundary without
 altering official task behavior. The largest likely omission is still the
 absence of license-clear, genuinely human-reviewed document-native bbox qrels.
+
+## tau2 Official Receipt Extension
+
+`IMPLEMENTED`: `Tau2OfficialRunner` now runs an isolated checkout of
+`sierra-research/tau2-bench` `v1.0.1` at
+`fc0055dc4e0a316c3f83133267fbd6faaa770992` through the upstream `tau2` CLI.
+The legacy `tau_bench 0.1.0` adapter and historical scores remain development
+evidence only. `collect_receipt()` persists `receipt.json`, and the source
+data pin comes from `git ls-tree -r HEAD data`, so generated
+`data/simulations/` output cannot alter an input-data hash.
+
+`VERIFIED`: the isolated checkout completed `uv run tau2 --help` and
+`uv run tau2 check-data`, followed by exactly one public `mock/create_task_1`
+task with one trial, seed `42`, and model concurrency `1`. Receipt
+`eval_results/tau2official/current-head-20260814-phoenix-readback-source-pin`
+records source-data SHA-256
+`df29afa3d8fbce072dae983c75b166548e1cea48c5e58737e0d5b29349c0441d`.
+The official CLI exited `0`, while the official score was `OFFICIAL_FAILURE`
+with reward `0.0`, `action_match=false`, and `db_match=false`. This is a
+scored model outcome, not a runner failure. No public task, scorer, or prompt
+was altered after the result.
+
+Phoenix readback is `phoenix_verified=true` for trace
+`ed86b6d750dd0a74d90bf897b91f8198`, but it contains only
+`eval.run -> eval.instance -> scorer.official`. The assertion is correctly
+`INCOMPLETE_AGENT_TRACE`: real `invoke_agent` and `chat` spans were not
+emitted. The receipt has 11 checksum entries with zero mismatches. LiteLLM's
+relay-model cost-map warning did not prevent execution and is not treated as a
+scoring error.
+
+Focused verification:
+
+```text
+C:\Python312\python.exe -m pytest tests\eval\test_tau2_official_runner.py tests\eval\test_official_receipt_trace.py -q
+11 passed in 0.59s
+```
+
+The tau2 adapter and one real official receipt increase Harness evidence, but
+do not increase the reported percentage: an independent passing sample and
+real Agent/Chat spans remain required. No historical receipt is being
+retroactively reclassified.

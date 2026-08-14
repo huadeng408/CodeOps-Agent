@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,42 @@ def test_tau2_official_runner_copies_and_hashes_raw_upstream_result(tmp_path: Pa
     assert receipt["official_output_sha256"]
     assert receipt["source_commit"] == "f" * 40
     assert receipt["status"] == "OFFICIAL_FAILURE"
+    assert json.loads((tmp_path / "artifact" / "receipt.json").read_text(encoding="utf-8")) == receipt
+
+
+def test_tau2_receipt_script_uses_pinned_isolated_checkout_and_phoenix_readback() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-tau2-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '[string]$CheckoutPath' in script
+    assert 'fc0055dc4e0a316c3f83133267fbd6faaa770992' in script
+    assert 'uv", "run", "tau2", "run"' in script
+    assert 'OfficialReceiptTrace' in script
+    assert 'TraceCapture' in script
+    assert 'read_run_spans' in script
+    assert 'write_official_receipt_trace(' in script
+    assert 'refresh_receipt_checksums' in script
+    assert 'max_concurrency=1' in script
+
+
+def test_tau2_source_data_hash_excludes_untracked_simulation_output(tmp_path: Path) -> None:
+    from eval.benchmarks.tau2official import source_data_tree_sha256
+
+    checkout = tmp_path / "tau2"
+    (checkout / "data").mkdir(parents=True)
+    (checkout / "data" / "mock.json").write_text('{"task": "source"}\n', encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=checkout, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
+    subprocess.run(["git", "add", "data"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-m", "source"], cwd=checkout, check=True, capture_output=True)
+
+    before = source_data_tree_sha256(checkout)
+    generated = checkout / "data" / "simulations" / "run" / "results.json"
+    generated.parent.mkdir(parents=True)
+    generated.write_text('{"reward": 0}\n', encoding="utf-8")
+
+    assert source_data_tree_sha256(checkout) == before
