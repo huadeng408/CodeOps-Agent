@@ -3464,6 +3464,20 @@ GPT-5.6 Sol may help generate or challenge `AI_CANDIDATE` records but may only
 produce `AI_REVIEWED` or `DISPUTED`; it cannot satisfy step 3. Until step 3
 has actual human evidence, the PDF document-native bbox gate remains blocked.
 
+### 53.3 VisualMRC mirror follow-up (2026-08-14)
+
+- **VERIFIED negative evidence**: the public mirrors
+  `jeepliu/VisualMRC@4f8b6de2c6ff498b32c7097112a0f96eb8551dd7` and
+  `mm-eval/VisualMRC@b522c09ab3958d25396c7e5da4ad4bea2ee7ef5b` expose only
+  page-level QA/image fields. Their published schemas have no upstream
+  `element_id`, `bbox`, or question-to-evidence relation, and neither card
+  declares a license.
+- **REJECTED**: the public upstream `nttmdlab-nlp/VisualMRC` repository has
+  no GitHub license declaration and its root contains only `README.md` and a
+  figure; the official Hugging Face dataset remains gated. These mirrors must
+  not be treated as a license proxy or used to infer qrels from OCR/string
+  matches. No data artifact was downloaded.
+
 ## 54. ScreenSpot-Pro independent GUI grounding receipt (2026-08-14)
 
 - **IMPLEMENTED**: `eval.benchmarks.screenspot_grounding` validates one
