@@ -3398,29 +3398,24 @@ receipt; a real runner must still exercise the full contract.
 
 ## 52. WebSRC structural-evidence candidate qualification (2026-08-14)
 
-- **VERIFIED (source qualification only)**: `X-LANCE/WebSRC_v1.0` is public,
-  ungated, and declares `CC-BY-4.0` at Hugging Face revision
-  `7aa0bc6efc7ef43f68c192e2091108541acbaf1a`. Its upstream repository is
-  public at commit `50695bca882e3779f48f0eedea3ad88b84f3839f` (repository code
-  license MIT). The dataset card, not the repository code license, is the
-  license authority for dataset use.
-- **VERIFIED (schema qualification only)**: a sampled page binds
-  `dataset.csv.question` and `dataset.csv.element_id` to the same page's
-  `processed_data/<page>.json`, where the element key carries `rect.x`,
-  `rect.y`, `rect.width`, and `rect.height`; sibling HTML and PNG assets provide
-  structure and visual context. This supports a separately versioned
-  `question/page/element/bbox` structural-web evidence lane without inventing
-  a bbox from answer text.
-- **NOT APPLICABLE to the PDF gate**: WebSRC is a screenshot-plus-HTML web
-  reading-comprehension corpus, not a PDF/document corpus processed by MinerU.
-  It must not be merged with DocVQA, ViDoRe, ScreenSpot-Pro, PDF RAG reports,
-  or used to pass the document-native visual alias gate.
-- **Next gate before materialization**: define a separate source manifest and
-  deterministic converter, then test a fixed stratified public sample against
-  raw `dataset.csv`, JSON rects, PNG dimensions, and HTML element ids. The
-  receipt must include source/revision/tree hashes, source license, selected
-  ids, rejected zero-area/yes-no elements, and `pdf_rag_gate=NOT_APPLICABLE`.
-  No production corpus or alias may ingest these assets.
+- **RETRACTED (real archive audit)**: the downloadable `WebSRC_v1.0` test
+  archive was inspected as source bytes. Its `dataset.csv` contains only
+  `question,id`; it does not expose a stable `element_id` needed to join a
+  question to a JSON geometry key. The HTML DOM ids and numeric JSON geometry
+  keys cannot be joined from the archive without an invented heuristic.
+- **VERIFIED negative evidence**: the tested archive was
+  `WebSRC_v1.0_test.zip`, 130,295,695 bytes, SHA-256
+  `e85088f49499f77ce34825fa747b941d7643cdeefedadc902884ccf1c06b7501`.
+  This invalidates the earlier schema-only claim. A licence declaration or a
+  page-level id is insufficient when the upstream question-to-element mapping
+  is absent.
+- **BLOCKED**: no WebSRC converter, qrels, score, or report may be produced
+  from this archive. The abandoned structural lane is not evidence for PDF,
+  document retrieval, visual alias, clean holdout, or human review.
+- **Allowed next step**: only resume this candidate after a separately
+  inspected, versioned upstream release exposes an explicit question-to-element
+  or question-to-bbox mapping. It must then remain a web-only lane and retain
+  `pdf_rag_gate=NOT_APPLICABLE`.
 
 ## 53. Document-native bbox source audit closure (2026-08-14)
 
@@ -3439,7 +3434,7 @@ unlinked word boxes, or a box from a different benchmark do not satisfy it.
 | VisualMRC mirrors | raw cards/tree | `LICENSE_UNVERIFIED` | no dataset license metadata; do not inherit a license from the original |
 | `munish0838/funsd-vqa` | OpenRAIL card, pinned 149-line JSONL | `LICENSE_BLOCKED` | not in allowlist; questions/answers and word boxes are not linked as gold evidence, and image assets are absent |
 | `jrzhang/TextVQA_GT_bbox` | Apache-2.0, manually boxed | `NOT_DOCUMENT` | street-scene TextVQA, not a document/page retrieval corpus |
-| `X-LANCE/WebSRC_v1.0` | CC-BY-4.0, question + element id + JSON rect + HTML + PNG | `WEB_STRUCTURAL_ONLY` | qualified independently in §52; does not test PDF/MinerU document RAG |
+| `X-LANCE/WebSRC_v1.0` | declared CC-BY-4.0; tested archive has question + page id only | `SOURCE_SCHEMA_UNUSABLE` | no upstream question-to-element/bbox join in inspected archive; no qrels may be inferred |
 | ScreenSpot-Pro | MIT, screenshot/instruction/bbox | `GUI_GROUNDING_ONLY` | qualified independently; not document retrieval |
 
 ### 53.2 Result and allowed route
@@ -3468,3 +3463,22 @@ The sole legitimate route to a project document-native gold lane is:
 GPT-5.6 Sol may help generate or challenge `AI_CANDIDATE` records but may only
 produce `AI_REVIEWED` or `DISPUTED`; it cannot satisfy step 3. Until step 3
 has actual human evidence, the PDF document-native bbox gate remains blocked.
+
+## 54. ScreenSpot-Pro independent GUI grounding receipt (2026-08-14)
+
+- **IMPLEMENTED**: `eval.benchmarks.screenspot_grounding` validates one
+  pinned ScreenSpot-Pro annotation and PNG locally against a fixed filename,
+  declared source-relative image path, and both SHA-256 inputs. It emits
+  deterministic report and checksum receipt files, and uses an explicit
+  non-model `image_center_baseline`. The right and lower bbox edges are
+  exclusive, preventing boundary points from receiving an inflated hit; non-
+  finite bbox coordinates are rejected.
+- **VERIFIED**: cached upstream sample `vscode_macos_0` parsed as UTF-8 JSON
+  (55 rows). Its image dimensions are `2560x1664`; annotation bbox is
+  `[473, 183, 503, 219]`; PNG SHA-256 is
+  `e2aba1cb9e3b31e3500178d0cebda30615e93fd74d1a3c3b353cc1dd5230cd1d`.
+  The center baseline produced `point_in_box=false` and rate `0.0`.
+- **Boundary**: this is one reproducible GUI-grounding micro-receipt, not a
+  model result, aggregate benchmark, document retrieval result, PDF RAG test,
+  answer-quality score, visual-alias gate, or human review. Its four unrelated
+  gates are all explicitly `NOT_APPLICABLE`.

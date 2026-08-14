@@ -85,6 +85,14 @@
   call until a valid live target identifier has been obtained from the matching
   namespace; repeated identical validation errors are never transient.
 
+- **2026-08-14 fourth recurrence:** a review-status check incorrectly invoked
+  `functions.wait` with a non-live cell id. The resulting `cell not found`
+  error is a controller failure, not a transient condition. After the first
+  such error, mark `functions.wait` permanently unavailable for the rest of
+  the turn, record the incident before resuming work, and use only
+  `collaboration.wait_agent` or `collaboration.list_agents` for review and
+  subagent state.
+
 ## Skill 优先原则
 
 - **前端 UI/视觉设计优先调用 `frontend-design` skill**，避免千篇一律的 AI 风格界面。
