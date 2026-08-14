@@ -1,0 +1,15 @@
+{
+  "artifact_type": "UNSUBMITTED_SOURCE_DECLARATION",
+  "exported_at": "2026-08-14T05:10:56.000215Z",
+  "declaration": {
+    "source_location": "https://github.com/git/git",
+    "source_revision": "a97fcc37c2bc6340a8d7ce78dedf227aac4e9aa7",
+    "license": "GPL-2.0-only",
+    "ocr_permission": "yes",
+    "page_render_permission": "yes",
+    "vectorization_permission": "yes",
+    "internal_evaluation_permission": "yes",
+    "public_display_permission": "yes",
+    "notes": "语料范围 Documentation/（GPL-2.0-only）。GPL 允许使用与再分发；再分发（含修改）须以 GPL 授权并附带许可文本。本声明依据许可证条款的一般理解填写，非法律意见。"
+  }
+}

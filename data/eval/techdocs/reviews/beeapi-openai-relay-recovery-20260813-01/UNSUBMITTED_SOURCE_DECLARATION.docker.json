@@ -1,0 +1,15 @@
+{
+  "artifact_type": "UNSUBMITTED_SOURCE_DECLARATION",
+  "exported_at": "2026-08-14T05:10:56.000215Z",
+  "declaration": {
+    "source_location": "https://github.com/docker/docs",
+    "source_revision": "bb6ca1cb679394b4e9f7f44cc84a1288f8966247",
+    "license": "Apache-2.0",
+    "ocr_permission": "yes",
+    "page_render_permission": "yes",
+    "vectorization_permission": "yes",
+    "internal_evaluation_permission": "yes",
+    "public_display_permission": "yes",
+    "notes": "语料范围 content/（Apache-2.0）。许可证允许使用、修改与再分发；再分发须保留许可与 NOTICE 文件。本声明依据许可证条款的一般理解填写，非法律意见。"
+  }
+}

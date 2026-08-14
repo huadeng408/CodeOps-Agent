@@ -1,0 +1,1294 @@
+{
+  "artifact_type": "UNSUBMITTED_REVIEW_DRAFT",
+  "worksheet_sha256": "e108e9aff54ba0e8a10b2477546847e3d7970bd1542c4b7bd8f1b16d62e1039a",
+  "exported_at": "2026-08-14T04:52:07.689408+00:00",
+  "decisions": [
+    {
+      "row_hash": "36e40095cb12d166",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档是 Go 汇编指南，主题对口；但检索证据均为通用汇编语法/伪寄存器/指令/寻址模式，未含「与 Go 类型和常量交互」关键章节，不足以支撑判定"
+    },
+    {
+      "row_hash": "eb188458f7e36537",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "git-branch 手册覆盖创建/删除分支并含 synopsis 与用法示例，证据充分"
+    },
+    {
+      "row_hash": "69a3dcd700ae4952",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Unicode HOWTO 主题对口；但检索证据为介绍、UTF-8、coding 声明、unicodedata 等章节，未含 UnicodeEncodeError/DecodeError 处理的关键内容"
+    },
+    {
+      "row_hash": "8eba71c5f30df6c9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "re 模块手册，证据覆盖匹配/替换、量词、命名分组、字符类与标志，充分"
+    },
+    {
+      "row_hash": "faf2d5b33a6732a7",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "config.sgml 的 Setting Parameters 章节，证据含参数设置方式（配置文件、SQL、命令行），充分"
+    },
+    {
+      "row_hash": "f299b79414562b54",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问清理旧镜像/容器释放磁盘空间，文档讲 Docker Desktop 的 Volumes 视图管理卷，主题不对口"
+    },
+    {
+      "row_hash": "8f3ce7a9152592af",
+      "verdict_relevant": "no",
+      "verdict_answerable": "no",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问抓取/检查客户端与服务器间 HTTP 流量，文档是 http.server（实现 HTTP 服务器），主题不对口；且抓包类问题超出 go/git/python/postgresql/docker/kubernetes 语料范围"
+    },
+    {
+      "row_hash": "38fdb86870bbf3d2",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "argparse 手册，证据含 add_argument 的 type/choices/required 等参数用法，充分"
+    },
+    {
+      "row_hash": "a7d90aba48be7b70",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "gitattributes 手册主题对口，证据含模式匹配与属性列表；但查询问 .gitattributes 配置文件的模式与属性，属 config 而非 code_api"
+    },
+    {
+      "row_hash": "59b84ac6027c0fa9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "monitoring 章含 Viewing Locks，主题对口；但检索证据全是 pg_stat_* 视图与后台进程，未含 pg_locks 查看锁的关键内容"
+    },
+    {
+      "row_hash": "7368b6481a57f41b",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "json-file 驱动手册，证据含 Options 章节，充分；但查询问驱动支持的选项，属 config 而非 code_api"
+    },
+    {
+      "row_hash": "502c0b28545ccf60",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "what-is-a-registry 文档解释镜像仓库及其在镜像存储/分发中的作用，证据充分"
+    },
+    {
+      "row_hash": "653c2dfeb914155f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Go 规范覆盖内建函数，主题对口；但检索证据为字面量/数组/结构体等章节，未含 make/append 内容；查询问用途属 concept 而非 code_api"
+    },
+    {
+      "row_hash": "320d5804e0b2a6a9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "容器生命周期钩子文档，证据含 PostStart/PreStop 及 Exec/HTTP/Sleep handler 实现，充分"
+    },
+    {
+      "row_hash": "e1a071059cf16333",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "Debug Running Pods 文档，证据含 kubectl describe/logs/exec 进入容器调试查看日志与进程，充分"
+    },
+    {
+      "row_hash": "3b115ff5ed7a3d2a",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 rebase 与 merge 改写历史的区别，文档是 git-blame（标注每行改动来源），主题不对口"
+    },
+    {
+      "row_hash": "566e479b1d5fd9a6",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "filter.md 讲解 --filter 标志、组合与取反过滤，能回答如何过滤 docker 命令输出"
+    },
+    {
+      "row_hash": "047263b57d3d169f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "kubelet-config-file.md 讲解用配置文件设置 kubelet 参数及 --config 启动，直接对口"
+    },
+    {
+      "row_hash": "ae939bf3ee3f9ea7",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "scale-deployment.md 讲 kubectl scale 及副本数变化，对口"
+    },
+    {
+      "row_hash": "df3d9f3a5d18182d",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 Bloom filter 索引用法，文档是 GiST 索引（gist.sgml），主题不对口；query_type 标 concept 不贴切，应为配置/用法类"
+    },
+    {
+      "row_hash": "f9afe51d14a6ef86",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 go_mem.html 对口，但检索到的段未含 happens-before 定义，关键内容缺失"
+    },
+    {
+      "row_hash": "5530c70d10b6dc91",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "high-availability.sgml 对口，但检索段未含 hot standby 只读、需 promote 等导致备库写失败的关键说明"
+    },
+    {
+      "row_hash": "4eadaff032527f31",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档对口，但检索段未含 atomic/happens-before 章节；query_type 标 code_api 不贴切，实为内存模型语义概念题"
+    },
+    {
+      "row_hash": "f48f8b2e733b333d",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "controller.md 讲解控制循环与期望/当前状态，对口"
+    },
+    {
+      "row_hash": "18fced697026f9d9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "compose-application-model.md 讲解 services/networks/volumes 应用模型，对口"
+    },
+    {
+      "row_hash": "c98b07611f87c2ed",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "datastructures.rst 覆盖序列类型与 list 方法，能回答序列数据结构及栈/队列选型"
+    },
+    {
+      "row_hash": "40336dbb4a71870f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "datatype.sgml 覆盖数值与字符类型，文档对口"
+    },
+    {
+      "row_hash": "e0ce979fee370922",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "deployment.md 讲解 Deployment 让实际状态逼近期望状态并创建 ReplicaSet，对口"
+    },
+    {
+      "row_hash": "4a8a0d07c5639301",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "gitattributes.adoc 讲解 text/eol 属性控制行尾转换，对口"
+    },
+    {
+      "row_hash": "2a40baf7c6569fd4",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "manage-resources-containers.md 讲解 requests/limits 及资源类型，对口"
+    },
+    {
+      "row_hash": "32499f1bc19fd3bf",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问用包管理器安装 Go 工具链，文档是 Go 汇编指南 doc/asm.html，主题不对口；且类型应为 command 而非 troubleshooting"
+    },
+    {
+      "row_hash": "74a53feac4081701",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 HPA 如何决定扩缩容，文档是 Job 控制器（job.md），主题不对口"
+    },
+    {
+      "row_hash": "1cf4b1ce50f7d2e5",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 godebug.md 的 GODEBUG History 章节正对应查询，检索到各版本引入/移除的设置"
+    },
+    {
+      "row_hash": "ffdb987d6ec5dcd5",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 runmetrics.md 的 docker stats 命令正对应查看容器 CPU/内存指标"
+    },
+    {
+      "row_hash": "89352abb37ecfdf4",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档即 Pod 失败原因排查页，检索到 termination message 相关内容"
+    },
+    {
+      "row_hash": "40f03030603f3147",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 asm.html 讲解 Go 汇编，检索段落讨论了 FP/SB 伪寄存器含义（PC 未完整覆盖但证据相关）"
+    },
+    {
+      "row_hash": "7b1a2a08dd64bf30",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Programming FAQ 确有 UnboundLocalError 条目，但检索段落是 lambda/默认参数等无关章节，关键内容未检索到"
+    },
+    {
+      "row_hash": "fa0c20201b911b70",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 GPG 签名提交，文档是 git-notes（对象注释），主题不对口；类型应为 config 而非 troubleshooting"
+    },
+    {
+      "row_hash": "9538591d4da4a011",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档是 Docker Desktop 排查主题页，内容对题"
+    },
+    {
+      "row_hash": "a3efc1e1b0afb357",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 optimize.md 即讲优化构建缓存，检索到 layer 排序、减小 context 等内容"
+    },
+    {
+      "row_hash": "13736e78d57a8593",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 dml.sgml 涵盖 INSERT，但检索段落是 UPDATE/DELETE/时态隔离，未检索到 INSERT ... RETURNING 关键内容"
+    },
+    {
+      "row_hash": "9b36aeeeb8e0b7ac",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 functions.rst 涵盖 enumerate，但检索段落是 breakpoint/bytearray 等，未检索到 enumerate 说明"
+    },
+    {
+      "row_hash": "cce75e634a57e019",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "检索段落直接命中该 FAQ 问题及答案（含 pdb/breakpoint）"
+    },
+    {
+      "row_hash": "d45b86528281ef52",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 textsearch.sgml 即全文搜索章节，检索到 tsvector/tsquery 相关内容"
+    },
+    {
+      "row_hash": "b62f319a652700c2",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档是 git-format-patch 手册页，内容对题；但类型应为 command 而非 code_api"
+    },
+    {
+      "row_hash": "dbae0e29de37677b",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档讲节点安全排空（kubectl drain），与查询完全对口，证据含 drain 用法。"
+    },
+    {
+      "row_hash": "5c9481e02dfa979c",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 reflect 包用法，文档讲 GODEBUG 兼容性设置，主题不对口，证据均为 GODEBUG 内容。"
+    },
+    {
+      "row_hash": "0ec11c51853be1d6",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档为 Kubernetes 组件概览，逐项说明控制平面与节点组件作用，与查询对口。"
+    },
+    {
+      "row_hash": "96d541e748fd9c56",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档为类型转换章节，主题对口；但查询问的是转换机制/规则，属 concept，非 code_api 用法。"
+    },
+    {
+      "row_hash": "4c86b99e6ab82977",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "urllib HOWTO 含异常处理章节，证据含 except HTTPError/URLError 代码，与查询对口。"
+    },
+    {
+      "row_hash": "8e7f7fa061021e8d",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "backup.sgml 含 WAL 连续归档与 PITR，证据含 Setting Up WAL Archiving，与查询对口。"
+    },
+    {
+      "row_hash": "e1bf5e6131769ba4",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "startup-order 文档讲 depends_on 控制启停顺序，与查询对口，证据含 condition/healthcheck。"
+    },
+    {
+      "row_hash": "9bb51e34d5c3917e",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "runtime.sgml 含服务器启动与排障，证据涉及共享内存/信号量与客户端连接问题，可支撑判定。"
+    },
+    {
+      "row_hash": "a1d7206731d8f850",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "proxy.md 讲 daemon.json 代理配置与环境变量、systemd，与查询完全对口。"
+    },
+    {
+      "row_hash": "9298490b6736a26a",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "godebug.md 讲 GODEBUG 用于兼容性回退，与查询对口。"
+    },
+    {
+      "row_hash": "416c23e322b4be9e",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "rootless troubleshoot 文档含已知限制与排障章节，与查询对口。"
+    },
+    {
+      "row_hash": "6f018ed278bffd13",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "asm.html 讲 Go 汇编指令与 DATA/GLOBL 符号声明，与查询对口，证据含指令参数说明。"
+    },
+    {
+      "row_hash": "503dfee24806bae6",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "plpgsql.sgml 含函数参数与 IF 等控制结构，与查询对口。"
+    },
+    {
+      "row_hash": "5fd58caaac932a61",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 amd64 BP 寄存器调用约定，属概念/事实判断而非 command；且证据未检索到 amd64 寄存器约定章节。"
+    },
+    {
+      "row_hash": "62aafd367e26421c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档讲 Pod 存活/就绪/启动探针配置，与查询完全对口，证据覆盖 exec/http/tcp/grpc 探针。"
+    },
+    {
+      "row_hash": "71c7d362fe7057b8",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问漏洞扫描/策略检查排查，文档讲的是 DHI 容器调试（docker debug、缺 shell），主题不对口"
+    },
+    {
+      "row_hash": "2a76f53aa0f5e3bd",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档即 daemon logs，journalctl 等命令与查询完全对口"
+    },
+    {
+      "row_hash": "1f8e338d39efabf2",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "godebug.md 的 Default GODEBUG Values 节直接回答默认值登记处"
+    },
+    {
+      "row_hash": "eebdf3d9b7cdf5a2",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "interpreter 教程含 Source Code Encoding 节，编码声明语法已在证据中"
+    },
+    {
+      "row_hash": "c496e0e23d0ce702",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "git check-attr 是命令用法，应为 command 而非 code_api"
+    },
+    {
+      "row_hash": "89504ff75b70c8f1",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "asyncio-task 文档，证据含 create_task/TaskGroup"
+    },
+    {
+      "row_hash": "76c60f8cfdc54db1",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "Compose SDK 文档，证据含 NewComposeService 用法"
+    },
+    {
+      "row_hash": "72fedc1305b7e088",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Go 规范确有 channel 类型章节，但检索证据全是整数/字符串/数组/方法集等无关章节"
+    },
+    {
+      "row_hash": "1d1433b47a75e865",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "os.rst 确有 Python UTF-8 Mode 节，但检索证据是 environ/文件描述符等无关内容"
+    },
+    {
+      "row_hash": "203ef0f46902515b",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "dataclasses 文档，证据含 default_factory 说明"
+    },
+    {
+      "row_hash": "57c3798a04fa8ac4",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 multiprocessing（进程），文档是 threading（线程），主题不对口"
+    },
+    {
+      "row_hash": "103e98230933f3eb",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问删除 Secret 后如何从备份恢复，文档讲垃圾回收/级联删除，不对口"
+    },
+    {
+      "row_hash": "41883b32f0748165",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问打 wheel 并发布 PyPI，文档是 zipapp（可执行 zip 归档），不对口"
+    },
+    {
+      "row_hash": "e21115fdd5a2bf46",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 Git/SVN 双向同步（git svn），文档是 git-daemon（Git 仓库服务器），不对口"
+    },
+    {
+      "row_hash": "4bfa0a563603c5fd",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "查询问 syslog 驱动配置项，应为 config 而非 code_api；文档 Options 节直接列出配置项"
+    },
+    {
+      "row_hash": "01c7053a8ad7e35c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档即讲 build cache invalidation，证据覆盖缓存失效规则，能直接回答为何缓存失效导致全部重建。"
+    },
+    {
+      "row_hash": "9b894a2cbc1ab136",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "gitsubmodules 文档直接解释子模块为嵌套于另一仓库内的仓库及其用途，证据充分。"
+    },
+    {
+      "row_hash": "692d1442d4ecf78a",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "git-commit 手册列出 --amend/-m 等常用选项，直接覆盖修改最近一次提交信息的查询。"
+    },
+    {
+      "row_hash": "3ead64023c3f9d09",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "CRD 文档演示用 CustomResourceDefinition 定义自定义 API 资源及 spec 字段，证据充分。"
+    },
+    {
+      "row_hash": "960c61c9f00a8e35",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "FAQ 明确解释循环内 lambda 因 x 非局部变量而全部返回同一值，证据充分。"
+    },
+    {
+      "row_hash": "bbac5026e91cdaba",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档主题对口（Go 内存模型），但查询是「在什么条件下可见」的语义概念题，query_type 应为 concept 而非 troubleshooting；且检索证据只到总则/锁/通道，未含 goroutine 结束后的可见性关键章节。"
+    },
+    {
+      "row_hash": "1f119c92058ab3f1",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档对口且 nodeSelector 示例在证据中，但 nodeSelector 属 pod spec 配置项，query_type 更接近 config 而非 code_api。"
+    },
+    {
+      "row_hash": "c1f1fb9814c4dceb",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "asm.html 确讲 Go 汇编，但查询属「有哪些特殊指令」的枚举概念题，query_type 应为 concept 而非 command；且证据未含 NOP/UNDEF 特殊指令章节。"
+    },
+    {
+      "row_hash": "7a85550b85989597",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档讲镜像分层与不可变层，证据覆盖 image layers 与 stacking，充分。"
+    },
+    {
+      "row_hash": "765d61148b90eb72",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "labels 文档直接讲标签与选择器如何协同组织对象，证据充分。"
+    },
+    {
+      "row_hash": "37d8f944acbb57da",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "stdtypes 确含内建类型，但检索证据段集中在数值/位运算/哈希/float，未检索到可变与不可变内建类型区别的关键内容。"
+    },
+    {
+      "row_hash": "92080da3b7fa92b9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档即 troubleshoot-kubectl，证据覆盖 kubeconfig/VPN/认证等排查步骤，充分。"
+    },
+    {
+      "row_hash": "b95a98bde65b4921",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档主题对口，但仅检索到开头一段且被截断（止于 find the original source），恢复 blob 的具体步骤未检索到。"
+    },
+    {
+      "row_hash": "a73f08b2a6e01d2c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "formatting 文档讲 --format 与 Go 模板函数，证据覆盖 join/table/json 等，充分。"
+    },
+    {
+      "row_hash": "742d50aa53e76180",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "go_spec 确含 go 语句语义，但检索证据段均为整数字面量/数组/方法集等无关章节，未检索到 go 语句章节。"
+    },
+    {
+      "row_hash": "339da93487759e88",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档为 StorageClass 概念与动态供给，主题对口；但 query_type 应为 concept（'是干什么的/怎么工作'），标 config 不准。"
+    },
+    {
+      "row_hash": "90abd7fe6c5275b5",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "revisions.adoc 正是讲如何用 SHA-1/分支名/tag/相对记号指定提交，完全对口。"
+    },
+    {
+      "row_hash": "856420378ee8aa92",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "errors.rst 覆盖异常与 try/except 机制，对口；但 query_type 应为 concept（讲异常处理机制，非具体报错排查），标 troubleshooting 不准。"
+    },
+    {
+      "row_hash": "02b6345fb369544f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "client-auth.sgml 即 pg_hba.conf 客户端认证配置，完全对口。"
+    },
+    {
+      "row_hash": "c3d513873f8c2f49",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "service.md 讲 Service 概念、定义与端口等，主题对口。"
+    },
+    {
+      "row_hash": "83672cb6f5431b9e",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "讲容器内设置环境变量（environment/env_file/docker run --env），对口。"
+    },
+    {
+      "row_hash": "1bcde8e676025864",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "go_spec.html 含 Handling panics 章节，文档主题对口；但证据段全是不相关的字面量/数组/结构体章节，未检索到 panic/recover 内容；且 query_type 应为 concept（机制语义），标 code_api 不准。"
+    },
+    {
+      "row_hash": "dbea5540a7773c8d",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "runtime.sgml 讲 initdb 建数据库集群与 postgres 启动，对口。"
+    },
+    {
+      "row_hash": "d55c1f21e6ebb13d",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "troubleshoot.md 正是 Docker daemon 排查，对口。"
+    },
+    {
+      "row_hash": "8c5fb347d28d9ce7",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "go_spec.html 含类型参数声明与约束章节，文档主题对口；但证据段全是不相关章节（字面量/数组/结构体），未检索到泛型内容。"
+    },
+    {
+      "row_hash": "590ee5dd2f2dab93",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "swarm services.md 的 Services/tasks 章节正好讲 service 与 task 的关系，对口。"
+    },
+    {
+      "row_hash": "15853f2b642a8bc3",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问如何配置 pg_stat_statements 扩展，文档却是 ECPG（C 内嵌 SQL），主题根本不对口，证据也全是 ECPG 内容。"
+    },
+    {
+      "row_hash": "d559888c85117e44",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "pod-lifecycle.md 讲 Pod 从创建到终止的生命周期（phase/container states），对口。"
+    },
+    {
+      "row_hash": "6ab9eb70d5bd7817",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "taint-and-toleration.md 讲 taint/toleration 配合调度，主题对口；但 query_type 应为 concept（讲配合机制），标 code_api 不准。"
+    },
+    {
+      "row_hash": "1abcc6246693890a",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "asm.html 的 amd64 章节含 MOVL g(CX),AX / g_m(AX),BX 示例，直接回答 MOVQ/MOVL 问题，对口。"
+    },
+    {
+      "row_hash": "b146a64611ff4fef",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档即 git-ls-files 手册，直接回答如何查看索引/暂存区文件列表，主题对口。"
+    },
+    {
+      "row_hash": "74be4850fc97c089",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档为 JSON Types 章节，主题对口；但「JSON 与 JSONB 的区别」属概念/区别类，query_type 应为 concept，标 code_api 不准。"
+    },
+    {
+      "row_hash": "6e5ddb8dc72899aa",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "plpgsql.sgml 确含触发器函数章节，文档主题对口；但检索证据段全是块结构/参数/声明/表达式等通用内容，未检索到触发器函数（TRIGGER/NEW/OLD/TG_*）。"
+    },
+    {
+      "row_hash": "e228925e124e7cf0",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 libpq.sgml 直接相关，证据含 PQconnectdb 等连接函数；执行查询函数未显示但连接部分已充分支撑判定。"
+    },
+    {
+      "row_hash": "9f6bff7aef8b66aa",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "git-log 手册直接回答查看提交历史及按作者/文件过滤，synopsis 含 options 与 path 参数，对口。"
+    },
+    {
+      "row_hash": "db9852c93304583c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Go 规范确含 Interface types 章节，文档主题对口；但检索证据为字面量/常量/数组/方法集等无关章节，未命中接口类型定义。"
+    },
+    {
+      "row_hash": "4c9fb5dca780dd86",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 IPv6 网络配置，文档却是 OverlayFS 存储驱动，主题根本不对口，证据也全是存储驱动内容。"
+    },
+    {
+      "row_hash": "200863eab96f2c3e",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "indices.sgml 主题对口；但证据只覆盖索引使用场景，未枚举索引类型（B-tree/Hash/GiST/GIN/BRIN），关键「Index Types」章节未检索到。"
+    },
+    {
+      "row_hash": "899692a2364dfaea",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问集群审计日志输出配置，文档却是 NetworkPolicies 网络策略，主题根本不对口。"
+    },
+    {
+      "row_hash": "843280d6ad0c474f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "ddl.sgml 直接覆盖建表/列/默认值，主题对口；但「如何定义表」属 how-to（CREATE TABLE/DDL 用法），query_type 应为 command，标 concept 不准。"
+    },
+    {
+      "row_hash": "b287e7b038ed04cc",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "interpreter.rst 含 Argument Passing 章节，文档主题对口；但检索证据为解释器调用/编码/shebang，未命中 sys.argv 参数传递内容。"
+    },
+    {
+      "row_hash": "d675ad667363c65c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "godebug.md 主题对口，证据直接说明 panicnil 控制 panic(nil) 是否允许。"
+    },
+    {
+      "row_hash": "73bc40b79b72045e",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "doc/README.md 直接说明用 relnote generate 合并 doc/next 下文件，对口。"
+    },
+    {
+      "row_hash": "0687214831126aff",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "go_mem.html 讲内存模型与同步原语（channel/lock），证据覆盖同步章节，主题对口。"
+    },
+    {
+      "row_hash": "339734a913b1287f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "venv.rst 主题对口；但证据为简介与 pip 选项说明，未显示 python -m venv 创建命令及 pip install 用法。"
+    },
+    {
+      "row_hash": "a19ac5be35e81a7c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档讲 Go 内存模型，证据含官方'序列化访问'建议，主题对口；但查询无报错语境，query_type 标 troubleshooting 不贴合，应属概念/用法类。"
+    },
+    {
+      "row_hash": "f12c0fa55259f99f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "merge-strategies.adoc 正讲合并策略及各策略默认选择，完全对口。"
+    },
+    {
+      "row_hash": "a12cc9921de85080",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "pretty-formats.adoc 讲 git log 格式化占位符，主题对口；但属命令用法而非库/API，query_type 应标 command。"
+    },
+    {
+      "row_hash": "f08ac0611425e212",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 pg_restore 恢复自定义格式备份，文档却是 dblink.sgml（跨库连接），主题不对口。"
+    },
+    {
+      "row_hash": "c9572704faa3eb7f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "Windows FAQ 确含'启动慢'章节，文档对口；但检索证据只命中'如何运行/嵌入/C API'等无关章节，关键内容未检索到。"
+    },
+    {
+      "row_hash": "adc71717a2dcc524",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "git-config.adoc 正讲配置文件存储位置，证据含各配置文件读取来源，对口。"
+    },
+    {
+      "row_hash": "81de0db0b9c5f285",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "variables.md 正讲 Bake 变量定义/插值/校验，完全对口。"
+    },
+    {
+      "row_hash": "cc500edfcea6cc9d",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "Windows FAQ 证据含'How do I run a Python program under Windows?'，完全对口。"
+    },
+    {
+      "row_hash": "c28d4b1c3ecb365f",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "install-kubectl-linux.md 正讲 Linux 安装 kubectl，完全对口。"
+    },
+    {
+      "row_hash": "800e900a63f4cc2c",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "envvars-precedence.md 正讲环境变量优先级，完全对口。"
+    },
+    {
+      "row_hash": "62a5074027597002",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "证据含 scannererr 分析器说明，主题对口；但查询问'检查什么问题'属概念/是什么，非报错排查，query_type 应标 concept。"
+    },
+    {
+      "row_hash": "c69079b871b8c4be",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "mvcc.sgml 讲并发控制与事务隔离级别，对口。"
+    },
+    {
+      "row_hash": "5ff2578a1f4c859a",
+      "verdict_relevant": "no",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "查询问 Swarm 节点间 PKI 加密通信，文档却是 host 网络驱动（容器共享宿主机网络），主题不对口。"
+    },
+    {
+      "row_hash": "bfba58cee65ce196",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "config.sgml 为服务器配置章，证据含 log_connections/log_destination 等日志参数，对口。"
+    },
+    {
+      "row_hash": "16bf07d59eee1258",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "what-is-a-container.md 证据含容器 vs 虚拟机对比，完全对口。"
+    },
+    {
+      "row_hash": "6d1f9ed7f19192f6",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档正是 BuildKit 构建密钥 secrets 章节，主题对口；但 query_type 标 code_api 不对，问的是如何用 --secret/RUN --mount 这一构建特性，属 command（命令用法）而非库/API 用法。"
+    },
+    {
+      "row_hash": "f48aeb0bb02948f2",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档为 logical-replication.sgml，正对查询；query_type 标 config（设置逻辑复制/发布）合理，证据覆盖 publication、subscription 等核心内容。"
+    },
+    {
+      "row_hash": "5889a374208775b7",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 use-secrets.md 正对 Compose secrets 定义与使用；标 config（定义配置项）合理，证据含 top-level secrets 定义、示例与 /run/secrets 挂载。"
+    },
+    {
+      "row_hash": "42a5f9f2ab78dd21",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "no",
+      "reviewer_notes": "文档 classes.rst 覆盖类/实例属性与作用域查找，主题对口；标 concept 正确；证据涉及类、实例属性、名字查找作用域，足以支撑相关性。"
+    },
+    {
+      "row_hash": "c96ac3870afe5683",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 what-is-an-image.md 讲解镜像与容器关系及镜像构成，主题对口；标 concept 正确；证据含镜像打包与层信息，充分。"
+    },
+    {
+      "row_hash": "5c283f09dae63bd1",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "no",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 custom-resources.md 正对查询主题；但 query_type 标 code_api 不对，问的是「What are Custom Resources」，属概念类，应为 concept。"
+    },
+    {
+      "row_hash": "670321200c6b96c1",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 configure.md 正对 daemon 日志驱动配置；标 config 正确；证据含 daemon.json log-driver 与 --log-opt 选项，充分。"
+    },
+    {
+      "row_hash": "a0d2ae3f81ca33c9",
+      "verdict_relevant": "yes",
+      "verdict_answerable": "yes",
+      "verdict_language_correct": "yes",
+      "verdict_query_type_correct": "yes",
+      "verdict_evidence_sufficient": "yes",
+      "reviewer_notes": "文档 configmap.md 正对 ConfigMap 注入配置到 Pod；标 config 合理；证据含 ConfigMap 对象、Pod 引用及四种注入方式，充分。"
+    }
+  ]
+}

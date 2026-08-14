@@ -1,0 +1,62 @@
+{
+  "artifact_type": "HUMAN_REVIEWED_QRELS_PROMOTION",
+  "promoted_at": "2026-08-14T05:24:32.984097+00:00",
+  "reviewer_hash": "1786f26c50bba56e",
+  "counts": {
+    "human_reviewed": 143,
+    "unchanged": 37
+  },
+  "inputs": {
+    "arbitrated_qrels_sha256": "50b95072aaf28ad6c6c7d206daee12e4354f3f6bee1e92af2bc1c1c7ba14a3dc",
+    "worksheet_original_sha256": "e108e9aff54ba0e8a10b2477546847e3d7970bd1542c4b7bd8f1b16d62e1039a",
+    "worksheet_filled_sha256": "c800408e45e1e1286df539be5bb9cf5e881ad89df9f57ebd4281ede53474a6bf",
+    "review_draft_sha256": "7afa92f88e156de682ec618ecd23943dbbeafeafe317da2f09405afb3f97627a"
+  },
+  "source_declarations": [
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.docker.json",
+      "sha256": "bcbc360d4e8a8abe1e289dd7264da91ed2d4564460547915696fa1880d3c9e57",
+      "source_location": "https://github.com/docker/docs",
+      "source_revision": "bb6ca1cb679394b4e9f7f44cc84a1288f8966247",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.git.json",
+      "sha256": "e0f1fe34d774958fa7f2bcdc4638a41bc7966cc935831c4e1b8d3020c2660de4",
+      "source_location": "https://github.com/git/git",
+      "source_revision": "a97fcc37c2bc6340a8d7ce78dedf227aac4e9aa7",
+      "license": "GPL-2.0-only"
+    },
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.go.json",
+      "sha256": "ebd7c745ec023999392051bc252d073d25a33593ee402b1841ed9dbc2e790875",
+      "source_location": "https://github.com/golang/go",
+      "source_revision": "5d29d80b6c9960c3fc39e14e3e8b9a0f52041fed",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.kubernetes.json",
+      "sha256": "22b02bb20da348255a2c960e1333e36313e2d78d87f10718549f55fd728a08ac",
+      "source_location": "https://github.com/kubernetes/website",
+      "source_revision": "b035ea80a2f666e0a60923560984458806788104",
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.postgresql.json",
+      "sha256": "cfdf95152cf353916d28c6c0876fad3a5cc3ae75a196ed8e100157b72b927222",
+      "source_location": "https://github.com/postgres/postgres",
+      "source_revision": "7a0299a1348b563c72a57a2a40462e90af9dfbac",
+      "license": "PostgreSQL"
+    },
+    {
+      "path": "data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/UNSUBMITTED_SOURCE_DECLARATION.python.json",
+      "sha256": "d9cfae2df20ba017f870fc8e9b117dccad35595fa907d1d3aac2cca55b0880b3",
+      "source_location": "https://github.com/python/cpython",
+      "source_revision": "96ebb20fc2f0542d9387091e49626f9a1132de82",
+      "license": "PSF-2.0"
+    }
+  ],
+  "outputs": {
+    "qrels_sha256": "9a98594331b1dde26ada0f28de3ba3a41e374f2b8361adb4d5077e76014680d2"
+  }
+}

@@ -17,6 +17,7 @@
 # Evaluation data artifacts: byte-pinned evidence, never line-ending converted.
 data/**/*.json    -text
 data/**/*.jsonl   -text
+data/**/*.jsonl.orig -text
 data/**/*.sha256  -text
 data/**/*.rc      -text
 

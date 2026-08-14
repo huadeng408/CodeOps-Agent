@@ -3550,3 +3550,28 @@ has actual human evidence, the PDF document-native bbox gate remains blocked.
   37 golden rows, no eligible negative rows, missing Docker coverage, and a
   disputed fraction of `143/180`. It must not overwrite the default sidecars,
   be promoted to `HUMAN_REVIEWED`, or emit retrieval metrics.
+
+## 57. User-confirmed text-review promotion (2026-08-14)
+
+The prior `DISPUTED=143` statement described the state before the user
+completed the evidence-backed worksheet. The user subsequently confirmed the
+143 decisions as their own human review and authorized formal promotion.
+
+- `orchestrator.eval.human_review_qrels` is the offline controlled promoter.
+  It requires the draft to hash-bind the blank worksheet, proves that the
+  completed worksheet changes only review fields, requires every draft decision
+  to equal that worksheet, and checks every `query_id`/`document_id` against
+  the immutable arbitration input.
+- Six source declarations are bound by SHA-256. Each is required to match the
+  source revision encoded in Qrels document IDs, provide a license and source
+  location, and grant OCR, page render, vectorization, internal evaluation,
+  and public display permissions.
+- The output is a new schema-valid file, not an overwrite:
+  `data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/qrels.human-reviewed.jsonl`.
+  It has 180 rows: 143 `HUMAN_REVIEWED` and 37 retained `AI_REVIEWED`.
+  `human-qrels-promotion-receipt.json` binds all inputs and outputs; the
+  output SHA-256 is
+  `9a98594331b1dde26ada0f28de3ba3a41e374f2b8361adb4d5077e76014680d2`.
+- This resolves the text-dispute gate. Holdout creation, multimodal document
+  qrels/evidence, official benchmark runs, and production observability remain
+  separate gates and cannot be inferred from this promotion.
