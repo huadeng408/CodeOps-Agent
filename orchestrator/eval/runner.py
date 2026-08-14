@@ -29,12 +29,15 @@ reported numbers stay comparable.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
+
+from orchestrator.eval.holdout import load_verified_holdout_qrels, verify_sealed_holdout
 
 # Common API-key / secret shapes; used only as defense in depth, since the
 # report is built from a whitelist of metric fields and stable ids.
@@ -68,7 +71,7 @@ def _key(document_id: str, section_path: list[str]) -> tuple[str, tuple[str, ...
 
 def _load_qrels(path: str | Path) -> dict[str, list[dict[str, Any]]]:
     """Load qrels JSONL grouped by query_id; raises ValueError on bad records."""
-    qrels: dict[str, list[dict[str, Any]]] = {}
+    records: list[dict[str, Any]] = []
     for line_no, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
         if not line:
@@ -77,8 +80,18 @@ def _load_qrels(path: str | Path) -> dict[str, list[dict[str, Any]]]:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"{path}:{line_no}: record must be an object")
+        records.append(record)
+    return _group_qrels(records, str(path))
+
+
+def _group_qrels(records: list[dict[str, Any]], source: str) -> dict[str, list[dict[str, Any]]]:
+    """Normalize already-loaded qrels without reopening their source file."""
+    qrels: dict[str, list[dict[str, Any]]] = {}
+    for index, record in enumerate(records, start=1):
         if not isinstance(record, dict) or not record.get("query_id") or not record.get("document_id"):
-            raise ValueError(f"{path}:{line_no}: record must have query_id and document_id")
+            raise ValueError(f"{source}:{index}: record must have query_id and document_id")
         qid = str(record["query_id"])
         qrels.setdefault(qid, []).append(
             {
@@ -221,7 +234,73 @@ def run_eval(
     is written to ``output_path``. A disabled visual path is recorded as
     ``"disabled"`` and is never labelled successful.
     """
-    qrels = _load_qrels(qrels_path)
+    return _run_loaded_eval(
+        qrels=_load_qrels(qrels_path),
+        predictions_path=predictions_path,
+        corpus_generation=corpus_generation,
+        index_alias=index_alias,
+        output_path=output_path,
+        qrels_name=Path(qrels_path).name,
+        visual_disabled=visual_disabled,
+    )
+
+
+def run_verified_holdout_eval(
+    *,
+    holdout_manifest_path: str | Path,
+    questions_path: str | Path,
+    qrels_path: str | Path,
+    attestation_path: str | Path,
+    predictions_path: str | Path,
+    corpus_generation: str,
+    index_alias: str,
+    output_path: str | Path,
+    visual_disabled: bool = True,
+) -> dict[str, Any]:
+    """Score an external holdout only after the seal releases its labels.
+
+    The privileged loader revalidates the manifest and every raw input hash.
+    Qrels stay in memory after that step, preventing a generic path-based
+    scorer from reopening unverified or substituted labels.
+    """
+    manifest = verify_sealed_holdout(
+        holdout_manifest_path, questions_path, qrels_path, attestation_path
+    )
+    rows = load_verified_holdout_qrels(
+        holdout_manifest_path, questions_path, qrels_path, attestation_path
+    )
+    manifest_hash = hashlib.sha256(Path(holdout_manifest_path).read_bytes()).hexdigest()
+    result = _run_loaded_eval(
+        qrels=_group_qrels(rows, "verified external holdout"),
+        predictions_path=predictions_path,
+        corpus_generation=corpus_generation,
+        index_alias=index_alias,
+        output_path=output_path,
+        qrels_name=Path(qrels_path).name,
+        visual_disabled=visual_disabled,
+        extra_meta={
+            "evaluation_kind": "verified_external_holdout",
+            "holdout_manifest_sha256": manifest_hash,
+            "holdout_status": manifest["status"],
+            "holdout_semantic_unseen": manifest["semantic_unseen"],
+        },
+    )
+    result["holdout_manifest_sha256"] = manifest_hash
+    return result
+
+
+def _run_loaded_eval(
+    *,
+    qrels: dict[str, list[dict[str, Any]]],
+    predictions_path: str | Path,
+    corpus_generation: str,
+    index_alias: str,
+    output_path: str | Path,
+    qrels_name: str,
+    visual_disabled: bool,
+    extra_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Score qrels that have already crossed their applicable intake gate."""
     predictions = _load_predictions(predictions_path)
     if not qrels:
         raise ValueError(f"no qrels records in {qrels_path}")
@@ -253,8 +332,9 @@ def run_eval(
             "corpus_generation": corpus_generation,
             "index_alias": index_alias,
             "visual_disabled": visual_disabled,
-            "qrels_path": Path(qrels_path).name,
+            "qrels_path": qrels_name,
             "predictions_path": Path(predictions_path).name,
+            **(extra_meta or {}),
         },
         "overall": overall,
         "per_source": per_source,
@@ -288,6 +368,18 @@ def run_eval(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="RAG retrieval evaluation runner")
     parser.add_argument("--qrels-path", required=True, help="qrels JSONL")
+    parser.add_argument(
+        "--holdout-manifest-path",
+        help="sealed external holdout manifest; requires the two holdout input paths",
+    )
+    parser.add_argument(
+        "--holdout-questions-path",
+        help="external holdout questions JSONL; required with --holdout-manifest-path",
+    )
+    parser.add_argument(
+        "--holdout-attestation-path",
+        help="external HUMAN_NET_NEW attestation; required with --holdout-manifest-path",
+    )
     parser.add_argument("--predictions-path", required=True, help="predictions JSONL")
     parser.add_argument("--corpus-generation", required=True, help="corpus generation tag")
     parser.add_argument("--index-alias", required=True, help="retrieval index alias")
@@ -300,14 +392,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        run_eval(
-            qrels_path=args.qrels_path,
-            predictions_path=args.predictions_path,
-            corpus_generation=args.corpus_generation,
-            index_alias=args.index_alias,
-            output_path=args.output_path,
-            visual_disabled=args.visual_disabled,
+        holdout_args = (
+            args.holdout_manifest_path,
+            args.holdout_questions_path,
+            args.holdout_attestation_path,
         )
+        if any(holdout_args):
+            if not all(holdout_args):
+                raise ValueError(
+                    "all holdout inputs are required: --holdout-manifest-path, "
+                    "--holdout-questions-path, and --holdout-attestation-path"
+                )
+            run_verified_holdout_eval(
+                holdout_manifest_path=args.holdout_manifest_path,
+                questions_path=args.holdout_questions_path,
+                qrels_path=args.qrels_path,
+                attestation_path=args.holdout_attestation_path,
+                predictions_path=args.predictions_path,
+                corpus_generation=args.corpus_generation,
+                index_alias=args.index_alias,
+                output_path=args.output_path,
+                visual_disabled=args.visual_disabled,
+            )
+        else:
+            run_eval(
+                qrels_path=args.qrels_path,
+                predictions_path=args.predictions_path,
+                corpus_generation=args.corpus_generation,
+                index_alias=args.index_alias,
+                output_path=args.output_path,
+                visual_disabled=args.visual_disabled,
+            )
     except (ValueError, OSError) as exc:
         print(f"eval runner failed: {exc}", file=sys.stderr)
         return 1
