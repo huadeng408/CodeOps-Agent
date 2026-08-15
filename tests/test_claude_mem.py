@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from orchestrator.rag.claude_mem import ClaudeMemClient
+from orchestrator.rag.claude_mem import ClaudeMemClient, MemoryReadOutcome
 
 
 @pytest.mark.asyncio
@@ -147,3 +147,28 @@ async def test_worker_timeout_fails_open() -> None:
     client = ClaudeMemClient("http://127.0.0.1:37777", transport=transport)
 
     assert await client.context("localcode", memory_mode="enabled") == ""
+
+
+def test_memory_outcome_attributes_exclude_content_query_and_path() -> None:
+    outcome = MemoryReadOutcome("claude_mem", 17, (385, 404), None)
+
+    assert outcome.telemetry_attributes() == {
+        "memory.backend": "claude_mem",
+        "memory.latency_ms": 17,
+        "memory.result_count": 2,
+        "memory.citation_ids": "385,404",
+    }
+
+
+@pytest.mark.asyncio
+async def test_enabled_read_exposes_only_allowlisted_outcome() -> None:
+    client = _client_returning_observation("L3 design")
+
+    assert await client.context("localcode", memory_mode="enabled") == "[claude-mem:385] L3 design"
+    assert client.last_outcome.telemetry_attributes().keys() == {
+        "memory.backend",
+        "memory.latency_ms",
+        "memory.result_count",
+        "memory.citation_ids",
+    }
+    assert client.last_outcome.citation_ids == (385,)

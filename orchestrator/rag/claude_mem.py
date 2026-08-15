@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import time
 from urllib.parse import urlparse
@@ -19,6 +20,27 @@ _SENSITIVE_PATTERNS = (
 )
 
 
+@dataclass(frozen=True)
+class MemoryReadOutcome:
+    """Allowlisted L3 metadata suitable for a caller-owned Phoenix span."""
+
+    backend: str
+    latency_ms: int
+    citation_ids: tuple[int, ...]
+    failure_category: str | None = None
+
+    def telemetry_attributes(self) -> dict[str, str | int]:
+        result: dict[str, str | int] = {
+            "memory.backend": self.backend,
+            "memory.latency_ms": self.latency_ms,
+            "memory.result_count": len(self.citation_ids),
+            "memory.citation_ids": ",".join(map(str, self.citation_ids)),
+        }
+        if self.failure_category:
+            result["memory.failure_category"] = self.failure_category
+        return result
+
+
 class ClaudeMemClient:
     """Boundary adapter for Claude-Mem; benchmark modes never read L3."""
 
@@ -32,6 +54,7 @@ class ClaudeMemClient:
         self.worker_url = worker_url.rstrip("/")
         self._transport = transport
         self._timeout_seconds = timeout_seconds
+        self.last_outcome = MemoryReadOutcome("claude_mem", 0, (), "disabled")
 
     async def context(
         self,
@@ -40,14 +63,14 @@ class ClaudeMemClient:
         query: str = "*",
         memory_mode: str = "disabled",
     ) -> str:
+        started = time.monotonic()
         if memory_mode != "enabled":
-            return ""
+            return self._finish("", started, failure_category="disabled")
         if not _is_loopback_worker_url(self.worker_url) or not _valid_request(
             project, query
         ):
-            return ""
+            return self._finish("", started, failure_category="invalid_input")
 
-        started = time.monotonic()
         try:
             async with httpx.AsyncClient(
                 base_url=self.worker_url,
@@ -62,11 +85,11 @@ class ClaudeMemClient:
                 search.raise_for_status()
                 observation_ids = _observation_ids(search.json())
                 if not observation_ids:
-                    return ""
+                    return self._finish("", started)
 
                 remaining = self._timeout_seconds - (time.monotonic() - started)
                 if remaining <= 0:
-                    return ""
+                    return self._finish("", started, failure_category="timeout")
 
                 batch = await http.post(
                     "/api/observations/batch",
@@ -74,9 +97,37 @@ class ClaudeMemClient:
                     timeout=httpx.Timeout(remaining),
                 )
                 batch.raise_for_status()
-                return _render_context(batch.json(), project, observation_ids)
-        except (httpx.HTTPError, TypeError, ValueError):
-            return ""
+                context, citation_ids = _render_context(
+                    batch.json(), project, observation_ids
+                )
+                return self._finish(
+                    context,
+                    started,
+                    citation_ids=citation_ids,
+                    failure_category=None if context else "malformed_response",
+                )
+        except httpx.TimeoutException:
+            return self._finish("", started, failure_category="timeout")
+        except httpx.HTTPError:
+            return self._finish("", started, failure_category="http_error")
+        except (TypeError, ValueError):
+            return self._finish("", started, failure_category="malformed_response")
+
+    def _finish(
+        self,
+        context: str,
+        started: float,
+        *,
+        citation_ids: tuple[int, ...] = (),
+        failure_category: str | None = None,
+    ) -> str:
+        self.last_outcome = MemoryReadOutcome(
+            "claude_mem",
+            int((time.monotonic() - started) * 1000),
+            citation_ids,
+            failure_category,
+        )
+        return context
 
 
 def _is_loopback_worker_url(value: str) -> bool:
@@ -117,19 +168,24 @@ def _observation_ids(payload: object) -> list[int]:
     return result
 
 
-def _render_context(payload: object, project: str, requested_ids: list[int]) -> str:
+def _render_context(
+    payload: object,
+    project: str,
+    requested_ids: list[int],
+) -> tuple[str, tuple[int, ...]]:
     records: list[object]
     if isinstance(payload, dict) and isinstance(payload.get("id"), int):
         records = [payload]
     elif isinstance(payload, dict) and isinstance(payload.get("observations"), list):
         records = payload["observations"]
     else:
-        return ""
+        return "", ()
 
     rendered: list[str] = []
+    citation_ids: list[int] = []
     for record in records:
         if not isinstance(record, dict):
-            return ""
+            return "", ()
         observation_id = record.get("id")
         title = record.get("title")
         if (
@@ -138,13 +194,14 @@ def _render_context(payload: object, project: str, requested_ids: list[int]) -> 
             or record.get("project") != project
             or not isinstance(title, str)
         ):
-            return ""
+            return "", ()
         rendered.append(f"[claude-mem:{observation_id}] {title}")
+        citation_ids.append(observation_id)
 
     result = "\n".join(rendered)
     if _contains_sensitive_content(result):
-        return ""
-    return _truncate_utf8(result)
+        return "", ()
+    return _truncate_utf8(result), tuple(citation_ids)
 
 
 def _contains_sensitive_content(value: str) -> bool:
