@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -38,12 +39,41 @@ def _get_tracer() -> Any:
         return None
 
 
+def _has_required_parentage(spans: list[CapturedSpan], trace_id: str) -> bool:
+    """Check the receipt topology inside one trace without inferring it by name."""
+    scoped = [span for span in spans if span.trace_id == trace_id]
+    roots = {span.span_id for span in scoped if span.name == SPAN_EVAL_RUN}
+    instances = {
+        span.span_id
+        for span in scoped
+        if span.name == SPAN_EVAL_INSTANCE and span.parent_span_id in roots
+    }
+    agents = {
+        span.span_id
+        for span in scoped
+        if span.name == SPAN_INVOKE_AGENT and span.parent_span_id in instances
+    }
+    has_chat = any(
+        span.name == SPAN_CHAT and span.parent_span_id in agents for span in scoped
+    )
+    has_scorer = any(
+        span.name == SPAN_SCORER_OFFICIAL and span.parent_span_id in instances
+        for span in scoped
+    )
+    return bool(roots and instances and agents and has_chat and has_scorer)
+
+
 @contextlib.contextmanager
-def _span(tracer: Any, name: str, attributes: dict[str, str]) -> Iterator[None]:
+def _span(
+    tracer: Any, name: str, attributes: dict[str, str], *, context: Any | None = None
+) -> Iterator[None]:
     if tracer is None:
         yield
         return
-    with tracer.start_as_current_span(name, attributes=attributes):
+    kwargs: dict[str, Any] = {"attributes": attributes}
+    if context is not None:
+        kwargs["context"] = context
+    with tracer.start_as_current_span(name, **kwargs):
         yield
 
 
@@ -53,6 +83,7 @@ class OfficialReceiptTrace:
 
     run_id: str
     instance_id: str
+    agent_parent_context: Any | None = None
 
     def __post_init__(self) -> None:
         self._tracer = _get_tracer()
@@ -81,11 +112,49 @@ class OfficialReceiptTrace:
 
     def agent(self) -> contextlib.AbstractContextManager[None]:
         """Only callers executing a real agent loop may create this span."""
-        return _span(self._tracer, SPAN_INVOKE_AGENT, self._attributes)
+        return _span(
+            self._tracer,
+            SPAN_INVOKE_AGENT,
+            self._attributes,
+            context=self.agent_parent_context,
+        )
 
     def chat(self) -> contextlib.AbstractContextManager[None]:
         """Only callers executing a real provider turn may create this span."""
         return _span(self._tracer, SPAN_CHAT, self._attributes)
+
+    @contextlib.contextmanager
+    def worker_environment(self) -> Iterator[None]:
+        """Temporarily provide the active instance's W3C context to workers.
+
+        Terminal-Bench dispatches each trial through a thread executor and then
+        an asyncio executor.  Neither copies ``contextvars``.  The official
+        receipt runs exactly one trial, so a scoped process environment carrier
+        avoids altering upstream code while retaining a true parent-child link.
+        """
+        keys = ("TERMINALBENCH_PARENT_TRACEPARENT", "TERMINALBENCH_PARENT_TRACESTATE")
+        previous = {key: os.environ.get(key) for key in keys}
+        try:
+            from opentelemetry import propagate
+
+            carrier: dict[str, str] = {}
+            propagate.inject(carrier)
+            for source, target in (
+                ("traceparent", "TERMINALBENCH_PARENT_TRACEPARENT"),
+                ("tracestate", "TERMINALBENCH_PARENT_TRACESTATE"),
+            ):
+                value = carrier.get(source)
+                if value:
+                    os.environ[target] = value
+                else:
+                    os.environ.pop(target, None)
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def evaluate_official_receipt_trace(
@@ -108,10 +177,26 @@ def evaluate_official_receipt_trace(
     ] + sorted(observed - set(_REQUIRED_BASE) - set(_REQUIRED_AGENT))
     missing_base = [name for name in _REQUIRED_BASE if name not in present]
     missing_agent = [name for name in _REQUIRED_AGENT if name not in present]
+    trace_ids = sorted({span.trace_id for span in matching})
+    complete_trace_ids = sorted(
+        trace_id
+        for trace_id in trace_ids
+        if set(_REQUIRED_BASE).union(_REQUIRED_AGENT)
+        <= {span.name for span in matching if span.trace_id == trace_id}
+    )
+    valid_trace_ids = [
+        trace_id
+        for trace_id in complete_trace_ids
+        if _has_required_parentage(matching, trace_id)
+    ]
     if missing_base:
         verdict = "FAIL"
     elif missing_agent:
         verdict = "INCOMPLETE_AGENT_TRACE"
+    elif not complete_trace_ids:
+        verdict = "SPLIT_TRACE"
+    elif not valid_trace_ids:
+        verdict = "INVALID_TOPOLOGY"
     else:
         verdict = "PASS"
     return {
@@ -121,6 +206,9 @@ def evaluate_official_receipt_trace(
         "present_kinds": present,
         "missing_base_kinds": missing_base,
         "missing_agent_kinds": missing_agent,
+        "trace_ids": trace_ids,
+        "complete_trace_ids": complete_trace_ids,
+        "valid_trace_ids": valid_trace_ids,
         "span_count": len(matching),
         "scope": "official-receipt-boundary",
     }

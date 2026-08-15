@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from eval.harness.trace_capture import TraceCapture
+
 
 def _write_dataset(root: Path) -> None:
     task = root / "tasks" / "fixed-task"
@@ -230,6 +232,79 @@ def test_terminalbench_agent_waits_for_each_command_before_collecting_feedback(m
     ]
 
 
+def test_terminalbench_agent_emits_receipt_bound_agent_and_chat_spans(monkeypatch) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    capture = TraceCapture()
+    assert capture.install()
+    monkeypatch.setenv("TERMINALBENCH_RUN_ID", "terminalbench-trace-001")
+    monkeypatch.setenv("TERMINALBENCH_INSTANCE_ID", "fixed-task")
+
+    responses = iter(["```bash\nprintf first\n```", "```bash\nprintf second\n```"])
+
+    class FakeSession:
+        def send_keys(self, _keys, **_kwargs) -> None:
+            return None
+
+        def get_incremental_output(self) -> str:
+            return "command completed"
+
+    class FakeResponses:
+        def create(self, **_kwargs):
+            return type(
+                "Response",
+                (),
+                {
+                    "output_text": next(responses),
+                    "usage": type("Usage", (), {"input_tokens": 5, "output_tokens": 7})(),
+                },
+            )()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    agent = DeepSeekTBAgent(model="gpt-5.6-sol", wire_api="responses", max_turns=2)
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: FakeClient())
+
+    agent.perform_task("solve", FakeSession())
+
+    spans = [
+        span
+        for span in capture.spans()
+        if span.attributes.get("eval.run_id") == "terminalbench-trace-001"
+    ]
+    assert [span.name for span in spans] == ["chat", "chat", "invoke_agent"]
+    agent_span = spans[-1]
+    assert all(span.parent_span_id == agent_span.span_id for span in spans[:2])
+    assert all(span.attributes["eval.instance_id"] == "fixed-task" for span in spans)
+
+
+def test_terminalbench_direct_provider_call_stays_untraced_without_receipt_identity(monkeypatch) -> None:
+    from eval.swebench_work.deepseek_tb_agent import DeepSeekTBAgent
+
+    capture = TraceCapture()
+    assert capture.install()
+    monkeypatch.delenv("TERMINALBENCH_RUN_ID", raising=False)
+    monkeypatch.delenv("TERMINALBENCH_INSTANCE_ID", raising=False)
+
+    class FakeResponses:
+        def create(self, **_kwargs):
+            return type(
+                "Response",
+                (),
+                {"output_text": "```bash\nprintf ready\n```", "usage": type("Usage", (), {})()},
+            )()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: FakeClient())
+    output, _, _ = DeepSeekTBAgent(model="gpt-5.6-sol", wire_api="responses")._request_commands("solve")
+
+    assert output.startswith("```bash")
+    assert [span for span in capture.spans() if span.name == "chat"] == []
+
+
 def test_terminalbench_verifier_proxy_is_disabled_by_default_and_records_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -374,6 +449,30 @@ def test_terminalbench_receipt_script_configures_and_reads_back_phoenix() -> Non
     assert 'force_flush' in script
     assert 'phoenix_url=os.environ.get("TERMINALBENCH_PHOENIX_URL", "")' in script
     assert 'phoenix_start_time=os.environ.get("TERMINALBENCH_PHOENIX_START_TIME", "")' in script
+
+
+def test_terminalbench_receipt_script_selects_a_multiline_beeapi_key_section() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-terminalbench-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "$beeStart" in script
+    assert "for ($index = $beeStart + 1" in script
+    assert "$env:LOCAL_LLM_API_KEY = $apiKey" in script
+    assert "beeapi.*apikey" not in script
+
+
+def test_terminalbench_receipt_script_wires_and_clears_the_nonsecret_instance_id() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-terminalbench-official-receipt.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '$env:TERMINALBENCH_INSTANCE_ID = "break-filter-js-from-html"' in script
+    assert "Remove-Item Env:TERMINALBENCH_INSTANCE_ID" in script
 
 
 def test_terminalbench_receipt_script_finalizes_checksums_after_driver_exit() -> None:

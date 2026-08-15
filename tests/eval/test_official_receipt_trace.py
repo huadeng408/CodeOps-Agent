@@ -7,6 +7,7 @@ from eval.harness.official_receipt_trace import (
     evaluate_official_receipt_trace,
 )
 from eval.harness.trace_capture import TraceCapture
+from eval.harness.trace_contract import CapturedSpan
 
 
 RUN_ID = "terminalbench-receipt-001"
@@ -43,6 +44,41 @@ def test_official_receipt_trace_passes_only_when_actual_agent_and_chat_spans_exi
 
     assert report["verdict"] == "PASS"
     assert report["missing_agent_kinds"] == []
+
+
+def test_official_receipt_trace_rejects_required_spans_split_across_traces() -> None:
+    """A complete name set does not prove the agent was part of the scored run."""
+    attrs = {"eval.run_id": RUN_ID, "eval.instance_id": INSTANCE_ID}
+    base_trace = "1" * 32
+    agent_trace = "2" * 32
+    spans = [
+        CapturedSpan("eval.run", base_trace, "1" * 16, "", "UNSET", attrs),
+        CapturedSpan("eval.instance", base_trace, "2" * 16, "1" * 16, "UNSET", attrs),
+        CapturedSpan("scorer.official", base_trace, "3" * 16, "2" * 16, "UNSET", attrs),
+        CapturedSpan("invoke_agent", agent_trace, "4" * 16, "", "UNSET", attrs),
+        CapturedSpan("chat", agent_trace, "5" * 16, "4" * 16, "UNSET", attrs),
+    ]
+
+    report = evaluate_official_receipt_trace(spans, RUN_ID, INSTANCE_ID)
+
+    assert report["verdict"] == "SPLIT_TRACE"
+
+
+def test_official_receipt_trace_rejects_an_invalid_agent_parentage_in_one_trace() -> None:
+    """One trace still fails when chat is not descended from the real agent span."""
+    attrs = {"eval.run_id": RUN_ID, "eval.instance_id": INSTANCE_ID}
+    trace_id = "3" * 32
+    spans = [
+        CapturedSpan("eval.run", trace_id, "1" * 16, "", "UNSET", attrs),
+        CapturedSpan("eval.instance", trace_id, "2" * 16, "1" * 16, "UNSET", attrs),
+        CapturedSpan("scorer.official", trace_id, "3" * 16, "2" * 16, "UNSET", attrs),
+        CapturedSpan("invoke_agent", trace_id, "4" * 16, "1" * 16, "UNSET", attrs),
+        CapturedSpan("chat", trace_id, "5" * 16, "2" * 16, "UNSET", attrs),
+    ]
+
+    report = evaluate_official_receipt_trace(spans, RUN_ID, INSTANCE_ID)
+
+    assert report["verdict"] == "INVALID_TOPOLOGY"
 
 
 def test_receipt_trace_writer_persists_incomplete_assertion_before_checksum(tmp_path) -> None:

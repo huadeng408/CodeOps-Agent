@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 from pathlib import Path
 
+from eval.harness.official_agent_trace import receipt_agent_trace
 from terminal_bench.agents.base_agent import AgentResult, BaseAgent
 from terminal_bench.agents.failure_mode import FailureMode
 from terminal_bench.terminal.tmux_session import TmuxSession
@@ -46,37 +48,40 @@ class DeepSeekTBAgent(BaseAgent):
         feedback = ""
         transcript: list[dict[str, object]] = []
 
-        for turn in range(1, self._max_turns + 1):
-            turn_instruction = rendered
-            if feedback:
-                turn_instruction += f"\n\nTerminal feedback from your previous commands:\n{feedback}"
-            output_text, tokens_in, tokens_out = self._request_commands(
-                turn_instruction, system_prompt
-            )
-            total_input_tokens += tokens_in
-            total_output_tokens += tokens_out
-            commands = self._command_lines(output_text)
-            if not commands or any(self._is_protected_content(command) for command in commands):
-                self._write_transcript(logging_dir, transcript)
-                return AgentResult(
-                    total_input_tokens=total_input_tokens,
-                    total_output_tokens=total_output_tokens,
-                    failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+        trace = receipt_agent_trace()
+        agent_scope = trace.agent() if trace is not None else contextlib.nullcontext()
+        with agent_scope:
+            for turn in range(1, self._max_turns + 1):
+                turn_instruction = rendered
+                if feedback:
+                    turn_instruction += f"\n\nTerminal feedback from your previous commands:\n{feedback}"
+                output_text, tokens_in, tokens_out = self._request_commands(
+                    turn_instruction, system_prompt
                 )
+                total_input_tokens += tokens_in
+                total_output_tokens += tokens_out
+                commands = self._command_lines(output_text)
+                if not commands or any(self._is_protected_content(command) for command in commands):
+                    self._write_transcript(logging_dir, transcript)
+                    return AgentResult(
+                        total_input_tokens=total_input_tokens,
+                        total_output_tokens=total_output_tokens,
+                        failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+                    )
 
-            for command in commands:
-                session.send_keys([command, "Enter"], block=True, max_timeout_sec=120)
-            feedback = session.get_incremental_output()
-            transcript.append(
-                {"turn": turn, "commands": commands, "terminal_output": feedback}
-            )
-            if self._is_protected_content(feedback):
-                self._write_transcript(logging_dir, transcript)
-                return AgentResult(
-                    total_input_tokens=total_input_tokens,
-                    total_output_tokens=total_output_tokens,
-                    failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+                for command in commands:
+                    session.send_keys([command, "Enter"], block=True, max_timeout_sec=120)
+                feedback = session.get_incremental_output()
+                transcript.append(
+                    {"turn": turn, "commands": commands, "terminal_output": feedback}
                 )
+                if self._is_protected_content(feedback):
+                    self._write_transcript(logging_dir, transcript)
+                    return AgentResult(
+                        total_input_tokens=total_input_tokens,
+                        total_output_tokens=total_output_tokens,
+                        failure_mode=FailureMode.FATAL_LLM_PARSE_ERROR,
+                    )
 
         self._write_transcript(logging_dir, transcript)
         return AgentResult(
@@ -103,37 +108,40 @@ class DeepSeekTBAgent(BaseAgent):
         from openai import OpenAI
 
         client = OpenAI(api_key=self._api_key, base_url=self._base_url)
-        if self._wire_api == "responses":
-            response = client.responses.create(
+        trace = receipt_agent_trace()
+        chat_scope = trace.chat() if trace is not None else contextlib.nullcontext()
+        with chat_scope:
+            if self._wire_api == "responses":
+                response = client.responses.create(
+                    model=self._model,
+                    input=[
+                        {"role": "developer", "content": system_prompt},
+                        {"role": "user", "content": f"Task:\n\n{instruction}"},
+                    ],
+                    max_output_tokens=4096,
+                )
+                usage = getattr(response, "usage", None)
+                return (
+                    getattr(response, "output_text", "") or "",
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
+
+            response = client.chat.completions.create(
                 model=self._model,
-                input=[
-                    {"role": "developer", "content": system_prompt},
+                messages=[
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Task:\n\n{instruction}"},
                 ],
-                max_output_tokens=4096,
+                temperature=self._temperature,
+                max_tokens=4096,
             )
-            usage = getattr(response, "usage", None)
+            usage = response.usage
             return (
-                getattr(response, "output_text", "") or "",
-                int(getattr(usage, "input_tokens", 0) or 0),
-                int(getattr(usage, "output_tokens", 0) or 0),
+                response.choices[0].message.content or "",
+                int(getattr(usage, "prompt_tokens", 0) or 0),
+                int(getattr(usage, "completion_tokens", 0) or 0),
             )
-
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Task:\n\n{instruction}"},
-            ],
-            temperature=self._temperature,
-            max_tokens=4096,
-        )
-        usage = response.usage
-        return (
-            response.choices[0].message.content or "",
-            int(getattr(usage, "prompt_tokens", 0) or 0),
-            int(getattr(usage, "completion_tokens", 0) or 0),
-        )
 
     @classmethod
     def _command_lines(cls, output_text: str) -> list[str]:

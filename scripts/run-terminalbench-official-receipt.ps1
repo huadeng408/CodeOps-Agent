@@ -24,11 +24,29 @@ if (Test-Path -LiteralPath $runRoot) {
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 
 $lines = Get-Content -LiteralPath $keyFile
-$keyHeader = [array]::IndexOf($lines, ($lines | Where-Object { $_ -match '(?i)beeapi.*apikey' } | Select-Object -First 1))
-if ($keyHeader -lt 0 -or $keyHeader + 1 -ge $lines.Count) {
-    throw "The approved key file has no BeeAPI key value after its labeled field."
+$beeStart = [array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($line) $line -match '^\s*beeapi\s*[:：]\s*$' })
+if ($beeStart -lt 0) {
+    throw "The approved key file has no BeeAPI section."
 }
-$apiKey = $lines[$keyHeader + 1].Trim()
+$apiKey = $null
+for ($index = $beeStart + 1; $index -lt $lines.Count; $index++) {
+    if ($lines[$index] -match '^\s*apikey\s*[:：]\s*(.+)$') {
+        $apiKey = $Matches[1].Trim(' ', '"', "'")
+        break
+    }
+    if ($lines[$index] -match '^\s*apikey\s*[:：]\s*$') {
+        for ($candidate = $index + 1; $candidate -lt $lines.Count; $candidate++) {
+            if ($lines[$candidate].Trim()) {
+                $apiKey = $lines[$candidate].Trim(' ', '"', "'")
+                break
+            }
+        }
+        break
+    }
+    if ($lines[$index] -match '^\s*[^#].*[:：]\s*$' -and $index -gt $beeStart + 1) {
+        break
+    }
+}
 $baseUrl = "https://beeapi.ai/v1"
 if (-not $apiKey) {
     throw "The approved key file is missing the BeeAPI API key."
@@ -49,6 +67,7 @@ from eval.benchmarks.terminalbench import _patch_terminal_bench_windows
 from eval.benchmarks.terminalbenchofficial import TerminalBenchOfficialConfig, TerminalBenchOfficialRunner
 from eval.harness.official_receipt_trace import (
     OfficialReceiptTrace,
+    evaluate_official_receipt_trace,
     refresh_receipt_checksums,
     write_official_receipt_trace,
 )
@@ -80,9 +99,14 @@ def phoenix_readback_with_retry(*args):
     for attempt in range(5):
         try:
             spans = read_run_spans(*args)
-            if spans:
+            report = evaluate_official_receipt_trace(
+                spans, run_id, "break-filter-js-from-html"
+            )
+            if report["verdict"] == "PASS":
                 return spans
-            last_error = RuntimeError("Phoenix returned no spans for receipt run")
+            last_error = RuntimeError(
+                f"Phoenix receipt trace is incomplete: {report['verdict']}"
+            )
         except Exception as exc:  # noqa: BLE001 - final writer records the gap
             last_error = exc
         if attempt < 4:
@@ -96,23 +120,24 @@ with OfficialReceiptTrace(run_id, "break-filter-js-from-html") as trace:
         os.environ.get("TERMINALBENCH_RECEIPT_VERIFIER_PROXY") or None,
         receipt_root,
     ):
-        harness = Harness(
-            output_path=output,
-            run_id=internal_run_id,
-            agent_import_path="eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent",
-            agent_kwargs={
-                "api_key": os.environ["LOCAL_LLM_API_KEY"],
-                "base_url": os.environ["LOCAL_LLM_BASE_URL"],
-                "model": "gpt-5.6-sol",
-                "wire_api": "responses",
-            },
-            dataset_path=repo / "eval" / "benchmark_data" / "terminalbench" / "tasks",
-            task_ids=["break-filter-js-from-html"],
-            n_concurrent_trials=1,
-            n_attempts=1,
-            cleanup=False,
-        )
-        results = harness.run()
+        with trace.worker_environment():
+            harness = Harness(
+                output_path=output,
+                run_id=internal_run_id,
+                agent_import_path="eval.swebench_work.deepseek_tb_agent:DeepSeekTBAgent",
+                agent_kwargs={
+                    "api_key": os.environ["LOCAL_LLM_API_KEY"],
+                    "base_url": os.environ["LOCAL_LLM_BASE_URL"],
+                    "model": "gpt-5.6-sol",
+                    "wire_api": "responses",
+                },
+                dataset_path=repo / "eval" / "benchmark_data" / "terminalbench" / "tasks",
+                task_ids=["break-filter-js-from-html"],
+                n_concurrent_trials=1,
+                n_attempts=1,
+                cleanup=False,
+            )
+            results = harness.run()
 
     # Archive only the official Harness output for this short internal run id.
     dataset_file = repo / "eval" / "benchmark_data" / "terminalbench" / "terminalbench_2.jsonl"
@@ -192,6 +217,7 @@ try {
     Remove-Item Env:TERMINALBENCH_PHOENIX_URL -ErrorAction SilentlyContinue
     Remove-Item Env:TERMINALBENCH_PHOENIX_OTLP_ENDPOINT -ErrorAction SilentlyContinue
     Remove-Item Env:TERMINALBENCH_PHOENIX_START_TIME -ErrorAction SilentlyContinue
+    Remove-Item Env:TERMINALBENCH_INSTANCE_ID -ErrorAction SilentlyContinue
 }
 '@ | Set-Content -LiteralPath $finalizerPath -Encoding utf8
 
@@ -201,6 +227,7 @@ $env:LOCAL_LLM_BASE_URL = $baseUrl
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:TERMINALBENCH_RUN_ID = $RunId
+$env:TERMINALBENCH_INSTANCE_ID = "break-filter-js-from-html"
 $env:TERMINALBENCH_OUTPUT_DIR = $upstreamRoot
 $env:TERMINALBENCH_RECEIPT_ROOT = $runRoot
 if ($VerifierProxy) {
@@ -213,6 +240,7 @@ $process = Start-Process -FilePath "powershell.exe" `
     -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath, "-DriverPath", $driverPath, "-ExitPath", $exitPath, "-PhoenixUrl", $PhoenixUrl) `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
+    -WindowStyle Hidden `
     -PassThru
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
 
