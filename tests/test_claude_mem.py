@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -95,6 +97,33 @@ async def test_enabled_mode_searches_then_fetches_selected_project_ids() -> None
     ]
 
 
+@pytest.mark.asyncio
+async def test_enabled_mode_accepts_worker_batch_list_for_multiple_ids() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/search":
+            return httpx.Response(
+                200,
+                json={"content": [{"type": "text", "text": "| #385 | a | #386 | b |"}]},
+            )
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 385, "project": "localcode", "title": "first"},
+                {"id": 386, "project": "localcode", "title": "second"},
+            ],
+        )
+
+    client = ClaudeMemClient(
+        "http://127.0.0.1:37777",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await client.context("localcode", memory_mode="enabled") == (
+        "[claude-mem:385] first\n[claude-mem:386] second"
+    )
+    assert client.last_outcome.citation_ids == (385, 386)
+
+
 def _client_returning_observation(title: str) -> ClaudeMemClient:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/search":
@@ -127,6 +156,7 @@ async def test_sensitive_worker_result_fails_open(unsafe_text: str) -> None:
     client = _client_returning_observation(unsafe_text)
 
     assert await client.context("localcode", memory_mode="enabled") == ""
+    assert client.last_outcome.failure_category == "privacy_rejected"
 
 
 @pytest.mark.asyncio
@@ -172,3 +202,24 @@ async def test_enabled_read_exposes_only_allowlisted_outcome() -> None:
         "memory.citation_ids",
     }
     assert client.last_outcome.citation_ids == (385,)
+
+
+@pytest.mark.asyncio
+async def test_total_worker_budget_fails_open_before_slow_transport_completes() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": "| #385 | result |"}]},
+        )
+
+    client = ClaudeMemClient(
+        "http://127.0.0.1:37777",
+        transport=httpx.MockTransport(handler),
+        timeout_seconds=0.01,
+    )
+    started = time.monotonic()
+
+    assert await client.context("localcode", memory_mode="enabled") == ""
+    assert time.monotonic() - started < 0.04
+    assert client.last_outcome.failure_category == "timeout"

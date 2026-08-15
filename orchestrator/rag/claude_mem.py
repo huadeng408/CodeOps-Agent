@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import re
 import time
@@ -72,40 +73,43 @@ class ClaudeMemClient:
             return self._finish("", started, failure_category="invalid_input")
 
         try:
-            async with httpx.AsyncClient(
-                base_url=self.worker_url,
-                transport=self._transport,
-                timeout=httpx.Timeout(self._timeout_seconds),
-                trust_env=False,
-            ) as http:
-                search = await http.get(
-                    "/api/search",
-                    params={"query": query.strip(), "project": project, "limit": 3},
-                )
-                search.raise_for_status()
-                observation_ids = _observation_ids(search.json())
-                if not observation_ids:
-                    return self._finish("", started)
+            async with asyncio.timeout(self._timeout_seconds):
+                async with httpx.AsyncClient(
+                    base_url=self.worker_url,
+                    transport=self._transport,
+                    timeout=httpx.Timeout(self._timeout_seconds),
+                    trust_env=False,
+                ) as http:
+                    search = await http.get(
+                        "/api/search",
+                        params={"query": query.strip(), "project": project, "limit": 3},
+                    )
+                    search.raise_for_status()
+                    observation_ids = _observation_ids(search.json())
+                    if not observation_ids:
+                        return self._finish("", started)
 
-                remaining = self._timeout_seconds - (time.monotonic() - started)
-                if remaining <= 0:
-                    return self._finish("", started, failure_category="timeout")
+                    remaining = self._timeout_seconds - (time.monotonic() - started)
+                    if remaining <= 0:
+                        return self._finish("", started, failure_category="timeout")
 
-                batch = await http.post(
-                    "/api/observations/batch",
-                    json={"ids": observation_ids, "project": project},
-                    timeout=httpx.Timeout(remaining),
-                )
-                batch.raise_for_status()
-                context, citation_ids = _render_context(
-                    batch.json(), project, observation_ids
-                )
-                return self._finish(
-                    context,
-                    started,
-                    citation_ids=citation_ids,
-                    failure_category=None if context else "malformed_response",
-                )
+                    batch = await http.post(
+                        "/api/observations/batch",
+                        json={"ids": observation_ids, "project": project},
+                        timeout=httpx.Timeout(remaining),
+                    )
+                    batch.raise_for_status()
+                    context, citation_ids, failure_category = _render_context(
+                        batch.json(), project, observation_ids
+                    )
+                    return self._finish(
+                        context,
+                        started,
+                        citation_ids=citation_ids,
+                        failure_category=failure_category,
+                    )
+        except TimeoutError:
+            return self._finish("", started, failure_category="timeout")
         except httpx.TimeoutException:
             return self._finish("", started, failure_category="timeout")
         except httpx.HTTPError:
@@ -172,20 +176,22 @@ def _render_context(
     payload: object,
     project: str,
     requested_ids: list[int],
-) -> tuple[str, tuple[int, ...]]:
+) -> tuple[str, tuple[int, ...], str | None]:
     records: list[object]
-    if isinstance(payload, dict) and isinstance(payload.get("id"), int):
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("id"), int):
         records = [payload]
     elif isinstance(payload, dict) and isinstance(payload.get("observations"), list):
         records = payload["observations"]
     else:
-        return "", ()
+        return "", (), "malformed_response"
 
     rendered: list[str] = []
     citation_ids: list[int] = []
     for record in records:
         if not isinstance(record, dict):
-            return "", ()
+            return "", (), "malformed_response"
         observation_id = record.get("id")
         title = record.get("title")
         if (
@@ -194,14 +200,14 @@ def _render_context(
             or record.get("project") != project
             or not isinstance(title, str)
         ):
-            return "", ()
+            return "", (), "malformed_response"
         rendered.append(f"[claude-mem:{observation_id}] {title}")
         citation_ids.append(observation_id)
 
     result = "\n".join(rendered)
     if _contains_sensitive_content(result):
-        return "", ()
-    return _truncate_utf8(result), tuple(citation_ids)
+        return "", (), "privacy_rejected"
+    return _truncate_utf8(result), tuple(citation_ids), None
 
 
 def _contains_sensitive_content(value: str) -> bool:

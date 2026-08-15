@@ -107,6 +107,13 @@ unhealthy sidecar, amplifies load, and violates the caller's latency budget.
 Only HTTP URLs whose host parses as `127.0.0.1`, `::1`, or `localhost` are
 accepted. The client must reject all other hosts before opening a connection.
 
+The installed 13.15.0 worker was observed to return one raw observation object
+for a one-ID batch request and a raw array of observation objects for a
+multi-ID request. The adapter may accept exactly those two forms, plus an
+upstream `observations` array wrapper if present, but only after every rendered
+record proves a requested numeric ID and exact project match. Any other JSON
+shape is a fail-open `malformed_response`, never a best-effort parse.
+
 `project` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. `query` is
 trimmed, nonempty, at most 256 characters, and transmitted as data rather than
 interpolated into a URL string. Invalid inputs return empty context without a
