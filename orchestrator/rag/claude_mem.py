@@ -9,6 +9,14 @@ import httpx
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _OBSERVATION_ID_RE = re.compile(r"(?<![A-Za-z0-9_])#([1-9][0-9]*)\b")
+_SENSITIVE_PATTERNS = (
+    re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|secret|password|passwd|token)\s*[:=]"),
+    re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+\S+"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~-]{16,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)(?:[A-Z]:\\Users\\|\\\\[^\\]+\\(?:Users|Profiles)\\|/(?:home|Users)/)"),
+    re.compile(r"(?i)\b(?:postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s/@:]+(?::[^\s/@]+)?@"),
+)
 
 
 class ClaudeMemClient:
@@ -132,4 +140,22 @@ def _render_context(payload: object, project: str, requested_ids: list[int]) -> 
         ):
             return ""
         rendered.append(f"[claude-mem:{observation_id}] {title}")
-    return "\n".join(rendered)
+
+    result = "\n".join(rendered)
+    if _contains_sensitive_content(result):
+        return ""
+    return _truncate_utf8(result)
+
+
+def _contains_sensitive_content(value: str) -> bool:
+    return any(pattern.search(value) for pattern in _SENSITIVE_PATTERNS)
+
+
+def _truncate_utf8(value: str, maximum_bytes: int = 4096) -> str:
+    encoded = value.encode("utf-8")[:maximum_bytes]
+    while encoded:
+        try:
+            return encoded.decode("utf-8")
+        except UnicodeDecodeError:
+            encoded = encoded[:-1]
+    return ""

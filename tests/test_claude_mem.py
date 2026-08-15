@@ -93,3 +93,57 @@ async def test_enabled_mode_searches_then_fetches_selected_project_ids() -> None
         "/api/search",
         "/api/observations/batch",
     ]
+
+
+def _client_returning_observation(title: str) -> ClaudeMemClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/search":
+            return httpx.Response(
+                200,
+                json={"content": [{"type": "text", "text": "| #385 | result |"}]},
+            )
+        return httpx.Response(
+            200,
+            json={"id": 385, "project": "localcode", "title": title},
+        )
+
+    return ClaudeMemClient(
+        "http://127.0.0.1:37777",
+        transport=httpx.MockTransport(handler),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "OPENAI_API_KEY=sk-secret-value",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        r"C:\Users\private\notes.txt",
+        "-----BEGIN PRIVATE KEY-----",
+    ],
+)
+async def test_sensitive_worker_result_fails_open(unsafe_text: str) -> None:
+    client = _client_returning_observation(unsafe_text)
+
+    assert await client.context("localcode", memory_mode="enabled") == ""
+
+
+@pytest.mark.asyncio
+async def test_context_ends_at_utf8_boundary_under_4096_bytes() -> None:
+    client = _client_returning_observation("中" * 3000)
+
+    context = await client.context("localcode", memory_mode="enabled")
+
+    assert len(context.encode("utf-8")) <= 4096
+    assert context.encode("utf-8").decode("utf-8") == context
+
+
+@pytest.mark.asyncio
+async def test_worker_timeout_fails_open() -> None:
+    transport = httpx.MockTransport(
+        lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("worker timeout"))
+    )
+    client = ClaudeMemClient("http://127.0.0.1:37777", transport=transport)
+
+    assert await client.context("localcode", memory_mode="enabled") == ""
