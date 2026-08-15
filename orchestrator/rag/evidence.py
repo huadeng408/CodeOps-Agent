@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:
     from .chunking import StructuredChunk
@@ -17,7 +17,7 @@ class EvidenceCoordinates(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     page_id: str = ""
-    page_span: tuple[int, int] = ()
+    page_span: tuple[int, ...] = ()
     element_ids: tuple[str, ...] = ()
     bbox_refs: tuple[str, ...] = ()
     asset_refs: tuple[str, ...] = ()
@@ -25,6 +25,13 @@ class EvidenceCoordinates(BaseModel):
     cell_range: str = ""
     start_ms: int | None = None
     end_ms: int | None = None
+
+    @field_validator("page_span")
+    @classmethod
+    def page_span_is_empty_or_a_two_page_range(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if value and len(value) != 2:
+            raise ValueError("page_span must be empty or contain exactly two page numbers")
+        return value
 
 
 class EvidenceUnit(BaseModel):

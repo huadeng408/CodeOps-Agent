@@ -80,3 +80,24 @@ def test_evidence_unit_adapts_existing_structured_chunk_without_identity_drift()
     assert unit.parent_id == chunk.parent_chunk_id
     assert unit.source_sha256 == chunk.source_sha256
     assert unit.coordinates.page_span == tuple(chunk.page_span)
+
+
+def test_audio_evidence_coordinates_round_trip_through_json() -> None:
+    unit = EvidenceUnit(
+        document_id="audio-1",
+        child_id="audio-1:audio:0-25000",
+        parent_id="audio-1:audio:transcript",
+        source_sha256=SOURCE_SHA256,
+        parser_name="faster-whisper",
+        parser_version="1.2.1",
+        modality="audio",
+        coordinates=EvidenceCoordinates(
+            asset_refs=("audio-1",),
+            start_ms=0,
+            end_ms=25_000,
+        ),
+    )
+
+    restored = EvidenceUnit.model_validate(unit.model_dump(mode="json"))
+
+    assert restored == unit
