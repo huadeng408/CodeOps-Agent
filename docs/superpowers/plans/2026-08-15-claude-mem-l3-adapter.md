@@ -4,7 +4,7 @@
 
 **Goal:** Replace the enabled-mode stub with a loopback-only, bounded, fail-open progressive-read adapter while keeping every evaluation path offline from L3.
 
-**Architecture:** `ClaudeMemClient` owns the L3 boundary. Its production path uses one short-lived `httpx.AsyncClient`; offline tests inject `httpx.MockTransport`. An enabled request performs a project-filtered index search then a batch fetch of at most three selected IDs. Disabled mode returns before client construction.
+**Architecture:** `ClaudeMemClient` owns the L3 boundary. Its production path uses one short-lived `httpx.AsyncClient`; offline tests inject `httpx.MockTransport`. An enabled request performs a project-filtered index search then a batch fetch of at most three selected IDs. The installed worker returns a raw observation object for a one-ID batch request, so parsing accepts that proven shape and a future list wrapper only after strict ID/project validation. Disabled mode returns before client construction.
 
 **Tech Stack:** Python 3.12, `httpx>=0.27,<1`, pytest, pytest-asyncio, Claude-Mem 13.15.0 loopback worker, existing OpenTelemetry/Phoenix conventions.
 
@@ -136,7 +136,7 @@ async def test_enabled_mode_searches_then_fetches_selected_project_ids() -> None
             return httpx.Response(200, json={"content": [{"type": "text", "text": "| #385 | design |"}]})
         assert request.url.path == "/api/observations/batch"
         assert json.loads(request.content) == {"ids": [385], "project": "localcode"}
-        return httpx.Response(200, json={"observations": [{"id": 385, "project": "localcode", "title": "L3 design"}]})
+        return httpx.Response(200, json={"id": 385, "project": "localcode", "title": "L3 design"})
     client = ClaudeMemClient("http://127.0.0.1:37777", transport=httpx.MockTransport(handler))
     assert await client.context("localcode", query="adapter design", memory_mode="enabled") == "[claude-mem:385] L3 design"
     assert [request.url.path for request in requests] == ["/api/search", "/api/observations/batch"]
@@ -166,7 +166,7 @@ async with httpx.AsyncClient(base_url=self.worker_url, transport=self._transport
     return _render_safe_context(batch.json(), project, ids)
 ```
 
-Extract only numeric IDs from `content[].text`. Catch `httpx.HTTPError`, malformed JSON, and deadline exhaustion in `context()` and return empty. Do not call `/api/context/inject`, `/api/sessions/*`, SQLite, Chroma, or any write route.
+Extract only numeric IDs from `content[].text`. Normalize the batch JSON to a sequence only when it is either one object with an integer `id` or an `observations` list; reject all other shapes. Then require every rendered record to have one requested numeric ID and the requested project. Catch `httpx.HTTPError`, malformed JSON, and deadline exhaustion in `context()` and return empty. Do not call `/api/context/inject`, `/api/sessions/*`, SQLite, Chroma, or any write route.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
