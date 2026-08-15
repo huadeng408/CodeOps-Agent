@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import re
+import time
+from urllib.parse import urlparse
+
 import httpx
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_OBSERVATION_ID_RE = re.compile(r"(?<![A-Za-z0-9_])#([1-9][0-9]*)\b")
 
 
 class ClaudeMemClient:
@@ -26,4 +34,102 @@ class ClaudeMemClient:
     ) -> str:
         if memory_mode != "enabled":
             return ""
+        if not _is_loopback_worker_url(self.worker_url) or not _valid_request(
+            project, query
+        ):
+            return ""
+
+        started = time.monotonic()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.worker_url,
+                transport=self._transport,
+                timeout=httpx.Timeout(self._timeout_seconds),
+                trust_env=False,
+            ) as http:
+                search = await http.get(
+                    "/api/search",
+                    params={"query": query.strip(), "project": project, "limit": 3},
+                )
+                search.raise_for_status()
+                observation_ids = _observation_ids(search.json())
+                if not observation_ids:
+                    return ""
+
+                remaining = self._timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    return ""
+
+                batch = await http.post(
+                    "/api/observations/batch",
+                    json={"ids": observation_ids, "project": project},
+                    timeout=httpx.Timeout(remaining),
+                )
+                batch.raise_for_status()
+                return _render_context(batch.json(), project, observation_ids)
+        except (httpx.HTTPError, TypeError, ValueError):
+            return ""
+
+
+def _is_loopback_worker_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in _LOOPBACK_HOSTS
+        and not parsed.username
+        and not parsed.password
+    )
+
+
+def _valid_request(project: str, query: str) -> bool:
+    return bool(_PROJECT_RE.fullmatch(project)) and bool(query.strip()) and len(query) <= 256
+
+
+def _observation_ids(payload: object) -> list[int]:
+    if not isinstance(payload, dict):
+        return []
+
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return []
+
+    result: list[int] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        for match in _OBSERVATION_ID_RE.finditer(text):
+            observation_id = int(match.group(1))
+            if observation_id not in result:
+                result.append(observation_id)
+            if len(result) == 3:
+                return result
+    return result
+
+
+def _render_context(payload: object, project: str, requested_ids: list[int]) -> str:
+    records: list[object]
+    if isinstance(payload, dict) and isinstance(payload.get("id"), int):
+        records = [payload]
+    elif isinstance(payload, dict) and isinstance(payload.get("observations"), list):
+        records = payload["observations"]
+    else:
         return ""
+
+    rendered: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            return ""
+        observation_id = record.get("id")
+        title = record.get("title")
+        if (
+            not isinstance(observation_id, int)
+            or observation_id not in requested_ids
+            or record.get("project") != project
+            or not isinstance(title, str)
+        ):
+            return ""
+        rendered.append(f"[claude-mem:{observation_id}] {title}")
+    return "\n".join(rendered)
