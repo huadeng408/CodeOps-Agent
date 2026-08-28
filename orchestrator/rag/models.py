@@ -117,6 +117,8 @@ class SearchResultPayload(BaseModel):
     userId: str = ""
     orgTag: str = ""
     isPublic: bool = False
+    sheetName: str = ""
+    cellRange: str = ""
 
 
 class KnowledgeSearchRequestPayload(BaseModel):
@@ -201,6 +203,10 @@ class ParseResponsePayload(BaseModel):
     elements: list[Element] = Field(default_factory=list)
     assets: list[dict[str, Any]] = Field(default_factory=list)
     renderedPages: list[dict[str, Any]] = Field(default_factory=list)
+    namedRanges: dict[str, list[str]] = Field(default_factory=dict)
+    cachedValues: dict[str, Any] = Field(default_factory=dict)
+    formulaCachePresent: dict[str, bool] = Field(default_factory=dict)
+    tableRegions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChunkRequestPayload(BaseModel):

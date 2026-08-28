@@ -3575,3 +3575,738 @@ completed the evidence-backed worksheet. The user subsequently confirmed the
 - This resolves the text-dispute gate. Holdout creation, multimodal document
   qrels/evidence, official benchmark runs, and production observability remain
   separate gates and cannot be inferred from this promotion.
+
+## 58. tau2 solo-agent infrastructure-failure closure (2026-08-14)
+
+- **VERIFIED negative evidence**: the current-head official tau2 `mock` solo
+  run is now retained at
+  `eval_results/tau2official/current-head-20260814-solo-mock-01/`. It uses
+  the pinned `tau2-bench v1.0.1` commit
+  `fc0055dc4e0a316c3f83133267fbd6faaa770992`, public task `create_task_1`,
+  `openai/gpt-5.6-sol`, seed 42, one task, one trial, and concurrency one.
+  Its copied official raw output has SHA-256
+  `fcd8ed02f15922e6daafed861c8445279147f1770987f789fd6403a4d0a2b5e2`.
+- **BLOCKED (upstream protocol)**: `tau2.runner.build.build_user()` always
+  passes `tools` to the configured user, while the pinned
+  `DummyUser.__init__()` accepts no arguments. The official result therefore
+  reports `termination_reason=infrastructure_error`, `reward_info=null`, and
+  `TypeError: DummyUser.__init__() got an unexpected keyword argument
+  'tools'`; it made no evaluable agent/model attempt. Do not patch the pinned
+  upstream checkout, replace this with `llm_agent_gt`, or report it as a zero
+  model score.
+- **IMPLEMENTED and VERIFIED**: `Tau2OfficialRunner.collect_receipt()` now
+  copies official raw bytes before summary calculation, safely handles a null
+  `reward_info`, counts infrastructure failures, and writes
+  `OFFICIAL_INFRA_FAILURE` rather than crashing or misclassifying the run.
+  TDD evidence: the new null-reward regression failed first with the prior
+  `NoneType.get` exception, then passed after the minimum receipt-only fix;
+  the focused official receipt regression suite passed `22 passed` (one
+  upstream SQLAlchemy deprecation warning).
+- **Next legitimate route**: retain `llm_agent + user_simulator` as the only
+  runnable public tau2 text configuration in this pinned release. A solo-agent
+  result can be revisited only after an upstream-compatible release or a
+  separately pinned official configuration exists; this failure is not a
+  reason to mutate public tasks, prompts, scorers, or source code.
+
+## 59. Current-index four-layer contamination receipt (2026-08-14)
+
+- **VERIFIED**: after starting only the existing `es` and `embedding` Compose
+  services, `scripts/corpus/scan_contamination.py` ran against
+  `knowledge_base_v2_bge_m3` at `aca3c96e544e913d8f73e688164653a51adf38c6`.
+  It completed exact, directional containment, MinHash, and stored-vector
+  BGE-M3 cosine layers within `71.671s`, below the frozen 600-second SLA.
+  The verdict is `CLEAN`: zero exact, containment, MinHash, and embedding
+  hits against all 180 frozen development queries, with no skipped layer.
+- **Artifact binding**: run directory is
+  `eval_results/contamination/current-head-20260814-220437/`; the empty JSONL
+  review report has SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  its manifest has SHA-256
+  `47c86e9cfb5865c5d348deef8d62552f4bb15f25f6b6b813d19c60fa64a5d217`,
+  the frozen policy is
+  `0de7b00c85234e7864b52abab0009e459ce9679c038b2884410c033ac20c4725`,
+  and the query source is
+  `15d549e61cbfcceb183dc087aeb1a749230c9d8b6c12acc1f229a3730d17a454`.
+  Layer 4 reuses ES field `vector`, whose recorded model revision is
+  `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181`; only query vectors
+  were requested from the matching local embedding service.
+- **Coverage audit**: ES contained 24,887 records, all with text and a vector.
+  The scanner compared 24,832 text-bearing normalized chunks; the remaining
+  55 have source text but normalize to no comparable characters (for example
+  separator-only lines). They are included in the visible
+  `degenerate_fragments=985` count, were not deleted, and cannot match any of
+  the 180 non-empty benchmark queries in the four metrics. This is a declared
+  boundary, not an unreported corpus omission.
+- **Scope limit**: this closes the current-index E4 contamination execution
+  for the frozen *development* query set only. The split manifest still has
+  `holdout_size=0`; it does not create a clean hidden holdout, replace a
+  document-native multimodal qrels set, or promote the final evaluation gate.
+
+## 60. Resource-bounded multi-modal RAG and third-layer agent memory design (2026-08-14)
+
+### 60.1 Status, constraints, and adopted boundary
+
+**Status: PROPOSED, not implemented or verified.** This is the required
+implementation design for the next increment. It does not create a visual
+index, install a plugin, modify a memory record, or change a retrieval score.
+
+The target host was inspected: i9-13900HX (24 cores / 32 logical processors),
+15.7 GiB RAM, and RTX 4060 Laptop GPU (8 GiB VRAM). Existing Compose services
+already reserve meaningful CPU/RAM for Elasticsearch (1 GiB JVM), BGE-M3 CPU
+embedding, Jina reranking, MySQL, Redis, Kafka and Phoenix. Therefore no
+always-on large VLM, ColPali service, Postgres cluster, or second Redis is
+permitted by default. GPU work is batch-one and scheduled; it never runs beside
+an O3 evaluation or the existing reranker without an explicit resource lease.
+
+The repository already has three distinct stores and they must not be merged:
+
+| Layer | Owner and scope | Source of truth | Retention / rule |
+|---|---|---|---|
+| L1 | Redis | live conversation/session cache, queues and short-lived tool state | Redis only | TTL-bound; never a durable RAG citation or human review record |
+| L2 | MySQL + MinIO + Elasticsearch | application users, documents, durable app-memory facts, original blobs and searchable RAG chunks | existing application contracts | current provenance, access control and deletion semantics remain authoritative |
+| L3 | Claude-Mem sidecar | developer/agent observations across coding sessions | pinned Claude-Mem SQLite + Chroma worker | never the source for user document truth, qrels, benchmark answers or release metrics |
+
+L3 is not a replacement for L1/L2 and must not share their Redis database. It
+is a narrow agent-continuity adapter: the CLI and Python orchestrator ask it for
+small, cited prior-work observations; its hooks capture developer workflow only.
+The adapter strips secrets and private-marked content, records source IDs, and
+fails open to *no extra memory* on an unavailable sidecar. Benchmark runs use
+`memory_mode=disabled`; they never receive L3 observations.
+
+### 60.2 Reused open-source components and decision
+
+Three choices were compared:
+
+1. **Adopt Claude-Mem as a local sidecar (recommended).** Pinned research
+   checkout: `thedotmack/claude-mem` commit
+   `d768ba364302d12b76e69e4f021f0bb1d2d50ed6` (v13.15.0 changelog),
+   Apache-2.0. Its supported Claude Code plugin path supplies lifecycle hooks,
+   local worker, SQLite/FTS5, Chroma hybrid search, MCP progressive disclosure
+   (`search -> timeline -> get_observations`) and private-content exclusion.
+   Use its stable plugin/worker path, not its evolving server-beta
+   Postgres/BullMQ path.
+2. **Embed Mem0.** Its current upstream HEAD was inspected as an alternative,
+   but it introduces a second application memory abstraction and would overlap
+   L2. It is suitable only if a later product requirement needs cross-product,
+   multi-user memory rather than developer-session continuity.
+3. **Build a new vector memory service. Rejected.** It would duplicate mature
+   hooks, compaction, search, local UI and storage already supplied by
+   Claude-Mem while exceeding the host memory budget.
+
+The production decision is option 1. Do not copy Claude-Mem source into this
+repository. Install the official plugin through Claude Code, pin and record its
+commit/version in an external lock receipt, and integrate through its documented
+local worker/MCP interface. Plugin data stays outside the repository under the
+user-local Claude-Mem data directory; no API key, transcript or SQLite database
+is committed.
+
+### 60.3 Modality-specific ingestion and chunk contracts
+
+Each modality has a different retrievable unit. Every output carries
+`document_id`, source hash, parser/model version, modality, parent/child IDs,
+time/page/cell coordinates where applicable, and an immutable extraction
+receipt. Search is hybrid (lexical + BGE-M3 dense + current reranker) within a
+modality before calibrated fusion. A result must cite the source unit rather
+than a synthetic summary.
+
+| Modality | Parsing and chunk method | Index/query policy for this host | Acceptance evidence |
+|---|---|---|---|
+| Text/code | Structure-first chunks: headings, paragraphs, lists and language AST boundaries; child chunks target 350-600 BGE-M3 tokens with 40-80 token overlap, retained under a 1,200-1,600 token parent window. Never split a code function, list item or definition/exception pair. | Current BGE-M3 + BM25 + Jina rerank. Retrieve children, expand only their parent at answer time; language and heading filters precede rerank. | pinned document fixture; stable parent/child IDs; Recall/MRR against text qrels; no answer or label exposed to the agent. |
+| Visual PDF/page/image | MinerU **explicit OCR only** produces page image, Markdown, layout element, bbox and reading order. Chunk is one page-layout graph: text elements remain separate children; tables/figures/captions form typed element nodes connected to the page parent. Never tile the image into arbitrary fixed squares. | Default production lane indexes OCR/layout text and page previews, then reranks top 5. A visual encoder is an offline, batch-one bake-off only: use a quantized small late-interaction/vision retriever only if its VRAM measurement fits below 6 GiB and it beats text on licensed page+bbox qrels. No visual alias switch before that gate. | MinerU OCR receipt, page/element/bbox qrels with real human evidence, text-vs-visual bake-off, latency/VRAM receipt and Phoenix retrieval trace. |
+| Spreadsheet/table/formula | Native workbook parser, not flattened prose: chunk a semantic table region (header + up to 40 rows or 12 columns), a separate formula-dependency subgraph (formula cells, precedents, dependents, named ranges), and a sheet-level schema summary. Preserve A1 references, formulas and cached values as distinct fields; do not claim recalculation without a real calc engine. Tika remains only a fallback for non-PDF Office text and cannot be the formula extractor. | Use lexical field boosts for sheet/table/header/cell reference, BGE-M3 over row narratives and formula graph summaries, then return exact sheet/range/formula citations. Initial implementation uses mature `openpyxl` read-only extraction; optional LibreOffice headless recalculation is isolated, resource-capped and records its version. | workbook fixture with merged cells, formulas, named ranges and errors; exact range/formula citation tests; question-to-cell/range qrels separate from PDF qrels. |
+| Audio | VAD- and timestamp-aware speech segments, not token windows: decode with `faster-whisper`; form 20-60 second utterance groups at silence/speaker boundaries with 1-2 second acoustic overlap; attach word/segment start/end times and confidence. A topic summary is a parent only, never replaces timestamp children. | Default model is GPU `distil-large-v3`/int8-float16 at batch one when the GPU lease is free; CPU fallback is `small` int8 with lower concurrency. Speaker diarization is optional and disabled until an authorized model and license are pinned. Retrieval uses transcript text; playback citation is `(audio_id, start_ms, end_ms)`. | WAV/MP3 fixture, deterministic transcript/timestamp receipt, timestamp seek check, audio qrels, transcription WER plus retrieval Recall/MRR, and a trace that excludes raw audio/transcript text. |
+
+PDF remains an immutable special case: every PDF entry point uses MinerU plus
+explicit OCR. Tika may process DOCX/PPTX/XLSX text only and must reject PDFs.
+
+### 60.4 Claude-Mem real-integration plan
+
+1. **Preflight and isolation.** Confirm Node >=20, Bun, `uv`, SQLite and
+   Claude Code plugin support. Create a user-local data directory and choose a
+   free loopback worker port. Configure Chinese code mode only if desired.
+   Do not enable cloud sync. Verify no plugin setting contains a project API key.
+2. **Install and pin.** Use Claude Code's official plugin workflow
+   (`/plugin marketplace add thedotmack/claude-mem`, then `/plugin install
+   claude-mem`) or the upstream `npx claude-mem install` path. Record installed
+   version, Git commit, SHA-256 of the plugin manifest, worker port and license
+   in a non-secret local receipt. Restart Claude Code and verify worker health.
+3. **Create a thin adapter, not a fork.** Add a Python `ClaudeMemClient` behind
+   the existing memory manager interface. It performs only local health and
+   progressive MCP/worker reads with project/session filters, citation IDs and
+   strict byte/token caps. Add a Go config flag so the CLI exposes status and
+   can request a read; it never reads the plugin database directly.
+4. **Write policy.** On session end, submit only a sanitized observation event
+   through the plugin's supported hook/API. Redact keys, bearer tokens, paths
+   marked private and benchmark/evaluation directories. L3 reads are disabled
+   for all official harness, holdout, scorer and qrels commands.
+5. **Observability and resilience.** Emit Phoenix spans containing only
+   `memory.backend=claude_mem`, latency, result count, citation IDs and failure
+   category. The worker is a soft dependency: timeout/unavailable yields an
+   empty L3 context and a visible status, never a fabricated memory answer.
+6. **Verification gate.** Prove one real Claude Code session writes an allowed
+   observation, a new session retrieves it through progressive disclosure, and
+   a private/secrets fixture is absent. Then prove the same benchmark command
+   has L3 disabled. Record CPU/RAM/VRAM idle and retrieval costs before enabling
+   it by default.
+
+### 60.5 Ordered implementation plan and stop conditions
+
+1. Define the modality-neutral `EvidenceUnit` and `ChunkStrategy` contracts;
+   add contract tests before changing the existing text pipeline.
+2. Implement and verify text structure/parent-child chunks, preserving current
+   stable citation IDs and text evaluation behavior.
+3. Implement native table/formula extraction and its workbook fixtures; keep
+   PDF routing unchanged and formula recalculation optional.
+4. Implement audio transcription/timestamp chunks with a resource lease and
+   fixtures; no diarization until its model/license gate passes.
+5. Implement MinerU layout-graph materialization and an offline visual
+   bake-off. Stop if licensed document-native bbox qrels or the VRAM ceiling is
+   absent; do not create a production visual alias.
+6. Complete Claude-Mem install/pin receipt, then build the thin adapter and
+   tests. Stop if plugin hooks cannot be installed without exposing secrets or
+   if its worker cannot stay under the agreed host budget.
+7. Run per-modality retrieval evaluations plus full O3 trace checks; every
+   score must bind qrels, index, predictions, scanner and Phoenix receipts.
+
+No step may promote `AI_REVIEWED` to `HUMAN_REVIEWED`, create a hidden holdout,
+or use a public task as a tuned holdout. A missing human decision, licensed
+document-native qrels, worker trust boundary, or resource budget is a visible
+`BLOCKED` result, not a retry loop or a synthetic substitute.
+
+## 61. Current-HEAD O3 receipt and page-Qrels trust-root hardening (2026-08-14)
+
+### 61.1 O3 current-HEAD development smoke
+
+- **VERIFIED within the stated development scope**: after restoring the needed
+  existing Compose services, the one-concurrency O3 run at
+  `aca3c96e544e913d8f73e688164653a51adf38c6` completed all three fixed
+  TechDocs instances (`3/3`, `failed=0`) at
+  `eval_results/o3/current-head-20260814-234351/trace-o3-0e117a53/`.
+- **Phoenix source evidence**: the artifact uses `phoenix-api-readback`, has
+  38 ended spans in trace `b1441d24b5c016903887ed315395dc1e`, and the shared
+  O3 v2 assertion is `PASS`. It contains the required `eval.run`,
+  `eval.instance`, `invoke_agent`, `execute_tool`, `chat`, real
+  `rag.retrieve`, `embedding`, `rerank`, and `scorer.official` kinds with
+  run/instance join attributes and no assertion problems.
+- **Independent integrity check**: every entry in the artifact's
+  `checksums.sha256` was recomputed locally and matched (`CHECKSUMS_OK`). The
+  runner also exited normally and printed the receipt path only after its own
+  assertion/checksum gates.
+- **Boundary**: this remains a fixed non-release development smoke. The
+  manifest records requested model `gpt-5.6-sol` but empty model revision and
+  `MODEL_IDENTITY_UNVERIFIED`; it is neither an identity attestation nor a
+  hidden-holdout score. It does, however, close the previously missing
+  same-run RAG/re-rank/scorer/Phoenix evidence for the stated O3 scope.
+
+### 61.2 Page-Qrels signer trust root
+
+- **IMPLEMENTED and VERIFIED**: a release no longer trusts public-key strings
+  supplied by its caller. `TRUSTED_PAGE_QRELS_SIGNERS` is intentionally empty
+  in production until a separately controlled public-key installation supplies
+  evidence-review, query-link-review and release-workflow keys. An unconfigured
+  key now fails closed with `PAGE_QRELS_TRUST_ROOT_UNCONFIGURED`; a caller key
+  differing from the configured key fails with
+  `PAGE_QRELS_TRUST_ROOT_MISMATCH`.
+- **Regression evidence**: the new unconfigured-root case first failed because
+  a freshly generated caller key could self-sign and release a 120-row fixture;
+  after the minimum trust-root enforcement it passed. The focused page-Qrels,
+  tau2 official receipt, and Terminal-Bench official runner suite reports
+  `32 passed` (one upstream SQLAlchemy deprecation warning).
+- **Boundary**: the test-only signer map is injected with pytest and cannot be
+  production evidence. No real multimodal page-Qrels release exists because
+  no external controlled public-key installation, 120-row licensed set,
+  full contamination receipt, or independent scorer receipt has been supplied.
+
+## 62. Four-track closure map: four modalities and Claude-Mem (2026-08-15)
+
+### 62.1 Adopted delivery shape
+
+This section refines Section 60 into the only permitted continuation order. It
+does not promote a design, fixture, synthetic score, or installed dependency
+to `VERIFIED`. The design map remains the authoritative route; the companion
+implementation plan names commands and file-level work but cannot override a
+gate here.
+
+Use one modality-neutral evidence envelope around the existing structured
+chunk pipeline rather than a second ingestion service:
+
+```text
+source bytes -> parser receipt -> EvidenceUnit children + parent -> modality lane
+                                                    |                 |
+                                                    +-> source coordinates -> citation
+                                                                          -> Phoenix span
+```
+
+Every `EvidenceUnit` must carry source hash, parser/model version, modality,
+stable parent/child identity, provenance coordinates, and extraction receipt.
+It must never contain an answer label, a qrels relevance value, hidden-holdout
+content, or a Claude-Mem observation. Existing ACL authority continues to be
+derived from the file-processing task, never from worker-supplied metadata.
+
+The concrete architecture is deliberately asymmetric:
+
+| Lane | Initial production implementation | Hard boundary | Release evidence |
+|---|---|---|---|
+| Text | structure/AST-aware child chunks and parent expansion over existing BGE-M3, BM25 and rerank | never split a function, list item, or definition/exception pair | fixture identity/citation stability plus locked text-qrels Recall/MRR receipt |
+| Visual PDF/image | MinerU explicit OCR layout/page graph and existing page artifacts; text/layout retrieval first | no Tika; no production visual alias; visual GPU work is batch-one and less than 6 GiB VRAM | licensed human page/element/bbox qrels, text-vs-visual bake-off, latency/VRAM and Phoenix receipt |
+| Table/formula | `openpyxl` read-only workbook regions, formula dependency subgraphs and sheet schemas | no prose flattening as the sole representation; no claimed recalculation without a real recorded engine | exact sheet/range/formula citation tests and separate range qrels |
+| Audio | `faster-whisper` VAD/timestamp groups, 20-60 seconds and 1-2 second acoustic overlap | no default diarization until model/license are pinned; raw transcript/audio never enters traces | deterministic timestamp receipt, seek check, WER plus retrieval qrels and privacy-safe span |
+
+The text lane is first because it establishes the shared envelope at low host
+cost. Table/formula follows because it uses the same text index and has exact
+citations. Audio next is a separate bounded extractor. Visual remains a
+separate offline lane: page OCR/layout is useful before a vision encoder, but
+an encoder cannot become a default retrieval dependency before its document-
+native evidence gate. This order deliberately rejects the tempting but unsafe
+alternative of shipping one generic fixed-token chunker for all modalities.
+
+### 62.2 Claude-Mem is L3, not another application database
+
+Keep Redis as L1 TTL session/queue state and MySQL + MinIO + Elasticsearch as
+L2 application truth, blobs and RAG evidence. Adopt the stable local
+plugin/worker path of `thedotmack/claude-mem` at researched commit
+`d768ba364302d12b76e69e4f021f0bb1d2d50ed6` (Apache-2.0), using its SQLite,
+FTS5, Chroma and progressive MCP reads. Do not adopt the evolving server-beta
+Postgres/BullMQ path and do not vendor or fork its source.
+
+L3 is a developer/agent continuity sidecar only. A thin client may request
+bounded, cited observations with a project/session filter, then fail open to
+an empty result on timeout or unavailability. It must redact secret-shaped
+values and private paths before writing, expose only backend/latency/count/
+citation IDs to Phoenix, and never read the plugin database directly. Official
+Harness, scorer, Qrels, contamination and holdout commands set
+`memory_mode=disabled`; L3 output cannot be indexed into L2 or enter a
+benchmark prompt.
+
+The integration is accepted only after a real local Claude Code session writes
+one allowed observation, a fresh session retrieves it through the supported
+progressive interface, a private/secrets fixture is absent, the benchmark
+disable gate is demonstrated, and a local resource receipt shows acceptable
+idle CPU/RAM with zero additional VRAM residency. Plugin version, upstream
+commit, manifest SHA-256, worker loopback endpoint and license are recorded in
+a non-secret user-local receipt, never in Git.
+
+### 62.3 Evidence-backed task cards and stop conditions
+
+| Card | Track | Automatable deliverable and mandatory evidence | Status / stop condition |
+|---|---|---|---|
+| F1 | Multimodal RAG | Add and test the modality-neutral evidence/parent-child contract while retaining present structured identifiers and ACL authority. | `DESIGNED`; stop if existing citation IDs would change without a migration/reindex receipt. |
+| F2 | Multimodal RAG | Materialize structure-first text parent/children and evaluate them against locked text qrels. | `DESIGNED`; no score claim until qrels/index/prediction/scorer pins bind the report. |
+| F3 | Multimodal RAG | Add `openpyxl` table/formula extraction with fixtures and exact coordinates. | `DESIGNED`; stop on a requested recalculation until an isolated engine/version is pinned. |
+| F4 | Multimodal RAG | Add bounded `faster-whisper` audio extraction, timestamp citations, and trace redaction tests. | `DESIGNED`; stop if a GPU lease cannot coexist with the existing service budget. |
+| F5 | Multimodal RAG | Run the MinerU-derived visual text/layout baseline, then a batch-one visual bake-off. | `BLOCKED` for release by licensed human 120+ page/element/bbox qrels and a controlled signer root; no visual alias. |
+| M1 | Memory | Install/pin the official Claude-Mem plugin and verify its worker with no secret-bearing configuration. | `DESIGNED`; stop if supported hooks/worker require cloud sync, an exposed secret, or exceed the host budget. |
+| M2 | Memory / observability | Add a thin, fail-open L3 adapter plus benchmark-disable, sanitization and Phoenix attribute tests. | `DESIGNED`; no direct SQLite/Chroma access and no L3 benchmark input. |
+| H1 | Harness | Produce a current-head official Terminal-Bench or tau2 evaluable agent receipt, with immutable pins and official raw scorer output. | `BLOCKED` by upstream tau2 solo `DummyUser` protocol failure or unavailable runnable configuration; do not patch upstream/public tasks or call it model failure. |
+| E1 | Evaluation set | Build a clean, independently sourced sealed holdout and run all four contamination layers before use. | `BLOCKED` until independent human review of all semantic candidates; no automatic accept/reject. |
+| O1 | Observability | Join official Terminal-Bench/tau2 execution, scorer and retrieval spans; persist long-window metrics and actionable alert tests. | `DESIGNED`; O3 development-smoke receipt does not satisfy this official-benchmark gate. |
+
+All cards follow failing focused test -> minimal implementation -> focused
+regression -> explicit integration run -> immutable artifact/receipt -> map and
+Obsidian update. A dependency failure is recorded with command, output,
+affected data, rollback boundary and one next action. Retrying a failure without
+new evidence, silently reducing the workload, adding a label, or substituting
+an AI judgment for human Qrels review is prohibited.
+
+### 62.4 Cross-track completion test
+
+The project is not complete until F1-F4 and M1-M2 have their stated real
+integration evidence, F5 has its licensed/signature/bake-off gate, H1 has an
+official evaluable receipt, E1 has independent human dispositions and a clean
+sealed holdout receipt, and O1 has official-run joins plus durable metrics and
+alert evidence. Work can continue on automatable cards while F5, H1 or E1 are
+genuinely blocked, but the top-level status remains `BLOCKED` and the blocker
+must remain visible in every phase-end report.
+
+### 62.5 F1 execution receipt (2026-08-15)
+
+- **IMPLEMENTED and regression-verified at the focused scope**: added
+  `orchestrator.rag.evidence.EvidenceUnit` and `EvidenceCoordinates` as frozen,
+  extra-forbidden Pydantic contracts. They require source SHA-256, parser
+  identity/version, modality, stable document/child/parent identities and a
+  coordinate envelope. `from_structured_chunk()` is a no-migration adapter:
+  it preserves existing `StructuredChunk` document, child, parent, provenance
+  and page/element/bbox identities, while deriving a lane only from existing
+  typed elements.
+- **Anti-contamination boundary**: unknown fields are rejected, so answer,
+  qrels and relevance-label payloads cannot enter an evidence unit. This is a
+  contract guard, not a claim that old artifacts have been retroactively
+  scanned or that any benchmark is clean.
+- **TDD and test evidence**: before implementation,
+  `C:\\Python312\\python.exe -m pytest tests\\test_evidence_unit.py -q`
+  failed at collection with `ModuleNotFoundError: orchestrator.rag.evidence`.
+  After the minimal implementation it passed `5 passed in 0.06s`. The focused
+  regression command
+  `C:\\Python312\\python.exe -m pytest tests\\test_evidence_unit.py tests\\test_document_contract.py tests\\test_hierarchy_chunking.py tests\\test_structured_ingestion_contract.py tests\\test_rag_ingestion_pdf.py -q`
+  passed `21 passed in 32.40s`.
+- **Environment boundary**: the default `D:\\anaconda\\python.exe` lacks the
+  declared optional `langchain-core` package and cannot collect ingestion
+  tests. `C:\\Python312\\python.exe` contains the pinned RAG runtime and was
+  explicitly used for the receipt. This is an interpreter-selection finding,
+  not a product-code failure and not a dependency mutation.
+- **Remaining work**: F1 now needs integration of the envelope into each new
+  modality output (F2-F4); its focused contract is not a retrieval-quality,
+  qrels, index, or production release receipt.
+
+### 62.6 F2 Python structure boundary receipt (2026-08-15)
+
+- **IMPLEMENTED and regression-verified at the chunk-contract scope**: the
+  existing Go evidence expander was inspected before changing Python. It
+  already performs same-parent, ACL-filtered neighbor expansion with a token
+  budget and stable citation keys; no duplicate parent store or new expansion
+  protocol was added.
+- **Actual repaired gap**: `orchestrator.rag.chunking` now parses Python code
+  when possible and treats top-level decorated functions, async functions and
+  classes as indivisible chunk boundaries. A syntax error or code in another
+  language keeps the former complete-line fallback. This intentionally permits
+  an oversized semantic code unit rather than cutting through its body.
+- **TDD and test evidence**: the new hard-boundary test initially failed with
+  a function header separated from its body. After the AST-only branch,
+  `C:\\Python312\\python.exe -m pytest tests\\test_hierarchy_chunking.py -q`
+  passed `6 passed in 0.07s`; the combined F1/structured-ingestion regression
+  command in §62.5 passed `22 passed in 9.74s`.
+- **Remaining scope**: this closes only one text/code child-boundary defect.
+  It does not yet provide a locked-qrels Retrieval Recall/MRR artifact, a
+  migration/reindex receipt for historical chunks, or a production quality
+  claim for the full F2 text lane.
+
+### 62.7 F3 native XLSX receipt (2026-08-15)
+
+- **IMPLEMENTED and focused-integration verified**: `.xlsx` source bytes now
+  use an `openpyxl` read-only extractor before Tika. The parse response carries
+  sheet heading, a worksheet-region table element, individual formula/equation
+  elements with `Sheet!A1` coordinates, formula source, OpenPyXL version and a
+  SHA-256 of the original workbook bytes. Formula text is retained; no formula
+  evaluation is claimed or attempted.
+- **TDD and routing evidence**: the new endpoint test first failed when it
+  intercepted a Tika PUT for `budget.xlsx`. After the smallest `.xlsx` branch,
+  `C:\\Python312\\python.exe -m pytest tests\\test_spreadsheet_rag.py tests\\test_rag_ingestion_pdf.py tests\\test_no_pdf_tika.py -q`
+  passed `6 passed in 10.11s`. The same command contains the PDF route tests,
+  so this receipt explicitly preserves the MinerU OCR/Tika-zero PDF boundary.
+- **Remaining scope**: `.xls` and CSV retain their non-PDF fallback; named
+  ranges, formula precedents/dependents, cached-value distinction, region
+  segmentation over large sheets and workbook range qrels remain F3 work.
+  This is not a spreadsheet retrieval-quality or recalculation receipt.
+
+### 62.8 F3 formula-dependency receipt (2026-08-15)
+
+- **IMPLEMENTED and focused-test verified**: the native XLSX artifact now
+  exposes a deterministic `formula_dependencies` map keyed by `Sheet!Cell`.
+  It preserves A1 references and ranges (for example `B2:B3`) without trying
+  to calculate them or infer values. This is the first formula-subgraph input
+  for later chunking, not an evaluation result.
+- **TDD evidence**: the assertion first failed because the artifact had no
+  dependency field. After the minimal parser-only implementation,
+  `C:\\Python312\\python.exe -m pytest tests\\test_spreadsheet_rag.py tests\\test_rag_ingestion_pdf.py tests\\test_no_pdf_tika.py -q`
+  passed `6 passed in 9.58s`; this retains the explicit PDF MinerU route tests.
+- **Remaining scope**: named ranges, cross-sheet references, cached values,
+  table-region limits, persisted formula graph metadata and workbook qrels are
+  still unimplemented. Do not claim formula semantic retrieval from this map.
+
+### 62.9 F4 timestamp chunk contract (2026-08-15)
+
+- **IMPLEMENTED and unit-verified only**: added deterministic grouping for
+  timestamped ASR segments into 20-60 second audio chunks with 1-2 second
+  playback overlap and exact `(audio_id, start_ms, end_ms)` citations. The
+  overlap is a media seek range only; transcript text is not duplicated or
+  fabricated across chunk boundaries.
+- **TDD evidence**: the new test first failed because the audio module was
+  absent. A first implementation then exposed a boundary defect (`32000ms`
+  instead of the required `28000ms` start); the correction was one expression,
+  after which `C:\\Python312\\python.exe -m pytest tests\\test_audio_rag.py -q`
+  passed `1 passed in 0.05s`.
+- **Runtime receipt (2026-08-15)**: `faster-whisper 1.2.1` was invoked through
+  `D:\\vscode\\localcode\\.runtime\\py312\\Scripts\\python.exe` (a D-drive
+  virtual environment using the already available system package); the model
+  cache and all new model bytes are under
+  `D:\\vscode\\localcode\\.runtime\\cache\\huggingface`. With a command-scoped
+  Clash proxy, `Systran/faster-whisper-tiny` downloaded and transcribed the
+  public 13-second `Narsil/asr_dummy` FLAC into five timestamped English
+  segments. `D:\\tools\\ffmpeg\\bin\\ffmpeg.exe` (7.1) was installed and
+  independently decoded that FLAC successfully. This is real local decoder,
+  model and ASR evidence, not a synthetic transcript.
+- **Remaining scope**: this does not demonstrate GPU execution, WER, diarization,
+  a persisted audio `EvidenceUnit`, vector retrieval, qrels, or Phoenix audio
+  spans. It must not be presented as audio retrieval-quality or release evidence.
+
+### 62.10 M2 benchmark-disable receipt (2026-08-15)
+
+- **IMPLEMENTED and unit-verified only**: `ClaudeMemClient` now has an
+  explicit `memory_mode` boundary. Every mode other than literal `enabled`
+  returns empty context without opening a network connection, making the
+  default compatible with official harness, scorer, Qrels and holdout runs.
+- **TDD evidence**: the test first failed because the adapter module was
+  absent, then `C:\\Python312\\python.exe -m pytest tests\\test_claude_mem.py -q`
+  passed `1 passed in 0.05s`.
+- **Boundary**: this has not enabled retrieval. Worker health (`127.0.0.1:37777/health`
+  returned HTTP 200) and plugin availability do not substitute for a bounded,
+  sanitized progressive-read integration, private-fixture exclusion, Phoenix
+  attributes or a real two-session acceptance receipt.
+
+### 62.11 tau2 runnable official receipt (2026-08-15)
+
+- **VERIFIED at the one-public-task receipt scope**: the separately pinned
+  `tau2-bench v1.0.1` checkout at commit
+  `fc0055dc4e0a316c3f83133267fbd6faaa770992` passed its official `tau2
+  check-data` command using `PYTHONUTF8=1` (the first attempt exposed only the
+  upstream Windows/Colorama `GBK` checkmark-print defect). A real official
+  command then ran `mock`, `llm_agent + user_simulator`,
+  `openai/gpt-5.6-sol`, seed 42, one task, one trial and concurrency one.
+- **Honest outcome**: the public task `create_task_1` completed in 13.11s and
+  the upstream scorer returned `reward=0.0`, `infrastructure_error_count=0`:
+  the agent failed the required database write. The project receipt at
+  `eval_results/tau2official/current-head-20260815-llm-user-02/receipt.json`
+  preserves source/data pins and raw official scorer SHA-256
+  `a5c05d9353e3e7622f0f86b9548865027f99acc0fe226ad147457020765c4e10`.
+  This is a failure receipt, not a benchmark score claim or an opportunity to
+  tune the fixed public task.
+- **Remaining scope**: no project-owned Phoenix join was recorded for this
+  upstream process, this one mock development task is not a sealed holdout,
+  and H1/O1 still require a trace-joined official execution plus the relevant
+  release gates.
+
+### 62.12 Terminal-Bench fresh official and trace receipt (2026-08-15)
+
+- **VERIFIED at the one-public-task receipt scope**: after repairing the
+  receipt launcher's BeeAPI section parser (a focused regression test first
+  failed, then the Terminal-Bench receipt suite passed `15 passed`), official
+  `terminal-bench 0.2.18` ran `break-filter-js-from-html` through its own
+  `Harness`. It used the pinned data SHA-256
+  `4bab83828d145cdb8378eea9f00c2fec5c90b32f3f4cd076c4111d6e4191c353`,
+  `openai/gpt-5.6-sol`, one task, one attempt and concurrency one. The verifier
+  alone received the ephemeral `host.docker.internal:7890` proxy overlay;
+  Docker Desktop, public task assets and global proxy settings were unchanged.
+- **Honest outcome**: the official receipt
+  `eval_results/terminalbenchofficial/current-head-20260815-tb-llm-user-01/`
+  returned `OFFICIAL_FAILURE`, `is_resolved=false`, 11,736 input tokens and
+  252 output tokens. The official results and metadata hashes are respectively
+  `974bf255cbd9a52ae1030da6c2d5eb277f688dd67b5c35f9f4b038dd0088764e`
+  and `a53eca6bb5845b7dbf0f16df1b0380d4c3bc885a813286db33d8c1523c80127c`.
+  The agent transcript records ordinary `/app` inspection and commands; it did
+  not access `/tests`, `/solution` or verifier logs. This is one public
+  development failure receipt, not a release score.
+- **Observability evidence and gap**: Phoenix readback found one real trace
+  with the nested `eval.run -> eval.instance -> scorer.official` spans. Its
+  `span-assertion.json` is `INCOMPLETE_AGENT_TRACE` because the project-owned
+  agent emitted no `invoke_agent` or `chat` span around its real model calls.
+  Trace base coverage is real; the missing agent spans remain an O1 defect and
+  must be fixed and re-run rather than labelled complete.
+
+### 62.13 Terminal-Bench worker trace join closure (2026-08-15)
+
+- **Root cause verified**: upstream `terminal-bench 0.2.18` runs trials in
+  `ThreadPoolExecutor` and its Agent via `asyncio.run_in_executor`. Python
+  `contextvars` does not cross those workers. The prior receipt therefore had
+  genuine Agent/chat spans on a different trace, and a name-only check would
+  have been a false positive.
+- **IMPLEMENTED and regression-verified**: the receipt launcher injects W3C
+  `traceparent`/`tracestate` only while the fixed concurrency-one Harness
+  runs. The worker restores it only for real `invoke_agent`; provider calls
+  make `chat` children naturally. Previous environment values are restored.
+  The receipt evaluator returns `SPLIT_TRACE` when all names exist but none
+  share one trace, and Phoenix retry accepts only `PASS`. The new tests first
+  failed for the missing parent and split-trace false positive, then the
+  focused suite passed `28 passed` (one upstream SQLAlchemy warning). A
+  same-trace candidate must also have the real
+  `eval.run -> eval.instance -> invoke_agent -> chat` parent chain and an
+  instance-child `scorer.official` span.
+- **Fresh official evidence**: receipt
+  `eval_results/terminalbenchofficial/current-head-20260815-tb-agent-trace-04-proxy/`
+  preserves the pinned public task/data SHA, model, one attempt and concurrency
+  one. An earlier fresh attempt was stopped but preserved after DNS succeeded
+  while direct Debian HTTP failed; the replacement used only a verifier proxy
+  overlay. It reports honest `OFFICIAL_FAILURE` (`0/1`), while Phoenix read
+  back six spans in one trace `14b7243ac7acbd2b85d99624a3289694` and
+  `span-assertion.json` is `PASS`.
+- **Boundary retained**: this proves Terminal-Bench receipt trace topology, not
+  a passing benchmark score, a general benchmark score, tau2 trace join,
+  audio-RAG tracing, dashboards or alerting. Do not tune the Agent against this
+  fixed public task.
+
+### 62.14 F4 audio evidence and retrieval receipt (2026-08-15)
+
+- **IMPLEMENTED and unit-verified**: `orchestrator.rag.audio` now exposes a
+  lazy local `transcribe_audio` entry point, turns timestamp groups into stable
+  audio `EvidenceUnit` records, projects them to existing text-index fields and
+  atomically persists JSONL evidence manifests. `asset_refs` and exact
+  millisecond coordinates carry playback provenance; raw transcripts remain
+  index content only and are explicitly excluded from the trace attributes.
+- **Real local evidence**: the D-drive Faster-Whisper 1.2.1 runtime ran the
+  new entry point on the public 12.76-second FLAC and emitted four ASR segments
+  and one `[0,12760] ms` evidence record at
+  `eval_results/audio-rag/current-head-20260815-asr-evidence-02/`. Starting
+  only `codeagent-es`, `IngestionService.index` wrote that real record and an
+  ES `match` readback returned the same source SHA-256 and citation range. ES
+  was stopped afterwards; no volume or index was deleted.
+- **Phoenix evidence**: serializing the real persisted EvidenceUnit into a
+  fresh manifest exported `ingest.audio` to Phoenix and read it back as trace
+  `a2a7139b82b23daeb556ad68f1cb7a68`. Its allowlisted fields are operation,
+  source hash, duration and record count; the transcript is absent. Receipt:
+  `eval_results/audio-rag/current-head-20260815-asr-evidence-03-phoenix/`.
+- **Boundary**: the short sample proves decoder, ASR, persistent evidence,
+  text-index retrieval and one privacy-safe audio span only. It is not a 20-60
+  second chunk-quality receipt, WER, audio qrels/Recall/MRR, diarization or GPU
+  lease. These remain F4 gates.
+
+### 62.15 M2 Claude-Mem thin adapter receipt (2026-08-15)
+
+- **IMPLEMENTED at the adapter boundary, not as a three-layer closure**:
+  `ClaudeMemClient` now permits only exact `enabled` calls to a loopback Worker,
+  uses project-filtered `search -> batch` progressive reads, limits results to
+  three records and context to 4096 UTF-8 bytes, and fail-opens on invalid
+  input, timeout, HTTP failure, malformed response, or privacy rejection.
+  Disabled modes allocate no client and therefore cannot reach L3.
+- **Worker format verified rather than assumed**: installed Claude-Mem 13.15.0
+  returns a raw object for one selected ID and a raw array for multiple selected
+  IDs. The client accepts both only after each observation has a requested
+  numeric ID and exact project; other shapes return empty. It never accesses
+  plugin SQLite/Chroma, writes an observation, stores L3 in Redis/MySQL/MinIO/
+  Elasticsearch, or passes L3 to benchmark/Qrels/holdout/scorer flows.
+- **TDD and local evidence**: new tests were watched failing before each
+  production slice. The focused regression command passed `26 passed`. The
+  read-only receipt at
+  `eval_results/memory/claude-mem-l3-acceptance/receipt-20260815160920.json`
+  records Worker `13.15.0`, three citation IDs, timing, endpoint, and no text.
+  A final real adapter call defaulted to timeout/fail-open around 1016 ms;
+  explicit non-evaluation `timeout_seconds=3.0` returned 351 bytes and three
+  citation IDs. No context text was exposed in the command or receipt.
+- **Remaining gate**: default one-second latency is currently insufficient for
+  this Worker, and a normal plugin session has not yet written a controlled
+  non-secret marker that a fresh session reads through the adapter. Phoenix has
+  a safe metadata object but no project-owned live L3 span/caller yet. Thus M2
+  is not evidence of L1/L2/L3 memory closure, benchmark readiness, or a release
+  claim.
+
+### 62.16 M2 controlled cross-session L3 addendum (2026-08-15)
+
+- **L3 write/read evidence now exists**: a normal non-`bare` Claude Code
+  session passed marker `l3accept-20260815-01` through the installed plugin
+  hooks. No project code called a session/write API. Read-only worker search
+  reported `3 observations, 2 sessions, 1 prompt`; its batch metadata had
+  three exact-project observation types (`discovery`, `discovery`, `change`).
+- **Fresh adapter retrieval**: a separate Python process used
+  `ClaudeMemClient(..., timeout_seconds=3.0)` and obtained 281 UTF-8 bytes with
+  citation IDs `583,509,323`. Only byte count and allowlisted metadata were
+  emitted. This validates the plugin write -> supported Worker read -> project
+  adapter chain without direct storage access.
+- **Completion boundary remains**: the default one-second call is still
+  fail-open under observed Worker latency; L1 and L2 are not connected to L3;
+  Phoenix has no real project L3 span; and no end-to-end official-evaluation
+  zero-call receipt exists. Do not mark M2 or the three-layer architecture as
+  release complete from this addendum.
+
+### 62.17 F2/F3 native Office chunk receipt (2026-08-27)
+
+- **IMPLEMENTED and VERIFIED at the native structure/chunk contract scope**:
+  DOCX and PPTX now use `python-docx`/`python-pptx` before any fallback; XLSX
+  uses `openpyxl` with formula text, dependency references, named ranges,
+  cached-value state and bounded worksheet regions. The modality dispatcher
+  keeps office tables/images/formulas as typed hard boundaries and preserves
+  slide order and normalized coordinates. `EvidenceUnit.from_structured_chunk`
+  carries the existing element/asset/bbox identities and optional
+  `sheet_name`/`cell_range` fields.
+- **Fresh real-fixture evidence**: generated fixtures are actual Office files
+  under `tests/fixtures/multimodal/`, not parser mocks. The metadata-only
+  receipt is
+  `eval_results/multimodal-rag/current-head-20260827-office-chunking/receipt.json`.
+  It records DOCX 5 elements/3 chunks, PPTX 6 elements/4 chunks, XLSX 48
+  elements/47 chunks, 1 named range, 2 bounded regions, 45 formula cells and
+  0 formula cache values, plus 54 EvidenceUnits. Fixture SHA-256 values and
+  parser versions are recorded in the receipt; no source text, model answer or
+  secret is recorded.
+- **Reproducibility evidence**: `C:\\Python312\\python.exe
+  scripts\\rag\\verify_office_chunking.py` was run twice in fresh processes;
+  both runs produced receipt SHA-256
+  `5740FBA3B49FEA04B980885F7F979C32A49DB71B8E7F4DAA1F770615DAAE2A3E`.
+  The focused regression command passed `27 passed, 1 warning`:
+  `C:\\Python312\\python.exe -m pytest tests\\test_native_office_documents.py
+  tests\\test_spreadsheet_rag.py tests\\test_hierarchy_chunking.py
+  tests\\test_evidence_unit.py tests\\test_rag_ingestion_pdf.py
+  tests\\test_no_pdf_tika.py -q`.
+- **PDF boundary**: the same regression continues to exercise explicit
+  MinerU OCR routing and zero PDF-to-Tika calls. The Office receipt does not
+  imply PDF visual retrieval, qrels, Recall/MRR, formula recalculation, audio
+  WER/diarization, or production release readiness.
+- **Remaining gates**: real Office retrieval qrels and Recall/MRR; PDF
+  page-level visual retrieval and bake-off; audio/video quality and qrels;
+  index/readback preservation of all coordinates; and benchmark/holdout
+  contamination and Phoenix full-chain evidence remain open. Rollback boundary
+  is limited to removing this new receipt/fixture set and this documentation
+  entry; historical indexes and Docker volumes must not be deleted.
+
+### 62.18 F2/F3 Office fixture retrieval and coordinate readback contract (2026-08-28)
+
+- **IMPLEMENTED and VERIFIED only as a service-free contract check**:
+  `scripts/rag/verify_office_retrieval.py` parses the real checked-in DOCX,
+  PPTX and XLSX fixtures, applies the modality-specific chunk policies, runs a
+  deterministic lexical candidate ranker independent of qrels, and scores the
+  result with the existing pure metrics implementation. It also checks that
+  every XLSX chunk retains both `sheet_name=Metrics` and a non-empty exact
+  `cell_range`.
+- **Fresh receipt**:
+  `eval_results/multimodal-rag/current-head-20260828-office-retrieval/receipt.json`
+  records five queries, 270 ranked candidates, Recall@5 `1.0`, MRR@10 `1.0`,
+  nDCG@10 `1.0`, two distinct worksheet regions and all 47 XLSX chunks with
+  coordinates preserved. `qrels.jsonl` and `predictions.jsonl` are emitted as
+  separate reproducibility artifacts; no answer text or secret is included in
+  the receipt.
+- **Integrity boundary**: qrels are manually authored from the fixture's known
+  sections and are explicitly marked
+  `fixture-derived; requires independent human review before quality use`.
+  Therefore this receipt is not a production Recall/MRR result, not human
+  qrels, not an Elasticsearch readback, and not a visual bake-off. It cannot
+  release an index alias.
+- **Reproducibility**: running
+  `C:\\Python312\\python.exe scripts\\rag\\verify_office_retrieval.py`
+  twice in fresh processes produced the same receipt SHA-256
+  `30B8F6BD2AB0FAAB60FD6CF36B574355ED30C11A6CCE8624733FB78B4D626D92`.
+- **New production contract evidence**: Go structured persistence and ES
+  mapping now carry `sheet_name`/`cell_range`; search source whitelists,
+  evidence expansion, and Python retriever metadata preserve them. Go tests
+  cover worker JSON decode, processor conversion, mapping, migration fields,
+  and neighbor expansion. The Docker-backed ES readback remains BLOCKED by
+  Docker Desktop's external `dockerInference` ReparsePoint startup failure.
+- **Docker-backed ES readback remains BLOCKED** by Docker Desktop's external
+  `dockerInference` ReparsePoint startup failure; no alias or business data
+  was modified.
+
+### 62.19 PDF page visual lane and runtime repair (2026-08-28)
+
+- **Runtime root cause verified**: the D-drive MinerU 3.4.4 isolated launcher
+  used a copied Python environment whose bundled Torch failed to load
+  `c10.dll` (`WinError 1114`). The same MinerU package imported successfully
+  under `C:\Python312\python.exe` when `PYTHONPATH` pointed at the D-drive
+  package directory. The launcher now accepts a shell-free JSON argv prefix,
+  so `["C:\\Python312\\python.exe","-m","mineru.cli.client"]` is a
+  reproducible fallback; ordinary executable strings remain compatible.
+- **Real MinerU OCR verified**: the integration command with the JSON argv
+  prefix and `-m ocr -b pipeline` passed `1 passed in 62.56s`; the HTTP source
+  recorded zero Tika calls. A real checked-in PDF was parsed by MinerU 3.4.4
+  and rendered to PNG using Poppler. Receipt:
+  `eval_results/multimodal-rag/current-head-20260828-mineru-page-evidence/receipt.json`;
+  it records
+  source/content/middle/page-image hashes, 4 OCR elements, 4 page candidates,
+  and one visual `EvidenceUnit`.
+- **Visual projection implemented**: `page_artifact_to_evidence` and
+  `page_artifact_to_index_document` preserve page/asset/source identity and
+  reject malformed hashes or mismatched page IDs. The visual projection emits
+  no `text_content` or `embedding_text`, preserving physical index isolation.
+- **Public visual pilot verified at bounded scope**: pinned
+  `vidore/docvqa_test_subsampled@49bf8f13e13c41dd8cdb0cae5314e31c1da1e0d6`
+  and `openai/clip-vit-base-patch32@3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`
+  ran on 8 real pages with CUDA. Receipt:
+  `eval_results/multimodal-rag/current-head-20260828-docvqa-clip-8-proxy/`.
+  This is `PUBLIC_PILOT_ONLY`: no element/bbox qrels, ES readback, or alias
+  switch. The bake-off rejects reusing one ranked file for two paths.
+
+### 62.20 Audio quality boundary (2026-08-28)
+
+- Added `compute_word_error_rate` with standard word-level edit distance. It
+  returns `QUALITY_BLOCKED` unless an independent reference transcript and
+  source are supplied; ASR output is never used as its own reference.
+- Real cached `Systran/faster-whisper-tiny@d90ca5fe260221311c53c58e` CPU int8
+  execution on `.runtime/asr-sample.flac` produced 4 timestamped segments, 1
+  bounded audio chunk and 1 persisted EvidenceUnit. Receipt:
+  `eval_results/multimodal-rag/current-head-20260828-audio-script-2/receipt.json`.
+  Status is `ASR_EVIDENCE_VERIFIED_QUALITY_BLOCKED`; WER, diarization and
+  retrieval quality remain open.

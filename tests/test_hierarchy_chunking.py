@@ -1,5 +1,8 @@
-from orchestrator.rag.chunking import chunk_elements
+import pytest
+
+from orchestrator.rag.chunking import chunk_elements, chunk_elements_for_modality
 from orchestrator.rag.elements import Element
+from orchestrator.rag.evidence import EvidenceUnit
 
 
 def sample_elements() -> list[Element]:
@@ -132,3 +135,39 @@ def test_python_function_is_a_hard_code_chunk_boundary() -> None:
         "def first():\n    alpha = 1\n    return alpha",
         "def second():\n    beta = 2\n    return beta",
     ]
+
+
+def test_office_document_policy_keeps_table_and_image_typed_boundaries() -> None:
+    source_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    elements = [
+        Element(document_id="doc-office", element_id="heading", type="heading", text="Runbook", heading_path=["Runbook"], source_sha256=source_sha, parser_version="fixture"),
+        Element(document_id="doc-office", element_id="paragraph", type="text", text="Deploy the service", heading_path=["Runbook"], source_sha256=source_sha, parser_version="fixture"),
+        Element(document_id="doc-office", element_id="table", type="table", text="Name | Owner\nAPI | SRE", heading_path=["Runbook"], source_sha256=source_sha, parser_version="fixture"),
+        Element(document_id="doc-office", element_id="image", type="image", text="", caption="Topology", image_path="embedded://sha256:abc", heading_path=["Runbook"], source_sha256=source_sha, parser_version="fixture"),
+    ]
+
+    chunks = chunk_elements_for_modality(elements, modality="office_document", child_tokens=20, parent_tokens=40)
+
+    assert [item.element_types for item in chunks] == [["text"], ["table"], ["image"]]
+    assert chunks[1].text.startswith("Name | Owner")
+    assert chunks[2].asset_refs == ["embedded://sha256:abc"]
+    assert all(EvidenceUnit.from_structured_chunk(item).coordinates.element_ids for item in chunks)
+
+
+def test_slide_policy_keeps_slide_shapes_in_reading_order() -> None:
+    elements = [
+        Element(document_id="deck", element_id="slide", type="heading", text="Overview", page_index=0, heading_path=["Overview"]),
+        Element(document_id="deck", element_id="shape-a", type="text", text="First", page_index=0, heading_path=["Overview"], bbox=[1, 1, 10, 10]),
+        Element(document_id="deck", element_id="shape-b", type="table", text="A | B\n1 | 2", page_index=0, heading_path=["Overview"], bbox=[10, 10, 30, 30]),
+        Element(document_id="deck", element_id="notes", type="text", text="Speaker note", sub_type="speaker_notes", page_index=0, heading_path=["Overview"]),
+    ]
+
+    chunks = chunk_elements_for_modality(elements, modality="slide", child_tokens=100, parent_tokens=200)
+
+    assert [item.element_ids for item in chunks] == [["shape-a"], ["shape-b"], ["notes"]]
+    assert [item.element_types for item in chunks] == [["text"], ["table"], ["text"]]
+
+
+def test_modality_policy_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="unsupported modality"):
+        chunk_elements_for_modality([], modality="unknown")  # type: ignore[arg-type]

@@ -157,6 +157,8 @@ def search_result_to_document(item: SearchResultPayload, mode: str) -> Document:
         "retrievalMode": mode,
         "orgTag": item.orgTag,
         "isPublic": item.isPublic,
+        "sheetName": item.sheetName,
+        "cellRange": item.cellRange,
     }
     return Document(page_content=item.textContent, metadata=metadata)
 

@@ -23,8 +23,9 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from .config import Settings
-from .chunking import chunk_elements
+from .chunking import chunk_elements, chunk_elements_for_modality
 from .elements import Element, map_mineru_output
+from .native_documents import parse_docx_bytes, parse_pptx_bytes
 from .spreadsheet import parse_xlsx_bytes
 from .models import (
     ChunkRequestPayload,
@@ -79,6 +80,34 @@ class IngestionService:
                 self._settings,
             )
             parsed = parsed_artifact.parsedText
+        elif payload.task.file_name.lower().endswith((".docx", ".pptx")):
+            office = None
+            try:
+                office = (
+                    parse_docx_bytes if payload.task.file_name.lower().endswith(".docx") else parse_pptx_bytes
+                )(
+                    source_resp.content,
+                    document_id=payload.task.file_md5,
+                    source_url=payload.objectUrl,
+                )
+            except Exception:
+                # A corrupt/non-Office payload may still be handled by the
+                # existing non-PDF text fallback.  PDF magic bytes were
+                # handled above and can never reach this branch.
+                office = None
+            if office is not None:
+                parsed = _elements_to_text(office.elements)
+            else:
+                tika_resp = await self._http.put(
+                    f"{self._settings.tika_url.rstrip('/')}/tika",
+                    content=source_resp.content,
+                    headers={
+                        "Accept": "text/plain",
+                        "Content-Type": _detect_mime_type(payload.task.file_name),
+                    },
+                )
+                tika_resp.raise_for_status()
+                parsed = tika_resp.text
         elif payload.task.file_name.lower().endswith(".xlsx"):
             spreadsheet = parse_xlsx_bytes(
                 source_resp.content,
@@ -106,6 +135,16 @@ class IngestionService:
         )
         if is_pdf:
             return parsed_artifact.model_copy(update={"parsedText": parsed_text})
+        if payload.task.file_name.lower().endswith((".docx", ".pptx")) and office is not None:
+            return ParseResponsePayload(
+                parsedText=parsed_text,
+                documentId=payload.task.file_md5,
+                parserName=office.parser_name,
+                parserVersion=office.parser_version,
+                sourceSha256=office.source_sha256,
+                elements=office.elements,
+                assets=office.assets,
+            )
         if payload.task.file_name.lower().endswith(".xlsx"):
             return ParseResponsePayload(
                 parsedText=parsed_text,
@@ -114,6 +153,10 @@ class IngestionService:
                 parserVersion=spreadsheet.parser_version,
                 sourceSha256=spreadsheet.source_sha256,
                 elements=spreadsheet.elements,
+                namedRanges={name: list(destinations) for name, destinations in spreadsheet.named_ranges.items()},
+                cachedValues=spreadsheet.cached_values,
+                formulaCachePresent=spreadsheet.formula_cache_present,
+                tableRegions=[region.__dict__ for region in spreadsheet.table_regions],
             )
         return ParseResponsePayload(parsedText=parsed_text)
 
@@ -122,12 +165,22 @@ class IngestionService:
         file_name = payload.task.file_name
         file_type = _detect_file_type(file_name)
         if payload.elements:
-            structured = chunk_elements(
-                payload.elements,
-                child_tokens=payload.chunkSize,
-                overlap_tokens=payload.chunkOverlap,
-                corpus_generation="techdocs-2026-07-30-v1",
-            )
+            modality = _office_modality(file_name)
+            if modality:
+                structured = chunk_elements_for_modality(
+                    payload.elements,
+                    modality=modality,  # type: ignore[arg-type]
+                    child_tokens=payload.chunkSize,
+                    overlap_tokens=payload.chunkOverlap,
+                    corpus_generation="techdocs-2026-07-30-v1",
+                )
+            else:
+                structured = chunk_elements(
+                    payload.elements,
+                    child_tokens=payload.chunkSize,
+                    overlap_tokens=payload.chunkOverlap,
+                    corpus_generation="techdocs-2026-07-30-v1",
+                )
             chunks = [item.text for item in structured if item.text.strip()]
             log_request(
                 "ingestion_chunk_structured",
@@ -402,7 +455,7 @@ class _BlockingMinerUCommand:
     """
 
     def __init__(self, command: str, args: tuple[str, ...], *, timeout_seconds: int) -> None:
-        self._argv = [command, *args]
+        self._argv = [*_parse_command_argv(command), *args]
         self._timeout_seconds = max(1, timeout_seconds)
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
@@ -463,6 +516,30 @@ def _mineru_executor() -> ThreadPoolExecutor:
         return _MINERU_EXECUTOR
 
 
+def _parse_command_argv(command: str) -> list[str]:
+    """Parse a plain executable or a shell-free JSON argv prefix.
+
+    JSON is used for the fallback ``python -m mineru.cli.client`` form so
+    Windows paths and arguments are not re-tokenized by a shell.
+    """
+    value = command.strip()
+    if not value:
+        raise ValueError("MinerU command must not be empty")
+    if not value.startswith("["):
+        return [value]
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("MinerU JSON command must be a valid argv array") from exc
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or any(not isinstance(item, str) or not item for item in parsed)
+    ):
+        raise ValueError("MinerU JSON command must contain a non-empty string argv array")
+    return parsed
+
+
 def _discard_future_result(future: Future[object]) -> None:
     def _swallow(done: Future[object]) -> None:
         if not done.cancelled():
@@ -509,6 +586,17 @@ def _detect_file_type(file_name: str) -> str:
     if lower_name.endswith((".xls", ".xlsx", ".csv")):
         return "excel"
     return "default"
+
+
+def _office_modality(file_name: str) -> str:
+    lower_name = (file_name or "").strip().lower()
+    if lower_name.endswith(".docx"):
+        return "office_document"
+    if lower_name.endswith(".pptx"):
+        return "slide"
+    if lower_name.endswith(".xlsx"):
+        return "spreadsheet"
+    return ""
 
 
 @lru_cache(maxsize=8)

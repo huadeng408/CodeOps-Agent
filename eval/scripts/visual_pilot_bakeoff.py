@@ -46,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="output JSON report path")
     args = parser.parse_args(argv)
 
+    ranked_sources = [Path(path).resolve() for path in (args.text, args.visual, args.late) if path]
+    if len(ranked_sources) != len(set(ranked_sources)):
+        raise ValueError("comparison ranked input paths must be different")
+
     qrels = load_qrels(args.qrels)
     text = _load_ranked(args.text)
     visual = _load_ranked(args.visual)

@@ -19,6 +19,8 @@ from orchestrator.rag.visual.artifacts import (
     CROP_SCALE,
     page_artifact,
     page_crop_artifacts,
+    page_artifact_to_evidence,
+    page_artifact_to_index_document,
 )
 from orchestrator.rag.visual.encoder import VisualEncoder, encoder_status
 
@@ -154,3 +156,37 @@ def test_artifacts_serialize_to_json_for_es() -> None:
     # Must serialize to the ES doc shape without custom encoders.
     blob = json.dumps(artifact)
     assert '"page_id"' in blob and '"document_id"' in blob
+
+
+def test_page_artifact_projects_to_visual_evidence_with_page_coordinates() -> None:
+    source_sha = "a" * 64
+    asset_sha = "b" * 64
+    artifact = page_artifact("doc-visual", 4, "pages/p4.png", source_sha, asset_bytes=b"asset")
+    assert artifact["asset_sha256"] == hashlib.sha256(b"asset").hexdigest()
+    evidence = page_artifact_to_evidence(artifact, parser_version="3.4.4")
+
+    assert evidence.document_id == "doc-visual"
+    assert evidence.child_id == "doc-visual:p4:visual-page"
+    assert evidence.parent_id == "doc-visual:visual-document"
+    assert evidence.modality == "visual"
+    assert evidence.coordinates.page_id == "doc-visual:p4"
+    assert evidence.coordinates.asset_refs == ("pages/p4.png",)
+    assert evidence.coordinates.element_ids == ()
+    assert evidence.source_sha256 == source_sha
+
+
+def test_page_artifact_index_projection_is_visual_only_and_fail_closed() -> None:
+    artifact = page_artifact("doc-visual", 0, "pages/p0.png", "c" * 64, asset_bytes=b"asset")
+    document = page_artifact_to_index_document(artifact, visual_vector=[0.1, 0.2])
+
+    assert document["document_id"] == "doc-visual"
+    assert document["page_id"] == "doc-visual:p0"
+    assert document["asset_sha256"] == hashlib.sha256(b"asset").hexdigest()
+    assert document["visual_vector"] == [0.1, 0.2]
+    assert "text_content" not in document
+    assert "embedding_text" not in document
+
+    missing = dict(artifact)
+    missing["source_sha256"] = ""
+    with pytest.raises(ValueError, match="source_sha256"):
+        page_artifact_to_index_document(missing)

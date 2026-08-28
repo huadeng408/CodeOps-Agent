@@ -66,6 +66,8 @@ class EvidenceUnit(BaseModel):
                 element_ids=tuple(chunk.element_ids),
                 bbox_refs=tuple(chunk.bbox_refs),
                 asset_refs=tuple(chunk.asset_refs),
+                sheet_name=chunk.sheet_name,
+                cell_range=chunk.cell_range,
             ),
         )
 

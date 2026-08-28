@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import re
 from typing import Any, Callable
 
 from .evidence import EvidenceCoordinates, EvidenceUnit
@@ -42,6 +43,49 @@ class AudioEvidenceRecord:
 
     evidence: EvidenceUnit
     index_document: dict[str, Any]
+
+
+def compute_word_error_rate(
+    hypothesis: str,
+    reference: str,
+    *,
+    reference_source: str,
+) -> dict[str, Any]:
+    """Score ASR against an independently supplied reference transcript.
+
+    The function fails closed when no trusted reference is supplied; comparing
+    ASR output with itself would be a meaningless quality claim.
+    """
+    reference_tokens = _wer_tokens(reference)
+    source = reference_source.strip()
+    if not reference_tokens or not source:
+        return {
+            "status": "QUALITY_BLOCKED",
+            "wer": None,
+            "reference_source": source,
+            "reference_word_count": len(reference_tokens),
+        }
+    hypothesis_tokens = _wer_tokens(hypothesis)
+    previous = list(range(len(reference_tokens) + 1))
+    for row_index, hypothesis_token in enumerate(hypothesis_tokens, 1):
+        current = [row_index]
+        for column_index, reference_token in enumerate(reference_tokens, 1):
+            substitution = previous[column_index - 1] + (hypothesis_token != reference_token)
+            insertion = current[column_index - 1] + 1
+            deletion = previous[column_index] + 1
+            current.append(min(substitution, insertion, deletion))
+        previous = current
+    distance = previous[-1]
+    return {
+        "status": "VERIFIED",
+        "wer": round(distance / len(reference_tokens), 6),
+        "reference_source": source,
+        "reference_word_count": len(reference_tokens),
+    }
+
+
+def _wer_tokens(value: str) -> list[str]:
+    return re.findall(r"[\w']+", value.lower(), flags=re.UNICODE)
 
 
 def transcribe_audio(

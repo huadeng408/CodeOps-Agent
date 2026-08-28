@@ -50,6 +50,8 @@ class Element(BaseModel):
     source_payload_ref: str = ""
     source_sha256: str = ""
     source_url: str = ""
+    sheet_name: str = ""
+    cell_range: str = ""
 
     @field_validator("bbox")
     @classmethod

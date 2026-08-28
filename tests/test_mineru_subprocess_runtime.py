@@ -32,6 +32,20 @@ from orchestrator.rag.ingestion import _parse_pdf_with_mineru, _run_mineru
 MARKER = "MINERU_SUBPROCESS_RUNTIME_MARKER"
 
 
+def test_mineru_command_accepts_json_argv_prefix() -> None:
+    command = json.dumps(
+        [sys.executable, "-c", "import sys; print(sys.argv[1])"]
+    )
+
+    async def invoke() -> tuple[bytes, bytes]:
+        return await _run_mineru(command, MARKER, timeout_seconds=30)
+
+    stdout, stderr = asyncio.run(invoke())
+
+    assert stdout.decode().strip() == MARKER
+    assert stderr == b""
+
+
 class _NoSubprocessLoop(asyncio.SelectorEventLoop):
     """A real event loop that refuses subprocess transports.
 

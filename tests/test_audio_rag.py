@@ -8,6 +8,7 @@ from orchestrator.rag.audio import (
     group_transcript_segments,
     transcribe_audio,
     write_audio_evidence_manifest,
+    compute_word_error_rate,
 )
 from eval.harness.trace_capture import TraceCapture
 
@@ -125,3 +126,20 @@ def test_transcribe_audio_converts_faster_whisper_segments_without_recording_tex
 
     assert segments == [TranscriptSegment("exact text stays in the evidence, never trace attributes", 1250, 3500, 0.8187)]
     assert calls == [(str(source), {"beam_size": 1, "vad_filter": False})]
+
+
+def test_audio_wer_requires_independent_reference_and_reports_edit_rate() -> None:
+    assert compute_word_error_rate("hello brave world", "hello world", reference_source="human") == {
+        "status": "VERIFIED",
+        "wer": 0.5,
+        "reference_source": "human",
+        "reference_word_count": 2,
+    }
+
+    blocked = compute_word_error_rate("hello world", "", reference_source="")
+    assert blocked == {
+        "status": "QUALITY_BLOCKED",
+        "wer": None,
+        "reference_source": "",
+        "reference_word_count": 0,
+    }

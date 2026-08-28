@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from typing import Literal
 
 from .elements import Element
 
@@ -29,6 +30,8 @@ class StructuredChunk:
     corpus_generation: str = "techdocs-2026-07-30-v1"
     target_index: str = ""
     overlap_tokens: int = 0
+    sheet_name: str = ""
+    cell_range: str = ""
 
 
 def chunk_elements(
@@ -84,6 +87,70 @@ def chunk_elements(
     return result
 
 
+def chunk_elements_for_modality(
+    elements: list[Element],
+    *,
+    modality: Literal["text", "office_document", "slide", "spreadsheet", "visual_page"],
+    child_tokens: int = 500,
+    parent_tokens: int = 1500,
+    overlap_tokens: int | None = None,
+    corpus_generation: str = "techdocs-2026-07-30-v1",
+) -> list[StructuredChunk]:
+    """Apply an explicit element-boundary policy while retaining chunk IDs.
+
+    The default ``chunk_elements`` contract remains unchanged for existing
+    callers.  Office policies exclude heading markers from child text and use
+    typed elements as hard boundaries; slides additionally keep each shape or
+    note as its own child in source order.
+    """
+
+    if modality not in {"text", "office_document", "slide", "spreadsheet", "visual_page"}:
+        raise ValueError(f"unsupported modality: {modality}")
+    if modality == "text":
+        return chunk_elements(
+            elements,
+            child_tokens=child_tokens,
+            parent_tokens=parent_tokens,
+            overlap_tokens=overlap_tokens,
+            corpus_generation=corpus_generation,
+        )
+    if child_tokens <= 0 or parent_tokens <= 0:
+        raise ValueError("chunk token limits must be positive")
+    if overlap_tokens is None:
+        overlap_tokens = min(48, child_tokens // 8)
+    if overlap_tokens < 0 or overlap_tokens >= child_tokens:
+        raise ValueError("overlap_tokens must be non-negative and smaller than child_tokens")
+
+    result: list[StructuredChunk] = []
+    chunk_number = 0
+    parent_number = 0
+    for section, section_elements in _sections(elements):
+        payload = [item for item in section_elements if item.type not in {"heading", "page_break"}]
+        if not payload:
+            continue
+        children = _chunk_section(
+            payload,
+            child_tokens,
+            overlap_tokens,
+            corpus_generation,
+            chunk_number,
+            force_element_boundaries=modality == "slide",
+        )
+        chunk_number += len(children)
+        parent_id = ""
+        parent_size = 0
+        for child in children:
+            if not parent_id or (parent_size and parent_size + child.token_count > parent_tokens):
+                parent_number += 1
+                parent_id = f"{payload[0].document_id}:parent:{parent_number}"
+                parent_size = 0
+            child.parent_chunk_id = parent_id
+            parent_size += child.token_count
+            child.embedding_text = _contextual_text(child, section, payload)
+        result.extend(children)
+    return result
+
+
 def _sections(elements: list[Element]):
     current_path: tuple[str, ...] | None = None
     current: list[Element] = []
@@ -104,6 +171,8 @@ def _chunk_section(
     overlap_tokens: int,
     generation: str,
     sequence_offset: int = 0,
+    *,
+    force_element_boundaries: bool = False,
 ) -> list[StructuredChunk]:
     chunks: list[StructuredChunk] = []
     sequence = 0
@@ -128,6 +197,10 @@ def _chunk_section(
         if not source.strip():
             continue
         if element.type in {"heading", "text", "list", "footnote"}:
+            if force_element_boundaries:
+                flush_pending()
+                append_chunk([element], source)
+                continue
             if _token_count(source) > child_tokens:
                 flush_pending()
                 for piece, overlap in _split_text(source, child_tokens, overlap_tokens):
@@ -186,6 +259,8 @@ def _make_chunk(
         parser_version=next((element.parser_version for element in elements if element.parser_version), ""),
         corpus_generation=generation,
         overlap_tokens=overlap_tokens,
+        sheet_name=first.sheet_name,
+        cell_range=first.cell_range,
     )
 
 

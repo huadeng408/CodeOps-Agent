@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from eval.scripts.visual_pilot_bakeoff import main
 
 
@@ -47,3 +49,14 @@ def test_bakeoff_distinguishes_page_qrels_from_complete_element_bbox_evidence(tm
         "qrels_with_element_bbox": 1,
     }
     assert payload["bbox"] == {"status": "PARTIAL", "labeled_qrels": 1}
+
+
+def test_bakeoff_rejects_reusing_one_ranked_file_as_two_comparison_paths(tmp_path) -> None:
+    qrels = tmp_path / "qrels.jsonl"
+    ranked = tmp_path / "ranked.jsonl"
+    report = tmp_path / "report.json"
+    qrels.write_text('{"query_id":"q1","document_id":"d1","page_id":"p1"}\n', encoding="utf-8")
+    ranked.write_text('{"query_id":"q1","document_id":"d1","page_id":"p1","score":1}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be different"):
+        main(["--qrels", str(qrels), "--text", str(ranked), "--visual", str(ranked), "--out", str(report)])
