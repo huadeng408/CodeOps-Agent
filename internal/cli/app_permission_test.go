@@ -275,6 +275,30 @@ func TestHandleSlashCommandRunsSkillConversation(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCommandRunsNamedSkill(t *testing.T) {
+	root := t.TempDir()
+	app, out := newPermissionTestApp(root, "")
+	app.skills = skills.NewManager()
+	app.skills.Register(skills.Skill{
+		Name:        "deploy",
+		Description: "Deploy the current revision.",
+		Prompt:      "Check the release before deploying.",
+		Tools:       []string{"Git"},
+	})
+
+	if !app.handleSlashCommand(context.Background(), "/skill deploy production") {
+		t.Fatal("/skill should be handled")
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "Run the deploy skill.") || !strings.Contains(rendered, "production") {
+		t.Fatalf("named skill prompt was not sent through the conversation path: %q", rendered)
+	}
+	messages := app.session.Current().Messages
+	if len(messages) < 2 || !strings.Contains(messages[len(messages)-2].Content, "/skill deploy production") {
+		t.Fatalf("generic command was not recorded in session messages: %+v", messages)
+	}
+}
+
 func TestBuildSkillInputIncludesPromptToolsAndFocus(t *testing.T) {
 	input := buildSkillInput(skills.Skill{
 		Name:   "review",

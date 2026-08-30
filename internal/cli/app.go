@@ -28,6 +28,7 @@ import (
 	"code-agent/internal/rag"
 	"code-agent/internal/recovery"
 	"code-agent/internal/safety"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"code-agent/internal/skills"
 	"code-agent/internal/telemetry/genai"
@@ -77,8 +78,6 @@ type App struct {
 }
 
 func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writer) *App {
-	_ = stderr
-
 	instructions, _ := config.LoadInstructions(cfg.ProjectRoot, cfg.WorkingDir)
 	allowlist := make([]permission.AllowRule, 0, len(cfg.Permissions.Allow))
 	for _, rule := range cfg.Permissions.Allow {
@@ -125,6 +124,16 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
+	if cfg.Sandbox.Enabled {
+		executor.SetSandbox(sandbox.NewDockerRunner(sandbox.Config{
+			Image:               cfg.Sandbox.Image,
+			AllowWorkspaceWrite: cfg.Sandbox.AllowWorkspaceWrite,
+			MemoryLimit:         cfg.Sandbox.MemoryLimit,
+			CPULimit:            cfg.Sandbox.CPULimit,
+			PidsLimit:           cfg.Sandbox.PidsLimit,
+			TmpfsSize:           cfg.Sandbox.TmpfsSize,
+		}))
+	}
 	executor.SetMCPManager(mcpManager)
 	ragClient := rag.NewClient(rag.Config{
 		Enabled:       cfg.RAGEnabled,
@@ -145,6 +154,20 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	})
 	executor.SetRAGSearcher(ragClient)
 	skillsManager := skills.NewManager()
+	globalSkillsDir := ""
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		globalSkillsDir = filepath.Join(home, ".agent", "skills")
+	}
+	if err := skillsManager.Discover(skills.DiscoveryOptions{
+		GlobalDir:   globalSkillsDir,
+		Directories: cfg.SkillDirectories,
+		ProjectDir:  filepath.Join(cfg.ProjectRoot, ".agent", "skills"),
+	}); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "skills discovery failed: %v\n", err)
+	}
+	if err := skillsManager.WriteManifest(filepath.Join(cfg.ProjectRoot, ".agent", "skills.json")); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "skills manifest failed: %v\n", err)
+	}
 	executor.SetSkillsManager(skillsManager)
 
 	telemetry := genai.NewTelemetry(context.Background())
@@ -734,6 +757,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/worktree manage worktree state (list/create/switch/cleanup)",
 			"/resume [session-id] resume a saved session",
 			"/skills list available skills",
+			"/skill <name> [args] run a named skill",
 			"/init [instructions] run the init skill",
 			"/review [focus] run the review skill",
 			"/security-review [focus] run the security review skill",
@@ -852,6 +876,12 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
 	case "/skills":
 		a.renderer.PrintBlock("skills", a.skillLines())
+	case "/skill":
+		if len(fields) < 2 {
+			a.renderer.PrintLine("usage: /skill <name> [args]")
+			return true
+		}
+		a.runSkillCommand(ctx, "/skill "+fields[1], fields[1], slashArgs(raw, 2))
 	case "/init":
 		a.runSkillCommand(ctx, "/init", "init", slashArgs(raw, 1))
 	case "/review":
@@ -923,7 +953,11 @@ func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 		a.renderer.PrintLine("skills are not available")
 		return
 	}
-	skill, ok := a.skills.Get(name)
+	skill, ok, err := a.skills.Load(name)
+	if err != nil {
+		a.renderer.PrintLine(err.Error())
+		return
+	}
 	if !ok {
 		a.renderer.PrintLine("skill not found: " + name)
 		return
@@ -1117,10 +1151,7 @@ func (a *App) skillLines() []string {
 	}
 	lines := make([]string, 0, len(registered))
 	for _, skill := range registered {
-		command := "/" + skill.Name
-		if skill.Name == "security" {
-			command = "/security-review"
-		}
+		command := skillCommand(skill.Name)
 		tools := "none"
 		if len(skill.Tools) > 0 {
 			tools = strings.Join(skill.Tools, ", ")
@@ -1128,6 +1159,17 @@ func (a *App) skillLines() []string {
 		lines = append(lines, fmt.Sprintf("%s | %s | tools: %s", command, skill.Description, tools))
 	}
 	return lines
+}
+
+func skillCommand(name string) string {
+	switch name {
+	case "init", "review", "commit":
+		return "/" + name
+	case "security":
+		return "/security-review"
+	default:
+		return "/skill " + name
+	}
 }
 
 func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {

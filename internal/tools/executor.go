@@ -11,6 +11,7 @@ import (
 
 	"code-agent/internal/mcp"
 	"code-agent/internal/rag"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/skills"
 	"code-agent/internal/telemetry/genai"
 )
@@ -53,6 +54,7 @@ type Executor struct {
 	workingDir     string
 	mcp            *mcp.Manager
 	rag            rag.Searcher
+	sandbox        sandbox.Runner
 	skills         *skills.Manager
 	// httpAllowPrivate lifts the SSRF private/loopback block for WebFetch/WebSearch.
 	// Intended only for tests and trusted local providers; production MUST stay false.
@@ -79,6 +81,25 @@ func (e *Executor) SetRAGSearcher(searcher rag.Searcher) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.rag = searcher
+}
+
+// SetSandbox routes Bash commands through a constrained backend. Once set, a
+// sandbox failure is returned to the caller and never retried on the host.
+func (e *Executor) SetSandbox(runner sandbox.Runner) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sandbox = runner
+}
+
+func (e *Executor) sandboxRunner() sandbox.Runner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sandbox
+}
+
+// HasSandbox reports whether Bash is constrained by a configured backend.
+func (e *Executor) HasSandbox() bool {
+	return e.sandboxRunner() != nil
 }
 
 // SetTracer injects a genai.Tracer for creating execute_tool and retrieve spans.
@@ -195,7 +216,10 @@ func (e *Executor) executeSkill(_ context.Context, args map[string]any) (ToolRes
 		return ToolResult{Name: "Skill", Error: "skill name is required", ExitCode: 1}, nil
 	}
 	name = strings.TrimSpace(name)
-	skill, ok := manager.Get(name)
+	skill, ok, err := manager.Load(name)
+	if err != nil {
+		return ToolResult{Name: "Skill", Error: err.Error(), ExitCode: 1}, nil
+	}
 	if !ok {
 		return ToolResult{Name: "Skill", Error: "skill not found: " + name, ExitCode: 1}, nil
 	}

@@ -38,6 +38,39 @@ def test_tool_registry_loads_mcp_manifest(tmp_path) -> None:
     assert spec.parameters["properties"]["text"]["type"] == "string"
 
 
+def test_tool_registry_refreshes_skill_catalog_into_model_visible_description(tmp_path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    (agent_dir / "skills.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "release",
+                        "description": "Prepare a release.",
+                        "tools": ["Git"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry(str(tmp_path))
+    first = registry.get("Skill")
+    assert first is not None
+    assert "release: Prepare a release." in first.description
+
+    (agent_dir / "skills.json").write_text(
+        json.dumps({"skills": [{"name": "deploy", "description": "Deploy safely."}]}),
+        encoding="utf-8",
+    )
+    refreshed = registry.get("Skill")
+    assert refreshed is not None
+    assert "deploy: Deploy safely." in refreshed.description
+    assert "release: Prepare a release." not in refreshed.description
+
+
 def test_builtin_tool_schemas_expose_bounded_file_search_parameters() -> None:
     registry = ToolRegistry()
     specs = {tool.name: tool for tool in registry.list()}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"code-agent/internal/sandbox"
 )
 
 type Config struct {
@@ -24,6 +26,8 @@ type Config struct {
 	OrchestratorStartupTimeout      int              `json:"orchestrator_startup_timeout_seconds"`
 	OrchestratorConversationTimeout int              `json:"orchestrator_conversation_timeout_seconds"`
 	SessionDBPath                   string           `json:"session_db_path"`
+	Sandbox                         SandboxConfig    `json:"sandbox"`
+	SkillDirectories                []string         `json:"skill_directories"`
 	Permissions                     PermissionConfig `json:"permissions"`
 	Hooks                           []HookConfig     `json:"hooks"`
 	MCPConfig                       string           `json:"mcp_config"`
@@ -43,6 +47,18 @@ type Config struct {
 	RAGCorpusGeneration             string           `json:"rag_corpus_generation"`
 	RAGIngestRunID                  string           `json:"rag_ingest_run_id"`
 	ThinkingEnabled                 bool             `json:"thinking_enabled"`
+}
+
+// SandboxConfig is the persisted policy for Docker-backed Bash execution.
+// It intentionally has no host-fallback or network-enable option.
+type SandboxConfig struct {
+	Enabled             bool   `json:"enabled"`
+	Image               string `json:"image"`
+	AllowWorkspaceWrite bool   `json:"allow_workspace_write"`
+	MemoryLimit         string `json:"memory_limit"`
+	CPULimit            string `json:"cpu_limit"`
+	PidsLimit           int    `json:"pids_limit"`
+	TmpfsSize           string `json:"tmpfs_size"`
 }
 
 type PermissionConfig struct {
@@ -69,6 +85,7 @@ func Default(projectRoot string) Config {
 		projectRoot = workingDir
 	}
 
+	sandboxDefaults := sandbox.DefaultConfig()
 	return Config{
 		ProjectRoot:                     projectRoot,
 		WorkingDir:                      workingDir,
@@ -84,11 +101,20 @@ func Default(projectRoot string) Config {
 		OrchestratorStartupTimeout:      5,
 		OrchestratorConversationTimeout: 300,
 		SessionDBPath:                   filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
-		MCPConfig:                       ".mcp.json",
-		MemoryDir:                       filepath.Join(projectRoot, ".agent", "memory"),
-		WorktreeBaseRef:                 "fresh",
-		RAGServerURL:                    "http://127.0.0.1:8081",
-		ThinkingEnabled:                 true,
+		Sandbox: SandboxConfig{
+			Enabled:             true,
+			Image:               sandboxDefaults.Image,
+			AllowWorkspaceWrite: sandboxDefaults.AllowWorkspaceWrite,
+			MemoryLimit:         sandboxDefaults.MemoryLimit,
+			CPULimit:            sandboxDefaults.CPULimit,
+			PidsLimit:           sandboxDefaults.PidsLimit,
+			TmpfsSize:           sandboxDefaults.TmpfsSize,
+		},
+		MCPConfig:       ".mcp.json",
+		MemoryDir:       filepath.Join(projectRoot, ".agent", "memory"),
+		WorktreeBaseRef: "fresh",
+		RAGServerURL:    "http://127.0.0.1:8081",
+		ThinkingEnabled: true,
 	}
 }
 
@@ -258,6 +284,9 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	if patch.SessionDBPath != "" {
 		dst.SessionDBPath = patch.SessionDBPath
 	}
+	if rawSandbox, ok := raw["sandbox"]; ok {
+		mergeSandboxConfig(&dst.Sandbox, patch.Sandbox, rawSandbox)
+	}
 	if len(patch.Permissions.Allow) > 0 || len(patch.Permissions.Deny) > 0 {
 		dst.Permissions = patch.Permissions
 	}
@@ -311,6 +340,37 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if _, ok := raw["thinking_enabled"]; ok {
 		dst.ThinkingEnabled = patch.ThinkingEnabled
+	}
+	if _, ok := raw["skill_directories"]; ok {
+		dst.SkillDirectories = append([]string(nil), patch.SkillDirectories...)
+	}
+}
+
+func mergeSandboxConfig(dst *SandboxConfig, patch SandboxConfig, raw json.RawMessage) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return
+	}
+	if _, ok := fields["enabled"]; ok {
+		dst.Enabled = patch.Enabled
+	}
+	if _, ok := fields["image"]; ok {
+		dst.Image = patch.Image
+	}
+	if _, ok := fields["allow_workspace_write"]; ok {
+		dst.AllowWorkspaceWrite = patch.AllowWorkspaceWrite
+	}
+	if _, ok := fields["memory_limit"]; ok {
+		dst.MemoryLimit = patch.MemoryLimit
+	}
+	if _, ok := fields["cpu_limit"]; ok {
+		dst.CPULimit = patch.CPULimit
+	}
+	if _, ok := fields["pids_limit"]; ok {
+		dst.PidsLimit = patch.PidsLimit
+	}
+	if _, ok := fields["tmpfs_size"]; ok {
+		dst.TmpfsSize = patch.TmpfsSize
 	}
 }
 

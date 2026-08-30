@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"code-agent/internal/sandbox"
 	"code-agent/internal/safety"
 )
 
@@ -21,6 +22,26 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 	if !analysis.Allowed {
 		err := fmt.Errorf("blocked git command: %s", analysis.Reason)
 		return ToolResult{Name: "Git", Error: err.Error(), ExitCode: 1}, err
+	}
+
+	if runner := e.sandboxRunner(); runner != nil {
+		requestArgs := append([]string{"-c", "safe.directory=/workspace", "-C", "/workspace", command}, extraArgs...)
+		sandboxResult, sandboxErr := runner.Run(ctx, sandbox.Request{
+			Workspace:  e.Root,
+			WorkingDir: e.Root,
+			Program:    "git",
+			Args:       requestArgs,
+		})
+		text, truncated := e.TruncateOutput(sandboxResult.Output)
+		result := ToolResult{Name: "Git", Output: text, ExitCode: sandboxResult.ExitCode, Truncated: truncated}
+		if sandboxErr != nil {
+			result.Error = sandboxErr.Error()
+			if result.ExitCode == 0 {
+				result.ExitCode = 1
+			}
+			return result, sandboxErr
+		}
+		return result, nil
 	}
 
 	cmdArgs := append([]string{"-C", e.Root, command}, extraArgs...)

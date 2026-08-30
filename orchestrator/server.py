@@ -11,10 +11,10 @@ from pathlib import Path
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
-from .config import configure_otel, load_dotenv
+from .config import configure_otel, load_dotenv, read_env
 from .context import TokenBudget
 from .graph.main_graph import build_graph
-from .llm.providers import build_default_client, build_fast_client
+from .llm.providers import AnthropicClient, LocalClient, OpenAIClient, build_default_client, build_fast_client
 from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
 from .skills.manager import SkillManager
@@ -44,6 +44,7 @@ class OrchestratorServer:
         self.working_dir = str(Path(self.config.working_dir).resolve())
         self.graph = build_graph()
         self.llm = build_default_client()
+        self.provider_clients = _build_provider_clients(self.llm)
         self.fast_llm = build_fast_client()
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
@@ -139,6 +140,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             token_budget=self.app.token_budget,
             fast_llm=self.app.fast_llm,
             main_llm=self.app.llm,
+            provider_clients=self._provider_clients_for_request(),
         )
         try:
             yield from runner.run(
@@ -157,6 +159,33 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     _otel_context.detach(otel_token)
                 except Exception:
                     pass
+
+    def _provider_clients_for_request(self):
+        clients = dict(self.app.provider_clients)
+        if self.app.llm is not None:
+            clients["default"] = self.app.llm
+            configured = read_env("LLM_PROVIDER").lower()
+            if configured in {"openai", "anthropic", "local"}:
+                clients[configured] = self.app.llm
+        return clients
+
+
+def _build_provider_clients(default_client):
+    clients = {}
+    configured = read_env("LLM_PROVIDER").lower()
+    if default_client is not None:
+        clients["default"] = default_client
+        if configured in {"openai", "anthropic", "local"}:
+            clients[configured] = default_client
+    for name, factory in (
+        ("openai", OpenAIClient.from_env),
+        ("anthropic", AnthropicClient.from_env),
+        ("local", LocalClient.from_env),
+    ):
+        client = factory()
+        if client is not None:
+            clients.setdefault(name, client)
+    return clients
 
 
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:

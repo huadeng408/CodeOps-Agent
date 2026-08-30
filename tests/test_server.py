@@ -909,6 +909,17 @@ def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
         server.stop(grace=0)
 
 
+def test_server_exposes_configured_provider_to_workflows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "local")
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "local-test")
+
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+
+    assert "local" in app.provider_clients
+    assert app.provider_clients["local"] is app.llm
+
+
 def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))

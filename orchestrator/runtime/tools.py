@@ -36,6 +36,9 @@ class ToolRegistry:
         self._mcp_manifest_path = (
             self._project_root / ".agent" / "mcp-tools.json" if self._project_root else None
         )
+        self._skills_manifest_path = (
+            self._project_root / ".agent" / "skills.json" if self._project_root else None
+        )
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tool_names: set[str] = set()
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
@@ -51,10 +54,12 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolSpec | None:
         self._refresh_mcp_tools()
+        self._refresh_skills_catalog()
         return self._tools.get(name)
 
     def list(self) -> list[ToolSpec]:
         self._refresh_mcp_tools()
+        self._refresh_skills_catalog()
         return sorted(self._tools.values(), key=lambda tool: tool.name.lower())
 
     def openai_schemas(self) -> list[dict[str, Any]]:
@@ -115,6 +120,39 @@ class ToolRegistry:
         for name in list(self._mcp_tool_names - next_names):
             self._tools.pop(name, None)
         self._mcp_tool_names = next_names
+
+    def _refresh_skills_catalog(self) -> None:
+        if self._skills_manifest_path is None:
+            return
+        skill_tool = self._tools.get("Skill")
+        if skill_tool is None:
+            return
+        description = (
+            "Invoke a registered skill by name. Returns the skill prompt "
+            "and instructions to be injected into the conversation."
+        )
+        try:
+            payload = json.loads(self._skills_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        raw_skills = payload.get("skills", []) if isinstance(payload, dict) else []
+        catalog: list[str] = []
+        for raw in raw_skills:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name", "")).strip()
+            if not name:
+                continue
+            summary = str(raw.get("description", "")).strip() or "No description."
+            catalog.append(f"{name}: {summary}")
+        if catalog:
+            description += " Available skills: " + "; ".join(sorted(catalog)) + "."
+        self._tools["Skill"] = ToolSpec(
+            name=skill_tool.name,
+            description=description,
+            parameters=skill_tool.parameters,
+            permission=skill_tool.permission,
+        )
 
     @staticmethod
     def _default_tools() -> list[ToolSpec]:
@@ -402,6 +440,33 @@ class ToolRegistry:
                         },
                     },
                     "required": ["kind", "title", "objective"],
+                },
+            ),
+            ToolSpec(
+                name="RunWorkflow",
+                description="Run a resumable multi-worker workflow with provider selection and dependencies.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Stable workflow identifier used for checkpoint recovery."},
+                        "workers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "title": {"type": "string"},
+                                    "objective": {"type": "string"},
+                                    "provider": {"type": "string", "description": "Provider name such as openai, anthropic, local, or default."},
+                                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                                    "context": {"type": "object"},
+                                },
+                                "required": ["id", "title", "objective"],
+                            },
+                        },
+                    },
+                    "required": ["id", "workers"],
                 },
             ),
             ToolSpec(

@@ -6,6 +6,7 @@ import os
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from codeagent import orchestrator_pb2
@@ -32,6 +33,13 @@ from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
 from orchestrator.security import InjectionDetector
 from orchestrator.skills.manager import SkillManager
 from orchestrator.todo.manager import Todo, TodoManager
+from orchestrator.workflows import (
+    ProviderWorkerExecutor,
+    SQLiteWorkflowStore,
+    WorkerSpec,
+    WorkflowEngine,
+    WorkflowSpec,
+)
 
 from .tools import ToolRegistry
 
@@ -169,6 +177,8 @@ class ConversationRunner:
     compactor: Compactor | None = None
     fast_llm: LLMClient | None = None
     main_llm: LLMClient | None = None
+    provider_clients: dict[str, LLMClient] | None = None
+    workflow_max_concurrency: int = 4
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -179,6 +189,10 @@ class ConversationRunner:
             self.injection_detector = InjectionDetector()
         if self.recovery is None:
             self.recovery = ErrorRecoveryEngine()
+        if self.provider_clients is None:
+            self.provider_clients = {}
+        if self.llm is not None:
+            self.provider_clients.setdefault("default", self.llm)
         if self.main_llm is None:
             object.__setattr__(self, "main_llm", self.llm)
 
@@ -470,6 +484,63 @@ class ConversationRunner:
                             tool_call_id=call_id,
                             content=json.dumps(agent_result, ensure_ascii=False),
                             is_error=False,
+                        )
+                    )
+                    continue
+
+                if call.name == "RunWorkflow":
+                    try:
+                        workflow = self._decode_workflow(self._call_arguments_json(call))
+                    except ValueError as exc:
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                name=call.name,
+                                tool_call_id=call_id,
+                                content=f"Invalid RunWorkflow payload: {exc}",
+                                is_error=True,
+                            )
+                        )
+                        yield self._text(f"RunWorkflow rejected: {exc}")
+                        continue
+                    for worker in workflow.workers:
+                        context = dict(worker.context)
+                        context.update(
+                            {
+                                "workflow_id": workflow.id,
+                                "provider": worker.provider,
+                                "depends_on": list(worker.depends_on),
+                            }
+                        )
+                        yield orchestrator_pb2.OrchestratorMessage(
+                            agent_spawn=orchestrator_pb2.AgentSpawn(
+                                kind="workflow",
+                                task=f"{worker.title}: {worker.objective}",
+                                context_json=json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+                                parallel=not worker.depends_on,
+                            )
+                        )
+                    try:
+                        workflow_result = self._run_workflow(workflow)
+                    except Exception as exc:
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                name=call.name,
+                                tool_call_id=call_id,
+                                content=f"RunWorkflow failed: {exc}",
+                                is_error=True,
+                            )
+                        )
+                        yield self._text(f"RunWorkflow failed: {exc}")
+                        continue
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            name=call.name,
+                            tool_call_id=call_id,
+                            content=json.dumps(workflow_result, ensure_ascii=False),
+                            is_error=workflow_result["state"] != "completed",
                         )
                     )
                     continue
@@ -1225,7 +1296,7 @@ class ConversationRunner:
         return all(self._is_batchable_tool_call(call) for call in calls)
 
     def _is_batchable_tool_call(self, call: ToolCall) -> bool:
-        if call.name in {"TodoWrite", "PlanWrite", "SpawnAgent", "AskUser"}:
+        if call.name in {"TodoWrite", "PlanWrite", "SpawnAgent", "RunWorkflow", "AskUser"}:
             return False
         return self.tool_registry.permission_for(call.name) == orchestrator_pb2.AUTO_ALLOW
 
@@ -1466,6 +1537,21 @@ class ConversationRunner:
             "notes": result.notes,
         }
 
+    def _run_workflow(self, workflow: WorkflowSpec) -> dict[str, object]:
+        store = SQLiteWorkflowStore(Path(self.project_root) / ".agent" / "workflows.sqlite")
+        try:
+            executor = ProviderWorkerExecutor(self.provider_clients or {})
+            result = asyncio.run(
+                WorkflowEngine(
+                    store,
+                    executor,
+                    max_concurrency=self.workflow_max_concurrency,
+                ).run(workflow)
+            )
+            return result.to_dict()
+        finally:
+            store.close()
+
     @staticmethod
     def _decode_todos(arguments_json: str) -> list[Todo]:
         try:
@@ -1574,6 +1660,48 @@ class ConversationRunner:
             "parallel": parallel,
             "context_json": context_json,
         }
+
+    @staticmethod
+    def _decode_workflow(arguments_json: str) -> WorkflowSpec:
+        try:
+            payload = json.loads(arguments_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(str(exc)) from exc
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        workflow_id = str(payload.get("id", "")).strip()
+        if not workflow_id:
+            raise ValueError("id must not be empty")
+        raw_workers = payload.get("workers", [])
+        if not isinstance(raw_workers, list) or not raw_workers:
+            raise ValueError("workers must be a non-empty list")
+        workers: list[WorkerSpec] = []
+        for raw in raw_workers:
+            if not isinstance(raw, dict):
+                raise ValueError("each worker must be an object")
+            worker_id = str(raw.get("id", "")).strip()
+            title = str(raw.get("title", "")).strip()
+            objective = str(raw.get("objective", "")).strip()
+            if not worker_id or not title or not objective:
+                raise ValueError("each worker requires id, title, and objective")
+            provider = str(raw.get("provider", "default")).strip() or "default"
+            raw_dependencies = raw.get("depends_on", [])
+            if not isinstance(raw_dependencies, list) or not all(isinstance(item, str) for item in raw_dependencies):
+                raise ValueError("worker depends_on must be a list of strings")
+            context = raw.get("context", {})
+            if not isinstance(context, dict):
+                raise ValueError("worker context must be an object")
+            workers.append(
+                WorkerSpec(
+                    id=worker_id,
+                    title=title,
+                    objective=objective,
+                    provider=provider,
+                    depends_on=tuple(item.strip() for item in raw_dependencies if item.strip()),
+                    context=context,
+                )
+            )
+        return WorkflowSpec(id=workflow_id, workers=workers)
 
     @staticmethod
     def _decode_ask_user(arguments_json: str) -> dict[str, object]:

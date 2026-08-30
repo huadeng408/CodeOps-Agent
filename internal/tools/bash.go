@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"code-agent/internal/sandbox"
 	"code-agent/internal/safety"
 )
 
@@ -49,6 +50,24 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 	timeout := durationArg(args, 30*time.Second, "timeout_seconds", "timeout")
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	if runner := e.sandboxRunner(); runner != nil {
+		sandboxResult, sandboxErr := runner.Run(runCtx, sandbox.Request{
+			Workspace:  e.Root,
+			WorkingDir: absDir,
+			Command:    command,
+		})
+		text, truncated := e.TruncateOutput(sandboxResult.Output)
+		result := ToolResult{Name: "Bash", Output: text, ExitCode: sandboxResult.ExitCode, Truncated: truncated}
+		if sandboxErr != nil {
+			result.Error = sandboxErr.Error()
+			if result.ExitCode == 0 {
+				result.ExitCode = 1
+			}
+			return result, sandboxErr
+		}
+		return result, nil
+	}
 
 	name, shellArgs := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, shellArgs...)

@@ -41,6 +41,41 @@ func TestNewAppWithoutOrchestratorDoesNotPanic(t *testing.T) {
 	if !app.executor.UsesRAGSearcher(app.ragClient) {
 		t.Fatal("NewApp executor must use the same RAG client instance")
 	}
+	if !app.executor.HasSandbox() {
+		t.Fatal("NewApp must install the configured sandbox runner")
+	}
+}
+
+func TestNewAppDiscoversConfiguredSkillsAndWritesMetadataManifest(t *testing.T) {
+	root := t.TempDir()
+	extraSkills := t.TempDir()
+	skillDir := filepath.Join(extraSkills, "release")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: release\ndescription: Prepare a release.\ntools: [Git]\n---\nprivate release instructions\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default(root)
+	cfg.ProjectRoot = root
+	cfg.WorkingDir = root
+	cfg.OrchestratorAddr = "127.0.0.1:1"
+	cfg.OrchestratorAutoStart = false
+	cfg.SkillDirectories = []string{extraSkills}
+	app := NewApp(cfg, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	t.Cleanup(func() { cleanupIntegrationApp(t, app) })
+
+	if _, ok := app.skills.Get("release"); !ok {
+		t.Fatal("NewApp did not discover configured skill directory")
+	}
+	manifest, err := os.ReadFile(filepath.Join(root, ".agent", "skills.json"))
+	if err != nil {
+		t.Fatalf("read skills manifest: %v", err)
+	}
+	if !strings.Contains(string(manifest), `"name": "release"`) || strings.Contains(string(manifest), "private release instructions") {
+		t.Fatalf("manifest should publish only custom skill metadata: %s", manifest)
+	}
 }
 
 func TestRealNewAppRAGIngestThenSearchKnowledge(t *testing.T) {
