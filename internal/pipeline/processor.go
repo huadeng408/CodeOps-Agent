@@ -56,6 +56,12 @@ type Processor struct {
 	// uploads and tests that never carry a DocumentID are left untouched.
 	documentRepo repository.KnowledgeDocumentRepository
 
+	objectStore    ObjectStore
+	taskQueue      TaskQueue
+	embeddingCache EmbeddingCache
+	indexWriter    IndexWriter
+	lifecycle      DocumentLifecycle
+
 	// esWriter is the ES bulk writer; defaulted to es.BulkIndexDocuments.
 	// Injectable so tests can assert zero writes on validation failure.
 	esWriter func(ctx context.Context, index string, docs []model.EsDocument) error
