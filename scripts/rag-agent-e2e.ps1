@@ -172,30 +172,6 @@ function Remove-E2EKafkaTopics {
     }
 }
 
-function Test-E2EKafkaGroupInactive {
-    param(
-        [Parameter(Mandatory = $true)][string]$ContainerName,
-        [Parameter(Mandatory = $true)][string]$Group
-    )
-
-    $result = @(& docker exec $ContainerName kafka-consumer-groups --bootstrap-server localhost:9092 --describe --group $Group 2>&1)
-    $text = ($result -join "`n")
-    return $text -match "has no active members|GroupIdNotFoundException|group id does not exist|does not exist"
-}
-
-function Wait-E2EKafkaGroupsInactive {
-    param(
-        [Parameter(Mandatory = $true)][string]$ContainerName,
-        [Parameter(Mandatory = $true)][string]$GroupPrefix,
-        [int]$TimeoutSeconds = 180
-    )
-
-    foreach ($stage in @("parse", "chunk", "embed", "index")) {
-        $group = "$GroupPrefix-$stage"
-        Wait-Until { Test-E2EKafkaGroupInactive -ContainerName $ContainerName -Group $group } "Kafka consumer group inactive: $group" $TimeoutSeconds
-    }
-}
-
 function Remove-E2EKafkaGroups {
     param(
         [Parameter(Mandatory = $true)][string]$ContainerName,
@@ -204,16 +180,28 @@ function Remove-E2EKafkaGroups {
 
     foreach ($stage in @("parse", "chunk", "embed", "index")) {
         $group = "$GroupPrefix-$stage"
-        $result = @(& docker exec $ContainerName kafka-consumer-groups --bootstrap-server localhost:9092 --delete --group $group 2>&1)
-        $exitCode = $LASTEXITCODE
-        $text = ($result -join "`n")
-        if ($text -match "GroupIdNotFoundException|group id does not exist|does not exist") {
-            Write-Host "Kafka consumer group already absent: $group"
-            continue
-        }
-        if ($exitCode -ne 0 -or $text -match "could not be deleted|failed") {
+        $deadline = (Get-Date).AddSeconds(180)
+        do {
+            $result = @(& docker exec $ContainerName kafka-consumer-groups --bootstrap-server localhost:9092 --delete --group $group 2>&1)
+            $exitCode = $LASTEXITCODE
+            $text = ($result -join "`n")
+            if ($text -match "GroupIdNotFoundException|group id does not exist|does not exist") {
+                Write-Host "Kafka consumer group already absent: $group"
+                break
+            }
+            if ($text -match "was successful") {
+                Write-Host "Kafka consumer group removed: $group"
+                break
+            }
+            if ($text -match "GroupNotEmptyException") {
+                if ((Get-Date) -ge $deadline) {
+                    throw "could not remove isolated Kafka consumer group ${group} before timeout: $text"
+                }
+                Start-Sleep -Seconds 2
+                continue
+            }
             throw "could not remove isolated Kafka consumer group ${group}: $text"
-        }
+        } while ($true)
     }
 }
 
@@ -518,7 +506,6 @@ finally {
 			$serverProcess.Dispose()
 		}
 		if ($null -ne $e2eKafkaTopics -and -not [string]::IsNullOrWhiteSpace($kafkaContainerName)) {
-			Wait-E2EKafkaGroupsInactive -ContainerName $kafkaContainerName -GroupPrefix "codeagent-rag-e2e-$runId"
 			Remove-E2EKafkaGroups -ContainerName $kafkaContainerName -GroupPrefix "codeagent-rag-e2e-$runId"
 			Remove-E2EKafkaTopics -ContainerName $kafkaContainerName -Topics $e2eKafkaTopics
 		}

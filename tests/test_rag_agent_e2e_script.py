@@ -71,15 +71,13 @@ def test_e2e_treats_missing_kafka_groups_as_idempotent_cleanup() -> None:
     assert "does not exist" in cleanup
 
 
-def test_e2e_waits_for_kafka_group_membership_to_drain_before_delete() -> None:
+def test_e2e_retries_busy_kafka_group_deletion_until_success() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    cleanup = source[source.index("function Test-E2EKafkaGroupInactive"):source.index("function Resolve-MinIOContainerName")]
-    assert "function Test-E2EKafkaGroupInactive" in cleanup
-    assert "function Wait-E2EKafkaGroupsInactive" in cleanup
-    assert "has no active members" in cleanup
-    finally_block = source[source.index("finally {"):]
-    assert "Wait-E2EKafkaGroupsInactive" in finally_block
-    assert finally_block.index("Wait-E2EKafkaGroupsInactive") < finally_block.index("Remove-E2EKafkaGroups")
+    cleanup = source[source.index("function Remove-E2EKafkaGroups"):source.index("function Resolve-MinIOContainerName")]
+    assert "GroupNotEmptyException" in cleanup
+    assert "Start-Sleep -Seconds 2" in cleanup
+    assert "AddSeconds(180)" in cleanup
+    assert "was successful" in cleanup
 
 
 def test_e2e_script_fails_nonzero_after_cleanup() -> None:
