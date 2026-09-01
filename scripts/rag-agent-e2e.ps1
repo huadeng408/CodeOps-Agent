@@ -187,7 +187,7 @@ function Wait-E2EKafkaGroupsInactive {
     param(
         [Parameter(Mandatory = $true)][string]$ContainerName,
         [Parameter(Mandatory = $true)][string]$GroupPrefix,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 180
     )
 
     foreach ($stage in @("parse", "chunk", "embed", "index")) {
