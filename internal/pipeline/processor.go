@@ -19,18 +19,12 @@ import (
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
-	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
-	"code-agent/pkg/es"
-	"code-agent/pkg/kafka"
 	"code-agent/pkg/log"
 	"code-agent/pkg/objectpath"
 	orchestratorclient "code-agent/pkg/orchestrator"
-	"code-agent/pkg/storage"
 	"code-agent/pkg/tasks"
-
-	"github.com/minio/minio-go/v7"
 )
 
 const (
@@ -62,7 +56,7 @@ type Processor struct {
 	indexWriter    IndexWriter
 	lifecycle      DocumentLifecycle
 
-	// esWriter is the ES bulk writer; defaulted to es.BulkIndexDocuments.
+	// esWriter is the legacy function seam retained for existing tests.
 	// Injectable so tests can assert zero writes on validation failure.
 	esWriter func(ctx context.Context, index string, docs []model.EsDocument) error
 	// vectorCache loads cached embeddings; defaulted to loadCachedEmbeddingMap.
@@ -70,7 +64,8 @@ type Processor struct {
 	vectorCache func(ctx context.Context, cacheKey string) (map[int][]float32, error)
 }
 
-// NewProcessor creates a processor.
+// NewProcessor creates a processor using the legacy global clients through
+// production adapters. It remains source-compatible with existing callers.
 func NewProcessor(
 	documentParser *documentparser.Client,
 	embeddingClient embedding.Client,
@@ -84,20 +79,28 @@ func NewProcessor(
 	ingestionClient orchestratorclient.IngestionClient,
 	documentRepo repository.KnowledgeDocumentRepository,
 ) *Processor {
-	return &Processor{
-		documentParser:  documentParser,
-		embeddingClient: embeddingClient,
-		esCfg:           esCfg,
-		minioCfg:        minioCfg,
-		embeddingCfg:    embeddingCfg,
-		corpusCfg:       corpusCfg,
-		kafkaCfg:        kafkaCfg,
-		uploadRepo:      uploadRepo,
-		docVectorRepo:   docVectorRepo,
-		ingestionClient: ingestionClient,
-		documentRepo:    documentRepo,
-		esWriter:        es.BulkIndexDocuments,
+	processor, err := NewProcessorWithDeps(PipelineDeps{
+		ObjectStore:       legacyObjectStore{cfg: minioCfg},
+		TaskQueue:         legacyTaskQueue{},
+		EmbeddingCache:    legacyEmbeddingCache{},
+		IndexWriter:       legacyIndexWriter{},
+		DocumentLifecycle: legacyDocumentLifecycle{repo: documentRepo},
+		DocumentParser:    documentParser,
+		EmbeddingClient:   embeddingClient,
+		Elasticsearch:     esCfg,
+		MinIO:             minioCfg,
+		Embedding:         embeddingCfg,
+		Corpus:            corpusCfg,
+		Kafka:             kafkaCfg,
+		UploadRepo:        uploadRepo,
+		DocVectorRepo:     docVectorRepo,
+		IngestionClient:   ingestionClient,
+		DocumentRepo:      documentRepo,
+	})
+	if err != nil {
+		panic(err)
 	}
+	return processor
 }
 
 // Process handles process.
@@ -125,7 +128,7 @@ func (p *Processor) processParse(ctx context.Context, task tasks.FileProcessingT
 	}
 
 	objectName := objectpath.MergedObjectName(task.FileMD5, task.FileName)
-	object, err := storage.MinioClient.GetObject(ctx, p.minioCfg.BucketName, objectName, minio.GetObjectOptions{})
+	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, objectName)
 	if err != nil {
 		return fmt.Errorf("parse: download object failed: %w", err)
 	}
@@ -150,13 +153,13 @@ func (p *Processor) processParse(ctx context.Context, task tasks.FileProcessingT
 
 	parsedObject := p.parsedObjectName(task.FileMD5)
 	reader := bytes.NewReader([]byte(textContent))
-	if _, err := storage.MinioClient.PutObject(
+	if err := p.objectStorePort().Write(
 		ctx,
 		p.minioCfg.BucketName,
 		parsedObject,
 		reader,
 		reader.Size(),
-		minio.PutObjectOptions{ContentType: "text/plain; charset=utf-8"},
+		"text/plain; charset=utf-8",
 	); err != nil {
 		return fmt.Errorf("parse: persist parsed text failed: %w", err)
 	}
@@ -164,7 +167,7 @@ func (p *Processor) processParse(ctx context.Context, task tasks.FileProcessingT
 	next := task
 	next.Stage = tasks.StageChunk
 	next.ParsedObject = parsedObject
-	if err := kafka.ProduceTask(next); err != nil {
+	if err := p.taskQueuePort().Publish(next); err != nil {
 		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
 	}
 	log.Infof("[Processor][parse] done file=%s text_len=%d", task.FileMD5, utf8.RuneCountInString(textContent))
@@ -184,7 +187,7 @@ func (p *Processor) processChunk(ctx context.Context, task tasks.FileProcessingT
 		parsedObject = p.parsedObjectName(task.FileMD5)
 	}
 
-	object, err := storage.MinioClient.GetObject(ctx, p.minioCfg.BucketName, parsedObject, minio.GetObjectOptions{})
+	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, parsedObject)
 	if err != nil {
 		return fmt.Errorf("chunk: read parsed object failed: %w", err)
 	}
@@ -207,7 +210,7 @@ func (p *Processor) processChunk(ctx context.Context, task tasks.FileProcessingT
 	if err := p.docVectorRepo.DeleteByFileMD5(task.FileMD5); err != nil {
 		log.Warnf("[Processor][chunk] clear old chunks failed file=%s err=%v", task.FileMD5, err)
 	}
-	_ = database.RDB.Del(ctx, p.embeddingCacheKey(task.FileMD5)).Err()
+	_ = p.embeddingCachePort().Clear(ctx, p.embeddingCacheKey(task.FileMD5))
 
 	dbVectors := make([]*model.DocumentVector, 0, len(chunks))
 	for i, chunk := range chunks {
@@ -231,17 +234,11 @@ func (p *Processor) processChunk(ctx context.Context, task tasks.FileProcessingT
 	next.TaskChunkID = 1
 	next.ChunkStart = 0
 	next.TotalChunks = len(chunks)
-	if err := kafka.ProduceTask(next); err != nil {
+	if err := p.taskQueuePort().Publish(next); err != nil {
 		return fmt.Errorf("chunk: enqueue embed task failed: %w", err)
 	}
 	log.Infof("[Processor][chunk] done file=%s chunks=%d", task.FileMD5, len(chunks))
 	return nil
-}
-
-// cachedEmbedding represents a cached embedding.
-type cachedEmbedding struct {
-	ChunkID int       `json:"chunkId"`
-	Vector  []float32 `json:"vector"`
 }
 
 // processEmbed processes embed.
@@ -321,21 +318,17 @@ func (p *Processor) processEmbed(ctx context.Context, task tasks.FileProcessingT
 			return fmt.Errorf("embed: vector count mismatch expected=%d actual=%d", len(texts), len(vectors))
 		}
 
-		kv := make(map[string]interface{}, len(vectors))
+		cacheVectors := make(map[int][]float32, len(vectors))
 		for j := range vectors {
-			vectorBytes, err := json.Marshal(vectors[j])
-			if err != nil {
-				return fmt.Errorf("embed: marshal vector failed chunk=%d: %w", savedVectors[i+j].ChunkID, err)
-			}
-			kv[strconv.Itoa(savedVectors[i+j].ChunkID)] = string(vectorBytes)
+			cacheVectors[savedVectors[i+j].ChunkID] = vectors[j]
 		}
-		if len(kv) > 0 {
-			if err := database.RDB.HSet(ctx, cacheKey, kv).Err(); err != nil {
+		if len(cacheVectors) > 0 {
+			if err := p.embeddingCachePort().Put(ctx, cacheKey, cacheVectors); err != nil {
 				return fmt.Errorf("embed: write vector cache failed: %w", err)
 			}
 		}
 	}
-	if err := database.RDB.Expire(ctx, cacheKey, embeddingCacheTTLSeconds*time.Second).Err(); err != nil {
+	if err := p.embeddingCachePort().SetTTL(ctx, cacheKey, embeddingCacheTTLSeconds*time.Second); err != nil {
 		return fmt.Errorf("embed: refresh cache ttl failed: %w", err)
 	}
 
@@ -350,7 +343,7 @@ func (p *Processor) processEmbed(ctx context.Context, task tasks.FileProcessingT
 		next.TaskChunkID = taskChunkID + 1
 		next.ChunkStart = nextStart
 		next.TotalChunks = totalChunks
-		if err := kafka.ProduceTask(next); err != nil {
+		if err := p.taskQueuePort().Publish(next); err != nil {
 			return fmt.Errorf("embed: enqueue next embed task failed: %w", err)
 		}
 		log.Infof(
@@ -420,10 +413,7 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 	if strings.TrimSpace(indexName) == "" {
 		return errors.New("index: corpus text index is not configured for structured chunks")
 	}
-	writer := p.esWriter
-	if writer == nil {
-		writer = es.BulkIndexDocuments
-	}
+	writer := p.indexWriterPort()
 	bulkSize := p.kafkaCfg.ESBulkBatchSize
 	if bulkSize <= 0 {
 		bulkSize = 100
@@ -433,7 +423,7 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 		if end > len(docs) {
 			end = len(docs)
 		}
-		if err := writer(ctx, indexName, docs[i:end]); err != nil {
+		if err := writer.Write(ctx, indexName, docs[i:end]); err != nil {
 			return fmt.Errorf("index: bulk index failed batch_start=%d: %w", i, err)
 		}
 	}
@@ -442,12 +432,8 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 	// the cache/parsed-object cleanup runs.
 	p.markDocumentActive(task)
 
-	if database.RDB != nil {
-		_ = database.RDB.Del(ctx, cacheKey).Err()
-	}
-	if storage.MinioClient != nil {
-		_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5), minio.RemoveObjectOptions{})
-	}
+	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
+	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5))
 	log.Infof("[Processor][index] done file=%s docs=%d", task.FileMD5, len(docs))
 	return nil
 }
@@ -457,7 +443,7 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	objectURL := task.ObjectURL
 	if strings.TrimSpace(objectURL) == "" {
 		objectName := objectpath.MergedObjectName(task.FileMD5, task.FileName)
-		url, err := storage.GetPresignedURL(p.minioCfg.BucketName, objectName, time.Hour)
+		url, err := p.objectStorePort().Presign(p.minioCfg.BucketName, objectName, time.Hour)
 		if err != nil {
 			return fmt.Errorf("parse: generate presigned url failed: %w", err)
 		}
@@ -495,13 +481,13 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	}
 	parsedObject := p.parsedArtifactObjectName(task.FileMD5)
 	reader := bytes.NewReader(artifactBytes)
-	if _, err := storage.MinioClient.PutObject(
+	if err := p.objectStorePort().Write(
 		ctx,
 		p.minioCfg.BucketName,
 		parsedObject,
 		reader,
 		reader.Size(),
-		minio.PutObjectOptions{ContentType: "application/json"},
+		"application/json",
 	); err != nil {
 		return fmt.Errorf("parse: persist parsed text failed: %w", err)
 	}
@@ -509,7 +495,7 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	next := task
 	next.Stage = tasks.StageChunk
 	next.ParsedObject = parsedObject
-	if err := kafka.ProduceTask(next); err != nil {
+	if err := p.taskQueuePort().Publish(next); err != nil {
 		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
 	}
 	log.Infof("[Processor][parse] done file=%s text_len=%d worker=external", task.FileMD5, utf8.RuneCountInString(artifact.ParsedText))
@@ -525,7 +511,7 @@ func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FilePro
 		parsedObject = p.parsedArtifactObjectName(task.FileMD5)
 	}
 
-	object, err := storage.MinioClient.GetObject(ctx, p.minioCfg.BucketName, parsedObject, minio.GetObjectOptions{})
+	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, parsedObject)
 	if err != nil {
 		return fmt.Errorf("chunk: read parsed object failed: %w", err)
 	}
@@ -582,9 +568,7 @@ func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks
 	if err := p.docVectorRepo.DeleteByFileMD5(task.FileMD5); err != nil {
 		log.Warnf("[Processor][chunk] clear old chunks failed file=%s err=%v", task.FileMD5, err)
 	}
-	if database.RDB != nil {
-		_ = database.RDB.Del(ctx, p.embeddingCacheKey(task.FileMD5)).Err()
-	}
+	_ = p.embeddingCachePort().Clear(ctx, p.embeddingCacheKey(task.FileMD5))
 
 	var dbVectors []*model.DocumentVector
 	if len(chunkResult.StructuredChunks) > 0 {
@@ -621,7 +605,7 @@ func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks
 	next.TaskChunkID = 1
 	next.ChunkStart = 0
 	next.TotalChunks = len(dbVectors)
-	if err := kafka.ProduceTask(next); err != nil {
+	if err := p.taskQueuePort().Publish(next); err != nil {
 		return fmt.Errorf("chunk: enqueue embed task failed: %w", err)
 	}
 	log.Infof("[Processor][chunk] done file=%s chunks=%d worker=external", task.FileMD5, len(dbVectors))
@@ -930,21 +914,17 @@ func (p *Processor) processEmbedExternal(ctx context.Context, task tasks.FilePro
 			return fmt.Errorf("embed: vector count mismatch expected=%d actual=%d", len(texts), len(vectors))
 		}
 
-		kv := make(map[string]interface{}, len(vectors))
+		cacheVectors := make(map[int][]float32, len(vectors))
 		for j := range vectors {
-			vectorBytes, err := json.Marshal(vectors[j])
-			if err != nil {
-				return fmt.Errorf("embed: marshal vector failed chunk=%d: %w", savedVectors[i+j].ChunkID, err)
-			}
-			kv[strconv.Itoa(savedVectors[i+j].ChunkID)] = string(vectorBytes)
+			cacheVectors[savedVectors[i+j].ChunkID] = vectors[j]
 		}
-		if len(kv) > 0 {
-			if err := database.RDB.HSet(ctx, cacheKey, kv).Err(); err != nil {
+		if len(cacheVectors) > 0 {
+			if err := p.embeddingCachePort().Put(ctx, cacheKey, cacheVectors); err != nil {
 				return fmt.Errorf("embed: write vector cache failed: %w", err)
 			}
 		}
 	}
-	if err := database.RDB.Expire(ctx, cacheKey, embeddingCacheTTLSeconds*time.Second).Err(); err != nil {
+	if err := p.embeddingCachePort().SetTTL(ctx, cacheKey, embeddingCacheTTLSeconds*time.Second); err != nil {
 		return fmt.Errorf("embed: refresh cache ttl failed: %w", err)
 	}
 
@@ -959,7 +939,7 @@ func (p *Processor) processEmbedExternal(ctx context.Context, task tasks.FilePro
 		next.TaskChunkID = taskChunkID + 1
 		next.ChunkStart = nextStart
 		next.TotalChunks = totalChunks
-		if err := kafka.ProduceTask(next); err != nil {
+		if err := p.taskQueuePort().Publish(next); err != nil {
 			return fmt.Errorf("embed: enqueue next embed task failed: %w", err)
 		}
 		log.Infof(
@@ -1033,12 +1013,8 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 	// the cache/parsed-object cleanup runs.
 	p.markDocumentActive(task)
 
-	if database.RDB != nil {
-		_ = database.RDB.Del(ctx, cacheKey).Err()
-	}
-	if storage.MinioClient != nil {
-		_ = storage.MinioClient.RemoveObject(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5), minio.RemoveObjectOptions{})
-	}
+	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
+	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5))
 	log.Infof("[Processor][index] done file=%s docs=%d worker=external", task.FileMD5, len(docs))
 	return nil
 }
@@ -1050,83 +1026,31 @@ func (p *Processor) enqueueIndexTask(task tasks.FileProcessingTask, totalChunks 
 	next.TaskChunkID = 0
 	next.ChunkStart = 0
 	next.TotalChunks = totalChunks
-	if err := kafka.ProduceTask(next); err != nil {
+	if err := p.taskQueuePort().Publish(next); err != nil {
 		return fmt.Errorf("embed: enqueue index task failed: %w", err)
 	}
 	return nil
 }
 
-// ensureEmbeddingHashCache ensures embedding hash cache.
+// hashCachePreparer is an internal compatibility seam for Redis hash caches.
+type hashCachePreparer interface {
+	EnsureHash(context.Context, string) error
+}
+
+// ensureEmbeddingHashCache preserves the legacy string-to-hash migration rule
+// without exposing Redis operations to the pipeline stages.
 func (p *Processor) ensureEmbeddingHashCache(ctx context.Context, cacheKey string) error {
-	cacheType, err := database.RDB.Type(ctx, cacheKey).Result()
-	if err != nil {
-		return err
-	}
-	if cacheType == "none" || cacheType == "hash" {
+	cache := p.embeddingCachePort()
+	preparer, ok := cache.(hashCachePreparer)
+	if !ok {
 		return nil
 	}
-	if err := database.RDB.Del(ctx, cacheKey).Err(); err != nil {
-		return err
-	}
-	return nil
+	return preparer.EnsureHash(ctx, cacheKey)
 }
 
-// loadCachedEmbeddingMap loads cached embedding map.
+// loadCachedEmbeddingMap loads cached embeddings through the cache port.
 func (p *Processor) loadCachedEmbeddingMap(ctx context.Context, cacheKey string) (map[int][]float32, error) {
-	cacheType, err := database.RDB.Type(ctx, cacheKey).Result()
-	if err != nil {
-		return nil, err
-	}
-
-	switch cacheType {
-	case "hash":
-		return p.loadEmbeddingMapFromHash(ctx, cacheKey)
-	case "string":
-		return p.loadEmbeddingMapFromLegacyString(ctx, cacheKey)
-	case "none":
-		return nil, errors.New("embedding cache key not found")
-	default:
-		return nil, fmt.Errorf("unsupported embedding cache type: %s", cacheType)
-	}
-}
-
-// loadEmbeddingMapFromHash loads embedding map from hash.
-func (p *Processor) loadEmbeddingMapFromHash(ctx context.Context, cacheKey string) (map[int][]float32, error) {
-	rawMap, err := database.RDB.HGetAll(ctx, cacheKey).Result()
-	if err != nil {
-		return nil, err
-	}
-	vectorMap := make(map[int][]float32, len(rawMap))
-	for field, value := range rawMap {
-		chunkID, err := strconv.Atoi(field)
-		if err != nil {
-			return nil, fmt.Errorf("invalid chunk id in cache field=%s: %w", field, err)
-		}
-		var vector []float32
-		if err := json.Unmarshal([]byte(value), &vector); err != nil {
-			return nil, fmt.Errorf("invalid vector for chunk=%d: %w", chunkID, err)
-		}
-		vectorMap[chunkID] = vector
-	}
-	return vectorMap, nil
-}
-
-// loadEmbeddingMapFromLegacyString loads embedding map from legacy string.
-func (p *Processor) loadEmbeddingMapFromLegacyString(ctx context.Context, cacheKey string) (map[int][]float32, error) {
-	cacheBytes, err := database.RDB.Get(ctx, cacheKey).Bytes()
-	if err != nil {
-		return nil, err
-	}
-
-	var cache []cachedEmbedding
-	if err := json.Unmarshal(cacheBytes, &cache); err != nil {
-		return nil, err
-	}
-	vectorMap := make(map[int][]float32, len(cache))
-	for _, item := range cache {
-		vectorMap[item.ChunkID] = item.Vector
-	}
-	return vectorMap, nil
+	return p.embeddingCachePort().Load(ctx, cacheKey)
 }
 
 // embeddingCacheKey handles embedding cache key.
