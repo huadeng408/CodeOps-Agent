@@ -2,19 +2,15 @@
 package pipeline
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
@@ -22,7 +18,6 @@ import (
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
 	"code-agent/pkg/log"
-	"code-agent/pkg/objectpath"
 	orchestratorclient "code-agent/pkg/orchestrator"
 	"code-agent/pkg/tasks"
 )
@@ -117,128 +112,6 @@ func (p *Processor) Process(ctx context.Context, task tasks.FileProcessingTask) 
 	default:
 		return fmt.Errorf("unknown pipeline stage: %s", task.Stage)
 	}
-}
-
-// processParse processes parse.
-func (p *Processor) processParse(ctx context.Context, task tasks.FileProcessingTask) error {
-	log.Infof("[Processor][parse] start file=%s name=%s", task.FileMD5, task.FileName)
-
-	if p.ingestionClient != nil && p.ingestionClient.Enabled() {
-		return p.processParseExternal(ctx, task)
-	}
-
-	objectName := objectpath.MergedObjectName(task.FileMD5, task.FileName)
-	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, objectName)
-	if err != nil {
-		return fmt.Errorf("parse: download object failed: %w", err)
-	}
-	defer object.Close()
-
-	buf := new(bytes.Buffer)
-	size, err := buf.ReadFrom(object)
-	if err != nil {
-		return fmt.Errorf("parse: read object stream failed: %w", err)
-	}
-	if size == 0 {
-		return errors.New("parse: empty file content")
-	}
-
-	textContent, err := p.documentParser.ExtractText(ctx, bytes.NewReader(buf.Bytes()), task.FileName)
-	if err != nil {
-		return fmt.Errorf("parse: document extraction failed: %w", err)
-	}
-	if textContent == "" {
-		return errors.New("parse: extracted text is empty")
-	}
-
-	parsedObject := p.parsedObjectName(task.FileMD5)
-	reader := bytes.NewReader([]byte(textContent))
-	if err := p.objectStorePort().Write(
-		ctx,
-		p.minioCfg.BucketName,
-		parsedObject,
-		reader,
-		reader.Size(),
-		"text/plain; charset=utf-8",
-	); err != nil {
-		return fmt.Errorf("parse: persist parsed text failed: %w", err)
-	}
-
-	next := task
-	next.Stage = tasks.StageChunk
-	next.ParsedObject = parsedObject
-	if err := p.taskQueuePort().Publish(next); err != nil {
-		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
-	}
-	log.Infof("[Processor][parse] done file=%s text_len=%d", task.FileMD5, utf8.RuneCountInString(textContent))
-	return nil
-}
-
-// processChunk processes chunk.
-func (p *Processor) processChunk(ctx context.Context, task tasks.FileProcessingTask) error {
-	log.Infof("[Processor][chunk] start file=%s", task.FileMD5)
-
-	if p.ingestionClient != nil && p.ingestionClient.Enabled() {
-		return p.processChunkExternal(ctx, task)
-	}
-
-	parsedObject := task.ParsedObject
-	if parsedObject == "" {
-		parsedObject = p.parsedObjectName(task.FileMD5)
-	}
-
-	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, parsedObject)
-	if err != nil {
-		return fmt.Errorf("chunk: read parsed object failed: %w", err)
-	}
-	defer object.Close()
-
-	textBytes, err := io.ReadAll(object)
-	if err != nil {
-		return fmt.Errorf("chunk: read parsed stream failed: %w", err)
-	}
-	textContent := string(textBytes)
-	if textContent == "" {
-		return errors.New("chunk: parsed text is empty")
-	}
-
-	chunks := p.splitText(textContent, 1000, 100)
-	if len(chunks) == 0 {
-		return errors.New("chunk: no chunks generated")
-	}
-
-	if err := p.docVectorRepo.DeleteByFileMD5(task.FileMD5); err != nil {
-		log.Warnf("[Processor][chunk] clear old chunks failed file=%s err=%v", task.FileMD5, err)
-	}
-	_ = p.embeddingCachePort().Clear(ctx, p.embeddingCacheKey(task.FileMD5))
-
-	dbVectors := make([]*model.DocumentVector, 0, len(chunks))
-	for i, chunk := range chunks {
-		dbVectors = append(dbVectors, &model.DocumentVector{
-			FileMD5:      task.FileMD5,
-			ChunkID:      i,
-			TextContent:  chunk,
-			ModelVersion: p.embeddingCfg.Model,
-			UserID:       task.UserID,
-			OrgTag:       task.OrgTag,
-			IsPublic:     task.IsPublic,
-		})
-	}
-	if err := p.docVectorRepo.BatchCreate(dbVectors); err != nil {
-		return fmt.Errorf("chunk: persist chunks failed: %w", err)
-	}
-
-	next := task
-	next.Stage = tasks.StageEmbed
-	next.ParsedObject = parsedObject
-	next.TaskChunkID = 1
-	next.ChunkStart = 0
-	next.TotalChunks = len(chunks)
-	if err := p.taskQueuePort().Publish(next); err != nil {
-		return fmt.Errorf("chunk: enqueue embed task failed: %w", err)
-	}
-	log.Infof("[Processor][chunk] done file=%s chunks=%d", task.FileMD5, len(chunks))
-	return nil
 }
 
 // processEmbed processes embed.
@@ -430,185 +303,11 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 
 	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
 	// the cache/parsed-object cleanup runs.
-	p.markDocumentActive(task)
+	p.markDocumentActive(ctx, task)
 
 	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
 	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5))
 	log.Infof("[Processor][index] done file=%s docs=%d", task.FileMD5, len(docs))
-	return nil
-}
-
-// processParseExternal delegates parse-stage execution to the external ingestion worker.
-func (p *Processor) processParseExternal(ctx context.Context, task tasks.FileProcessingTask) error {
-	objectURL := task.ObjectURL
-	if strings.TrimSpace(objectURL) == "" {
-		objectName := objectpath.MergedObjectName(task.FileMD5, task.FileName)
-		url, err := p.objectStorePort().Presign(p.minioCfg.BucketName, objectName, time.Hour)
-		if err != nil {
-			return fmt.Errorf("parse: generate presigned url failed: %w", err)
-		}
-		objectURL = url
-	}
-
-	artifact, err := p.ingestionClient.Parse(ctx, task, objectURL)
-	if err != nil {
-		return fmt.Errorf("parse: external worker failed: %w", err)
-	}
-	if strings.TrimSpace(artifact.ParsedText) == "" {
-		// A corpus document (carries a DocumentID) whose parsed text comes back
-		// empty — e.g. a k8s _index.md that is pure Hugo front matter with no
-		// body — is a data-quality reality, not a format bug. Mark it SKIPPED
-		// (not indexed, not a failure) and end the parse stage cleanly so the
-		// task is not retried as FAILED and the importer poll resolves. No chunk
-		// task is produced. Legacy uploads (no DocumentID) keep the original
-		// error so a normal empty-file upload still surfaces a parse failure.
-		if p.documentRepo != nil && strings.TrimSpace(task.DocumentID) != "" {
-			p.markDocumentSkipped(task, "parse: empty content after parse")
-			log.Infof("[Processor][parse] skip empty corpus document file=%s doc=%s", task.FileMD5, task.DocumentID)
-			return nil
-		}
-		return errors.New("parse: extracted text is empty")
-	}
-	if structuredArtifact(task, artifact) {
-		if strings.TrimSpace(artifact.DocumentID) == "" || strings.TrimSpace(artifact.ParserName) == "" || strings.TrimSpace(artifact.ParserVersion) == "" || len(artifact.Elements) == 0 {
-			return errors.New("parse: structured MinerU PDF provenance is incomplete")
-		}
-	}
-
-	artifactBytes, err := json.Marshal(artifact)
-	if err != nil {
-		return fmt.Errorf("parse: encode structured artifact failed: %w", err)
-	}
-	parsedObject := p.parsedArtifactObjectName(task.FileMD5)
-	reader := bytes.NewReader(artifactBytes)
-	if err := p.objectStorePort().Write(
-		ctx,
-		p.minioCfg.BucketName,
-		parsedObject,
-		reader,
-		reader.Size(),
-		"application/json",
-	); err != nil {
-		return fmt.Errorf("parse: persist parsed text failed: %w", err)
-	}
-
-	next := task
-	next.Stage = tasks.StageChunk
-	next.ParsedObject = parsedObject
-	if err := p.taskQueuePort().Publish(next); err != nil {
-		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
-	}
-	log.Infof("[Processor][parse] done file=%s text_len=%d worker=external", task.FileMD5, utf8.RuneCountInString(artifact.ParsedText))
-	return nil
-}
-
-// processChunkExternal delegates chunk-stage execution to the external ingestion worker.
-func (p *Processor) processChunkExternal(ctx context.Context, task tasks.FileProcessingTask) error {
-	log.Infof("[Processor][chunk] external worker file=%s", task.FileMD5)
-
-	parsedObject := task.ParsedObject
-	if parsedObject == "" {
-		parsedObject = p.parsedArtifactObjectName(task.FileMD5)
-	}
-
-	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, parsedObject)
-	if err != nil {
-		return fmt.Errorf("chunk: read parsed object failed: %w", err)
-	}
-	defer object.Close()
-
-	textBytes, err := io.ReadAll(object)
-	if err != nil {
-		return fmt.Errorf("chunk: read parsed stream failed: %w", err)
-	}
-	return p.processChunkExternalArtifact(ctx, task, parsedObject, textBytes)
-}
-
-// processChunkExternalArtifact runs the chunk-stage pipeline (decode → chunk →
-// provenance fill → persist → enqueue) against the parsed artifact bytes
-// already loaded from object storage. Splitting the MinIO read out keeps the
-// fill/persist/lifecycle logic unit-testable without the storage or Kafka
-// globals.
-func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks.FileProcessingTask, parsedObject string, textBytes []byte) error {
-	var artifact orchestratorclient.ParsedArtifact
-	if err := json.Unmarshal(textBytes, &artifact); err != nil {
-		return fmt.Errorf("chunk: decode structured artifact failed: %w", err)
-	}
-	textContent := artifact.ParsedText
-	if strings.TrimSpace(textContent) == "" {
-		return errors.New("chunk: structured artifact text is empty")
-	}
-	if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") && len(artifact.Elements) == 0 {
-		return errors.New("chunk: structured PDF artifact has no elements")
-	}
-
-	chunkResult, err := p.ingestionClient.Chunk(ctx, task, artifact, 1000, 100)
-	if err != nil {
-		return fmt.Errorf("chunk: external worker failed: %w", err)
-	}
-	structuredPath := structuredArtifact(task, artifact)
-	if structuredPath && len(chunkResult.StructuredChunks) == 0 {
-		return errors.New("chunk: structured artifact returned no structured chunks")
-	}
-	// Go is the authority for source provenance: prefer the raw file hash
-	// carried on the task (validated at the internal trust boundary) over the
-	// worker/client artifact hash, falling back to the artifact hash only for
-	// legacy uploads that carry no provenance.
-	for index := range chunkResult.StructuredChunks {
-		chunk := &chunkResult.StructuredChunks[index]
-		chunk.SourceSHA256 = sourceSHA256ForChunk(task, chunk.SourceSHA256, textBytes)
-		if err := chunk.Validate(); err != nil {
-			return fmt.Errorf("chunk: structured chunk %d is invalid: %w", index, err)
-		}
-	}
-	if !structuredPath && len(chunkResult.StructuredChunks) == 0 && len(chunkResult.Chunks) == 0 {
-		return errors.New("chunk: no chunks generated")
-	}
-
-	if err := p.docVectorRepo.DeleteByFileMD5(task.FileMD5); err != nil {
-		log.Warnf("[Processor][chunk] clear old chunks failed file=%s err=%v", task.FileMD5, err)
-	}
-	_ = p.embeddingCachePort().Clear(ctx, p.embeddingCacheKey(task.FileMD5))
-
-	var dbVectors []*model.DocumentVector
-	if len(chunkResult.StructuredChunks) > 0 {
-		dbVectors = make([]*model.DocumentVector, 0, len(chunkResult.StructuredChunks))
-		for i, chunk := range chunkResult.StructuredChunks {
-			if task.CorpusGeneration != "" {
-				chunk.CorpusGeneration = task.CorpusGeneration
-				chunk.TargetIndex = p.corpusCfg.TextIndex
-			}
-			dbVectors = append(dbVectors, documentVectorFromStructuredChunk(task, i, chunk, p.embeddingCfg.Model))
-		}
-	} else {
-		dbVectors = make([]*model.DocumentVector, 0, len(chunkResult.Chunks))
-		for i, chunk := range chunkResult.Chunks {
-			dbVectors = append(dbVectors, &model.DocumentVector{
-				FileMD5:      task.FileMD5,
-				ChunkID:      i,
-				TextContent:  chunk,
-				ModelVersion: p.embeddingCfg.Model,
-				UserID:       task.UserID,
-				OrgTag:       task.OrgTag,
-				IsPublic:     task.IsPublic,
-			})
-		}
-	}
-	if err := p.docVectorRepo.BatchCreate(dbVectors); err != nil {
-		p.markDocumentFailed(task, "chunk", err)
-		return fmt.Errorf("chunk: persist chunks failed: %w", err)
-	}
-
-	next := task
-	next.Stage = tasks.StageEmbed
-	next.ParsedObject = parsedObject
-	next.TaskChunkID = 1
-	next.ChunkStart = 0
-	next.TotalChunks = len(dbVectors)
-	if err := p.taskQueuePort().Publish(next); err != nil {
-		return fmt.Errorf("chunk: enqueue embed task failed: %w", err)
-	}
-	log.Infof("[Processor][chunk] done file=%s chunks=%d worker=external", task.FileMD5, len(dbVectors))
 	return nil
 }
 
@@ -744,11 +443,11 @@ func sourceSHA256ForChunk(task tasks.FileProcessingTask, current string, artifac
 // markDocumentActive flips a corpus document to ACTIVE after the index stage
 // confirms the ES write. Nil-tolerant and a no-op for tasks without a
 // DocumentID so legacy uploads never trigger a lifecycle update.
-func (p *Processor) markDocumentActive(task tasks.FileProcessingTask) {
-	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+func (p *Processor) markDocumentActive(ctx context.Context, task tasks.FileProcessingTask) {
+	if strings.TrimSpace(task.DocumentID) == "" {
 		return
 	}
-	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentActive, ""); err != nil {
+	if err := p.lifecyclePort().Active(ctx, task); err != nil {
 		log.Warnf("[Processor] mark document active failed doc=%s err=%v", task.DocumentID, err)
 	}
 }
@@ -758,11 +457,11 @@ func (p *Processor) markDocumentActive(task tasks.FileProcessingTask) {
 // after parse, e.g. a front-matter-only _index.md). The task ends SUCCESS so it
 // is not retried; no chunk task is produced. Nil-tolerant and a no-op for tasks
 // without a DocumentID so legacy uploads never trigger a lifecycle update.
-func (p *Processor) markDocumentSkipped(task tasks.FileProcessingTask, reason string) {
-	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+func (p *Processor) markDocumentSkipped(ctx context.Context, task tasks.FileProcessingTask, reason string) {
+	if strings.TrimSpace(task.DocumentID) == "" {
 		return
 	}
-	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentSkipped, reason); err != nil {
+	if err := p.lifecyclePort().Skipped(ctx, task, reason); err != nil {
 		log.Warnf("[Processor] mark document skipped failed doc=%s err=%v", task.DocumentID, err)
 	}
 }
@@ -771,12 +470,11 @@ func (p *Processor) markDocumentSkipped(task tasks.FileProcessingTask, reason st
 // document. The stored last_error never carries tokens, headers or full file
 // content (see sanitizeErrorSummary); the raw error is still returned to the
 // caller for logging/retry.
-func (p *Processor) markDocumentFailed(task tasks.FileProcessingTask, stage string, cause error) {
-	if p.documentRepo == nil || strings.TrimSpace(task.DocumentID) == "" {
+func (p *Processor) markDocumentFailed(ctx context.Context, task tasks.FileProcessingTask, stage string, cause error) {
+	if strings.TrimSpace(task.DocumentID) == "" {
 		return
 	}
-	summary := sanitizeErrorSummary(stage, cause)
-	if err := p.documentRepo.MarkDocumentStatus(task.DocumentID, model.DocumentFailed, summary); err != nil {
+	if err := p.lifecyclePort().Failed(ctx, task, stage, cause); err != nil {
 		log.Warnf("[Processor] mark document failed failed doc=%s err=%v", task.DocumentID, err)
 	}
 }
@@ -1011,7 +709,7 @@ func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FilePro
 
 	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
 	// the cache/parsed-object cleanup runs.
-	p.markDocumentActive(task)
+	p.markDocumentActive(ctx, task)
 
 	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
 	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5))
