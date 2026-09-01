@@ -1,5 +1,5 @@
 ﻿server:
-  port: "8081"
+  port: "${CODE_AGENT_SERVER_PORT:8081}"
   mode: "debug" # debug, release, test
 
 database:
@@ -22,18 +22,18 @@ log:
 
 kafka:
   brokers: "127.0.0.1:9092"
-  topic: "file-parse"
-  consumer_group_prefix: "paismart-go"
+  topic: "${CODE_AGENT_KAFKA_PARSE_TOPIC:file-parse}"
+  consumer_group_prefix: "${CODE_AGENT_KAFKA_CONSUMER_GROUP_PREFIX:paismart-go}"
   max_retries: 3
   base_backoff_ms: 800
   embedding_batch_size: 2
   es_bulk_batch_size: 100
   topics:
-    parse: "file-parse"
-    chunk: "file-chunk"
-    embed: "file-embed"
-    index: "file-index"
-    dlq: "file-dlq"
+    parse: "${CODE_AGENT_KAFKA_PARSE_TOPIC:file-parse}"
+    chunk: "${CODE_AGENT_KAFKA_CHUNK_TOPIC:file-chunk}"
+    embed: "${CODE_AGENT_KAFKA_EMBED_TOPIC:file-embed}"
+    index: "${CODE_AGENT_KAFKA_INDEX_TOPIC:file-index}"
+    dlq: "${CODE_AGENT_KAFKA_DLQ_TOPIC:file-dlq}"
 # MinIO 对象存储配置
 minio:
   endpoint: "127.0.0.1:9000" # 本地开发环境使用 127.0.0.1:9000
@@ -55,7 +55,7 @@ elasticsearch:
 corpus:
   generation: "techdocs-2026-07-30-v1"
   text_index: "knowledge_base_v2_bge_m3"
-  read_alias: "knowledge_base_current"
+  read_alias: "${CODE_AGENT_RAG_READ_ALIAS:knowledge_base_current}"
   visual_pilot_prefix: "knowledge_page_visual_pilot"
   visual_alias: "knowledge_page_visual_current"
   loader_user: 1
@@ -140,7 +140,7 @@ ai:
     # authority for file_md5/user_id/org_tag/is_public and ES writes.
     enabled: true
     ingestion_enabled: true
-    base_url: "http://127.0.0.1:8090"
+    base_url: "${PAISMART_INGESTION_BASE_URL:http://127.0.0.1:8090}"
     timeout_ms: 120000
     ingestion_timeout_ms: 3600000
     shared_secret: "${ORCHESTRATOR_SHARED_SECRET:}"

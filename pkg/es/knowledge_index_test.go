@@ -36,6 +36,11 @@ func TestKnowledgeV2MappingHasNativeVectorAndNoVisualFields(t *testing.T) {
 	if vector["dims"] != 1024 || vector["type"] != "dense_vector" || vector["similarity"] != "cosine" {
 		t.Fatalf("unexpected vector mapping: %v", vector)
 	}
+	for _, field := range []string{"sheet_name", "cell_range"} {
+		if props[field].(map[string]any)["type"] != "keyword" {
+			t.Fatalf("spreadsheet coordinate field %q must be keyword: %v", field, props[field])
+		}
+	}
 	// The text index must be physically separate from the visual pilot.
 	for _, visualField := range []string{"image_embedding", "patch_embedding", "visual_embedding"} {
 		if _, exists := props[visualField]; exists {

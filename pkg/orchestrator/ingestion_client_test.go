@@ -24,7 +24,7 @@ func TestChunkSendsArtifactElementsAndDecodesStructuredChunks(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		_, _ = w.Write([]byte(`{"code":200,"data":{"chunks":["legacy"],"structuredChunks":[{"document_id":"doc-1","source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","chunk_id":"chunk-1","text":"body","embedding_text":"body context","page_id":"doc-1:p1","element_ids":["e1"],"element_types":["text"],"token_count":1,"parser_name":"mineru","parser_version":"3.4.4","corpus_generation":"techdocs-2026-07-30-v1"}]},"message":"success"}`))
+		_, _ = w.Write([]byte(`{"code":200,"data":{"chunks":["legacy"],"structuredChunks":[{"document_id":"doc-1","source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","chunk_id":"chunk-1","text":"body","embedding_text":"body context","page_id":"doc-1:p1","sheet_name":"Metrics","cell_range":"Metrics!A1:C40","element_ids":["e1"],"element_types":["table"],"token_count":1,"parser_name":"openpyxl","parser_version":"3.1.5","corpus_generation":"techdocs-2026-07-30-v1"}]},"message":"success"}`))
 	}))
 	defer server.Close()
 
@@ -48,6 +48,9 @@ func TestChunkSendsArtifactElementsAndDecodesStructuredChunks(t *testing.T) {
 	}
 	if len(result.StructuredChunks) != 1 || result.StructuredChunks[0].DocumentID != "doc-1" {
 		t.Fatalf("structured chunks = %+v", result.StructuredChunks)
+	}
+	if result.StructuredChunks[0].SheetName != "Metrics" || result.StructuredChunks[0].CellRange != "Metrics!A1:C40" {
+		t.Fatalf("spreadsheet coordinates = %+v", result.StructuredChunks[0])
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -16,7 +15,6 @@ import (
 	"code-agent/internal/serverconfig"
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
-	"code-agent/pkg/log"
 	orchestratorclient "code-agent/pkg/orchestrator"
 	"code-agent/pkg/tasks"
 )
@@ -113,78 +111,10 @@ func (p *Processor) Process(ctx context.Context, task tasks.FileProcessingTask) 
 	}
 }
 
-// processIndex processes index.
+// processIndex delegates index policy to the stage module while Processor
+// retains the stable Process routing interface.
 func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingTask) error {
-	log.Infof("[Processor][index] start file=%s", task.FileMD5)
-
-	if p.ingestionClient != nil && p.ingestionClient.Enabled() {
-		return p.processIndexExternal(ctx, task)
-	}
-
-	savedVectors, err := p.docVectorRepo.FindByFileMD5(task.FileMD5)
-	if err != nil {
-		return fmt.Errorf("index: load chunks failed: %w", err)
-	}
-	if len(savedVectors) == 0 {
-		return errors.New("index: chunks are empty")
-	}
-
-	cacheKey := p.embeddingCacheKey(task.FileMD5)
-	loadCache := p.vectorCache
-	if loadCache == nil {
-		loadCache = p.loadCachedEmbeddingMap
-	}
-	vectorMap, err := loadCache(ctx, cacheKey)
-	if err != nil {
-		return fmt.Errorf("index: read cached vectors failed: %w", err)
-	}
-	if len(vectorMap) == 0 {
-		return errors.New("index: cached vectors are empty")
-	}
-
-	docs := make([]model.EsDocument, 0, len(savedVectors))
-	for _, item := range savedVectors {
-		vector, ok := vectorMap[item.ChunkID]
-		if !ok || len(vector) == 0 {
-			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
-		}
-		if err := p.validateStructuredVector(*item, vector); err != nil {
-			return fmt.Errorf("index: structured vector validation failed for chunk=%d: %w", item.ChunkID, err)
-		}
-		modelVersion := p.embeddingCfg.Model
-		if p.embeddingCfg.ModelRevision != "" {
-			modelVersion = p.embeddingCfg.ModelRevision
-		}
-		docs = append(docs, esDocumentFromVector(*item, vector, modelVersion))
-	}
-
-	indexName := p.indexNameFor(*savedVectors[0])
-	if strings.TrimSpace(indexName) == "" {
-		return errors.New("index: corpus text index is not configured for structured chunks")
-	}
-	writer := p.indexWriterPort()
-	bulkSize := p.kafkaCfg.ESBulkBatchSize
-	if bulkSize <= 0 {
-		bulkSize = 100
-	}
-	for i := 0; i < len(docs); i += bulkSize {
-		end := i + bulkSize
-		if end > len(docs) {
-			end = len(docs)
-		}
-		if err := writer.Write(ctx, indexName, docs[i:end]); err != nil {
-			return fmt.Errorf("index: bulk index failed batch_start=%d: %w", i, err)
-		}
-	}
-
-	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
-	// the cache/parsed-object cleanup runs.
-	p.markDocumentActive(ctx, task)
-
-	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
-	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedObjectName(task.FileMD5))
-	log.Infof("[Processor][index] done file=%s docs=%d", task.FileMD5, len(docs))
-	return nil
+	return p.indexStage().process(ctx, task)
 }
 
 func structuredArtifact(task tasks.FileProcessingTask, artifact orchestratorclient.ParsedArtifact) bool {
@@ -235,6 +165,8 @@ func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int,
 		SourceID:         sourceID,
 		PageID:           chunk.PageID,
 		ParentChunkID:    chunk.ParentChunkID,
+		SheetName:        chunk.SheetName,
+		CellRange:        chunk.CellRange,
 		SectionPath:      chunk.SectionPath,
 		PageSpan:         chunk.PageSpan,
 		ElementIDs:       chunk.ElementIDs,
@@ -278,6 +210,8 @@ func esDocumentFromVector(item model.DocumentVector, vector []float32, modelVers
 		SectionPath:      item.SectionPath,
 		PageID:           item.PageID,
 		PageSpan:         item.PageSpan,
+		SheetName:        item.SheetName,
+		CellRange:        item.CellRange,
 		ElementIDs:       item.ElementIDs,
 		ElementTypes:     item.ElementTypes,
 		BBoxRefs:         item.BBoxRefs,
@@ -314,164 +248,6 @@ func sourceSHA256ForChunk(task tasks.FileProcessingTask, current string, artifac
 		return hashSHA256(artifactBytes)
 	}
 	return current
-}
-
-// markDocumentActive flips a corpus document to ACTIVE after the index stage
-// confirms the ES write. Nil-tolerant and a no-op for tasks without a
-// DocumentID so legacy uploads never trigger a lifecycle update.
-func (p *Processor) markDocumentActive(ctx context.Context, task tasks.FileProcessingTask) {
-	if strings.TrimSpace(task.DocumentID) == "" {
-		return
-	}
-	if err := p.lifecyclePort().Active(ctx, task); err != nil {
-		log.Warnf("[Processor] mark document active failed doc=%s err=%v", task.DocumentID, err)
-	}
-}
-
-// markDocumentSkipped records a graceful skip (not indexed, not a failure)
-// against a corpus document — used when parse extracts no text (empty content
-// after parse, e.g. a front-matter-only _index.md). The task ends SUCCESS so it
-// is not retried; no chunk task is produced. Nil-tolerant and a no-op for tasks
-// without a DocumentID so legacy uploads never trigger a lifecycle update.
-func (p *Processor) markDocumentSkipped(ctx context.Context, task tasks.FileProcessingTask, reason string) {
-	if strings.TrimSpace(task.DocumentID) == "" {
-		return
-	}
-	if err := p.lifecyclePort().Skipped(ctx, task, reason); err != nil {
-		log.Warnf("[Processor] mark document skipped failed doc=%s err=%v", task.DocumentID, err)
-	}
-}
-
-// markDocumentFailed records a sanitized failure summary against a corpus
-// document. The stored last_error never carries tokens, headers or full file
-// content (see sanitizeErrorSummary); the raw error is still returned to the
-// caller for logging/retry.
-func (p *Processor) markDocumentFailed(ctx context.Context, task tasks.FileProcessingTask, stage string, cause error) {
-	if strings.TrimSpace(task.DocumentID) == "" {
-		return
-	}
-	if err := p.lifecyclePort().Failed(ctx, task, stage, cause); err != nil {
-		log.Warnf("[Processor] mark document failed failed doc=%s err=%v", task.DocumentID, err)
-	}
-}
-
-// maxErrorSummaryLen bounds the last_error excerpt persisted to the document
-// row; the remainder of the wrapped error chain stays in logs only.
-const maxErrorSummaryLen = 160
-
-// sanitizeErrorSummary reduces an error to a single short, stage-prefixed line
-// safe to persist as knowledge_document.last_error. It strips newlines (so
-// later lines of a multi-line message, where secrets or payloads typically
-// land, are never echoed) and truncates to a small bound.
-func sanitizeErrorSummary(stage string, cause error) string {
-	stage = strings.TrimSpace(stage)
-	if cause == nil {
-		if stage == "" {
-			return "failed"
-		}
-		return stage + " failed"
-	}
-	msg := strings.TrimSpace(cause.Error())
-	if i := strings.IndexAny(msg, "\r\n"); i >= 0 {
-		msg = msg[:i]
-	}
-	msg = strings.TrimSpace(msg)
-	if len(msg) > maxErrorSummaryLen {
-		msg = msg[:maxErrorSummaryLen]
-	}
-	if msg == "" {
-		if stage == "" {
-			return "failed"
-		}
-		return stage + " failed"
-	}
-	if stage == "" {
-		return msg
-	}
-	return stage + ": " + msg
-}
-
-// indexNameFor resolves the ES index for a document vector. Structured
-// chunks with a corpus generation must land in the corpus text index — never
-// a hardcoded name; legacy vectors keep the legacy index. An empty result is
-// a configuration error and must fail the write.
-func (p *Processor) indexNameFor(item model.DocumentVector) string {
-	if item.CorpusGeneration != "" {
-		return p.corpusCfg.TextIndex
-	}
-	return p.esCfg.IndexName
-}
-
-// validateStructuredVector enforces the native embedding contract for any
-// structured chunk on BOTH the local and external processing paths.
-func (p *Processor) validateStructuredVector(item model.DocumentVector, vector []float32) error {
-	if item.CorpusGeneration == "" {
-		return nil // legacy path is not subject to the native-dimension contract
-	}
-	expected := p.embeddingCfg.ExpectedDimensions
-	if expected <= 0 {
-		expected = p.embeddingCfg.Dimensions
-	}
-	return embedding.ValidateEmbeddingContract(p.embeddingCfg.ModelRevision, expected, vector)
-}
-
-// processIndexExternal delegates index-stage execution to the external ingestion worker.
-func (p *Processor) processIndexExternal(ctx context.Context, task tasks.FileProcessingTask) error {
-	log.Infof("[Processor][index] start file=%s worker=external", task.FileMD5)
-
-	savedVectors, err := p.docVectorRepo.FindByFileMD5(task.FileMD5)
-	if err != nil {
-		return fmt.Errorf("index: load chunks failed: %w", err)
-	}
-	if len(savedVectors) == 0 {
-		return errors.New("index: chunks are empty")
-	}
-
-	cacheKey := p.embeddingCacheKey(task.FileMD5)
-	loadCache := p.vectorCache
-	if loadCache == nil {
-		loadCache = p.loadCachedEmbeddingMap
-	}
-	vectorMap, err := loadCache(ctx, cacheKey)
-	if err != nil {
-		return fmt.Errorf("index: read cached vectors failed: %w", err)
-	}
-	if len(vectorMap) == 0 {
-		return errors.New("index: cached vectors are empty")
-	}
-
-	docs := make([]model.EsDocument, 0, len(savedVectors))
-	for _, item := range savedVectors {
-		vector, ok := vectorMap[item.ChunkID]
-		if !ok || len(vector) == 0 {
-			return fmt.Errorf("index: missing vector for chunk=%d", item.ChunkID)
-		}
-		if err := p.validateStructuredVector(*item, vector); err != nil {
-			return fmt.Errorf("index: structured vector validation failed for chunk=%d: %w", item.ChunkID, err)
-		}
-		modelVersion := p.embeddingCfg.Model
-		if p.embeddingCfg.ModelRevision != "" {
-			modelVersion = p.embeddingCfg.ModelRevision
-		}
-		docs = append(docs, esDocumentFromVector(*item, vector, modelVersion))
-	}
-
-	indexName := p.indexNameFor(*savedVectors[0])
-	if strings.TrimSpace(indexName) == "" {
-		return errors.New("index: corpus text index is not configured for structured chunks")
-	}
-	if _, err := p.ingestionClient.Index(ctx, task, indexName, docs); err != nil {
-		return fmt.Errorf("index: external worker failed: %w", err)
-	}
-
-	// ES v2 write confirmed -> advance the corpus document to ACTIVE before
-	// the cache/parsed-object cleanup runs.
-	p.markDocumentActive(ctx, task)
-
-	_ = p.embeddingCachePort().Clear(ctx, cacheKey)
-	_ = p.objectStorePort().Delete(ctx, p.minioCfg.BucketName, p.parsedArtifactObjectName(task.FileMD5))
-	log.Infof("[Processor][index] done file=%s docs=%d worker=external", task.FileMD5, len(docs))
-	return nil
 }
 
 // embeddingCacheKey handles embedding cache key.

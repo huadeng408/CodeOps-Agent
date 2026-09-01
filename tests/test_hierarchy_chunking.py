@@ -171,3 +171,43 @@ def test_slide_policy_keeps_slide_shapes_in_reading_order() -> None:
 def test_modality_policy_rejects_unknown_values() -> None:
     with pytest.raises(ValueError, match="unsupported modality"):
         chunk_elements_for_modality([], modality="unknown")  # type: ignore[arg-type]
+
+
+def test_pdf_policy_keeps_page_layout_elements_in_separate_chunks() -> None:
+    source_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    elements = [
+        Element(
+            document_id="scan",
+            element_id="p0-text",
+            type="text",
+            text="page zero evidence",
+            page_index=0,
+            bbox=[10, 20, 200, 80],
+            source_sha256=source_sha,
+            parser_version="3.4.4",
+        ),
+        Element(
+            document_id="scan",
+            element_id="p1-table",
+            type="table",
+            text="Header | Value\nA | 1",
+            page_index=1,
+            bbox=[30, 40, 300, 180],
+            source_sha256=source_sha,
+            parser_version="3.4.4",
+        ),
+    ]
+
+    chunks = chunk_elements_for_modality(elements, modality="pdf", child_tokens=100, parent_tokens=200)
+
+    assert [chunk.page_id for chunk in chunks] == ["scan:p0", "scan:p1"]
+    assert [chunk.element_ids for chunk in chunks] == [["p0-text"], ["p1-table"]]
+    assert chunks[1].bbox_refs == ["p1-table:30.0,40.0,300.0,180.0"]
+
+
+def test_ingestion_modality_routes_pdf_elements_to_the_pdf_policy() -> None:
+    from orchestrator.rag.ingestion import _structured_modality
+
+    assert _structured_modality("scan.pdf") == "pdf"
+    assert _structured_modality("deck.pptx") == "slide"
+    assert _structured_modality("sheet.xlsx") == "spreadsheet"

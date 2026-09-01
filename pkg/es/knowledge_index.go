@@ -44,6 +44,7 @@ func KnowledgeV2Mapping(dimensions int) map[string]any {
 		"source_sha256": map[string]any{"type": "keyword"}, "source_url": map[string]any{"type": "keyword"},
 		"source_path": map[string]any{"type": "keyword"}, "source_commit": map[string]any{"type": "keyword"}, "source_id": map[string]any{"type": "keyword"},
 		"parent_chunk_id": map[string]any{"type": "keyword"}, "section_path": map[string]any{"type": "keyword"},
+		"sheet_name": map[string]any{"type": "keyword"}, "cell_range": map[string]any{"type": "keyword"},
 		"page_id": map[string]any{"type": "keyword"}, "page_span": map[string]any{"type": "integer"},
 		"element_ids": map[string]any{"type": "keyword"}, "element_types": map[string]any{"type": "keyword"},
 		"bbox_refs": map[string]any{"type": "keyword"}, "asset_refs": map[string]any{"type": "keyword"},

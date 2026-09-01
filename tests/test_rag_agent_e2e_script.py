@@ -31,13 +31,44 @@ def test_e2e_starts_and_cleans_up_the_python_ingestion_worker() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     assert "orchestrator.rag.main:app" in source
-    assert 'Test-HttpEndpoint "http://127.0.0.1:8090/healthz"' in source
+    assert 'Test-HttpEndpoint "$workerUrl/healthz"' in source
+    assert '"--port", "$WorkerPort"' in source
     assert "$workerStartedHere" in source
     assert "Stop-Process -Id $workerProcess.Id" in source
     assert "Invoke-WithPaismartInternalToken -Secret $internalSecret" in source
     assert 'PAISMART_EMBEDDING_BASE_URL = "http://127.0.0.1:8009"' in runtime
     assert 'PAISMART_EMBEDDING_MODEL = "BAAI/bge-m3"' in runtime
     assert 'PAISMART_EMBEDDING_DIMENSIONS = "1024"' in runtime
+
+
+def test_e2e_defaults_to_isolated_go_and_python_ports() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert '[string]$ServerUrl = "http://127.0.0.1:8082"' in source
+    assert '[int]$WorkerPort = 8092' in source
+
+
+def test_e2e_rejects_reusing_existing_app_processes() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'throw "refusing to reuse an existing Python ingestion worker' in source
+    assert 'throw "refusing to reuse an existing Go server' in source
+
+
+def test_e2e_resolves_the_actual_minio_container_and_cleans_topics() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "function Resolve-MinIOContainerName" in source
+    assert "codeagent-minio" in source
+    assert "function Remove-E2EKafkaTopics" in source
+    assert "function Remove-E2EKafkaGroups" in source
+    assert "Remove-E2EKafkaTopics" in source[source.index("finally {"):]
+    assert "Remove-E2EKafkaGroups" in source[source.index("finally {"):]
+
+
+def test_e2e_treats_missing_kafka_groups_as_idempotent_cleanup() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    cleanup = source[source.index("function Remove-E2EKafkaGroups"):source.index("function Resolve-MinIOContainerName")]
+    assert "2>&1" in cleanup
+    assert "GroupIdNotFoundException" in cleanup
+    assert "does not exist" in cleanup
 
 
 def test_e2e_script_fails_nonzero_after_cleanup() -> None:

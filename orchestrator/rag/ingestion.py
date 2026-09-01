@@ -165,7 +165,7 @@ class IngestionService:
         file_name = payload.task.file_name
         file_type = _detect_file_type(file_name)
         if payload.elements:
-            modality = _office_modality(file_name)
+            modality = _structured_modality(file_name)
             if modality:
                 structured = chunk_elements_for_modality(
                     payload.elements,
@@ -597,6 +597,13 @@ def _office_modality(file_name: str) -> str:
     if lower_name.endswith(".xlsx"):
         return "spreadsheet"
     return ""
+
+
+def _structured_modality(file_name: str) -> str:
+    """Return the explicit structured chunk route for a parsed document."""
+    if _detect_file_type(file_name) == "pdf":
+        return "pdf"
+    return _office_modality(file_name)
 
 
 @lru_cache(maxsize=8)

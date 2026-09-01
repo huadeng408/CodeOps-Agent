@@ -95,7 +95,7 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 		// task is produced. Legacy uploads (no DocumentID) keep the original
 		// error so a normal empty-file upload still surfaces a parse failure.
 		if strings.TrimSpace(task.DocumentID) != "" {
-			p.markDocumentSkipped(ctx, task, "parse: empty content after parse")
+			p.indexStage().markDocumentSkipped(ctx, task, "parse: empty content after parse")
 			log.Infof("[Processor][parse] skip empty corpus document file=%s doc=%s", task.FileMD5, task.DocumentID)
 			return nil
 		}

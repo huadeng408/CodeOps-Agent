@@ -23,6 +23,8 @@ func EnsureRuntimeSchema() error {
 		"ALTER TABLE document_vectors ADD COLUMN embedding_text TEXT NULL",
 		"ALTER TABLE document_vectors ADD COLUMN page_id VARCHAR(255) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN parent_chunk_id VARCHAR(255) NULL",
+		"ALTER TABLE document_vectors ADD COLUMN sheet_name VARCHAR(255) NULL",
+		"ALTER TABLE document_vectors ADD COLUMN cell_range VARCHAR(255) NULL",
 		"ALTER TABLE document_vectors ADD COLUMN section_path JSON NULL",
 		"ALTER TABLE document_vectors ADD COLUMN page_span JSON NULL",
 		"ALTER TABLE document_vectors ADD COLUMN element_ids JSON NULL",

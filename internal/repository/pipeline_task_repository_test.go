@@ -1,6 +1,9 @@
 package repository
 
 import (
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
 	"code-agent/internal/model"
@@ -51,6 +54,105 @@ func TestMarkProcessingRunCreatesRunWithRunKey(t *testing.T) {
 	}
 	if task.FileMD5 != "md5" || task.Stage != "chunk" || task.ChunkID != -1 {
 		t.Fatalf("row fields mismatch: %+v", task)
+	}
+}
+
+func TestBuildRunKeyBoundsLongRunIDsDeterministically(t *testing.T) {
+	longRunID := strings.Repeat("r", 96)
+	got := buildRunKey(longRunID, "0123456789abcdef0123456789abcdef", "index", -1)
+	if len(got) > 96 {
+		t.Fatalf("run key length=%d exceeds varchar(96): %q", len(got), got)
+	}
+	if got != buildRunKey(longRunID, "0123456789abcdef0123456789abcdef", "index", -1) {
+		t.Fatal("long run key must be deterministic")
+	}
+	other := buildRunKey(longRunID+"x", "0123456789abcdef0123456789abcdef", "index", -1)
+	if got == other {
+		t.Fatal("different long run IDs must not collapse to the same key")
+	}
+}
+
+func TestCreateRunTaskReusesExistingUniqueKey(t *testing.T) {
+	db := newPipelineTaskDB(t)
+	repo := NewPipelineTaskRepository(db).(*pipelineTaskRepository)
+	first := &model.PipelineTask{
+		FileMD5:        "md5",
+		Stage:          "index",
+		ChunkID:        -1,
+		Status:         model.PipelineStatusProcessing,
+		RunID:          "run-1",
+		IdempotencyKey: "run:run-1:md5:index:-1",
+	}
+	created, err := repo.createRunTask(first)
+	if err != nil {
+		t.Fatalf("first createRunTask: %v", err)
+	}
+	reused, err := repo.createRunTask(&model.PipelineTask{
+		FileMD5:        "md5",
+		Stage:          "index",
+		ChunkID:        -1,
+		Status:         model.PipelineStatusProcessing,
+		RunID:          "run-1",
+		IdempotencyKey: "run:run-1:md5:index:-1",
+	})
+	if err != nil {
+		t.Fatalf("duplicate createRunTask: %v", err)
+	}
+	if reused.ID != created.ID {
+		t.Fatalf("duplicate returned ID=%d, want existing ID=%d", reused.ID, created.ID)
+	}
+	var count int64
+	if err := db.Model(&model.PipelineTask{}).Where("idempotency_key = ?", "run:run-1:md5:index:-1").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("unique run row count=%d, want 1", count)
+	}
+}
+
+func TestMarkProcessingRunConcurrentSameKeyHasOneRow(t *testing.T) {
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=busy_timeout(5000)", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open concurrent sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(8)
+	if err := db.AutoMigrate(&model.PipelineTask{}); err != nil {
+		t.Fatalf("auto-migrate concurrent pipeline_task: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	repo := NewPipelineTaskRepository(db)
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := repo.MarkProcessingRun("concurrent-run", "md5", "index", -1)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent MarkProcessingRun: %v", err)
+		}
+	}
+	var count int64
+	if err := db.Model(&model.PipelineTask{}).Where("idempotency_key = ?", "run:concurrent-run:md5:index:-1").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("concurrent unique run row count=%d, want 1", count)
 	}
 }
 

@@ -67,6 +67,8 @@ func evHitDTO(chunkID int, parent, text string, userID uint, orgTag string, toke
 func evStoreVector(chunkID int, parent string, userID uint, orgTag, text string, tokens int) *model.DocumentVector {
 	v := evVector(chunkID, parent, "p1", userID, orgTag, text, tokens)
 	v.FileMD5 = "md5-evidence"
+	v.SheetName = "Metrics"
+	v.CellRange = "Metrics!A1:C40"
 	return v
 }
 
@@ -170,6 +172,9 @@ func TestOrchestratorSearchKnowledgeExpandsNeighborEvidence(t *testing.T) {
 	}
 	if neighbor.TokenCount != 30 {
 		t.Fatalf("neighbor token count lost in expansion: %d", neighbor.TokenCount)
+	}
+	if neighbor.SheetName != "Metrics" || neighbor.CellRange != "Metrics!A1:C40" {
+		t.Fatalf("neighbor spreadsheet coordinates lost in expansion: %#v", neighbor)
 	}
 }
 

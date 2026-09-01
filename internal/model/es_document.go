@@ -20,6 +20,8 @@ type SearchResponseDTO struct {
 	ElementTypes  []string `json:"elementTypes,omitempty"`
 	BBoxRefs      []string `json:"bboxRefs,omitempty"`
 	AssetRefs     []string `json:"assetRefs,omitempty"`
+	SheetName     string   `json:"sheetName,omitempty"`
+	CellRange     string   `json:"cellRange,omitempty"`
 	SourceURL     string   `json:"sourceUrl,omitempty"`
 	TokenCount    int      `json:"tokenCount,omitempty"`
 	// CitationKey is the stable citation for this chunk
@@ -51,6 +53,8 @@ type EsDocument struct {
 	SectionPath      []string  `json:"section_path,omitempty"`
 	PageID           string    `json:"page_id,omitempty"`
 	PageSpan         []int     `json:"page_span,omitempty"`
+	SheetName        string    `json:"sheet_name,omitempty"`
+	CellRange        string    `json:"cell_range,omitempty"`
 	ElementIDs       []string  `json:"element_ids,omitempty"`
 	ElementTypes     []string  `json:"element_types,omitempty"`
 	BBoxRefs         []string  `json:"bbox_refs,omitempty"`

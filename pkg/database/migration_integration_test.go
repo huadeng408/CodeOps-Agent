@@ -34,7 +34,7 @@ func TestStructuredChunkColumnsExistInMySQL(t *testing.T) {
 	if err := EnsureRuntimeSchema(); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"EmbeddingText", "TokenCount"} {
+	for _, field := range []string{"EmbeddingText", "TokenCount", "SheetName", "CellRange"} {
 		if !db.Migrator().HasColumn(&model.DocumentVector{}, field) {
 			t.Fatalf("document_vectors is missing %s", field)
 		}

@@ -90,7 +90,9 @@ def chunk_elements(
 def chunk_elements_for_modality(
     elements: list[Element],
     *,
-    modality: Literal["text", "office_document", "slide", "spreadsheet", "visual_page"],
+    modality: Literal[
+        "text", "office_document", "slide", "spreadsheet", "visual_page", "pdf", "table", "formula"
+    ],
     child_tokens: int = 500,
     parent_tokens: int = 1500,
     overlap_tokens: int | None = None,
@@ -104,10 +106,18 @@ def chunk_elements_for_modality(
     note as its own child in source order.
     """
 
-    if modality not in {"text", "office_document", "slide", "spreadsheet", "visual_page"}:
+    if modality not in {"text", "office_document", "slide", "spreadsheet", "visual_page", "pdf", "table", "formula"}:
         raise ValueError(f"unsupported modality: {modality}")
     if modality == "text":
         return chunk_elements(
+            elements,
+            child_tokens=child_tokens,
+            parent_tokens=parent_tokens,
+            overlap_tokens=overlap_tokens,
+            corpus_generation=corpus_generation,
+        )
+    if modality == "pdf":
+        return _chunk_pdf_pages(
             elements,
             child_tokens=child_tokens,
             parent_tokens=parent_tokens,
@@ -148,6 +158,60 @@ def chunk_elements_for_modality(
             parent_size += child.token_count
             child.embedding_text = _contextual_text(child, section, payload)
         result.extend(children)
+    return result
+
+
+def _chunk_pdf_pages(
+    elements: list[Element],
+    *,
+    child_tokens: int,
+    parent_tokens: int,
+    overlap_tokens: int | None,
+    corpus_generation: str,
+) -> list[StructuredChunk]:
+    """Chunk MinerU PDF elements without allowing evidence across pages.
+
+    A page is the visual parent boundary. Typed elements inside a page still
+    use the normal table/equation/image hard boundaries and retain their
+    original element IDs and bbox references.
+    """
+    if child_tokens <= 0 or parent_tokens <= 0:
+        raise ValueError("chunk token limits must be positive")
+    if overlap_tokens is None:
+        overlap_tokens = min(48, child_tokens // 8)
+    if overlap_tokens < 0 or overlap_tokens >= child_tokens:
+        raise ValueError("overlap_tokens must be non-negative and smaller than child_tokens")
+
+    result: list[StructuredChunk] = []
+    chunk_number = 0
+    parent_number = 0
+    for section, section_elements in _sections(elements):
+        payload = [item for item in section_elements if item.type not in {"heading", "page_break"}]
+        pages: dict[int, list[Element]] = {}
+        for element in payload:
+            pages.setdefault(element.page_index, []).append(element)
+        for page_elements in pages.values():
+            children = _chunk_section(
+                page_elements,
+                child_tokens,
+                overlap_tokens,
+                corpus_generation,
+                chunk_number,
+            )
+            chunk_number += len(children)
+            if not children:
+                continue
+            parent_id = ""
+            parent_size = 0
+            for child in children:
+                if not parent_id or (parent_size and parent_size + child.token_count > parent_tokens):
+                    parent_number += 1
+                    parent_id = f"{page_elements[0].document_id}:parent:{parent_number}"
+                    parent_size = 0
+                child.parent_chunk_id = parent_id
+                parent_size += child.token_count
+                child.embedding_text = _contextual_text(child, section, page_elements)
+            result.extend(children)
     return result
 
 

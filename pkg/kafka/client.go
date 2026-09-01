@@ -156,6 +156,7 @@ func produceToTopic(ctx context.Context, topic string, task tasks.FileProcessing
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		writeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		err = writer.WriteMessages(writeCtx, kafka.Message{
+			Key:   []byte(taskMessageKey(task)),
 			Time:  time.Now(),
 			Value: taskBytes,
 		})
@@ -166,7 +167,7 @@ func produceToTopic(ctx context.Context, topic string, task tasks.FileProcessing
 
 		lastErr = err
 		log.Warnf("Kafka writer fallback probe, topic=%s attempt=%d/%d err=%v", topic, attempt, maxAttempts, err)
-		if leaderErr := produceByLeaderDial(ctx, topic, taskBytes); leaderErr == nil {
+		if leaderErr := produceByLeaderDial(ctx, topic, taskBytes, taskMessageKey(task)); leaderErr == nil {
 			log.Infof("Kafka leader dial fallback succeeded, topic=%s attempt=%d/%d", topic, attempt, maxAttempts)
 			return nil
 		} else {
@@ -194,7 +195,7 @@ func produceToTopic(ctx context.Context, topic string, task tasks.FileProcessing
 }
 
 // produceByLeaderDial handles produce by leader dial.
-func produceByLeaderDial(ctx context.Context, topic string, taskBytes []byte) error {
+func produceByLeaderDial(ctx context.Context, topic string, taskBytes []byte, messageKey string) error {
 	if producerDialer == nil {
 		return errors.New("kafka producer dialer not initialized")
 	}
@@ -212,6 +213,7 @@ func produceByLeaderDial(ctx context.Context, topic string, taskBytes []byte) er
 
 		_ = conn.SetWriteDeadline(time.Now().Add(20 * time.Second))
 		_, err = conn.WriteMessages(kafka.Message{
+			Key:   []byte(messageKey),
 			Time:  time.Now(),
 			Value: taskBytes,
 		})
@@ -226,6 +228,20 @@ func produceByLeaderDial(ctx context.Context, topic string, taskBytes []byte) er
 		lastErr = fmt.Errorf("failed to dial kafka leader for topic=%s", topic)
 	}
 	return lastErr
+}
+
+// taskMessageKey keeps all deliveries for one file/stage/chunk in one Kafka
+// partition. A controlled run is part of the key so separate replays remain
+// independently ordered while duplicate delivery within a run stays stable.
+func taskMessageKey(task tasks.FileProcessingTask) string {
+	chunkID := -1
+	if task.TaskChunkID > 0 {
+		chunkID = task.TaskChunkID
+	}
+	if runID := strings.TrimSpace(task.RunID); runID != "" {
+		return fmt.Sprintf("%s:%s:%s:%d", runID, task.FileMD5, task.Stage, chunkID)
+	}
+	return fmt.Sprintf("%s:%s:%d", task.FileMD5, task.Stage, chunkID)
 }
 
 // ProduceFileTask enqueues the first stage of the pipeline (parse).
@@ -298,11 +314,10 @@ func consumeStage(cfg serverconfig.KafkaConfig, tracker repository.PipelineTaskR
 		if task.TaskChunkID > 0 {
 			chunkID = task.TaskChunkID
 		}
-		// Run-aware dedup: a message carrying a RunID belongs to a controlled
-		// replay and must NOT be skipped by a stale SUCCESS from a prior run.
-		// Dedup within the same run is handled by MarkProcessingRun's upsert.
-		// Legacy messages (no RunID) keep their original key and SUCCESS-skip
-		// semantics, so existing pipeline_task rows behave exactly as before.
+		// Run-aware dedup uses the run-prefixed key, so a fresh controlled run
+		// does not see an earlier run's SUCCESS. Once that same run key is
+		// SUCCESS, an at-least-once Kafka duplicate must be discarded before it
+		// can repeat post-index cleanup.
 		hasRunID := strings.TrimSpace(task.RunID) != ""
 		var previous *model.PipelineTask
 		var getErr error
@@ -401,19 +416,12 @@ func pipelineReaderConfig(brokers []string, topic, groupID string) kafka.ReaderC
 // shouldSkipByStatus decides whether a fetched Kafka message should be skipped
 // because the prior pipeline_task row for its dedup key is already SUCCESS.
 //
-// Legacy semantics (hasRunID==false): skip iff a prior SUCCESS row exists —
-// identical to the pre-run-aware behavior, so the 44 existing legacy rows and
-// ordinary uploads are unaffected.
-//
-// Run semantics (hasRunID==true): NEVER skip on a prior SUCCESS. A controlled
-// replay (distinct RunID) must always execute end-to-end; intra-run duplicate
-// messages are deduped by MarkProcessingRun's idempotent upsert, not by the
-// SUCCESS check here. A nil previous (no row yet) never skips.
+// Both legacy and run-aware lookups skip only a prior SUCCESS. Run-aware
+// callers query by run-prefixed key first, so a distinct controlled run has no
+// matching previous row and remains replayable; only duplicate delivery inside
+// the same run is skipped. A nil previous never skips.
 func shouldSkipByStatus(previous *model.PipelineTask, hasRunID bool) bool {
 	if previous == nil {
-		return false
-	}
-	if hasRunID {
 		return false
 	}
 	return previous.Status == model.PipelineStatusSuccess

@@ -122,6 +122,42 @@ func TestProcessIndexExternalNoActiveMarkOnESFailure(t *testing.T) {
 	}
 }
 
+func TestProcessIndexExternalRejectsPartialIndexBeforeActivatingDocument(t *testing.T) {
+	repo := &fakeVectorRepo{vectors: []*model.DocumentVector{structuredVectorItem(0), structuredVectorItem(1)}}
+	// The worker acknowledged only one of the two documents without returning
+	// an HTTP error. This must remain retryable rather than becoming ACTIVE.
+	ingestion := &fakeIngestionClient{indexResult: 1}
+	docRepo := &fakeDocumentRepo{}
+	p := newExternalIndexProcessor(repo, ingestion, docRepo)
+	p.vectorCache = func(_ context.Context, _ string) (map[int][]float32, error) {
+		return map[int][]float32{0: native1024(0), 1: native1024(1)}, nil
+	}
+
+	err := p.processIndexExternal(context.Background(), fileTask())
+	if err == nil || !strings.Contains(err.Error(), "indexed 1/2 documents") {
+		t.Fatalf("expected partial index rejection, got %v", err)
+	}
+	if len(docRepo.markCalls) != 0 {
+		t.Fatalf("expected ZERO ACTIVE marks after partial index, got %d", len(docRepo.markCalls))
+	}
+}
+
+func TestProcessIndexExternalRejectsZeroIndexBeforeActivatingDocument(t *testing.T) {
+	repo := &fakeVectorRepo{vectors: []*model.DocumentVector{structuredVectorItem(0)}}
+	ingestion := &fakeIngestionClient{indexResult: 0}
+	docRepo := &fakeDocumentRepo{}
+	p := newExternalIndexProcessor(repo, ingestion, docRepo)
+	p.vectorCache = native1024Cache(0)
+
+	err := p.processIndexExternal(context.Background(), fileTask())
+	if err == nil || !strings.Contains(err.Error(), "indexed 0/1 documents") {
+		t.Fatalf("expected zero index rejection, got %v", err)
+	}
+	if len(docRepo.markCalls) != 0 {
+		t.Fatalf("expected ZERO ACTIVE marks after zero index, got %d", len(docRepo.markCalls))
+	}
+}
+
 // (f) An empty DocumentID (legacy task) must never touch the document repo.
 func TestProcessIndexExternalSkipsMarkWhenDocumentIDEmpty(t *testing.T) {
 	repo := &fakeVectorRepo{vectors: []*model.DocumentVector{structuredVectorItem(0)}}

@@ -3,10 +3,12 @@ package repository
 
 import (
 	"code-agent/internal/model"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PipelineTaskRepository defines persistence operations for pipeline task data.
@@ -50,7 +52,11 @@ func buildPipelineKey(fileMD5, stage string, chunkID int) string {
 // run-keyed rows in a separate namespace from legacy keys (file_md5:stage:chunk_id),
 // so both can coexist for the same file_md5 without colliding on the unique index.
 func buildRunKey(runID, fileMD5, stage string, chunkID int) string {
-	return fmt.Sprintf("run:%s:%s:%s:%d", runID, fileMD5, stage, chunkID)
+	raw := fmt.Sprintf("run:%s:%s:%s:%d", runID, fileMD5, stage, chunkID)
+	if len(raw) <= 96 {
+		return raw
+	}
+	return fmt.Sprintf("runhash:%x", sha256.Sum256([]byte(raw)))
 }
 
 // GetByKey returns by key.
@@ -158,10 +164,27 @@ func (r *pipelineTaskRepository) MarkProcessingRun(runID, fileMD5, stage string,
 			RunID:          runID,
 			IdempotencyKey: buildRunKey(runID, fileMD5, stage, chunkID),
 		}
-		return task, r.db.Create(task).Error
+		return r.createRunTask(task)
 	}
 	task.Status = model.PipelineStatusProcessing
 	return task, r.db.Save(task).Error
+}
+
+// createRunTask inserts a new run row without exposing a unique-key race to
+// concurrent Kafka deliveries. The unique idempotency key is the database
+// arbiter; both the winner and a conflict loser re-read the same persisted row.
+func (r *pipelineTaskRepository) createRunTask(task *model.PipelineTask) (*model.PipelineTask, error) {
+	if err := r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "idempotency_key"}},
+		DoNothing: true,
+	}).Create(task).Error; err != nil {
+		return nil, err
+	}
+	var existing model.PipelineTask
+	if err := r.db.Where("idempotency_key = ?", task.IdempotencyKey).First(&existing).Error; err != nil {
+		return nil, err
+	}
+	return &existing, nil
 }
 
 // MarkSuccessRun flips the run row to SUCCESS.

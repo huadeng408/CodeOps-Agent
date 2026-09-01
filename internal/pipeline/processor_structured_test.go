@@ -19,6 +19,8 @@ func TestDocumentVectorFromStructuredChunkPreservesProvenance(t *testing.T) {
 		EmbeddingText:    "title\nexact source",
 		SectionPath:      []string{"Guide", "Intro"},
 		PageID:           "doc-1:p1",
+		SheetName:        "Metrics",
+		CellRange:        "Metrics!A2:C5",
 		PageSpan:         []int{1, 1},
 		ElementIDs:       []string{"e1"},
 		ElementTypes:     []string{"text"},
@@ -41,6 +43,9 @@ func TestDocumentVectorFromStructuredChunkPreservesProvenance(t *testing.T) {
 	if vector.DocumentID != chunk.DocumentID || vector.PageID != chunk.PageID || vector.ParentChunkID != chunk.ParentChunkID {
 		t.Fatalf("vector document provenance = %+v", vector)
 	}
+	if vector.SheetName != chunk.SheetName || vector.CellRange != chunk.CellRange {
+		t.Fatalf("vector spreadsheet provenance = %+v", vector)
+	}
 	if vector.TokenizerID != chunk.TokenizerID || vector.ParserName != chunk.ParserName || vector.ParserVersion != chunk.ParserVersion || vector.CorpusGeneration != chunk.CorpusGeneration {
 		t.Fatalf("vector parser provenance = %+v", vector)
 	}
@@ -56,6 +61,7 @@ func TestStructuredEmbeddingAndIndexPreserveSeparateTextFields(t *testing.T) {
 	item := &model.DocumentVector{
 		FileMD5: "file", ChunkID: 2, TextContent: "exact source", EmbeddingText: "Guide\nexact source",
 		DocumentID: "doc-1", ParentChunkID: "parent-1", PageID: "doc-1:p0", PageSpan: []int{0, 0},
+		SheetName: "Metrics", CellRange: "Metrics!A2:C5",
 		ElementIDs: []string{"e1"}, ElementTypes: []string{"text"}, BBoxRefs: []string{"e1:0,0,1,1"},
 		AssetRefs: []string{"asset"}, TokenCount: 2, TokenizerID: "whitespace-v1", ParserName: "mineru",
 		ParserVersion: "3.4.4", CorpusGeneration: "techdocs-2026-07-30-v1", UserID: 7, OrgTag: "org",
@@ -69,6 +75,9 @@ func TestStructuredEmbeddingAndIndexPreserveSeparateTextFields(t *testing.T) {
 	}
 	if doc.DocumentID != item.DocumentID || doc.PageID != item.PageID || len(doc.ElementIDs) != 1 {
 		t.Fatalf("provenance was not preserved: %+v", doc)
+	}
+	if doc.SheetName != item.SheetName || doc.CellRange != item.CellRange {
+		t.Fatalf("spreadsheet coordinates were not preserved: %+v", doc)
 	}
 }
 

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ServerUrl = "http://127.0.0.1:8081",
+    [string]$ServerUrl = "http://127.0.0.1:8082",
+    [int]$WorkerPort = 8092,
     [string]$MinerUCommand = "D:/tools/mineru-3.4.4-cpython/Scripts/mineru.exe",
     [int]$StartupTimeoutSeconds = 600,
     [string]$ArtifactRoot = ".tmp/rag-agent-e2e"
@@ -27,6 +28,8 @@ $serverStartedHere = $false
 $workerProcess = $null
 $workerStartedHere = $false
 $completed = $false
+$e2eKafkaTopics = $null
+$kafkaContainerName = $null
 $runId = "{0}-{1}" -f (Get-Date -Format "yyyyMMddHHmmss"), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
 $serverStdout = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-e2e-$runId.stdout.log"
 $serverStderr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-rag-e2e-$runId.stderr.log"
@@ -52,7 +55,18 @@ $trackedEnvironmentNames = @(
     "CODE_AGENT_RAG_SOURCE_COMMIT",
     "CODE_AGENT_RAG_TARGET_INDEX",
     "CODE_AGENT_RAG_CORPUS_GENERATION",
-    "CODE_AGENT_RAG_RUN_ID"
+    "CODE_AGENT_RAG_RUN_ID",
+    "CODE_AGENT_SERVER_PORT",
+    "PAISMART_GO_BASE_URL",
+    "PAISMART_INGESTION_BASE_URL",
+    "PAISMART_PORT",
+    "CODE_AGENT_RAG_READ_ALIAS",
+    "CODE_AGENT_KAFKA_PARSE_TOPIC",
+    "CODE_AGENT_KAFKA_CHUNK_TOPIC",
+    "CODE_AGENT_KAFKA_EMBED_TOPIC",
+    "CODE_AGENT_KAFKA_INDEX_TOPIC",
+    "CODE_AGENT_KAFKA_DLQ_TOPIC",
+    "CODE_AGENT_KAFKA_CONSUMER_GROUP_PREFIX"
 )
 $trackedEnvironment = @{}
 foreach ($name in $trackedEnvironmentNames) {
@@ -124,6 +138,71 @@ function Resolve-InternalSecret {
     return $fromEnvironment
 }
 
+function Test-KafkaReady {
+    param([Parameter(Mandatory = $true)][string]$ContainerName)
+    & docker exec $ContainerName kafka-topics --bootstrap-server localhost:9092 --list 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+function New-E2EKafkaTopics {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][hashtable]$Topics
+    )
+
+    foreach ($topic in $Topics.Values) {
+        & docker exec $ContainerName kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic $topic 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "failed to create isolated Kafka topic $topic"
+        }
+    }
+}
+
+function Remove-E2EKafkaTopics {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][hashtable]$Topics
+    )
+
+    foreach ($topic in $Topics.Values) {
+        & docker exec $ContainerName kafka-topics --bootstrap-server localhost:9092 --delete --if-exists --topic $topic 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "could not remove isolated Kafka topic $topic"
+        }
+    }
+}
+
+function Remove-E2EKafkaGroups {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][string]$GroupPrefix
+    )
+
+    foreach ($stage in @("parse", "chunk", "embed", "index")) {
+        $group = "$GroupPrefix-$stage"
+        $result = @(& docker exec $ContainerName kafka-consumer-groups --bootstrap-server localhost:9092 --delete --group $group 2>&1)
+        $exitCode = $LASTEXITCODE
+        $text = ($result -join "`n")
+        if ($text -match "GroupIdNotFoundException|group id does not exist|does not exist") {
+            Write-Host "Kafka consumer group already absent: $group"
+            continue
+        }
+        if ($exitCode -ne 0 -or $text -match "could not be deleted|failed") {
+            throw "could not remove isolated Kafka consumer group ${group}: $text"
+        }
+    }
+}
+
+function Resolve-MinIOContainerName {
+    if (Test-ContainerRunning "codeagent-minio") {
+        return "codeagent-minio"
+    }
+    if (Test-ContainerRunning "minio") {
+        return "minio"
+    }
+    return $null
+}
+
 function Test-EmbeddingReady {
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:8009/health" -TimeoutSec 5
@@ -151,7 +230,7 @@ function Write-DataSnapshot {
     foreach ($index in @("knowledge_base", "knowledge_base_v2_bge_m3", "conversation_memory")) {
         $es[$index] = [int64](Invoke-RestMethod -Uri "http://127.0.0.1:9200/$index/_count" -TimeoutSec 10).count
     }
-    $minioText = & docker exec codeagent-minio sh -c "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin >/dev/null && mc ls --recursive local/uploads | wc -l"
+    $minioText = & docker exec $minioContainerName sh -c "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin >/dev/null && mc ls --recursive local/uploads | wc -l"
     if ($LASTEXITCODE -ne 0) { throw "MinIO snapshot failed" }
     [ordered]@{
         run_id = $runId
@@ -241,30 +320,74 @@ try {
     }
 
     Write-Host "Starting required RAG infrastructure without removing existing containers or volumes..."
-    & docker compose up -d mysql redis minio minio-init tika zookeeper kafka kafka-init es embedding
+    # Reuse an already healthy Tika endpoint (for example, a separately
+    # managed local stack) instead of competing for the fixed host port 9998.
+    # All other services remain owned by this compose project and keep their
+    # existing startup/readiness checks below.
+    $tikaAlreadyAvailable = Test-HttpEndpoint "http://127.0.0.1:9998/"
+    $minioAlreadyAvailable = Test-HttpEndpoint "http://127.0.0.1:9000/minio/health/live"
+    $esAlreadyAvailable = Test-HttpEndpoint "http://127.0.0.1:9200/_cluster/health"
+    $kafkaContainerName = if (Test-KafkaReady "kafka") { "kafka" } else { "codeagent-kafka" }
+    $kafkaAlreadyAvailable = $kafkaContainerName -eq "kafka"
+    $minioContainerName = Resolve-MinIOContainerName
+    if ($minioAlreadyAvailable -and $null -eq $minioContainerName) {
+        throw "MinIO endpoint is already listening but no supported Docker container is available for the required snapshot"
+    }
+    $composeServices = @("mysql", "redis", "zookeeper", "embedding")
+    if (-not $minioAlreadyAvailable) {
+        $composeServices += @("minio", "minio-init")
+    }
+    if (-not $kafkaAlreadyAvailable) {
+        $composeServices += @("kafka", "kafka-init")
+    }
+    if (-not $esAlreadyAvailable) {
+        $composeServices += "es"
+    }
+    if (-not $tikaAlreadyAvailable) {
+        $composeServices += "tika"
+    }
+    & docker compose up -d @composeServices
     if ($LASTEXITCODE -ne 0) {
         throw "docker compose up failed"
     }
 
     Wait-Until { Test-ContainerHealthy "codeagent-mysql" } "MySQL" $StartupTimeoutSeconds
     Wait-Until { Test-ContainerHealthy "codeagent-redis" } "Redis" $StartupTimeoutSeconds
-    Wait-Until { Test-ContainerRunning "codeagent-minio" } "MinIO container" $StartupTimeoutSeconds
-    Wait-Until { Test-InitContainerSucceeded "codeagent-minio-init" } "MinIO bucket initialization" $StartupTimeoutSeconds
-    Wait-Until { Test-ContainerRunning "codeagent-tika" } "Tika container" $StartupTimeoutSeconds
+    if ($minioAlreadyAvailable) {
+        Write-Host "Using the MinIO endpoint already listening at http://127.0.0.1:9000"
+    }
+    else {
+        Wait-Until { Test-ContainerRunning "codeagent-minio" } "MinIO container" $StartupTimeoutSeconds
+        Wait-Until { Test-InitContainerSucceeded "codeagent-minio-init" } "MinIO bucket initialization" $StartupTimeoutSeconds
+        $minioContainerName = "codeagent-minio"
+    }
+    if ($tikaAlreadyAvailable) {
+        Write-Host "Using the Tika endpoint already listening at http://127.0.0.1:9998"
+    }
+    else {
+        Wait-Until { Test-ContainerRunning "codeagent-tika" } "Tika container" $StartupTimeoutSeconds
+    }
     Wait-Until { Test-ContainerRunning "codeagent-zookeeper" } "ZooKeeper" $StartupTimeoutSeconds
-    Wait-Until { Test-ContainerRunning "codeagent-kafka" } "Kafka" $StartupTimeoutSeconds
-    Wait-Until { Test-InitContainerSucceeded "codeagent-kafka-init" } "Kafka topic initialization" $StartupTimeoutSeconds
-    Wait-Until { Test-ContainerHealthy "codeagent-es" } "Elasticsearch container" $StartupTimeoutSeconds
+    if ($kafkaAlreadyAvailable) {
+        Write-Host "Using the Kafka broker already listening at localhost:9092"
+    }
+    else {
+        Wait-Until { Test-ContainerRunning "codeagent-kafka" } "Kafka" $StartupTimeoutSeconds
+        Wait-Until { Test-InitContainerSucceeded "codeagent-kafka-init" } "Kafka topic initialization" $StartupTimeoutSeconds
+    }
+    if ($esAlreadyAvailable) {
+        Write-Host "Using the Elasticsearch endpoint already listening at http://127.0.0.1:9200"
+    }
+    else {
+        Wait-Until { Test-ContainerHealthy "codeagent-es" } "Elasticsearch container" $StartupTimeoutSeconds
+    }
     Wait-Until { Test-ContainerRunning "codeagent-embedding" } "embedding container" $StartupTimeoutSeconds
 
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9000/minio/health/live" } "MinIO HTTP health" $StartupTimeoutSeconds
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9998/" } "Tika HTTP endpoint" $StartupTimeoutSeconds
     Wait-Until { Test-HttpEndpoint "http://127.0.0.1:9200/_cluster/health" } "Elasticsearch HTTP health" $StartupTimeoutSeconds
     Wait-Until { Test-EmbeddingReady } "native BGE-M3 embedding readiness" $StartupTimeoutSeconds
-    Wait-Until {
-        & docker compose exec -T kafka kafka-topics --bootstrap-server kafka:29092 --list 2>$null | Out-Null
-        return $LASTEXITCODE -eq 0
-    } "Kafka broker" $StartupTimeoutSeconds
+    Wait-Until { Test-KafkaReady $kafkaContainerName } "Kafka broker" $StartupTimeoutSeconds
 
     $env:CODE_AGENT_MINERU_COMMAND = $MinerUCommand
     $env:CODE_AGENT_MINERU_BACKEND = "pipeline"
@@ -281,35 +404,55 @@ try {
 	if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
 		throw "cannot resolve an auditable source commit from git HEAD"
 	}
-    if (-not (Test-HttpEndpoint "http://127.0.0.1:8090/healthz")) {
-        Write-Host "Starting Python ingestion worker for this E2E run..."
-        $workerProcess = Invoke-WithPaismartInternalToken -Secret $internalSecret -Action {
-            Start-Process -FilePath "C:\Python312\python.exe" `
-                -ArgumentList "-m", "uvicorn", "orchestrator.rag.main:app", "--host", "127.0.0.1", "--port", "8090" `
-                -WorkingDirectory $repoRoot -RedirectStandardOutput $workerStdout -RedirectStandardError $workerStderr `
-                -WindowStyle Hidden -PassThru
-        }
-        $workerStartedHere = $true
-        Wait-Until { Test-HttpEndpoint "http://127.0.0.1:8090/healthz" } "Python ingestion worker" $StartupTimeoutSeconds
+    $kafkaTopicPrefix = "codeagent-rag-e2e-$runId"
+    $e2eKafkaTopics = [ordered]@{
+        Parse = "$kafkaTopicPrefix-parse"
+        Chunk = "$kafkaTopicPrefix-chunk"
+        Embed = "$kafkaTopicPrefix-embed"
+        Index = "$kafkaTopicPrefix-index"
+        DLQ = "$kafkaTopicPrefix-dlq"
     }
-    else {
-        Write-Host "Using the Python ingestion worker already listening at http://127.0.0.1:8090"
+    New-E2EKafkaTopics -ContainerName $kafkaContainerName -Topics $e2eKafkaTopics
+    $env:CODE_AGENT_KAFKA_PARSE_TOPIC = $e2eKafkaTopics.Parse
+    $env:CODE_AGENT_KAFKA_CHUNK_TOPIC = $e2eKafkaTopics.Chunk
+    $env:CODE_AGENT_KAFKA_EMBED_TOPIC = $e2eKafkaTopics.Embed
+    $env:CODE_AGENT_KAFKA_INDEX_TOPIC = $e2eKafkaTopics.Index
+    $env:CODE_AGENT_KAFKA_DLQ_TOPIC = $e2eKafkaTopics.DLQ
+    $env:CODE_AGENT_KAFKA_CONSUMER_GROUP_PREFIX = "codeagent-rag-e2e-$runId"
+    $workerUrl = "http://127.0.0.1:{0}" -f $WorkerPort
+    if (Test-HttpEndpoint "$workerUrl/healthz") {
+        throw "refusing to reuse an existing Python ingestion worker at $workerUrl; choose a free -WorkerPort for an isolated E2E run"
     }
-    if (-not (Test-HttpEndpoint "$ServerUrl/healthz")) {
-        Write-Host "Starting Go server for this E2E run..."
-        & go build -o $serverExecutable ./cmd/server
-        if ($LASTEXITCODE -ne 0) {
-            throw "building Go server failed"
-        }
-        $serverProcess = Invoke-WithOrchestratorSharedSecret -Secret $internalSecret -Action {
-            Start-Process -FilePath $serverExecutable -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr -WindowStyle Hidden -PassThru
-        }
-        $serverStartedHere = $true
-        Wait-Until { Test-HttpEndpoint "$ServerUrl/healthz" } "Go server" $StartupTimeoutSeconds
+    Write-Host "Starting Python ingestion worker for this E2E run..."
+    $env:PAISMART_PORT = "$WorkerPort"
+    $env:PAISMART_GO_BASE_URL = $ServerUrl
+    $workerProcess = Invoke-WithPaismartInternalToken -Secret $internalSecret -Action {
+        Start-Process -FilePath "C:\Python312\python.exe" `
+            -ArgumentList "-m", "uvicorn", "orchestrator.rag.main:app", "--host", "127.0.0.1", "--port", "$WorkerPort" `
+            -WorkingDirectory $repoRoot -RedirectStandardOutput $workerStdout -RedirectStandardError $workerStderr `
+            -WindowStyle Hidden -PassThru
     }
-    else {
-        Write-Host "Using the Go server already listening at $ServerUrl"
+    $workerStartedHere = $true
+    Wait-Until { Test-HttpEndpoint "$workerUrl/healthz" } "Python ingestion worker" $StartupTimeoutSeconds
+    if (Test-HttpEndpoint "$ServerUrl/healthz") {
+        throw "refusing to reuse an existing Go server at $ServerUrl; choose a free -ServerUrl for an isolated E2E run"
     }
+    Write-Host "Starting Go server for this E2E run..."
+    & go build -o $serverExecutable ./cmd/server
+    if ($LASTEXITCODE -ne 0) {
+        throw "building Go server failed"
+    }
+	$serverPort = ([Uri]$ServerUrl).Port
+    $env:CODE_AGENT_SERVER_PORT = "$serverPort"
+    $env:PAISMART_INGESTION_BASE_URL = $workerUrl
+    # This run must not create or retarget the shared read alias. Search
+    # the existing isolated write index directly for its private marker.
+    $env:CODE_AGENT_RAG_READ_ALIAS = $targetIndex
+    $serverProcess = Invoke-WithOrchestratorSharedSecret -Secret $internalSecret -Action {
+        Start-Process -FilePath $serverExecutable -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr -WindowStyle Hidden -PassThru
+    }
+    $serverStartedHere = $true
+    Wait-Until { Test-HttpEndpoint "$ServerUrl/healthz" } "Go server" $StartupTimeoutSeconds
 	Invoke-RAGInternalProbe -ServerUrl $ServerUrl -InternalSecret $internalSecret
 	Write-DataSnapshot -Path $snapshotBefore
 
@@ -349,6 +492,10 @@ finally {
 			}
 			try { $serverProcess.WaitForExit() } catch { }
 			$serverProcess.Dispose()
+		}
+		if ($null -ne $e2eKafkaTopics -and -not [string]::IsNullOrWhiteSpace($kafkaContainerName)) {
+			Remove-E2EKafkaGroups -ContainerName $kafkaContainerName -GroupPrefix "codeagent-rag-e2e-$runId"
+			Remove-E2EKafkaTopics -ContainerName $kafkaContainerName -Topics $e2eKafkaTopics
 		}
 		if (Test-Path -LiteralPath $serverExecutable -PathType Leaf) {
             Remove-Item -LiteralPath $serverExecutable -Force -ErrorAction SilentlyContinue

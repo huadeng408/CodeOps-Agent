@@ -18,6 +18,8 @@ type DocumentVector struct {
 	SourceID         string   `gorm:"type:varchar(128);column:source_id" json:"source_id,omitempty"`
 	PageID           string   `gorm:"type:varchar(255);column:page_id"`
 	ParentChunkID    string   `gorm:"type:varchar(255);column:parent_chunk_id"`
+	SheetName        string   `gorm:"type:varchar(255);column:sheet_name" json:"sheet_name,omitempty"`
+	CellRange        string   `gorm:"type:varchar(255);column:cell_range" json:"cell_range,omitempty"`
 	SectionPath      []string `gorm:"type:json;serializer:json;column:section_path"`
 	PageSpan         []int    `gorm:"type:json;serializer:json;column:page_span"`
 	ElementIDs       []string `gorm:"type:json;serializer:json;column:element_ids"`

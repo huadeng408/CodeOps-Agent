@@ -180,7 +180,7 @@ func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks
 		}
 	}
 	if err := p.docVectorRepo.BatchCreate(dbVectors); err != nil {
-		p.markDocumentFailed(ctx, task, "chunk", err)
+		p.indexStage().markDocumentFailed(ctx, task, "chunk", err)
 		return fmt.Errorf("chunk: persist chunks failed: %w", err)
 	}
 

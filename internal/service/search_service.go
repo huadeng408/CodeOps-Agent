@@ -611,6 +611,8 @@ func (s *searchService) buildResponseDTOs(hits []retrievalHit) ([]model.SearchRe
 			SectionPath:   hit.Source.SectionPath,
 			PageID:        hit.Source.PageID,
 			PageSpan:      hit.Source.PageSpan,
+			SheetName:     hit.Source.SheetName,
+			CellRange:     hit.Source.CellRange,
 			ElementIDs:    hit.Source.ElementIDs,
 			ElementTypes:  hit.Source.ElementTypes,
 			BBoxRefs:      hit.Source.BBoxRefs,
@@ -717,7 +719,7 @@ func buildPermissionFilter(userID uint, orgTags []string) map[string]any {
 
 // buildSourceFields builds source fields.
 func buildSourceFields() []string {
-	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url", "token_count"}
+	return []string{"file_md5", "chunk_id", "text_content", "user_id", "org_tag", "is_public", "document_id", "parent_chunk_id", "section_path", "page_id", "page_span", "sheet_name", "cell_range", "element_ids", "element_types", "bbox_refs", "asset_refs", "source_url", "token_count"}
 }
 
 // fuseAndExpand keeps evidence diverse by allowing only one hit per

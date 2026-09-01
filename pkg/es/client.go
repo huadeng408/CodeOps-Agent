@@ -144,6 +144,8 @@ func createIndexIfNotExists(indexName string, vectorDims int) error {
 					"similarity": "cosine"
 				},
 				"model_version": { "type": "keyword" },
+				"sheet_name": { "type": "keyword" },
+				"cell_range": { "type": "keyword" },
 				"user_id": { "type": "long" },
 				"org_tag": { "type": "keyword" },
 				"is_public": { "type": "boolean" }

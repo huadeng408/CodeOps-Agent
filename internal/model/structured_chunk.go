@@ -17,6 +17,8 @@ type StructuredChunk struct {
 	SectionPath      []string `json:"section_path,omitempty"`
 	PageID           string   `json:"page_id"`
 	PageSpan         []int    `json:"page_span,omitempty"`
+	SheetName        string   `json:"sheet_name,omitempty"`
+	CellRange        string   `json:"cell_range,omitempty"`
 	ElementIDs       []string `json:"element_ids"`
 	ElementTypes     []string `json:"element_types"`
 	BBoxRefs         []string `json:"bbox_refs,omitempty"`
