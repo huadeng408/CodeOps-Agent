@@ -172,6 +172,30 @@ function Remove-E2EKafkaTopics {
     }
 }
 
+function Test-E2EKafkaGroupInactive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][string]$Group
+    )
+
+    $result = @(& docker exec $ContainerName kafka-consumer-groups --bootstrap-server localhost:9092 --describe --group $Group 2>&1)
+    $text = ($result -join "`n")
+    return $text -match "has no active members|GroupIdNotFoundException|group id does not exist|does not exist"
+}
+
+function Wait-E2EKafkaGroupsInactive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][string]$GroupPrefix,
+        [int]$TimeoutSeconds = 60
+    )
+
+    foreach ($stage in @("parse", "chunk", "embed", "index")) {
+        $group = "$GroupPrefix-$stage"
+        Wait-Until { Test-E2EKafkaGroupInactive -ContainerName $ContainerName -Group $group } "Kafka consumer group inactive: $group" $TimeoutSeconds
+    }
+}
+
 function Remove-E2EKafkaGroups {
     param(
         [Parameter(Mandatory = $true)][string]$ContainerName,
@@ -494,6 +518,7 @@ finally {
 			$serverProcess.Dispose()
 		}
 		if ($null -ne $e2eKafkaTopics -and -not [string]::IsNullOrWhiteSpace($kafkaContainerName)) {
+			Wait-E2EKafkaGroupsInactive -ContainerName $kafkaContainerName -GroupPrefix "codeagent-rag-e2e-$runId"
 			Remove-E2EKafkaGroups -ContainerName $kafkaContainerName -GroupPrefix "codeagent-rag-e2e-$runId"
 			Remove-E2EKafkaTopics -ContainerName $kafkaContainerName -Topics $e2eKafkaTopics
 		}
