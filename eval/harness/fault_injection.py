@@ -199,10 +199,19 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             failures.append({"category": "timeout", "message": "fault injection run exceeded timeout"})
 
         for slot, (process, record) in list(active.items()):
-            if process.poll() is None:
-                _terminate_process(process)
+            terminated_by_parent = _terminate_process(process)
             record.ended_at = time.time()
             record.exit_code = process.wait(timeout=10)
+            if record.log_handle is not None:
+                record.log_handle.close()
+            if record.exit_code != 0 and not record.injected and not terminated_by_parent:
+                _record_process_exit_failure(
+                    failures,
+                    record,
+                    record.exit_code,
+                    progress_root,
+                )
+            active.pop(slot)
             next_launch[slot] = False
 
         complete = _completed_tasks(store, task_ids)
@@ -406,7 +415,7 @@ def _select_fault_target(
     for slot, (process, record) in sorted(active.items()):
         if process.poll() is not None:
             continue
-        progress = _read_json(progress_root / f"worker-{slot}.json")
+        progress = _progress_for_process(progress_root, slot, record)
         if progress.get("state") == "running" and progress.get("task_id"):
             return slot, process, record, str(progress["task_id"])
     return None
@@ -427,29 +436,60 @@ def _reap_processes(
         if record.log_handle is not None:
             record.log_handle.close()
         if code != 0 and not record.injected:
-            progress = _read_json(progress_root / f"worker-{slot}.json")
-            failures.append(
-                {
-                    "category": "process_exit",
-                    "process_id": record.process_id,
-                    "slot": slot,
-                    "exit_code": code,
-                    "task_id": str(progress.get("task_id", "")),
-                    "detail": _read_log(record.log_path),
-                }
-            )
+            _record_process_exit_failure(failures, record, code, progress_root)
         active.pop(slot)
         next_launch[slot] = True
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+def _progress_for_process(
+    progress_root: Path,
+    slot: int,
+    record: _ProcessRecord,
+) -> dict[str, Any]:
+    progress = _read_json(progress_root / f"worker-{slot}.json")
+    try:
+        progress_pid = int(progress.get("pid", 0))
+        progress_slot = int(progress.get("slot", -1))
+    except (TypeError, ValueError):
+        return {}
+    if progress_pid != record.pid or progress_slot != slot:
+        return {}
+    return progress
+
+
+def _record_process_exit_failure(
+    failures: list[dict[str, Any]],
+    record: _ProcessRecord,
+    exit_code: int,
+    progress_root: Path,
+) -> None:
+    progress = _progress_for_process(progress_root, record.slot, record)
+    failures.append(
+        {
+            "category": "process_exit",
+            "process_id": record.process_id,
+            "slot": record.slot,
+            "exit_code": exit_code,
+            "task_id": str(progress.get("task_id", "")),
+            "detail": _read_log(record.log_path),
+        }
+    )
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
     if process.poll() is not None:
-        return
-    if os.name == "nt":
-        process.kill()
-    else:
-        process.send_signal(signal.SIGKILL)
+        return False
+    try:
+        if os.name == "nt":
+            process.kill()
+        else:
+            process.send_signal(signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        if process.poll() is not None:
+            return False
+        raise
     process.wait(timeout=10)
+    return True
 
 
 def _stop_active_processes(active: dict[int, tuple[subprocess.Popen[bytes], _ProcessRecord]]) -> None:
@@ -467,7 +507,12 @@ def _read_log(path: Path | None) -> str:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    return redact_credential_text(text[-16_000:])
+    safe_text = redact_credential_text(text)
+    captured = safe_text[-16_000:]
+    if len(text) <= 16_000:
+        return captured
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"[log truncated: original_chars={len(text)} sha256={digest}]\n{captured}"
 
 
 def _is_canonical(config: FaultInjectionConfig) -> bool:

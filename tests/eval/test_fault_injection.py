@@ -2,14 +2,33 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
+from eval.harness import fault_injection
 from eval.harness.fault_injection import (
     FaultInjectionConfig,
     _source_pin,
     run_fault_injection,
     verify_receipt,
 )
+
+
+class _FinishedProcess:
+    def __init__(self, exit_code: int) -> None:
+        self.exit_code = exit_code
+
+    def poll(self) -> int:
+        return self.exit_code
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.exit_code
+
+
+class _RunningProcess:
+    def poll(self) -> None:
+        return None
 
 
 def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Path) -> None:
@@ -122,3 +141,115 @@ def test_source_pin_records_commit_and_worktree_inventory() -> None:
     assert len(pin["git_sha"]) == 40
     assert len(pin["dirty_hash"]) == 64
     assert int(pin["untracked_files"]) >= 0
+
+
+def test_fault_target_rejects_progress_from_previous_process(tmp_path: Path) -> None:
+    progress_root = tmp_path / "progress"
+    progress_root.mkdir()
+    (progress_root / "worker-0.json").write_text(
+        json.dumps({"slot": 0, "pid": 111, "task_id": "stale-task", "state": "running"}),
+        encoding="utf-8",
+    )
+    record = fault_injection._ProcessRecord(
+        process_id="current-process",
+        slot=0,
+        pid=222,
+        started_at=time.time(),
+    )
+
+    target = fault_injection._select_fault_target(
+        {0: (_RunningProcess(), record)},
+        progress_root,
+    )
+
+    assert target is None
+
+
+def test_unexpected_exit_does_not_claim_stale_progress_task(tmp_path: Path) -> None:
+    progress_root = tmp_path / "progress"
+    progress_root.mkdir()
+    (progress_root / "worker-0.json").write_text(
+        json.dumps({"slot": 0, "pid": 111, "task_id": "stale-task", "state": "running"}),
+        encoding="utf-8",
+    )
+    record = fault_injection._ProcessRecord(
+        process_id="current-process",
+        slot=0,
+        pid=222,
+        started_at=time.time(),
+    )
+    active = {0: (_FinishedProcess(17), record)}
+    failures: list[dict[str, object]] = []
+
+    fault_injection._reap_processes(active, {0: False}, failures, progress_root)
+
+    assert failures[0]["category"] == "process_exit"
+    assert failures[0]["task_id"] == ""
+
+
+def test_deadline_drain_records_process_that_already_exited_nonzero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    process = _FinishedProcess(23)
+    record = fault_injection._ProcessRecord(
+        process_id="deadline-process",
+        slot=0,
+        pid=333,
+        started_at=time.time(),
+    )
+    monkeypatch.setattr(
+        fault_injection,
+        "_launch_child",
+        lambda *args, **kwargs: (process, record),
+    )
+    monotonic_ticks = iter((0.0, 0.0, 0.0, 2.0))
+    monkeypatch.setattr(
+        fault_injection,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: next(monotonic_ticks),
+            sleep=lambda _seconds: None,
+            time=time.time,
+        ),
+    )
+    config = FaultInjectionConfig(
+        run_id="deadline-exit",
+        artifact_root=tmp_path / "artifacts",
+        worker_count=1,
+        task_count=1,
+        fault_count=0,
+        task_duration_s=0.01,
+        timeout_s=1.0,
+    )
+
+    receipt = run_fault_injection(config)
+
+    process_failures = [
+        item for item in receipt["failures"] if item["category"] == "process_exit"
+    ]
+    assert len(process_failures) == 1
+    assert process_failures[0]["process_id"] == "deadline-process"
+    assert process_failures[0]["exit_code"] == 23
+
+
+def test_truncated_process_log_records_original_size_and_digest(tmp_path: Path) -> None:
+    log_path = tmp_path / "worker.log"
+    content = "start-of-log\n" + ("x" * 17_000) + "\nend-of-log"
+    log_path.write_text(content, encoding="utf-8")
+
+    captured = fault_injection._read_log(log_path)
+
+    assert captured.startswith("[log truncated: original_chars=17024 sha256=")
+    assert captured.endswith("end-of-log")
+    assert "start-of-log" not in captured
+
+
+def test_process_log_redacts_secret_before_tail_truncation(tmp_path: Path) -> None:
+    log_path = tmp_path / "worker.log"
+    secret = "sk-" + ("s" * 17_000)
+    log_path.write_text(f"Bearer {secret}\nend-of-log", encoding="utf-8")
+
+    captured = fault_injection._read_log(log_path)
+
+    assert secret[-128:] not in captured
+    assert "Bearer <redacted>" in captured
