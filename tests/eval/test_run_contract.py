@@ -243,6 +243,123 @@ def test_run_cli_dash_b_without_value_lists(capsys) -> None:
         assert name in out
 
 
+def test_run_cli_provider_is_explicit_and_defaults_from_environment(monkeypatch) -> None:
+    from eval.run import _parse_args
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+
+    assert _parse_args([])["provider"] == "anthropic"
+    assert _parse_args(["--provider", "openai"])["provider"] == "openai"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_env", "base_url_env", "api_key_env"),
+    [
+        ("anthropic", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"),
+        ("openai", "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"),
+    ],
+)
+def test_run_cli_resolves_provider_specific_environment(
+    monkeypatch,
+    provider: str,
+    model_env: str,
+    base_url_env: str,
+    api_key_env: str,
+) -> None:
+    """Selecting a remote protocol must not silently reuse Ollama settings."""
+    from eval.run import _parse_args, _provider_api_key
+
+    for name in (
+        "LOCAL_LLM_MODEL",
+        "LOCAL_LLM_BASE_URL",
+        "LOCAL_LLM_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "wrong-local-model")
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "wrong-local-key")
+    monkeypatch.setenv(model_env, f"{provider}-locked-model")
+    monkeypatch.setenv(base_url_env, f"https://{provider}.example/v1")
+    monkeypatch.setenv(api_key_env, f"{provider}-in-memory-key")
+
+    parsed = _parse_args(["--provider", provider])
+
+    assert parsed["model"] == f"{provider}-locked-model"
+    assert parsed["base_url"] == f"https://{provider}.example/v1"
+    assert _provider_api_key(provider) == f"{provider}-in-memory-key"
+
+
+def test_run_cli_explicit_connection_overrides_provider_environment(monkeypatch) -> None:
+    from eval.run import _parse_args
+
+    monkeypatch.setenv("ANTHROPIC_MODEL", "env-model")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://env.example")
+
+    parsed = _parse_args(
+        [
+            "--provider",
+            "anthropic",
+            "--model",
+            "cli-model",
+            "--base-url",
+            "https://cli.example",
+        ]
+    )
+
+    assert parsed["model"] == "cli-model"
+    assert parsed["base_url"] == "https://cli.example"
+
+
+def test_subset_requires_sha256_sidecar(tmp_path: Path) -> None:
+    from eval.run import _load_subset
+
+    subset = tmp_path / "subset.json"
+    subset.write_text(
+        json.dumps({"subset_id": "fixed", "instance_ids": ["one"]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="sha256 sidecar"):
+        _load_subset(str(subset))
+
+
+def test_subset_manifest_pin_records_exact_cases_and_parent_hash() -> None:
+    from eval.run import _subset_manifest_pin
+
+    digest = "a" * 64
+    parent_digest = "b" * 64
+    pin = _subset_manifest_pin(
+        {
+            "subset_id": "astropy-empty-patch-smoke-3",
+            "dataset": "princeton-nlp/SWE-bench_Verified",
+            "split": "test",
+            "size": 3,
+            "parent_subset": "astropy-20",
+            "parent_subset_sha256": parent_digest,
+            "instance_ids": ["case-1", "case-2", "case-3"],
+            "_sha256": digest,
+        }
+    )
+
+    assert pin == {
+        "subset_id": "astropy-empty-patch-smoke-3",
+        "sha256": digest,
+        "dataset": "princeton-nlp/SWE-bench_Verified",
+        "split": "test",
+        "size": 3,
+        "parent_subset": "astropy-20",
+        "parent_subset_sha256": parent_digest,
+        "instance_ids": ["case-1", "case-2", "case-3"],
+    }
+
+
 def test_find_agent_benchmark_passes_cli_model_to_official_adapter() -> None:
     from eval import run as run_mod
     from eval.benchmarks import tau2bench
@@ -454,6 +571,7 @@ def test_terminalbench_failure_mode_is_json_serializable() -> None:
 def test_driver_api_key_env_wins_over_placeholder(monkeypatch) -> None:
     from eval.driver_headless import HeadlessDriver, create_driver
 
+    monkeypatch.setenv("LLM_PROVIDER", "local")
     monkeypatch.setenv("LOCAL_LLM_API_KEY", "env-key")
     assert HeadlessDriver().api_key == "env-key"  # env beats "ollama" placeholder
     assert HeadlessDriver(api_key="explicit").api_key == "explicit"  # explicit beats env
@@ -463,6 +581,61 @@ def test_driver_api_key_env_wins_over_placeholder(monkeypatch) -> None:
     monkeypatch.delenv("LOCAL_LLM_API_KEY")
     assert HeadlessDriver().api_key == "ollama"  # placeholder fallback
     assert create_driver().api_key == "ollama"
+
+
+def test_driver_selects_anthropic_adapter_at_llm_seam() -> None:
+    from eval.driver_headless import create_driver
+    from orchestrator.llm.providers import AnthropicClient
+
+    driver = create_driver(
+        model="gpt-5.6-sol",
+        base_url="https://provider.example",
+        api_key="in-memory-key",
+        provider="anthropic",
+    )
+
+    client = driver._get_llm_client()
+    assert isinstance(client, AnthropicClient)
+    assert client.model == "gpt-5.6-sol"
+    assert client.base_url == "https://provider.example"
+    assert client.api_key == "in-memory-key"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_env", "base_url_env", "api_key_env"),
+    [
+        ("anthropic", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"),
+        ("openai", "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"),
+    ],
+)
+def test_driver_uses_provider_specific_environment_without_explicit_values(
+    monkeypatch,
+    provider: str,
+    model_env: str,
+    base_url_env: str,
+    api_key_env: str,
+) -> None:
+    from eval.driver_headless import HeadlessDriver
+
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "wrong-local-model")
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "wrong-local-key")
+    monkeypatch.setenv(model_env, f"{provider}-model")
+    monkeypatch.setenv(base_url_env, f"https://{provider}.example/v1")
+    monkeypatch.setenv(api_key_env, f"{provider}-key")
+
+    driver = HeadlessDriver(provider=provider)
+
+    assert driver.model == f"{provider}-model"
+    assert driver.base_url == f"https://{provider}.example/v1"
+    assert driver.api_key == f"{provider}-key"
+
+
+def test_driver_rejects_unknown_provider() -> None:
+    from eval.driver_headless import create_driver
+
+    with pytest.raises(ValueError, match="unsupported LLM provider"):
+        create_driver(provider="mystery")
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +671,7 @@ def test_evalplus_through_harness_run(tmp_path: Path) -> None:
         artifacts=artifacts,
         budget=Budget(wall_clock_seconds=60, max_tokens=10_000),
         adapter=adapter,
-        config=_pinned_config(),
+        config=_pinned_config(provider="anthropic"),
     )
 
     instances = [
@@ -533,6 +706,7 @@ def test_evalplus_through_harness_run(tmp_path: Path) -> None:
     assert (root / "run-manifest.json").exists(), "run-manifest.json must exist"
     manifest = json.loads(root.joinpath("run-manifest.json").read_text(encoding="utf-8"))
     assert manifest["run_id"] == run_id
+    assert manifest["provider"] == "anthropic"
     assert "synthetic" in manifest
     assert "budgets" in manifest
     assert manifest["budgets"]["wall_clock_seconds"] == 60

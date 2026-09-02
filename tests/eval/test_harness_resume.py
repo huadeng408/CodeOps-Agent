@@ -155,6 +155,31 @@ def test_environment_omits_secret_variable_names(tmp_path: Path, monkeypatch) ->
     assert "secret-value" not in content
 
 
+def test_run_manifest_preserves_evaluation_subset_pin(tmp_path: Path) -> None:
+    from eval.harness.runner import _build_manifest
+
+    subset_pin = {
+        "subset_id": "astropy-empty-patch-smoke-3",
+        "sha256": "a" * 64,
+        "parent_subset": "astropy-20",
+        "parent_subset_sha256": "b" * 64,
+        "instance_ids": ["one", "two", "three"],
+    }
+    artifacts = RunArtifacts("run-1", tmp_path)
+    harness = HarnessRun(
+        run_id="run-1",
+        artifacts=artifacts,
+        config=_pinned_config(evaluation_subset=subset_pin),
+    )
+
+    manifest = _build_manifest(
+        harness,
+        {"total": 3, "completed": 3, "failed": 0, "skipped": 0},
+    )
+
+    assert manifest["evaluation_subset"] == subset_pin
+
+
 # ---------------------------------------------------------------------------
 # HarnessRun tests — updated for EvalInstance / FakeAgentAdapter
 # ---------------------------------------------------------------------------
@@ -290,7 +315,14 @@ def test_scorer_exception_becomes_error_scorer(tmp_path: Path) -> None:
         def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    def bad_scorer(result: EvalResult, instance: EvalInstance, workspace: Path) -> dict:
+    def bad_scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del timeout_s
         raise RuntimeError("scorer crashed")
 
     harness = HarnessRun(
@@ -342,7 +374,14 @@ def test_scorer_success_merges_into_prediction(tmp_path: Path) -> None:
         def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    def good_scorer(result: EvalResult, instance: EvalInstance, workspace: Path) -> dict:
+    def good_scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del timeout_s
         return {"score": 0.95, "passed": True}
 
     harness = HarnessRun(
@@ -359,3 +398,101 @@ def test_scorer_success_merges_into_prediction(tmp_path: Path) -> None:
     assert len(predictions) == 1
     assert predictions[0]["score"] == 0.95
     assert predictions[0]["passed"] is True
+
+
+def test_scorer_receives_remaining_run_wall_clock_budget(tmp_path: Path) -> None:
+    """A scorer gets only the unspent run deadline, not a fresh full budget."""
+    artifacts = RunArtifacts("run-deadline", tmp_path)
+    seen: dict[str, float] = {}
+
+    def scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del result, instance, workspace
+        seen["timeout_s"] = timeout_s
+        return {"resolved": False}
+
+    harness = HarnessRun(
+        run_id="run-deadline",
+        artifacts=artifacts,
+        budget=Budget(wall_clock_seconds=10),
+        adapter=FakeAgentAdapter(),
+        scorer=scorer,
+        config=_pinned_config(),
+    )
+    harness._global_usage.started_at -= 4.0
+
+    summary = harness.run(
+        [EvalInstance(instance_id="deadline-1", task_description="")]
+    )["summary"]
+
+    assert summary["completed"] == 1
+    assert 0 < seen["timeout_s"] <= 6.0
+
+
+def test_scorer_timeout_is_classified_as_timeout(tmp_path: Path) -> None:
+    """Deadline expiry is a run timeout, not an official-scorer defect."""
+    artifacts = RunArtifacts("run-scorer-timeout", tmp_path)
+
+    def scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del result, instance, workspace, timeout_s
+        raise TimeoutError("official scorer exceeded the harness deadline")
+
+    harness = HarnessRun(
+        run_id="run-scorer-timeout",
+        artifacts=artifacts,
+        budget=Budget(wall_clock_seconds=10),
+        adapter=FakeAgentAdapter(),
+        scorer=scorer,
+        config=_pinned_config(),
+    )
+
+    summary = harness.run(
+        [EvalInstance(instance_id="timeout-1", task_description="")]
+    )["summary"]
+
+    assert summary["by_category"][ERROR_TIMEOUT] == 1
+    assert summary["by_category"][ERROR_SCORER] == 0
+
+
+def test_scorer_cannot_complete_after_run_deadline(tmp_path: Path) -> None:
+    """A scorer result that arrives after the run deadline is not completed."""
+    artifacts = RunArtifacts("run-late-scorer", tmp_path)
+    harness: HarnessRun
+
+    def scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del result, instance, workspace, timeout_s
+        harness._global_usage.started_at -= 20.0
+        return {"resolved": True}
+
+    harness = HarnessRun(
+        run_id="run-late-scorer",
+        artifacts=artifacts,
+        budget=Budget(wall_clock_seconds=10),
+        adapter=FakeAgentAdapter(),
+        scorer=scorer,
+        config=_pinned_config(),
+    )
+
+    summary = harness.run(
+        [EvalInstance(instance_id="late-1", task_description="")]
+    )["summary"]
+
+    assert summary["completed"] == 0
+    assert summary["by_category"][ERROR_TIMEOUT] == 1

@@ -76,6 +76,46 @@ MAX_TOOL_OUTPUT_LINES = 250
 _IDEMPOTENT_TOOLS = frozenset({"Read", "Glob", "Grep"})
 
 
+def resolve_provider_connection(
+    provider: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve one provider's connection settings without crossing env namespaces."""
+    provider = provider.strip().lower()
+    if provider == "anthropic":
+        return (
+            model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            base_url
+            or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            api_key
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or "",
+        )
+    if provider == "openai":
+        return (
+            model or os.environ.get("OPENAI_MODEL", "gpt-4o"),
+            base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
+            api_key or os.environ.get("OPENAI_API_KEY") or "",
+        )
+    if provider == "local":
+        return (
+            model or os.environ.get("LOCAL_LLM_MODEL", DEFAULT_OLLAMA_MODEL),
+            base_url
+            or os.environ.get("LOCAL_LLM_BASE_URL")
+            or os.environ.get("LOCAL_OPENAI_BASE_URL")
+            or DEFAULT_OLLAMA_BASE_URL,
+            api_key
+            or os.environ.get("LOCAL_LLM_API_KEY")
+            or os.environ.get("LOCAL_OPENAI_API_KEY")
+            or "ollama",
+        )
+    raise ValueError(f"unsupported LLM provider: {provider}")
+
+
 # ---------------------------------------------------------------------------
 # Lightweight tool result
 # ---------------------------------------------------------------------------
@@ -590,6 +630,13 @@ _TOOL_HANDLERS: dict[str, str] = {
     "SearchKnowledge": "_search_knowledge",
 }
 
+# Tools genuinely serviced by the headless ConversationRunner path.  The
+# runner handles these control-plane tools itself; all remaining tools need a
+# local executor handler and must not be advertised to the model.
+_HEADLESS_SERVICED_TOOLS = frozenset(_TOOL_HANDLERS) | frozenset(
+    {"TodoWrite", "PlanWrite", "SpawnAgent", "RunWorkflow", "AskUser"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Headless driver
@@ -612,6 +659,9 @@ class HeadlessDriver(DefaultAgentAdapter):
     ----------
     model:
         Model name (default ``"qwen3:4b"``).
+    provider:
+        Provider protocol: ``"anthropic"`` uses the Anthropic Messages API;
+        ``"local"`` and ``"openai"`` use the OpenAI-compatible local client.
     base_url:
         OpenAI-compatible base URL (default ``http://127.0.0.1:11434/v1``).
     api_key:
@@ -635,18 +685,23 @@ class HeadlessDriver(DefaultAgentAdapter):
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        provider: str | None = None,
         use_runner: bool = True,
         strict_o3: bool = False,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> None:
         super().__init__()
-        self.model = model or os.environ.get("LOCAL_LLM_MODEL", DEFAULT_OLLAMA_MODEL)
-        self.base_url = base_url or os.environ.get(
-            "LOCAL_LLM_BASE_URL", DEFAULT_OLLAMA_BASE_URL
+        self.provider = (
+            provider or os.environ.get("LLM_PROVIDER", "local") or "local"
+        ).strip().lower()
+        if self.provider not in {"local", "openai", "anthropic"}:
+            raise ValueError(f"unsupported LLM provider: {self.provider}")
+        self.model, self.base_url, self.api_key = resolve_provider_connection(
+            self.provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
         )
-        # Explicit argument -> LOCAL_LLM_API_KEY env -> local ollama placeholder.
-        # Defaulting to None (not "ollama") is what lets the env var win.
-        self.api_key = api_key or os.environ.get("LOCAL_LLM_API_KEY", "ollama")
         self.timeout_s = timeout_s
         self.use_runner = use_runner
         self.strict_o3 = strict_o3
@@ -776,8 +831,11 @@ class HeadlessDriver(DefaultAgentAdapter):
         # Build the orchestrator components
         graph = build_graph()
         tools = ToolRegistry(
-            working_dir,
-            allowed_tools=frozenset({"SearchKnowledge"}) if self.strict_o3 else None,
+            allowed_tools=(
+                frozenset({"SearchKnowledge"})
+                if self.strict_o3
+                else _HEADLESS_SERVICED_TOOLS
+            ),
         )
         todo_mgr = TodoManager()
         memory_mgr = MemoryManager(str(Path(working_dir) / ".agent" / "memory"))
@@ -1050,9 +1108,15 @@ class HeadlessDriver(DefaultAgentAdapter):
     def _get_llm_client(self) -> Any:
         """Return (or lazily create) the LLM client."""
         if self._llm is None:
-            from orchestrator.llm.providers.local import LocalClient
+            if self.provider == "anthropic":
+                from orchestrator.llm.providers.anthropic import AnthropicClient
 
-            self._llm = LocalClient(
+                client_type = AnthropicClient
+            else:
+                from orchestrator.llm.providers.local import LocalClient
+
+                client_type = LocalClient
+            self._llm = client_type(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 model=self.model,
@@ -1154,6 +1218,7 @@ def create_driver(
     model: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
+    provider: str | None = None,
     use_runner: bool = True,
     strict_o3: bool = False,
 ) -> HeadlessDriver:
@@ -1173,6 +1238,7 @@ def create_driver(
         model=model,
         base_url=base_url,
         api_key=api_key,
+        provider=provider,
         use_runner=use_runner,
         strict_o3=strict_o3,
     )

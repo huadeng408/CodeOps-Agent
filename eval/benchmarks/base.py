@@ -123,7 +123,7 @@ class AgentBenchmark(ABC):
            (clone the repo, install deps, ...).
         2. ``solve(instance, workspace, adapter)``   - run the agent and
            produce an :class:`EvalResult`; never returns ``None``.
-        3. ``score(result, instance, workspace)``    - invoke the OFFICIAL
+        3. ``score(result, instance, workspace, timeout_s=...)`` - invoke the OFFICIAL
            scorer and return the metrics dict merged into the prediction
            artifact.
 
@@ -152,8 +152,10 @@ class AgentBenchmark(ABC):
         result: "EvalResult",
         instance: "EvalInstance",
         workspace: Path,
+        *,
+        timeout_s: float,
     ) -> dict[str, Any]:
-        """Invoke the official scorer; returns the metrics dict for the artifact."""
+        """Invoke the official scorer within the remaining Harness deadline."""
 
     @property
     def pins(self) -> dict[str, str]:

@@ -1,0 +1,16 @@
+{
+  "subset_id": "astropy-empty-patch-smoke-3",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "split": "test",
+  "repo": "astropy/astropy",
+  "size": 3,
+  "parent_subset": "astropy-20",
+  "parent_subset_sha256": "21625df5184869073ff6cd85f928062ca3a0e94772f23a424e9cb9f51aa7792e",
+  "selection_rule": "Three instances from the locked astropy-20 subset that produced empty patches in the historical baseline run, sorted by instance_id.",
+  "reporting_constraint": "This is a high-signal integration smoke subset only. Report results as k/3 on astropy-empty-patch-smoke-3 and never as a SWE-bench Verified score or as evidence for the locked astropy-20 threshold.",
+  "instance_ids": [
+    "astropy__astropy-13398",
+    "astropy__astropy-14182",
+    "astropy__astropy-14598"
+  ]
+}

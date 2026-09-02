@@ -23,11 +23,11 @@ from pathlib import Path
 
 import pytest
 
-from eval.adapter import EvalInstance
+from eval.adapter import EvalInstance, EvalResult
 from eval.benchmarks.swebench import SWEBenchAdapter
 from eval.harness.runner import HarnessRun
 from eval.harness.uplift import UPLIFT_ENV
-
+from eval.run import _OfficialBenchmarkDriver
 
 TASK = "Separability matrix is wrong for nested CompoundModels"
 
@@ -153,3 +153,27 @@ def test_tool_rounds_reads_the_uplift_on_the_driver_path(monkeypatch):
 
     source = inspect.getsource(D.HeadlessDriver)
     assert "uplift_config().tool_rounds" in source
+
+
+def test_official_driver_does_not_augment_prepared_prompt_twice(
+    synthetic_repo: Path, monkeypatch
+):
+    """The prepare -> bridge -> solve path must add the grading contract once."""
+    monkeypatch.setenv(UPLIFT_ENV, "1")
+    instance = _instance()
+    benchmark = SWEBenchAdapter()
+    benchmark.prepare(instance, synthetic_repo)
+
+    class RecordingDriver:
+        def __init__(self) -> None:
+            self.task_description = ""
+
+        def solve_instance(self, observed, working_dir, **kwargs):
+            self.task_description = observed.task_description
+            return EvalResult(instance_id=observed.instance_id, model_patch="")
+
+    driver = RecordingDriver()
+    bridge = _OfficialBenchmarkDriver(benchmark, driver)
+    bridge.solve_instance(instance, str(synthetic_repo))
+
+    assert driver.task_description.count("## How this task is graded") == 1

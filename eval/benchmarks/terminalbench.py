@@ -665,6 +665,8 @@ class TerminalBenchAdapter(AgentBenchmark):
         result: EvalResult,
         instance: EvalInstance,
         workspace: Path,
+        *,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Return the official resolution embedded in :meth:`solve`.
 
@@ -673,6 +675,7 @@ class TerminalBenchAdapter(AgentBenchmark):
         official evidence -> fail-closed ``resolved: False`` (the official
         scorer is never faked).
         """
+        del timeout_s
         workspace = Path(workspace)
         sidecar_path = workspace / "score.json"
         if sidecar_path.exists():

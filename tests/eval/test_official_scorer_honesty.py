@@ -124,6 +124,30 @@ def test_score_returns_real_verdict_when_scorer_ran(
     assert (tmp_path / "predictions.jsonl").exists()
 
 
+def test_score_passes_harness_deadline_to_official_scorer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SWE-bench cannot replace the Harness deadline with its 3600s default."""
+    from eval.benchmarks import swebench as mod
+
+    seen: dict[str, float] = {}
+
+    def run_official(*args, **kwargs):
+        del args
+        seen["timeout"] = float(kwargs["timeout"])
+        return True, "done"
+
+    monkeypatch.setattr(mod, "_can_score_official", lambda: (True, "available"))
+    monkeypatch.setattr(mod, "_run_official_scoring", run_official)
+    monkeypatch.setattr(mod, "_read_official_resolution", lambda **k: False)
+
+    adapter = mod.SWEBenchAdapter()
+    out = adapter.score(_result(), _instance(), tmp_path, timeout_s=12.5)
+
+    assert out["resolved"] is False
+    assert seen["timeout"] == 12.5
+
+
 # ---------------------------------------------------------------------------
 # End-to-end through the harness: infra fault -> ERROR_SCORER, non-zero exit
 # ---------------------------------------------------------------------------

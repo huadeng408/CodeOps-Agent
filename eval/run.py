@@ -59,17 +59,16 @@ class _OfficialBenchmarkDriver:
 
 def _parse_args(argv: list[str]) -> dict[str, Any]:
     """Parse flat key-value pairs from *argv*.  Returns a dict with keys
-    ``benchmark``, ``model``, ``limit``, ``output_dir``, ``base_url``,
+    ``benchmark``, ``provider``, ``model``, ``limit``, ``output_dir``, ``base_url``,
     ``use_runner``.  Unknown flags are ignored with a warning.
     """
     args: dict[str, Any] = {
         "benchmark": "evalplus",
-        "model": os.environ.get("LOCAL_LLM_MODEL", "qwen3:4b"),
+        "provider": os.environ.get("LLM_PROVIDER", "local").strip().lower() or "local",
+        "model": None,
         "limit": 10,
         "output_dir": "eval_results",
-        "base_url": os.environ.get(
-            "LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1"
-        ),
+        "base_url": None,
         "use_runner": True,
         "dry_run": False,
         "smoke": False,
@@ -89,6 +88,9 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
                 i += 1
         elif flag in ("--model", "-m") and i + 1 < len(argv):
             args["model"] = argv[i + 1]
+            i += 2
+        elif flag == "--provider" and i + 1 < len(argv):
+            args["provider"] = argv[i + 1].strip().lower()
             i += 2
         elif flag in ("--limit", "-n") and i + 1 < len(argv):
             try:
@@ -130,6 +132,20 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         else:
             i += 1  # skip unknown
 
+    if args["provider"] in {"local", "openai", "anthropic"}:
+        from eval.driver_headless import resolve_provider_connection
+
+        resolved_model, resolved_base_url, _ = resolve_provider_connection(
+            args["provider"],
+            model=args["model"],
+            base_url=args["base_url"],
+        )
+        args["model"] = resolved_model
+        args["base_url"] = resolved_base_url
+    else:
+        # main() owns the user-facing unsupported-provider diagnostic.
+        args["model"] = args["model"] or "qwen3:4b"
+        args["base_url"] = args["base_url"] or "http://127.0.0.1:11434/v1"
     return args
 
 
@@ -140,19 +156,21 @@ def _print_usage() -> None:
         "flags:\n"
         "  --benchmark, -b NAME    Benchmark to run (evalplus, swebench) [default: evalplus]\n"
         "  -b                      List available benchmarks (same as `-b list`)\n"
-        "  --model, -m NAME        LLM model name [default: qwen3:4b]\n"
+        "  --provider NAME         LLM protocol (local, openai, anthropic) [default: local]\n"
+        "  --model, -m NAME        LLM model name [default: provider-specific]\n"
         "  --limit, -n N           Max instances to evaluate [default: 10]\n"
         "  --output-dir, -o DIR    Directory for result files [default: eval_results]\n"
-        "  --base-url URL          LLM API base URL [default: http://127.0.0.1:11434/v1]\n"
+        "  --base-url URL          LLM API base URL [default: provider-specific]\n"
         "  --no-runner             Skip ConversationRunner path, use direct LLM only\n"
         "  --dry-run               Validate manifest only, do not solve instances\n"
         "  --smoke                 Run a single instance for smoke testing\n"
         "  --help, -h              Show this message\n"
         "\n"
         "env vars:\n"
-        "  LOCAL_LLM_BASE_URL      LLM API base URL (overrides --base-url)\n"
-        "  LOCAL_LLM_MODEL         LLM model name (overrides --model)\n"
-        "  LOCAL_LLM_API_KEY       LLM API key (used unless --api-key is given)\n"
+        "  LLM_PROVIDER            LLM protocol selected when --provider is omitted\n"
+        "  LOCAL_LLM_*             Local/OpenAI-compatible endpoint settings\n"
+        "  OPENAI_*                OpenAI endpoint settings\n"
+        "  ANTHROPIC_*             Anthropic endpoint settings\n"
     )
 
 
@@ -214,20 +232,54 @@ def _load_subset(path: str) -> tuple[list[str], dict[str, Any]]:
     raw = subset_file.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     sidecar = Path(str(subset_file) + ".sha256")
-    if sidecar.is_file():
-        recorded = sidecar.read_text(encoding="utf-8").split()[0].strip().lower()
-        if recorded != digest:
-            raise SystemExit(
-                f"subset sha256 mismatch: {subset_file} hashes to {digest} "
-                f"but its sidecar records {recorded}. Refusing to run: a paired "
-                "comparison needs a verified instance list."
-            )
+    if not sidecar.is_file():
+        raise SystemExit(
+            f"subset sha256 sidecar not found: {sidecar}. Refusing to run an "
+            "unverified instance list."
+        )
+    sidecar_parts = sidecar.read_text(encoding="utf-8").split()
+    recorded = sidecar_parts[0].strip().lower() if sidecar_parts else ""
+    if recorded != digest:
+        raise SystemExit(
+            f"subset sha256 mismatch: {subset_file} hashes to {digest} "
+            f"but its sidecar records {recorded or '<empty>'}. Refusing to run: "
+            "a paired comparison needs a verified instance list."
+        )
     payload = json.loads(raw.decode("utf-8"))
     ids = list(payload.get("instance_ids") or [])
     if not ids:
         raise SystemExit(f"--subset file {subset_file} lists no instance_ids")
     payload["_sha256"] = digest
+    _subset_manifest_pin(payload)
     return ids, payload
+
+
+def _subset_manifest_pin(subset_meta: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact, portable subset identity recorded in run-manifest.json."""
+    instance_ids = list(subset_meta.get("instance_ids") or [])
+    size = int(subset_meta.get("size", len(instance_ids)))
+    if size != len(instance_ids) or len(set(instance_ids)) != len(instance_ids):
+        raise SystemExit("subset size/instance_ids are inconsistent or duplicated")
+    digest = str(subset_meta.get("_sha256", "")).lower()
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise SystemExit("subset sha256 is missing or invalid")
+    parent = str(subset_meta.get("parent_subset", ""))
+    parent_digest = str(subset_meta.get("parent_subset_sha256", "")).lower()
+    if parent and (
+        len(parent_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in parent_digest)
+    ):
+        raise SystemExit("parent subset sha256 is missing or invalid")
+    return {
+        "subset_id": str(subset_meta.get("subset_id", "")),
+        "sha256": digest,
+        "dataset": str(subset_meta.get("dataset", "")),
+        "split": str(subset_meta.get("split", "")),
+        "size": size,
+        "parent_subset": parent,
+        "parent_subset_sha256": parent_digest,
+        "instance_ids": instance_ids,
+    }
 
 
 def _git_dirty_hash() -> str:
@@ -343,6 +395,19 @@ def _model_endpoint_allowlist(base_url: str) -> tuple[str, ...]:
     return (host,)
 
 
+def _provider_api_key(provider: str) -> str | None:
+    """Resolve a provider credential in memory without persisting it."""
+    if provider == "anthropic":
+        return os.environ.get("ANTHROPIC_API_KEY") or os.environ.get(
+            "ANTHROPIC_AUTH_TOKEN"
+        )
+    if provider == "openai":
+        return os.environ.get("OPENAI_API_KEY")
+    return os.environ.get("LOCAL_LLM_API_KEY") or os.environ.get(
+        "LOCAL_OPENAI_API_KEY"
+    )
+
+
 def _validate_benchmark_pins(agent_bench: Any) -> list[str]:
     """Validate a benchmark adapter's reproducibility pins BEFORE any run.
 
@@ -376,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
     benchmark_name = args["benchmark"]
+    provider: str = args["provider"]
     model: str = args["model"]
     limit: int = args["limit"]
     output_dir = Path(args["output_dir"])
@@ -385,6 +451,16 @@ def main(argv: list[str] | None = None) -> int:
     smoke: bool = args.get("smoke", False)
     cache_dir: str = args.get("cache_dir", "")
     subset_path: str = args.get("subset", "")
+
+    supported_providers = {"local", "openai", "anthropic"}
+    if provider not in supported_providers:
+        print(
+            f"ERROR: unsupported LLM provider '{provider}'; expected one of "
+            + ", ".join(sorted(supported_providers)),
+            file=sys.stderr,
+        )
+        return 1
+    api_key = _provider_api_key(provider)
 
     # ---- List available benchmarks ----
     if benchmark_name == "list":
@@ -483,7 +559,7 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_mod,
         model=model,
         base_url=base_url,
-        api_key=os.environ.get("LOCAL_LLM_API_KEY"),
+        api_key=api_key,
     )
 
     # ---- H0 pin preflight: fail BEFORE launching on incomplete pins ----
@@ -503,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if dry_run:
         print(f"[dry-run] benchmark : {benchmark_name}")
+        print(f"[dry-run] provider  : {provider}")
         print(f"[dry-run] model     : {model}")
         print(f"[dry-run] run_id    : {run_id}")
         print("[dry-run] pins      : validated (no missing keys)")
@@ -512,7 +589,13 @@ def main(argv: list[str] | None = None) -> int:
     # ---- Create driver (AgentAdapter) ----
     from eval.driver_headless import create_driver
 
-    adapter = create_driver(model=model, base_url=base_url, use_runner=use_runner)
+    adapter = create_driver(
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        provider=provider,
+        use_runner=use_runner,
+    )
 
     # ---- Load instances (benchmark MUST expose load_instances) ----
     # Done before the budget is sized: the budget is enforced across the whole
@@ -582,10 +665,14 @@ def main(argv: list[str] | None = None) -> int:
         config={
             "git_sha": _git_head(),
             "dirty_hash": _git_dirty_hash(),
+            "provider": provider,
             "model": model,
             "benchmark": benchmark_name,
             "mode": "official",
             "synthetic": False,
+            "evaluation_subset": (
+                _subset_manifest_pin(subset_meta) if subset_ids else {}
+            ),
             # Which trace span kinds this benchmark can legitimately omit.  Read
             # from the benchmark module so the declaration lives with the code
             # that either retrieves or does not; a benchmark that stays silent
@@ -605,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     # Instances were loaded above, before the budget was sized from their count.
 
     print(f"[eval] benchmark : {benchmark_name}")
+    print(f"[eval] provider  : {provider}")
     print(f"[eval] model     : {model}")
     print(f"[eval] base_url  : {base_url}")
     # When a pinned subset is in play the limit did not apply, and printing it

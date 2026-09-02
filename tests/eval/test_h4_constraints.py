@@ -81,7 +81,14 @@ def test_workspace_preservation_marker_scorer_failure(tmp_path: Path) -> None:
             workspaces.append(working_dir)
             return EvalResult(instance_id=instance.instance_id, answer="ok")
 
-    def bad_scorer(result: EvalResult, instance: EvalInstance, workspace: Path) -> dict:
+    def bad_scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del timeout_s
         raise RuntimeError("scorer crashed")
 
     harness = HarnessRun(

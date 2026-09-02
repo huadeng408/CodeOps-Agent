@@ -49,9 +49,11 @@ def synthetic_demo_scorer(
     result: EvalResult,
     instance: EvalInstance,
     workspace: Path,
+    *,
+    timeout_s: float | None = None,
 ) -> dict[str, object]:
     """Score the fixed answer and retain the synthetic raw scorer payload."""
-    del workspace
+    del workspace, timeout_s
     passed = result.instance_id == instance.instance_id and result.answer == DEMO_EXPECTED_ANSWER
     raw_payload = {
         "demo_passed": passed,

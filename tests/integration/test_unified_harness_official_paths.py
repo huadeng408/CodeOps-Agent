@@ -476,7 +476,8 @@ class TestScorerErrorScorerClassification:
         from eval.harness import HarnessRun, RunArtifacts, Budget, ScorerError
         from eval.adapter import EvalInstance, EvalResult
 
-        def crashing_scorer(result, instance, workspace):
+        def crashing_scorer(result, instance, workspace, *, timeout_s):
+            del timeout_s
             raise RuntimeError("official scorer timeout")
 
         class SpyAdapter:

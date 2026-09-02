@@ -8,16 +8,16 @@ correct — but it made the clone cost recur per instance.  For astropy that is
 clones, and a paired two-arm experiment doubled it.
 
 This module keeps one bare mirror per repository and creates each per-instance
-workspace from it with ``--reference``, so object storage is shared and the
-network is touched once per repo instead of once per instance.
+workspace directly from it with ``--no-hardlinks``, so the network is touched
+once per repo instead of once per instance while each workspace owns its objects.
 
 Design constraints this obeys:
 
 * **A cache failure must never fail the run.**  Every entry point degrades to
   the original full clone.  A benchmark result must not depend on whether a
   cache directory happened to be writable.
-* **The workspace must be indistinguishable from a full clone.**  ``--dissociate``
-  copies the borrowed objects into the workspace, so it keeps working if the
+* **The workspace must be indistinguishable from a full clone.**  ``--no-hardlinks``
+  copies the mirror objects into the workspace, so it keeps working if the
   mirror is later deleted, and ``git diff HEAD`` — which is how the patch is
   captured — behaves exactly as before.  Sharing objects would be faster still,
   but a workspace whose history silently depends on an external directory is a
@@ -208,7 +208,7 @@ def clone_at_commit(
 
     Uses a local mirror when one can be produced, and falls back to a direct
     full clone otherwise.  The resulting workspace is a standalone repository in
-    both paths — see the module docstring on ``--dissociate``.
+    both paths — see the module docstring on ``--no-hardlinks``.
     """
     workspace = str(workspace)
     os.makedirs(workspace, exist_ok=True)
@@ -225,14 +225,22 @@ def clone_at_commit(
         result = _run(
             [
                 "git", "clone",
-                "--reference", str(mirror),
-                "--dissociate",
-                f"https://github.com/{repo}.git",
+                "--no-hardlinks",
+                str(mirror),
                 workspace,
             ],
             timeout=CLONE_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
+            remote_url = f"https://github.com/{repo}.git"
+            set_origin = _run(
+                ["git", "-C", workspace, "remote", "set-url", "origin", remote_url],
+                timeout=CHECKOUT_TIMEOUT_SECONDS,
+            )
+            if set_origin.returncode != 0:
+                reason = f"cannot set workspace origin: {set_origin.stderr[-300:]}"
+                _reset_dir(workspace)
+                return _direct_clone(repo, base_commit, workspace, reason)
             checkout = _run(
                 ["git", "-C", workspace, "checkout", base_commit],
                 timeout=CHECKOUT_TIMEOUT_SECONDS,

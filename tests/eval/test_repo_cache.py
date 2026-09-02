@@ -8,7 +8,7 @@ degrades to a plain clone rather than failing the run.
 
 Everything runs against real local git repositories over ``file://`` — no
 network, no GitHub.  A mocked git would prove nothing here, because the whole
-question is what git actually does with ``--reference --dissociate``.
+question is what git actually does with a standalone mirror clone.
 """
 
 from __future__ import annotations
@@ -76,10 +76,11 @@ def local_github(monkeypatch, origin_repo):
     real_run = repo_cache._run
 
     def rewriting_run(argv, **kwargs):
-        argv = [
-            str(origin) if a == "https://github.com/owner/name.git" else a
-            for a in argv
-        ]
+        if argv[:2] == ["git", "clone"]:
+            argv = [
+                str(origin) if a == "https://github.com/owner/name.git" else a
+                for a in argv
+            ]
         return real_run(argv, **kwargs)
 
     monkeypatch.setattr(repo_cache, "_run", rewriting_run)
@@ -105,19 +106,17 @@ def test_workspace_is_at_the_requested_commit(tmp_path, local_github, origin_rep
 
 
 def test_workspace_survives_deleting_the_mirror(tmp_path, local_github, origin_repo):
-    """``--dissociate`` must make the workspace standalone.
+    """``--no-hardlinks`` must make the workspace standalone.
 
     If objects were merely borrowed, archiving the artifact and deleting the
     cache would silently corrupt history — and ``git diff HEAD``, which is how
     the patch is captured, would stop working.
     """
-    import shutil
-
     _, first, _ = origin_repo
     cache = tmp_path / "cache"
     ws = tmp_path / "ws"
     clone_at_commit("owner/name", first, ws, cache_dir=cache)
-    shutil.rmtree(cache)
+    repo_cache._force_rmtree(cache)
     # Still a working repository with intact history.
     assert _git("rev-parse", "HEAD", cwd=ws) == first
     assert _git("log", "--oneline", cwd=ws)
@@ -151,6 +150,33 @@ def test_mirror_is_created_once_then_reused(tmp_path, local_github, origin_repo)
     assert first_outcome.mirror_created is True
     assert second_outcome.mirror_created is False, "mirror must be reused"
     assert second_outcome.used_mirror is True
+
+
+def test_existing_mirror_materializes_workspace_without_remote_access(
+    tmp_path, local_github, origin_repo, monkeypatch
+):
+    """A warm mirror must be sufficient when GitHub is unavailable."""
+    _, first, second = origin_repo
+    cache = tmp_path / "cache"
+    clone_at_commit("owner/name", first, tmp_path / "warmup", cache_dir=cache)
+    run_with_local_origin = repo_cache._run
+    remote_url = "https://github.com/owner/name.git"
+
+    def offline_run(argv, **kwargs):
+        if argv[:2] == ["git", "clone"] and remote_url in argv:
+            return subprocess.CompletedProcess(
+                argv, 1, "", "simulated network unavailable"
+            )
+        return run_with_local_origin(argv, **kwargs)
+
+    monkeypatch.setattr(repo_cache, "_run", offline_run)
+
+    workspace = tmp_path / "offline"
+    outcome = clone_at_commit("owner/name", second, workspace, cache_dir=cache)
+
+    assert outcome.used_mirror is True
+    assert _git("rev-parse", "HEAD", cwd=workspace) == second
+    assert _git("remote", "get-url", "origin", cwd=workspace) == remote_url
 
 
 def test_two_workspaces_can_sit_at_different_commits(

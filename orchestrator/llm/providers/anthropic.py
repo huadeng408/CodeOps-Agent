@@ -58,8 +58,9 @@ class AnthropicClient(LLMClient):
 
     def _chat_sync(self, request: ChatRequest) -> ChatResponse:
         system, messages = self._convert_messages(request.messages)
+        requested_model = request.model or self.model
         payload: dict[str, Any] = {
-            "model": request.model or self.model,
+            "model": requested_model,
             "max_tokens": self.max_tokens,
             "messages": messages,
             "temperature": request.temperature,
@@ -94,7 +95,9 @@ class AnthropicClient(LLMClient):
             cancel_event=request.cancel_event,
         )
         body = body_bytes.decode("utf-8")
-        return self._parse_response(json.loads(body))
+        return self._parse_response(
+            json.loads(body), requested_model=requested_model
+        )
 
     async def stream(self, request: ChatRequest):
         """Server-Sent-Events streaming override (design 22.6).
@@ -215,8 +218,14 @@ class AnthropicClient(LLMClient):
                         slot["partial_json"] += delta.get("partial_json", "")
                 elif etype == "message_delta":
                     usage_payload = evt.get("usage", {}) or {}
+                    if usage_payload.get("input_tokens") is not None:
+                        input_tokens = int(usage_payload.get("input_tokens", 0) or 0)
                     if usage_payload.get("output_tokens") is not None:
                         output_tokens = int(usage_payload.get("output_tokens", 0) or 0)
+                    if usage_payload.get("cache_read_input_tokens") is not None:
+                        cached_tokens = int(
+                            usage_payload.get("cache_read_input_tokens", 0) or 0
+                        )
                 elif etype == "message_stop":
                     break
 
@@ -462,7 +471,23 @@ class AnthropicClient(LLMClient):
         }
 
     @staticmethod
-    def _parse_response(payload: dict[str, Any]) -> ChatResponse:
+    def _model_identity(
+        payload: dict[str, Any], requested_model: str = ""
+    ) -> dict[str, Any]:
+        """Capture response-side identity without inventing a revision."""
+        return {
+            "requested_model": str(requested_model or ""),
+            "reported_model": str(payload.get("model") or ""),
+            "response_id": str(payload.get("id") or ""),
+            "system_fingerprint": "",
+            "created": 0,
+            "identity_verified": False,
+        }
+
+    @staticmethod
+    def _parse_response(
+        payload: dict[str, Any], requested_model: str = ""
+    ) -> ChatResponse:
         content = payload.get("content", []) or []
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -515,6 +540,9 @@ class AnthropicClient(LLMClient):
                 input_tokens=int(usage_payload.get("input_tokens", 0) or 0),
                 output_tokens=int(usage_payload.get("output_tokens", 0) or 0),
                 cached_input_tokens=int(usage_payload.get("cache_read_input_tokens", 0) or 0),
+            ),
+            model_identity=AnthropicClient._model_identity(
+                payload, requested_model=requested_model
             ),
         )
 

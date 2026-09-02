@@ -50,6 +50,7 @@ import argparse
 import json
 import os
 import platform
+import signal
 import shlex
 import shutil
 import subprocess
@@ -1355,20 +1356,53 @@ def _can_score_official() -> tuple[bool, str]:
     # Windows: check WSL2 availability
     if platform.system() == "Windows":
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c",
                  "python3 -c 'import docker; print(\"ok\")' 2>/dev/null || echo 'no-docker'"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=30,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-            if "ok" in result.stdout:
+            try:
+                stdout, stderr = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                _terminate_windows_process_tree(process)
+                return False, "Windows but WSL2 check timed out after 30s"
+            if process.returncode == 0 and "ok" in stdout:
                 return True, "Windows + WSL2 Ubuntu-24.04 + Docker available"
             else:
-                return False, f"Windows + WSL2 but Docker not available in WSL: {result.stdout.strip()}"
+                detail = (stderr or stdout).strip()
+                return False, f"Windows + WSL2 but Docker not available in WSL: {detail}"
         except Exception as e:
             return False, f"Windows but WSL2 check failed: {e}"
 
     return False, f"unsupported platform: {platform.system()}"
+
+
+def _terminate_windows_process_tree(process: "subprocess.Popen[str]") -> None:
+    """Terminate a timed-out WSL probe and reap its Windows process tree."""
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        pass
+    try:
+        process.kill()
+    except Exception:
+        pass
+    try:
+        process.communicate(timeout=1)
+    except Exception:
+        pass
 
 
 # "Caller said nothing", which must stay distinguishable from an explicit
@@ -1408,7 +1442,7 @@ def _run_official_scoring(
     split: str = "test",
     max_workers: int = 4,
     run_id: str = "code-agent-eval",
-    timeout: int = 3600,
+    timeout: float = 3600,
     namespace: "str | None | object" = _UNSET,
 ) -> tuple[bool, str]:
     """Invoke the official swebench scoring harness.
@@ -1437,34 +1471,92 @@ def _run_official_scoring_local(
     split: str,
     max_workers: int,
     run_id: str,
-    timeout: int,
+    timeout: float,
     namespace: "str | None" = None,
 ) -> tuple[bool, str]:
-    """Run swebench.harness.run_evaluation locally (Linux only)."""
-    import resource  # noqa: F401
-    from swebench.harness.run_evaluation import main as run_eval_main
-
+    """Run the Linux scorer in a process group bounded by the Harness deadline."""
+    if timeout <= 0:
+        raise TimeoutError("official scorer deadline exhausted before Linux start")
+    kill_after = min(1.0, timeout / 4)
+    launch_margin = min(0.05, timeout / 4)
+    process_timeout = timeout - kill_after - launch_margin
+    if process_timeout <= 0:
+        raise TimeoutError("official scorer deadline exhausted before Linux start")
+    scorer_args = {
+        "dataset_name": dataset_name,
+        "split": split,
+        "instance_ids": [],
+        "predictions_path": predictions_path,
+        "max_workers": max_workers,
+        "force_rebuild": False,
+        "cache_level": "env",
+        "clean": False,
+        "open_file_limit": 4096,
+        "run_id": run_id,
+        "timeout": max(1, int(process_timeout)),
+        "namespace": namespace,
+        "rewrite_reports": False,
+        "modal": False,
+        "report_dir": output_dir,
+    }
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import json,sys; "
+            "from swebench.harness.run_evaluation import main; "
+            "main(**json.loads(sys.argv[1]))"
+        ),
+        json.dumps(scorer_args, separators=(",", ":")),
+    ]
     try:
-        run_eval_main(
-            dataset_name=dataset_name,
-            split=split,
-            instance_ids=[],
-            predictions_path=predictions_path,
-            max_workers=max_workers,
-            force_rebuild=False,
-            cache_level="env",
-            clean=False,
-            open_file_limit=4096,
-            run_id=run_id,
-            timeout=timeout,
-            namespace=namespace,
-            rewrite_reports=False,
-            modal=False,
-            report_dir=output_dir,
+        process = subprocess.Popen(
+            command,
+            cwd=str(_REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
         )
-        return True, f"official scoring completed for {run_id}"
-    except Exception as e:
-        return False, f"official scoring failed: {e}"
+        stdout, stderr = process.communicate(timeout=process_timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_local_scorer_tree(process, kill_after)
+        raise TimeoutError(
+            f"Linux official scorer exceeded the {timeout:.3f}s Harness deadline"
+        ) from exc
+    except Exception as exc:
+        return False, f"official scoring failed: {exc}"
+    if process.returncode == 0:
+        return True, (
+            "official scoring completed: " + _summarise_official_stdout(stdout)
+        )
+    combined = f"{stderr}\n{stdout}".strip()
+    return False, (
+        f"official scoring failed (exit {process.returncode}): {combined[-500:]}"
+    )
+
+
+def _terminate_local_scorer_tree(
+    process: "subprocess.Popen[str]", grace_s: float
+) -> None:
+    """Terminate and reap a POSIX scorer process group without leaving workers."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.communicate()
+        return
+    try:
+        process.communicate(timeout=max(0.01, grace_s))
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate()
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1578,7 +1670,7 @@ def _run_official_scoring_wsl(
     split: str,
     max_workers: int,
     run_id: str,
-    timeout: int,
+    timeout: float,
     namespace: "str | None" = None,
 ) -> tuple[bool, str]:
     """Run official scoring via WSL2 Ubuntu-24.04."""
@@ -1602,9 +1694,8 @@ def _run_official_scoring_wsl(
             f"no_proxy=127.0.0.1,localhost,::1 && "
         )
 
-    cmd = (
-        f"cd {shlex.quote(wsl_repo_root)} && "
-        f"{proxy_prefix}"
+    inner_timeout = max(1, int(timeout))
+    python_cmd = (
         f"python3 -c \""
         f"import sys; sys.path.insert(0, '.'); "
         f"from swebench.harness.run_evaluation import main; "
@@ -1612,13 +1703,30 @@ def _run_official_scoring_wsl(
         f"instance_ids=[], predictions_path='{wsl_preds}', "
         f"max_workers={max_workers}, force_rebuild=False, "
         f"cache_level='env', clean=False, open_file_limit=4096, "
-        f"run_id='{run_id}', timeout={timeout}, namespace={namespace!r}, "
+        f"run_id='{run_id}', timeout={inner_timeout}, namespace={namespace!r}, "
         f"rewrite_reports=False, modal=False, "
         f"report_dir='{wsl_output}')\""
     )
 
+    if timeout <= 0:
+        raise TimeoutError("official scorer deadline exhausted before WSL2 start")
+    deadline = time.monotonic() + timeout
     attempts = 2  # one retry, for transport faults only -- see _is_transient_network
     for attempt in range(1, attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("official scorer exceeded the Harness deadline")
+        kill_after = min(1.0, remaining / 4)
+        launch_margin = min(0.05, remaining / 4)
+        process_timeout = remaining - kill_after - launch_margin
+        if process_timeout <= 0:
+            raise TimeoutError("official scorer deadline exhausted before WSL2 start")
+        cmd = (
+            f"cd {shlex.quote(wsl_repo_root)} && "
+            f"{proxy_prefix}"
+            f"timeout --signal=TERM --kill-after={kill_after:.3f}s "
+            f"{process_timeout:.3f}s {python_cmd}"
+        )
         try:
             result = subprocess.run(
                 ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
@@ -1628,12 +1736,18 @@ def _run_official_scoring_wsl(
                 # reader thread raised UnicodeDecodeError and the verdict text was
                 # lost -- an encoding fault masquerading as a scorer failure.
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=timeout + 600,
+                timeout=remaining,
             )
-        except subprocess.TimeoutExpired:
-            return False, f"WSL2 scoring timed out after {timeout}s"
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"WSL2 official scorer exceeded the {timeout:.3f}s Harness deadline"
+            ) from exc
         except Exception as exc:
             return False, f"WSL2 scoring error: {exc}"
+        if result.returncode in (124, 137):
+            raise TimeoutError(
+                f"WSL2 official scorer exceeded the {timeout:.3f}s Harness deadline"
+            )
         if result.returncode == 0:
             return True, f"WSL2 official scoring completed: {_summarise_official_stdout(result.stdout)}"
         combined = f"{result.stderr}\n{result.stdout}"
@@ -1762,11 +1876,6 @@ class SWEBenchAdapter(AgentBenchmark):
         worktree via :func:`_capture_git_diff`.
         """
         workdir = _instance_workdir(instance, workspace)
-        # Arm B only: prepend BM25 localization candidates and the grading
-        # contract.  Done here rather than in load_instances because it needs the
-        # prepared worktree, and done by replacing the field on a copy so the
-        # instance the artifacts recorded stays the dataset's own text.
-        instance = _augment_for_uplift(instance, str(workdir))
         result = adapter.solve_instance(
             instance, working_dir=str(workdir), **kwargs
         )
@@ -1784,6 +1893,8 @@ class SWEBenchAdapter(AgentBenchmark):
         result: EvalResult,
         instance: EvalInstance,
         workspace: Path,
+        *,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Write predictions and invoke the official scorer (fail-closed).
 
@@ -1825,12 +1936,16 @@ class SWEBenchAdapter(AgentBenchmark):
         # can reject any report that predates this request.  See
         # :data:`_SCORING_SESSION` for why both guards exist.
         requested_at = time.time()
+        scorer_timeout = 3600.0 if timeout_s is None else float(timeout_s)
+        if scorer_timeout <= 0:
+            raise TimeoutError("official scorer deadline exhausted before start")
         ok, detail = _run_official_scoring(
             str(predictions_path),
             str(workspace),
             dataset_name=self._DATASET_NAME,
             split=self._DATASET_SPLIT,
             run_id=run_id,
+            timeout=scorer_timeout,
         )
         if not ok:
             raise OfficialScorerUnavailable(f"failed: {detail}")

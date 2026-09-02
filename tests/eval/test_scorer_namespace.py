@@ -24,7 +24,9 @@ These tests pin the resolution contract only -- no Docker, no WSL, no network.
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -129,7 +131,7 @@ class TestWslCommandEmbedsNamespace:
 
     @staticmethod
     def _capture_cmd(monkeypatch):
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
 
         class Result:
             returncode = 0
@@ -138,6 +140,7 @@ class TestWslCommandEmbedsNamespace:
 
         def fake_run(argv, **kwargs):
             captured["cmd"] = argv[-1]
+            captured["timeout"] = kwargs["timeout"]
             return Result()
 
         monkeypatch.setattr(sb.subprocess, "run", fake_run)
@@ -179,3 +182,203 @@ class TestWslCommandEmbedsNamespace:
         sb._run_official_scoring("preds.jsonl", "out")
         assert "namespace=None" not in captured["cmd"]
         assert "namespace='swebench'" in captured["cmd"]
+
+    def test_outer_subprocess_timeout_does_not_extend_scorer_deadline(self, monkeypatch):
+        captured = self._capture_cmd(monkeypatch)
+
+        sb._run_official_scoring_wsl(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 60, "swebench",
+        )
+
+        assert 0 < captured["timeout"] <= 60
+
+    def test_transport_retry_shares_one_deadline(self, monkeypatch):
+        timeouts: list[float] = []
+
+        class Result:
+            stdout = ""
+
+            def __init__(self, returncode: int, stderr: str = "") -> None:
+                self.returncode = returncode
+                self.stderr = stderr
+
+        def fake_run(argv, **kwargs):
+            del argv
+            timeouts.append(float(kwargs["timeout"]))
+            if len(timeouts) == 1:
+                time.sleep(0.02)
+                return Result(1, "SSLEOFError")
+            return Result(0)
+
+        monkeypatch.setattr(sb.subprocess, "run", fake_run)
+
+        ok, _ = sb._run_official_scoring_wsl(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 1.0, "swebench",
+        )
+
+        assert ok is True
+        assert len(timeouts) == 2
+        assert 0 < timeouts[1] < timeouts[0] <= 1.0
+
+    def test_subprocess_timeout_is_raised_for_harness_classification(self, monkeypatch):
+        def fake_run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        monkeypatch.setattr(sb.subprocess, "run", fake_run)
+
+        with pytest.raises(TimeoutError, match="deadline"):
+            sb._run_official_scoring_wsl(
+                "preds.jsonl", "out", "ds", "test", 1, "rid", 1.0, "swebench",
+            )
+
+    def test_wsl_process_tree_has_an_in_distro_deadline_guard(self, monkeypatch):
+        captured = self._capture_cmd(monkeypatch)
+
+        sb._run_official_scoring_wsl(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 60, "swebench",
+        )
+
+        assert "timeout --signal=TERM --kill-after=" in captured["cmd"]
+        assert "s python3 -c" in captured["cmd"]
+
+    @pytest.mark.parametrize("returncode", [124, 137])
+    def test_wsl_deadline_exit_is_raised_for_harness_classification(
+        self, monkeypatch, returncode
+    ):
+        class Result:
+            stdout = ""
+            stderr = "deadline"
+
+            def __init__(self) -> None:
+                self.returncode = returncode
+
+        monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: Result())
+
+        with pytest.raises(TimeoutError, match="deadline"):
+            sb._run_official_scoring_wsl(
+                "preds.jsonl", "out", "ds", "test", 1, "rid", 60, "swebench",
+            )
+
+
+class TestLocalScorerDeadline:
+    """The Linux scorer needs an OS-enforced boundary, not an advisory value."""
+
+    @staticmethod
+    def _install_fake_swebench(monkeypatch) -> None:
+        import types
+
+        swebench = types.ModuleType("swebench")
+        harness = types.ModuleType("swebench.harness")
+        run_evaluation = types.ModuleType("swebench.harness.run_evaluation")
+        run_evaluation.main = lambda **_kwargs: None
+        monkeypatch.setitem(sys.modules, "resource", types.ModuleType("resource"))
+        monkeypatch.setitem(sys.modules, "swebench", swebench)
+        monkeypatch.setitem(sys.modules, "swebench.harness", harness)
+        monkeypatch.setitem(
+            sys.modules, "swebench.harness.run_evaluation", run_evaluation
+        )
+
+    def test_local_scorer_runs_in_a_new_session_with_exact_outer_deadline(
+        self, monkeypatch
+    ) -> None:
+        self._install_fake_swebench(monkeypatch)
+        captured: dict[str, object] = {}
+
+        class Process:
+            pid = 1234
+            returncode = 0
+
+            def communicate(self, *, timeout):
+                captured["communicate_timeout"] = timeout
+                return "Instances resolved: 1", ""
+
+        def fake_popen(argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Process()
+
+        monkeypatch.setattr(sb.subprocess, "Popen", fake_popen)
+
+        ok, _ = sb._run_official_scoring_local(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 0.5, "swebench"
+        )
+
+        assert ok is True
+        assert captured["start_new_session"] is True
+        assert 0 < float(captured["communicate_timeout"]) < 0.5
+
+    def test_local_scorer_timeout_terminates_its_process_tree(self, monkeypatch) -> None:
+        self._install_fake_swebench(monkeypatch)
+        terminated: list[tuple[int, float]] = []
+
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def communicate(self, *, timeout):
+                raise subprocess.TimeoutExpired(["python"], timeout)
+
+        monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: Process())
+        monkeypatch.setattr(
+            sb,
+            "_terminate_local_scorer_tree",
+            lambda process, grace_s: terminated.append((process.pid, grace_s)),
+            raising=False,
+        )
+
+        with pytest.raises(TimeoutError, match="Harness deadline"):
+            sb._run_official_scoring_local(
+                "preds.jsonl", "out", "ds", "test", 1, "rid", 0.5, "swebench"
+            )
+
+        assert len(terminated) == 1
+        assert terminated[0][0] == 4321
+
+    def test_local_scorer_reaps_when_process_group_already_exited(self, monkeypatch) -> None:
+        class Process:
+            pid = 9876
+
+            def __init__(self) -> None:
+                self.communicate_calls = 0
+
+            def communicate(self, **kwargs):
+                del kwargs
+                self.communicate_calls += 1
+                return "", ""
+
+        process = Process()
+        monkeypatch.setattr(
+            sb.os,
+            "killpg",
+            lambda *_args: (_ for _ in ()).throw(ProcessLookupError()),
+            raising=False,
+        )
+
+        sb._terminate_local_scorer_tree(process, 0.1)
+
+        assert process.communicate_calls == 1
+
+
+def test_wsl_availability_probe_reaps_hung_process_tree(monkeypatch) -> None:
+    class Process:
+        pid = 2468
+
+        def communicate(self, **kwargs):
+            raise subprocess.TimeoutExpired(["wsl.exe"], kwargs["timeout"])
+
+    terminated: list[int] = []
+    monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: Process())
+    monkeypatch.setattr(
+        sb,
+        "_terminate_windows_process_tree",
+        lambda process: terminated.append(process.pid),
+        raising=False,
+    )
+
+    monkeypatch.setattr(sb.platform, "system", lambda: "Windows")
+
+    available, detail = sb._can_score_official()
+
+    assert available is False
+    assert "timed out" in detail.lower()
+    assert terminated == [2468]

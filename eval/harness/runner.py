@@ -28,7 +28,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Protocol, Sequence
 
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
@@ -80,7 +80,15 @@ SPAN_ASSERTION_FILENAME = "span-assertion.json"
 # the instance workspace as well (where the benchmark adapter writes its own
 # artifacts, e.g. predictions.jsonl / score.json sidecars).  Returns a dict
 # that gets merged into the prediction artifact.
-ScorerCallback = Callable[[EvalResult, EvalInstance, Path], dict[str, Any]]
+class ScorerCallback(Protocol):
+    def __call__(
+        self,
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict[str, Any]: ...
 
 # Workspace setup callback: called before each solve_instance to populate
 # the working directory (e.g. clone a repo, checkout a commit).  Receives
@@ -223,6 +231,17 @@ class HarnessRun:
             self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             with self.checkpoint_path.open("a", encoding="utf-8") as handle:
                 handle.write(instance_id + "\n")
+
+    def _remaining_wall_clock_seconds(self) -> float:
+        """Return the unspent run deadline or fail before starting more work."""
+        remaining = self.budget.wall_clock_seconds - self._global_usage.wall_clock()
+        if remaining <= 0:
+            raise BudgetExceeded(
+                "wall-clock",
+                f"{self._global_usage.wall_clock():.1f}s > "
+                f"{self.budget.wall_clock_seconds}s",
+            )
+        return remaining
 
     def run(self, instances: list[EvalInstance]) -> dict[str, Any]:
         """Run all *instances* through the adapter, recording artifacts.
@@ -490,7 +509,16 @@ class HarnessRun:
                 self._instance_span_attributes(instance_id),
             ) as scorer_span:
                 try:
-                    scorer_result = self.scorer(result, instance, workspace)
+                    check_budget(self.budget, self._global_usage)
+                    scorer_result = self.scorer(
+                        result,
+                        instance,
+                        workspace,
+                        timeout_s=self._remaining_wall_clock_seconds(),
+                    )
+                    check_budget(self.budget, self._global_usage)
+                except (BudgetExceeded, TimeoutError, subprocess.TimeoutExpired):
+                    raise
                 except Exception as scorer_exc:
                     # scorer exception → ERROR_SCORER (now reachable!).  Raised
                     # inside the span's with-block so the span is ended with
@@ -757,6 +785,7 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         "synthetic": config.get("synthetic", False),
         "git_sha": pin_values["git_sha"],
         "dirty_hash": config.get("dirty_hash", ""),
+        "provider": config.get("provider", ""),
         "model": pin_values["model"],
         "model_revision": pin_values["model_revision"],
         "prompt_hash": pin_values["prompt_hash"],
@@ -765,6 +794,7 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         "physical_index": pin_values["physical_index"],
         "index_mapping_hash": config.get("index_mapping_hash", ""),
         "dataset_pin": config.get("dataset_pin", {}),
+        "evaluation_subset": config.get("evaluation_subset", {}),
         "budgets": {
             "wall_clock_seconds": harness.budget.wall_clock_seconds,
             "max_tokens": harness.budget.max_tokens,

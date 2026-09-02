@@ -117,12 +117,19 @@ def _relevant_document_ids(query_id: str) -> set[str]:
     return ids
 
 
-def score(result: EvalResult, instance: EvalInstance, _workspace: Path) -> dict[str, Any]:
+def score(
+    result: EvalResult,
+    instance: EvalInstance,
+    _workspace: Path,
+    *,
+    timeout_s: float | None = None,
+) -> dict[str, Any]:
     """Score only the safe IDs from a real SearchKnowledge response.
 
     The LLM answer text is deliberately not inspected. This makes a tool-less
     fluent answer unscorable rather than allowing it to manufacture RAG credit.
     """
+    del timeout_s
     if instance.instance_id != result.instance_id:
         raise ValueError("trace_o3 scorer received an unpinned instance")
     query_id = _query_id_for_instance(instance.instance_id)

@@ -286,6 +286,8 @@ def test_openai_reasoning_effort_sent_for_reasoning_model() -> None:
 def test_anthropic_client_uses_tool_use_payload() -> None:
     server, captured = _json_server(
         {
+            "id": "msg-provider-identity",
+            "model": "gpt-5.6-sol",
             "content": [
                 {"type": "text", "text": "anthropic reply"},
                 {
@@ -337,6 +339,14 @@ def test_anthropic_client_uses_tool_use_payload() -> None:
         assert response.usage.input_tokens == 21
         assert response.usage.output_tokens == 9
         assert response.usage.cached_input_tokens == 4
+        assert response.model_identity == {
+            "requested_model": "claude-test",
+            "reported_model": "gpt-5.6-sol",
+            "response_id": "msg-provider-identity",
+            "system_fingerprint": "",
+            "created": 0,
+            "identity_verified": False,
+        }
 
         body = json.loads(captured["body"])
         assert captured["headers"]["x-api-key"] == "test-key"
@@ -901,6 +911,63 @@ def test_anthropic_stream_emits_incremental_text_and_tool_use() -> None:
         assert done_delta.thinking_blocks == []
         body = json.loads(captured["body"])
         assert body["stream"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_anthropic_stream_uses_final_message_delta_input_usage() -> None:
+    """A compatible endpoint may replace provisional zero usage at stream end."""
+    frames = [
+        _anthropic_frame(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    }
+                },
+            },
+        ),
+        _anthropic_frame(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "usage": {
+                    "input_tokens": 550,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 3840,
+                },
+            },
+        ),
+        _anthropic_frame("message_stop", {"type": "message_stop"}),
+    ]
+    server, _ = _sse_server(frames, capture={})
+    try:
+        client = AnthropicClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="claude-test",
+            timeout=5.0,
+        )
+        deltas = asyncio.run(
+            _collect(
+                client.stream(
+                    ChatRequest(
+                        model="claude-test",
+                        messages=[ChatMessage(role="user", content="hello")],
+                    )
+                )
+            )
+        )
+
+        usage = next(delta.usage for delta in deltas if delta.kind == "usage")
+        assert usage.input_tokens == 550
+        assert usage.output_tokens == 5
+        assert usage.cached_input_tokens == 3840
     finally:
         server.shutdown()
         server.server_close()
