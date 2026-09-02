@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import sqlite3
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from codeagent import orchestrator_pb2
 from orchestrator.agents.deep_agent import DeepAgentManager
-from orchestrator.context import BudgetStatus, Compactor, TokenBudget, load_git_diff_context
+from orchestrator.context import (
+    BudgetStatus,
+    Compactor,
+    LayeredContext,
+    TokenBudget,
+    load_git_diff_context,
+)
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.llm.client import (
     COMPLEXITY_FAST_THRESHOLD,
@@ -28,7 +36,11 @@ from orchestrator.llm.client import (
 )
 from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.memory.manager import Memory, MemoryManager
-from orchestrator.prompts import build_system_prompt, build_with_cache_breaks, load_agent_instructions
+from orchestrator.prompts import (
+    build_system_prompt,
+    build_with_cache_breaks,
+    load_agent_instructions,
+)
 from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
 from orchestrator.security import InjectionDetector
 from orchestrator.skills.manager import SkillManager
@@ -42,7 +54,6 @@ from orchestrator.workflows import (
 )
 
 from .tools import ToolRegistry
-
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.0025, 0.01),
@@ -179,6 +190,8 @@ class ConversationRunner:
     main_llm: LLMClient | None = None
     provider_clients: dict[str, LLMClient] | None = None
     workflow_max_concurrency: int = 4
+    layered_context: LayeredContext | None = None
+    _context_persistence_error: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -205,7 +218,9 @@ class ConversationRunner:
         cancel_event: threading.Event | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         if self.llm is None:
-            yield from self._fallback_conversation(user_text, request_iterator)
+            yield from self._fallback_conversation(
+                user_text, request_iterator, session_id=session_id
+            )
             return
 
         # ── Model routing: pick fast model for simple queries ─────────
@@ -214,6 +229,15 @@ class ConversationRunner:
         using_fast = self.llm is self.fast_llm
 
         messages = self._initial_messages(user_text, turn=1, session_id=session_id, history=history or [])
+        if self.layered_context is not None and session_id.strip():
+            self._persist_event(
+                session_id,
+                "execution_result",
+                {
+                    "status": "turn_started",
+                    "request_sha256": self._digest_value(user_text),
+                },
+            )
         total_tokens_in = 0
         total_tokens_out = 0
         total_cached_tokens = 0
@@ -231,13 +255,13 @@ class ConversationRunner:
                 yield self._session_meta(
                     turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
                 )
-                yield self._done(False)
+                yield self._finish(session_id, False, "interrupted", turn=turn)
                 return
 
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                yield self._done(False)
+                yield self._finish(session_id, False, "budget_exceeded", turn=turn)
                 return
 
             # ── Escalate from fast to main model mid-conversation ──
@@ -275,7 +299,7 @@ class ConversationRunner:
                 yield self._session_meta(
                     turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
                 )
-                yield self._done(False)
+                yield self._finish(session_id, False, "interrupted", turn=turn)
                 return
             response = response_box[0]
             # If the interrupt arrived just as the response came back, stop
@@ -286,7 +310,7 @@ class ConversationRunner:
                 yield self._session_meta(
                     turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
                 )
-                yield self._done(False)
+                yield self._finish(session_id, False, "interrupted", turn=turn)
                 return
             total_tokens_in += response.usage.input_tokens
             total_tokens_out += response.usage.output_tokens
@@ -316,11 +340,18 @@ class ConversationRunner:
             if self._budget_status() == BudgetStatus.EXCEEDED:
                 yield self._text(self._budget_exceeded_message())
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                yield self._done(False)
+                yield self._finish(session_id, False, "budget_exceeded", turn=turn)
                 return
             if not response.tool_calls:
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                yield self._done(True)
+                self._persist_reflection(session_id, response.text, turn)
+                yield self._finish(
+                    session_id,
+                    True,
+                    "completed",
+                    turn=turn,
+                    response=response.text,
+                )
                 return
 
             if self._can_batch_tool_calls(response.tool_calls):
@@ -335,6 +366,7 @@ class ConversationRunner:
                     total_cost,
                     consecutive_errors,
                     total_cached_tokens,
+                    session_id,
                 )
                 if should_stop:
                     return
@@ -348,6 +380,7 @@ class ConversationRunner:
 
             for call in response.tool_calls:
                 call_id = self._tool_call_id(call)
+                self._persist_tool_call(session_id, call)
                 if call.name == "AskUser":
                     try:
                         ask_request = self._decode_ask_user(self._call_arguments_json(call))
@@ -368,9 +401,12 @@ class ConversationRunner:
                     if result is None:
                         yield self._text("User response stream ended before an answer was received.")
                         yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                        yield self._done(False)
+                        yield self._finish(
+                            session_id, False, "missing_tool_result", turn=turn
+                        )
                         return
                     messages.append(self._tool_result_message(call_id, call.name, result))
+                    self._persist_tool_result(session_id, call, result)
                     continue
                 if call.name == "TodoWrite":
                     try:
@@ -452,6 +488,7 @@ class ConversationRunner:
                         )
                     )
                     plan_mode_active = True
+                    self._persist_event(session_id, "plan", plan_update)
                     continue
                 if call.name == "SpawnAgent":
                     try:
@@ -477,6 +514,16 @@ class ConversationRunner:
                         )
                     )
                     agent_result = self._run_sub_agent(spawn)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": call.name,
+                            "status": agent_result.get("status", "completed"),
+                            "result_sha256": self._digest_value(agent_result),
+                        },
+                    )
                     messages.append(
                         ChatMessage(
                             role="tool",
@@ -534,6 +581,16 @@ class ConversationRunner:
                         )
                         yield self._text(f"RunWorkflow failed: {exc}")
                         continue
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": call.name,
+                            "status": workflow_result.get("state", "unknown"),
+                            "result_sha256": self._digest_value(workflow_result),
+                        },
+                    )
                     messages.append(
                         ChatMessage(
                             role="tool",
@@ -572,10 +629,14 @@ class ConversationRunner:
                 if result is None:
                     yield self._text("Tool result stream ended before a result was received.")
                     yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                    yield self._done(False)
+                    yield self._finish(
+                        session_id, False, "missing_tool_result", turn=turn
+                    )
                     return
                 tool_message = self._tool_result_message(call_id, call.name, result)
                 messages.append(tool_message)
+                self._persist_tool_result(session_id, call, result)
+                self._persist_file_change(session_id, call, result)
                 self._remember_tool_result(tool_cache, call, tool_message)
                 self._invalidate_tool_cache_after(tool_cache, call, result)
                 if self._tool_result_failed(result):
@@ -622,7 +683,9 @@ class ConversationRunner:
             yield self._session_meta(
                 final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
             )
-            yield self._done(False)
+            yield self._finish(
+                session_id, False, "interrupted", turn=final_turn
+            )
             return
         response = response_box[0]
         total_tokens_in += response.usage.input_tokens
@@ -645,9 +708,17 @@ class ConversationRunner:
                 "No final model summary was returned."
             )
         yield self._session_meta(final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-        yield self._done(False)
+        yield self._finish(
+            session_id,
+            False,
+            "tool_round_limit",
+            turn=final_turn,
+            response=response.text,
+        )
 
-    def _fallback_conversation(self, user_text: str, request_iterator) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+    def _fallback_conversation(
+        self, user_text: str, request_iterator, session_id: str = ""
+    ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         yield self._text("Checking workspace...\n")
         fallback_call = ToolCall(
             name="Glob",
@@ -655,8 +726,10 @@ class ConversationRunner:
             id="fallback-glob",
             arguments_json=json.dumps({"pattern": "**/*"}),
         )
+        self._persist_tool_call(session_id, fallback_call)
         yield self._tool_request(fallback_call, self._call_arguments_json(fallback_call))
         tool_result = self._next_tool_result(request_iterator, self._tool_call_id(fallback_call))
+        self._persist_tool_result(session_id, fallback_call, tool_result)
         state = self.graph.run()
         file_count = self._count_lines(tool_result.output) if tool_result else 0
         if tool_result and tool_result.error:
@@ -665,11 +738,30 @@ class ConversationRunner:
             text = f"{state.response}: {user_text}\nFiles visible: {file_count}"
         yield self._text(text)
         yield self._session_meta(1, 0, 0, 0.0)
-        yield self._done(True)
+        yield self._finish(session_id, True, "completed", turn=1, response=text)
 
     def _initial_messages(self, user_text: str, turn: int, session_id: str = "", history: list[dict[str, str]] | None = None) -> list[ChatMessage]:
         history = history or []
         memories = self.memory_manager.load_relevant(user_text)
+        layered = ""
+        if self.layered_context is not None and session_id.strip():
+            try:
+                snapshot = self.layered_context.load(session_id)
+                long_term = self.layered_context.search_memory(user_text, limit=5)
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                layered = f"Event-sourced context unavailable: {type(exc).__name__}"
+            else:
+                event_text = snapshot.events_text or "_No persisted events._"
+                layered = "\n".join(
+                    ("Event-sourced context:", snapshot.p0, snapshot.p1, event_text)
+                )
+                if long_term:
+                    layered += "\nLong-term memory:\n" + "\n".join(
+                        f"- {item.content}" for item in long_term
+                    )
+        memory_text = self._memory_context(memories) or "_No relevant memories found._"
+        if layered:
+            memory_text += "\n\n" + layered
         provider = self._detect_provider()
         sections = {
             "identity": (
@@ -680,7 +772,7 @@ class ConversationRunner:
             "capabilities": self._capabilities_context(),
             "tools": self._tools_context(),
             "project": self._project_context(),
-            "memory": self._memory_context(memories) or "_No relevant memories found._",
+            "memory": memory_text,
             "session": self._session_context(user_text, turn, session_id=session_id, history=history),
             "provider": provider,
         }
@@ -1159,7 +1251,10 @@ class ConversationRunner:
         total_cost: float,
         consecutive_errors: int,
         total_cached_tokens: int = 0,
+        session_id: str = "",
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        for call in calls:
+            self._persist_tool_call(session_id, call)
         request_calls: list[ToolCall] = []
         requested_keys: set[str] = set()
         for call in calls:
@@ -1181,7 +1276,9 @@ class ConversationRunner:
             if results is None:
                 yield self._text("Tool result stream ended before all batch results were received.")
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                yield self._done(False)
+                yield self._finish(
+                    session_id, False, "missing_tool_result", turn=turn
+                )
                 return consecutive_errors, True
 
             for call in request_calls:
@@ -1190,9 +1287,13 @@ class ConversationRunner:
                 if result is None:
                     yield self._text(f"Batch result missing for tool call {call_id}.")
                     yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                    yield self._done(False)
+                    yield self._finish(
+                        session_id, False, "missing_tool_result", turn=turn
+                    )
                     return consecutive_errors, True
                 tool_message = self._tool_result_message(call_id, call.name, result)
+                self._persist_tool_result(session_id, call, result)
+                self._persist_file_change(session_id, call, result)
                 key = self._tool_cache_key(call)
                 if key:
                     self._remember_tool_result(tool_cache, call, tool_message)
@@ -1205,7 +1306,9 @@ class ConversationRunner:
             if cached_message is None:
                 yield self._text(f"Batch result missing for tool call {call_id}.")
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
-                yield self._done(False)
+                yield self._finish(
+                    session_id, False, "missing_tool_result", turn=turn
+                )
                 return consecutive_errors, True
             messages.append(cached_message)
             if cached_message.is_error:
@@ -1404,6 +1507,128 @@ class ConversationRunner:
         return orchestrator_pb2.OrchestratorMessage(
             done=orchestrator_pb2.Done(success=success),
         )
+
+    def _persist_event(
+        self, session_id: str, kind: str, payload: dict[str, Any]
+    ) -> None:
+        if (
+            self.layered_context is None
+            or not session_id.strip()
+            or self._context_persistence_error
+        ):
+            return
+        try:
+            self.layered_context.store.append(session_id, kind, payload)
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            self._context_persistence_error = type(exc).__name__
+
+    def _persist_tool_call(self, session_id: str, call: ToolCall) -> None:
+        self._persist_event(
+            session_id,
+            "tool_call",
+            {
+                "tool_call_id": self._tool_call_id(call),
+                "tool_name": call.name,
+                "path": call.arguments.get("path", ""),
+                "argument_keys": sorted(str(key) for key in call.arguments),
+                "result_sha256": self._digest_value(call.arguments),
+            },
+        )
+
+    def _persist_tool_result(self, session_id: str, call: ToolCall, result) -> None:
+        if result is None:
+            payload: dict[str, Any] = {
+                "tool_call_id": self._tool_call_id(call),
+                "tool_name": call.name,
+                "status": "missing",
+            }
+        else:
+            payload = {
+                "tool_call_id": self._tool_call_id(call),
+                "tool_name": call.name,
+                "status": "failed" if self._tool_result_failed(result) else "completed",
+                "exit_code": int(getattr(result, "exit_code", 0)),
+                "truncated": bool(getattr(result, "truncated", False)),
+                "result_sha256": self._digest_value(
+                    {
+                        "output": str(getattr(result, "output", "")),
+                        "error": str(getattr(result, "error", "")),
+                    }
+                ),
+            }
+        self._persist_event(session_id, "execution_result", payload)
+
+    def _persist_file_change(self, session_id: str, call: ToolCall, result) -> None:
+        if call.name not in {"Write", "Edit", "NotebookEdit"}:
+            return
+        if result is None or self._tool_result_failed(result):
+            return
+        path = call.arguments.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return
+        self._persist_event(
+            session_id,
+            "file_diff",
+            {
+                "tool_call_id": self._tool_call_id(call),
+                "operation": call.name,
+                "path": path,
+                "change_sha256": self._digest_value(call.arguments),
+                "git_diff_sha256": self._digest_value(
+                    load_git_diff_context(
+                        self.project_root, self.working_dir, max_chars=6_000
+                    )
+                ),
+            },
+        )
+
+    def _persist_reflection(self, session_id: str, response: str, turn: int) -> None:
+        if self.layered_context is None or not session_id.strip() or not response.strip():
+            return
+        try:
+            self.layered_context.reflect(
+                session_id,
+                f"Conversation outcome: completed at turn {turn}.",
+                tags=("conversation", "outcome"),
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            self._context_persistence_error = type(exc).__name__
+
+    def _finish(
+        self,
+        session_id: str,
+        success: bool,
+        status: str,
+        **details: Any,
+    ) -> orchestrator_pb2.OrchestratorMessage:
+        safe_details = dict(details)
+        response = safe_details.pop("response", "")
+        if response:
+            safe_details["response_sha256"] = self._digest_value(response)
+        self._persist_event(
+            session_id,
+            "execution_result",
+            {"status": status, "success": success, **safe_details},
+        )
+        if self._context_persistence_error:
+            return orchestrator_pb2.OrchestratorMessage(
+                done=orchestrator_pb2.Done(
+                    success=False,
+                    message="context persistence unavailable",
+                )
+            )
+        return self._done(success)
+
+    @staticmethod
+    def _digest_value(value: Any) -> str:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _count_lines(value: str) -> int:

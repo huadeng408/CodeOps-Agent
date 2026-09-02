@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 import argparse
-import logging
-import os
 import threading
-from dataclasses import dataclass
 from concurrent import futures
+from dataclasses import dataclass
 from pathlib import Path
 
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
+
 from .config import configure_otel, load_dotenv, read_env
-from .context import TokenBudget
+from .context import LayeredContext, SQLiteContextStore, TokenBudget
 from .graph.main_graph import build_graph
-from .llm.providers import AnthropicClient, LocalClient, OpenAIClient, build_default_client, build_fast_client
+from .llm.providers import (
+    AnthropicClient,
+    LocalClient,
+    OpenAIClient,
+    build_default_client,
+    build_fast_client,
+)
 from .memory.manager import MemoryManager
 from .runtime import ConversationRunner, ToolRegistry
 from .skills.manager import SkillManager
 from .todo.manager import TodoManager
-
 
 MAX_GRPC_MESSAGE_BYTES = 32 * 1024 * 1024
 
@@ -49,11 +53,23 @@ class OrchestratorServer:
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
+        self.context_store = SQLiteContextStore(Path(self.project_root) / ".agent" / "context.sqlite")
+        self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
         self.token_budget = TokenBudget(
             max_tokens=self.config.max_tokens,
             max_cost=self.config.max_cost,
         )
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.context_store.close()
+            self._otel_shutdown()
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -70,7 +86,7 @@ class OrchestratorServer:
         except KeyboardInterrupt:
             server.stop(grace=1)
         finally:
-            self._otel_shutdown()
+            self.close()
 
 
 class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
@@ -113,7 +129,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             traceparent = md.get("traceparent", "").strip()
             if traceparent:
                 from opentelemetry import context as otel_context
-                from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+                from opentelemetry.trace.propagation.tracecontext import (
+                    TraceContextTextMapPropagator,
+                )
 
                 propagator = TraceContextTextMapPropagator()
                 parent_ctx = propagator.extract(carrier={"traceparent": traceparent})
@@ -141,6 +159,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             fast_llm=self.app.fast_llm,
             main_llm=self.app.llm,
             provider_clients=self._provider_clients_for_request(),
+            layered_context=self.app.layered_context,
         )
         try:
             yield from runner.run(
@@ -188,7 +207,25 @@ def _build_provider_clients(default_client):
     return clients
 
 
+class _ManagedGrpcServer:
+    """Delegate to gRPC while tying application resources to server.stop()."""
+
+    def __init__(self, server: grpc.Server, app: OrchestratorServer) -> None:
+        self._server = server
+        self._app = app
+
+    def __getattr__(self, name):
+        return getattr(self._server, name)
+
+    def stop(self, grace):
+        stopped = self._server.stop(grace)
+        stopped.wait()
+        self._app.close()
+        return stopped
+
+
 def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:
+    managed_app = app or OrchestratorServer()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
         options=[
@@ -197,10 +234,10 @@ def create_grpc_server(app: OrchestratorServer | None = None) -> grpc.Server:
         ],
     )
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
-        OrchestratorService(app or OrchestratorServer()),
+        OrchestratorService(managed_app),
         server,
     )
-    return server
+    return _ManagedGrpcServer(server, managed_app)
 
 
 def build_parser() -> argparse.ArgumentParser:

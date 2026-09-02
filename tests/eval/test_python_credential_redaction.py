@@ -42,6 +42,27 @@ def test_run_redacted_command_filters_both_streams_and_preserves_exit_code(
     assert output.count("<redacted>") >= 3
 
 
+def test_shared_redaction_covers_assignments_private_keys_and_local_paths() -> None:
+    from eval.harness.redaction import redact_credential_text
+
+    secret = "top" + "secret-value"
+    private_key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+    text = (
+        f"OPENAI_API_KEY={secret}\n{private_key}\n"
+        f"authorization={secret}\n"
+        "workspace=C:\\Users\\developer\\My Project\\source.py\n"
+        "cache=/var/lib/private/cache.db"
+    )
+
+    redacted = redact_credential_text(text)
+
+    assert secret not in redacted
+    assert "authorization=<redacted>" in redacted
+    assert "fixture" not in redacted
+    assert "developer" not in redacted
+    assert "/var/lib/private" not in redacted
+
+
 @pytest.mark.parametrize(
     "module_name",
     ("eval.swebench_work.run_h5_full", "eval.swebench_work.run_arm"),
