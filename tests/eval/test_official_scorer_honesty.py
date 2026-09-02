@@ -30,16 +30,19 @@ import pytest
 from eval.adapter import EvalInstance, EvalResult
 
 
-def _instance() -> EvalInstance:
+def _instance(instance_id: str = "astropy__astropy-12907") -> EvalInstance:
     return EvalInstance(
-        instance_id="astropy__astropy-12907",
+        instance_id=instance_id,
         task_description="issue text",
         metadata={"repo": "astropy/astropy", "base_commit": "d16bfe0"},
     )
 
 
-def _result(patch: str = "diff --git a/x b/x\n") -> EvalResult:
-    return EvalResult(instance_id="astropy__astropy-12907", model_patch=patch)
+def _result(
+    patch: str = "diff --git a/x b/x\n",
+    instance_id: str = "astropy__astropy-12907",
+) -> EvalResult:
+    return EvalResult(instance_id=instance_id, model_patch=patch)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,29 @@ def test_score_passes_harness_deadline_to_official_scorer(
 
     assert out["resolved"] is False
     assert seen["timeout"] == 12.5
+
+
+def test_score_reuses_official_capability_probe_for_one_adapter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A multi-instance run must not pay the WSL probe timeout per instance."""
+    from eval.benchmarks import swebench as mod
+
+    calls = 0
+
+    def unavailable_probe():
+        nonlocal calls
+        calls += 1
+        return False, "probe unavailable"
+
+    monkeypatch.setattr(mod, "_can_score_official", unavailable_probe)
+    adapter = mod.SWEBenchAdapter()
+
+    for instance_id in ("case-1", "case-2", "case-3"):
+        with pytest.raises(mod.OfficialScorerUnavailable, match="probe unavailable"):
+            adapter.score(_result(instance_id), _instance(instance_id), tmp_path)
+
+    assert calls == 1
 
 
 # ---------------------------------------------------------------------------

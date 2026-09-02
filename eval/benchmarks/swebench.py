@@ -1828,6 +1828,12 @@ class SWEBenchAdapter(AgentBenchmark):
     #: Official scorer invoked by :func:`_run_official_scoring`.
     _SCORER_NAME = "swebench.harness.run_evaluation"
 
+    def __init__(self) -> None:
+        # Capability probing can itself block on a broken WSL distro. Cache the
+        # result for this adapter/run so a multi-instance evaluation pays that
+        # boundary cost once; a new adapter re-probes on the next run.
+        self._official_capability: tuple[bool, str] | None = None
+
     # ------------------------------------------------------------------
     # AgentBenchmark contract
     # ------------------------------------------------------------------
@@ -1927,7 +1933,9 @@ class SWEBenchAdapter(AgentBenchmark):
                 + "\n"
             )
 
-        available, reason = _can_score_official()
+        if self._official_capability is None:
+            self._official_capability = _can_score_official()
+        available, reason = self._official_capability
         if not available:
             raise OfficialScorerUnavailable(f"unavailable: {reason}")
 
