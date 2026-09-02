@@ -33,6 +33,24 @@ func TestNewManagerRegistersAllBuiltins(t *testing.T) {
 	}
 }
 
+func TestNewManagerProvidesGoalSkillCatalog(t *testing.T) {
+	manager := NewManager()
+	items := manager.List()
+	if len(items) < 40 {
+		t.Fatalf("goal requires at least 40 runnable skills, got %d", len(items))
+	}
+	seen := make(map[string]struct{}, len(items))
+	for _, skill := range items {
+		if skill.Name == "" || skill.Description == "" || skill.Prompt == "" || len(skill.Tools) == 0 {
+			t.Fatalf("skill %q is not runnable metadata: %+v", skill.Name, skill)
+		}
+		if _, ok := seen[skill.Name]; ok {
+			t.Fatalf("duplicate skill name %q", skill.Name)
+		}
+		seen[skill.Name] = struct{}{}
+	}
+}
+
 func TestDiscoverReadsOnlyFrontmatterUntilSkillIsInvoked(t *testing.T) {
 	global := t.TempDir()
 	project := t.TempDir()

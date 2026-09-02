@@ -98,7 +98,9 @@ Python Orchestrator
 
 - MCP：读取 `.mcp.json`，启动配置的 MCP stdio server，发现工具后写入 `.agent/mcp-tools.json`，再暴露给 Orchestrator 使用。
 - Hooks：支持 pre/post tool 命令钩子，可用于审计、格式化、阻断或额外校验。
-- Skills：内置 init、review、security review 技能，可通过斜杠命令调用。
+- Skills：Go Harness 提供 40+ 个可运行的内置 Skill，支持模型通过 `Skill`
+  工具自主调用，也支持用户通过斜杠命令显式调用；Python 编排层按需镜像
+  `.agent/skills.json` 元数据，不加载提示词正文。
 - Memory：持久化项目记忆，支持新增、列表、查找、展示和删除。
 - Worktree：支持创建、切换、清理本地 Git worktree。
 - Undo：对 `Write` 和 `Edit` 产生的文件变更做撤销记录。

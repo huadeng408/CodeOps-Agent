@@ -52,12 +52,7 @@ type Manager struct {
 
 func NewManager() *Manager {
 	manager := &Manager{items: make(map[string]skillEntry)}
-	for _, skill := range []Skill{
-		initSkill(),
-		reviewSkill(),
-		securitySkill(),
-		commitSkill(),
-	} {
+	for _, skill := range goalSkills() {
 		manager.Register(skill)
 	}
 	return manager

@@ -49,7 +49,7 @@ class OrchestratorServer:
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
-        self.skills = SkillManager()
+        self.skills = SkillManager(self.project_root)
         self.token_budget = TokenBudget(
             max_tokens=self.config.max_tokens,
             max_cost=self.config.max_cost,
