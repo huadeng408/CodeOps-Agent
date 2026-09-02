@@ -14,9 +14,12 @@ class SQLiteWorkflowStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path)
+        self._connection = sqlite3.connect(self.path, timeout=30.0)
         self._lock = threading.Lock()
         with self._connection:
+            self._connection.execute("PRAGMA busy_timeout = 30000")
+            self._connection.execute("PRAGMA journal_mode = WAL")
+            self._connection.execute("PRAGMA synchronous = NORMAL")
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS workflow_checkpoints (
@@ -63,7 +66,7 @@ class SQLiteWorkflowStore:
             return None
         decoded = json.loads(str(row[0]))
         if not isinstance(decoded, dict):
-            raise ValueError(f"invalid workflow checkpoint for {workflow_id}")
+            raise ValueError(f"invalid workflow checkpoint for {workflow_id}")  # noqa: TRY004 - malformed persisted data
         return WorkflowRun.from_dict(decoded)
 
     def events(self, workflow_id: str) -> list[tuple[int, str, str, str]]:
@@ -73,6 +76,20 @@ class SQLiteWorkflowStore:
                 (workflow_id,),
             ).fetchall()
         return [(int(row[0]), str(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+    def backup_to(self, target: str | Path) -> Path:
+        """Create a consistent SQLite snapshot, including committed WAL pages."""
+        destination_path = Path(target)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if destination_path.exists():
+            destination_path.unlink()
+        with self._lock:
+            destination = sqlite3.connect(destination_path)
+            try:
+                self._connection.backup(destination)
+            finally:
+                destination.close()
+        return destination_path
 
     def close(self) -> None:
         with self._lock:

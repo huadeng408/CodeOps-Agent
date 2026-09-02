@@ -297,6 +297,21 @@ go test ./...
 pytest -q
 ```
 
+运行可审计的真实进程故障恢复验收（默认 8 Worker、200 个任务、30 次进程终止）：
+
+```powershell
+python -m eval.harness.fault_injection `
+  --run-id fault-<timestamp> `
+  --artifact-root .tmp/fault-injection
+```
+
+runner 会启动真实 Python 子进程，复用 `WorkflowEngine` 和 SQLite checkpoint，
+按固定间隔终止正在执行的 worker 并重启其 assignment。receipt、任务清单、
+进程退出码、故障事件、SQLite 事件摘要和 `checksums.sha256` 写入
+`.tmp/fault-injection/<run_id>/`；运行目录被 `.gitignore` 排除，不应提交。
+只有故障次数、任务分母、最终状态和 checksum 全部满足约束时才会输出
+`VERIFIED`，夹具或 mock 不会被计为该验收证据。
+
 ### Phoenix 跨语言 Trace 显式集成测试
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。
