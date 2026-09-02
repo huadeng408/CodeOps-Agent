@@ -12,6 +12,27 @@ from eval.driver_headless import HeadlessDriver, LocalToolExecutor
 from eval.harness.trace_join import eval_join_context
 
 
+def test_skill_tool_loads_default_catalog_and_focus(tmp_path) -> None:
+    result = LocalToolExecutor(str(tmp_path)).execute(
+        "Skill",
+        json.dumps({"name": "integration-test", "args": "runner boundary"}),
+    )
+
+    assert result.exit_code == 0
+    assert "integration-test Skill" in result.output
+    assert "Preferred tools: Read, Write, Bash" in result.output
+    assert "User focus: runner boundary" in result.output
+
+
+def test_skill_tool_fails_closed_for_unknown_name(tmp_path) -> None:
+    result = LocalToolExecutor(str(tmp_path)).execute(
+        "Skill", json.dumps({"name": "does-not-exist"})
+    )
+
+    assert result.exit_code == 1
+    assert "skill not found" in result.error
+
+
 def test_search_knowledge_calls_go_endpoint_with_o3_policy_and_run_id(
     monkeypatch, tmp_path
 ) -> None:

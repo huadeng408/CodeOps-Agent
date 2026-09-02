@@ -48,6 +48,7 @@ def test_headless_runner_advertises_only_serviced_tools(monkeypatch, tmp_path) -
         "SpawnAgent",
         "RunWorkflow",
         "AskUser",
+        "Skill",
     }
 
 

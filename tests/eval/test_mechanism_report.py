@@ -218,7 +218,7 @@ def test_render_distinguishes_baseline_missing_ranking() -> None:
 def test_every_driver_tool_is_classified() -> None:
     from eval.driver_headless import _TOOL_HANDLERS
 
-    assert set(_TOOL_HANDLERS) <= M.SEARCH_TOOLS | M.EDIT_TOOLS
+    assert set(_TOOL_HANDLERS) <= M.SEARCH_TOOLS | M.EDIT_TOOLS | M.AUXILIARY_TOOLS
     assert not (M.SEARCH_TOOLS & M.EDIT_TOOLS)
 
 

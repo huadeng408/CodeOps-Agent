@@ -49,6 +49,7 @@ from eval.adapter import DefaultAgentAdapter, EvalInstance, EvalResult
 from eval.harness.trace_contract import SPAN_EXECUTE_TOOL, SPAN_INVOKE_AGENT
 from eval.harness.trace_join import current_join_attributes
 from orchestrator.rag.trace import otel_span
+from orchestrator.skills.manager import SkillManager
 
 
 def _set_span_attribute(span: Any, key: str, value: Any) -> None:
@@ -142,7 +143,7 @@ class LocalToolExecutor:
     :class:`~orchestrator.runtime.conversation.ConversationRunner` without a
     gRPC round-trip.
 
-    Supported tools: Read, Write, Edit, Bash, Glob, Grep, SearchKnowledge.
+    Supported tools: Read, Write, Edit, Bash, Glob, Grep, SearchKnowledge, Skill.
     Unsupported tools return a stub error so the LLM can adapt.
     """
 
@@ -150,10 +151,12 @@ class LocalToolExecutor:
         self,
         working_dir: str,
         allowed_tools: frozenset[str] | None = None,
+        skills: SkillManager | None = None,
     ) -> None:
         self._cwd = Path(working_dir).resolve()
         self._safe_evidence: dict[str, list[dict[str, Any]]] = {"retrieval_hits": []}
         self._allowed_tools = allowed_tools
+        self._skills = skills or SkillManager(self._cwd)
 
     def safe_evidence(self) -> dict[str, list[dict[str, Any]]]:
         """Return only stable, non-content evidence from the last RAG call."""
@@ -475,6 +478,26 @@ class LocalToolExecutor:
         output, truncated = self._truncate(output)
         return _LocalToolResult(output=output, truncated=truncated)
 
+    def _skill(self, params: dict[str, Any]) -> _LocalToolResult:
+        name = params.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            return _LocalToolResult(error="skill name is required", exit_code=1)
+        name = name.strip()
+        skill = self._skills.get(name)
+        if skill is None:
+            return _LocalToolResult(error=f"skill not found: {name}", exit_code=1)
+
+        parts: list[str] = []
+        if skill.prompt.strip():
+            parts.append(skill.prompt)
+        if skill.tools:
+            parts.append("Preferred tools: " + ", ".join(skill.tools))
+        focus = params.get("args", "")
+        if isinstance(focus, str) and focus.strip():
+            parts.append("User focus: " + focus.strip())
+        output, truncated = self._truncate("\n\n".join(parts))
+        return _LocalToolResult(output=output, truncated=truncated)
+
     def _search_knowledge(self, params: dict[str, Any]) -> _LocalToolResult:
         """Call the real internal Go RAG endpoint for a tool request.
 
@@ -628,6 +651,7 @@ _TOOL_HANDLERS: dict[str, str] = {
     "Glob": "_glob",
     "Grep": "_grep",
     "SearchKnowledge": "_search_knowledge",
+    "Skill": "_skill",
 }
 
 # Tools genuinely serviced by the headless ConversationRunner path.  The

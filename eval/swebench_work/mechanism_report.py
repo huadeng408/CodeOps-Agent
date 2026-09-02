@@ -24,6 +24,9 @@ from eval.swebench_work.report_gate import (  # noqa: E402
 
 SEARCH_TOOLS = frozenset({"Grep", "Read", "Glob", "Bash", "LS", "SearchKnowledge"})
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "str_replace_editor"})
+# Control-plane tools are counted for auditability but do not represent
+# repository search or edits when reporting the mechanism ratio.
+AUXILIARY_TOOLS = frozenset({"Skill"})
 
 
 @dataclass
