@@ -1132,6 +1132,21 @@ def test_build_fast_client_builds_anthropic_client_for_claude_model(monkeypatch)
     assert client.model == "claude-haiku-4-5"
 
 
+def test_anthropic_from_env_accepts_auth_token(monkeypatch) -> None:
+    """Relays that expose Anthropic auth as a bearer token remain configurable."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "auth-token-fixture")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://relay.example/anthropic")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "relay-model")
+
+    client = AnthropicClient.from_env()
+
+    assert client is not None
+    assert client.api_key == "auth-token-fixture"
+    assert client.base_url == "https://relay.example/anthropic"
+    assert client.model == "relay-model"
+
+
 # ---------------------------------------------------------------------------
 # Multimodal (design 22.10): image data-URIs in user/assistant messages become
 # native provider image blocks. Tool results stay plain text.

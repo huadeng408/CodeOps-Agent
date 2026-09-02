@@ -17,12 +17,14 @@ from eval.harness.redaction import redact_credential_text
 from eval.harness.source_pin import source_pin
 from orchestrator.config import load_dotenv
 from orchestrator.context import LayeredContext, SQLiteContextStore
-from orchestrator.llm import ChatMessage, ChatRequest, ChatResponse
-from orchestrator.llm.providers import OpenAIClient, build_default_client
+from orchestrator.llm import ChatMessage, ChatRequest, ChatResponse, LLMClient
+from orchestrator.llm.providers import build_default_client
 
 _SYSTEM_PROMPT = (
     "Answer the repository question using only the supplied context. "
-    "Return exactly one JSON object with no Markdown or explanation."
+    "Return exactly one JSON object with no Markdown or explanation. "
+    "For class-name fields, use the unqualified class name unless the task "
+    "explicitly requests a qualified name."
 )
 _SENSITIVE_NAMES = {
     ".env",
@@ -254,7 +256,7 @@ def _outcome_matches(
 
 
 async def _run_arm(
-    client: OpenAIClient,
+    client: LLMClient,
     config: ContextTokenEvalConfig,
     task: ContextTokenTask,
     context: str,
@@ -304,8 +306,8 @@ async def _run_arm(
     return result, raw
 
 
-def _evidence_scope(client: OpenAIClient) -> tuple[str, str | None, dict[str, str]]:
-    endpoint = urlparse(client.base_url)
+def _evidence_scope(client: LLMClient) -> tuple[str, str | None, dict[str, str]]:
+    endpoint = urlparse(str(getattr(client, "base_url", "")))
     host = (endpoint.hostname or "").lower()
     metadata = {"scheme": endpoint.scheme.lower(), "host": host}
     if host in _LOOPBACK_HOSTS:
@@ -321,7 +323,7 @@ def _evidence_scope(client: OpenAIClient) -> tuple[str, str | None, dict[str, st
 
 async def run_context_token_eval(
     config: ContextTokenEvalConfig,
-    client: OpenAIClient,
+    client: LLMClient,
 ) -> dict[str, Any]:
     config.validate()
     task = load_context_token_task(config.task_path)
@@ -570,8 +572,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     load_dotenv()
     client = build_default_client()
-    if not isinstance(client, OpenAIClient):
-        raise TypeError("an OpenAI-compatible provider client is required")
+    if not isinstance(client, LLMClient):
+        raise TypeError("a provider client implementing LLMClient is required")
     config = ContextTokenEvalConfig(
         run_id=args.run_id,
         artifact_root=args.artifact_root,

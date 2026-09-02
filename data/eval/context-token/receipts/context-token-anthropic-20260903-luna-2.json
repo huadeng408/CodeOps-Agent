@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REMOTE_PROVIDER_REPORTED_USAGE",
+  "limitations": [
+    "This lane verifies provider-reported context A/B usage, not the full product E2E.",
+    "P3 paths are task-pinned; this lane does not measure context-selection accuracy."
+  ],
+  "run_id": "context-token-anthropic-20260903-luna-2",
+  "trace_id": "d873b6958cf84667839bbbc4b26dfcbe",
+  "source_pin": {
+    "git_sha": "59fbb89070ab21adc20bcec17cad3ee57c8a14bd",
+    "dirty_hash": "f4b47304aba0f52b245865c3af2381157e8c727472a4b4110c8d12075e9e984c",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_id": "workflow-provider-contract-v1",
+    "task_sha256": "dffbe79dc36a97a5b28e45b686fa80322a34e0095034ce1a8cac3bc734abc77c",
+    "corpus_sha256": "66b0a8490de88d450a169e1ca89633758a8054e822125f59bdf7a82eeda4045c",
+    "corpus_file_count": 7,
+    "redacted_file_count": 0
+  },
+  "prompt_pins": {
+    "system_sha256": "5c9d6e4e73d01bc8db8bdb03d20d4595a6a7effbf546dcbaa24111b8c6ebd53d",
+    "task_sha256": "9842b160235baf1042a3b82267678109f8bc4d7def1080a376ad7853ffd03ab7",
+    "baseline_context_sha256": "bd687b12fcbfb73131af86e9d689efcf1e3fdb7991d9ae806ce2bb6356639167",
+    "layered_context_sha256": "9bfb9a005f573ba459826a342588962156ae09d0c60c7572ef1a23760397cc2f"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-luna",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED"
+  },
+  "budget": {
+    "max_output_tokens_per_arm": 512,
+    "max_input_tokens_per_arm": 100000,
+    "timeout_seconds_per_arm": 180.0,
+    "temperature": 0.0,
+    "calls_per_arm": 1
+  },
+  "arms": {
+    "baseline": {
+      "call_completed": true,
+      "provider_input_tokens": 17419,
+      "provider_output_tokens": 115,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "reported_model": "gpt-5.6-luna",
+      "response_id_sha256": "454a6a123ba5745a653dbd96f3a238abda1f7b23894d93dd7edddaca3da792aa",
+      "system_fingerprint": ""
+    },
+    "layered": {
+      "call_completed": true,
+      "provider_input_tokens": 565,
+      "provider_output_tokens": 117,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "reported_model": "gpt-5.6-luna",
+      "response_id_sha256": "200e55f1f52303012bc8fbd7b0b288041772c6c38b3255554e11d20008241166",
+      "system_fingerprint": ""
+    }
+  },
+  "comparison": {
+    "baseline_input_token_denominator": 17419,
+    "layered_input_token_denominator": 565,
+    "saved_input_tokens": 16854,
+    "input_token_reduction": 0.9675641540846203,
+    "minimum_required_reduction": 0.6,
+    "outcome_regressed": false
+  },
+  "failures": [],
+  "artifacts": {
+    "arm_results": "arm-results.json",
+    "checksum_file": "checksums.sha256",
+    "context_database": "context.sqlite"
+  }
+}

@@ -16,6 +16,7 @@ from eval.harness.context_token_eval import load_context_token_task
 
 def _provider_server(
     *,
+    provider: str = "openai",
     input_token_values: tuple[int, int] = (1_000, 200),
     output_values: tuple[dict[str, object], dict[str, object]] | None = None,
     reported_models: tuple[str, str] = ("locked-model", "locked-model"),
@@ -45,8 +46,22 @@ def _provider_server(
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            body = json.dumps(
-                {
+            if provider == "anthropic":
+                response_payload = {
+                    "id": f"message-{len(requests)}",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": next(models),
+                    "content": [
+                        {"type": "text", "text": json.dumps(next(outputs))}
+                    ],
+                    "usage": {
+                        "input_tokens": next(input_tokens),
+                        "output_tokens": 8,
+                    },
+                }
+            else:
+                response_payload = {
                     "id": f"response-{len(requests)}",
                     "model": next(models),
                     "system_fingerprint": "revision-1",
@@ -63,7 +78,7 @@ def _provider_server(
                         "completion_tokens": 8,
                     },
                 }
-            ).encode("utf-8")
+            body = json.dumps(response_payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -115,21 +130,35 @@ def _run_cli(
     tmp_path: Path,
     server: ThreadingHTTPServer,
     *,
+    provider: str = "openai",
     run_id: str,
     expected: dict[str, object] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     project_root, task_path, _ = _write_task(tmp_path, expected=expected)
     env = os.environ.copy()
-    env.update(
-        {
-            "LLM_PROVIDER": "openai",
-            "OPENAI_API_KEY": "test-key",
-            "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-            "OPENAI_MODEL": "locked-model",
-            "OPENAI_TIMEOUT": "5",
-            "OPENAI_MAX_RETRIES": "0",
-        }
-    )
+    if provider == "anthropic":
+        env.update(
+            {
+                "LLM_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_AUTH_TOKEN": "test-auth-token",
+                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                "ANTHROPIC_MODEL": "locked-model",
+                "ANTHROPIC_TIMEOUT": "5",
+                "ANTHROPIC_MAX_RETRIES": "0",
+            }
+        )
+    else:
+        env.update(
+            {
+                "LLM_PROVIDER": "openai",
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                "OPENAI_MODEL": "locked-model",
+                "OPENAI_TIMEOUT": "5",
+                "OPENAI_MAX_RETRIES": "0",
+            }
+        )
     return subprocess.run(
         [
             sys.executable,
@@ -159,6 +188,83 @@ def _run_cli(
         timeout=30,
         check=False,
     )
+
+
+def test_cli_accepts_anthropic_client(monkeypatch, tmp_path: Path, capsys) -> None:
+    """The context lane is provider-neutral when a client implements LLMClient."""
+    from eval.harness import context_token_eval as mod
+    from orchestrator.llm.providers import AnthropicClient
+
+    client = AnthropicClient(
+        api_key="auth-token-fixture",
+        base_url="https://relay.example/anthropic",
+        model="relay-model",
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_run(config, passed_client):
+        observed["client"] = passed_client
+        return {
+            "status": "SMOKE_PASS",
+            "run_id": config.run_id,
+            "comparison": {"input_token_reduction": 0.0},
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr(mod, "build_default_client", lambda: client)
+    monkeypatch.setattr(mod, "run_context_token_eval", fake_run)
+
+    rc = mod.main(
+        [
+            "--task",
+            str(tmp_path / "task.json"),
+            "--run-id",
+            "context-anthropic",
+            "--model",
+            "relay-model",
+        ]
+    )
+
+    assert rc == 0
+    assert observed["client"] is client
+    assert "context-anthropic" in capsys.readouterr().out
+
+
+def test_cli_runs_anthropic_provider_end_to_end(tmp_path: Path) -> None:
+    server, requests = _provider_server(provider="anthropic")
+    try:
+        completed = _run_cli(
+            tmp_path,
+            server,
+            provider="anthropic",
+            run_id="context-token-anthropic",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0, completed.stderr
+    assert len(requests) == 2
+    assert {request["model"] for request in requests} == {"locked-model"}
+    assert all(request["messages"][0]["role"] == "user" for request in requests)
+    assert "noise = 'irrelevant'" in str(requests[0]["messages"][0]["content"])
+    assert "noise = 'irrelevant'" not in str(
+        requests[1]["messages"][0]["content"]
+    )
+
+    receipt = json.loads(
+        (
+            tmp_path
+            / "eval_results"
+            / "context-token-anthropic"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "SMOKE_PASS"
+    assert receipt["evidence_scope"] == "LOCAL_PROVIDER_INTEGRATION"
+    assert receipt["arms"]["baseline"]["provider_input_tokens"] == 1_000
+    assert receipt["arms"]["layered"]["provider_input_tokens"] == 200
+    assert receipt["provider"]["model_revision_status"] == "MODEL_IDENTITY_UNVERIFIED"
 
 
 def test_cli_compares_provider_reported_tokens_with_locked_inputs(

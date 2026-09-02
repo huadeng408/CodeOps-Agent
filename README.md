@@ -321,6 +321,8 @@ checksum 均通过。该 receipt 只验证固定进程故障恢复 lane；由于
 运行 Context/Memory 的固定双臂输入 Token 验收：
 
 ```powershell
+# OpenAI-compatible provider
+$env:LLM_PROVIDER = 'openai'
 $env:OPENAI_API_KEY = '<从安全存储加载>'
 $env:OPENAI_BASE_URL = '<OpenAI-compatible HTTPS endpoint>'
 $env:OPENAI_MODEL = '<locked model>'
@@ -330,6 +332,25 @@ python -m eval.harness.context_token_eval `
   --artifact-root eval_results `
   --run-id context-token-<timestamp> `
   --model $env:OPENAI_MODEL `
+  --max-output-tokens 512 `
+  --minimum-reduction 0.60
+```
+
+也可以使用 Anthropic Messages provider。`AnthropicClient` 优先读取
+`ANTHROPIC_API_KEY`，未设置或仍为占位符时回退到 `ANTHROPIC_AUTH_TOKEN`；两者
+都只应从安全存储临时注入环境，不要写入仓库：
+
+```powershell
+$env:LLM_PROVIDER = 'anthropic'
+$env:ANTHROPIC_AUTH_TOKEN = '<从安全存储加载>'
+$env:ANTHROPIC_BASE_URL = '<Anthropic Messages HTTPS endpoint>'
+$env:ANTHROPIC_MODEL = '<locked model>'
+python -m eval.harness.context_token_eval `
+  --task data/eval/context-token/tasks/workflow-provider-contract-v1.json `
+  --project-root . `
+  --artifact-root eval_results `
+  --run-id context-token-<timestamp> `
+  --model $env:ANTHROPIC_MODEL `
   --max-output-tokens 512 `
   --minimum-reduction 0.60
 ```

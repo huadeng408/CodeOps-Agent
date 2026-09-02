@@ -38,6 +38,8 @@ class AnthropicClient(LLMClient):
     def from_env(cls) -> AnthropicClient | None:
         api_key = read_env("ANTHROPIC_API_KEY")
         if not api_key or api_key.startswith("<"):
+            api_key = read_env("ANTHROPIC_AUTH_TOKEN")
+        if not api_key or api_key.startswith("<"):
             return None
         max_tokens = _read_int("ANTHROPIC_MAX_TOKENS", 4096)
         timeout = _read_float("ANTHROPIC_TIMEOUT", 60.0)
