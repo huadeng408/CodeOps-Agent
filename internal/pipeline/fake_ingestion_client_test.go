@@ -18,6 +18,7 @@ type fakeIngestionClient struct {
 	chunkErr    error
 	parseResult orchestratorclient.ParsedArtifact
 	parseErr    error
+	chunkCalls  int
 }
 
 func (f *fakeIngestionClient) Enabled() bool { return true }
@@ -27,6 +28,7 @@ func (f *fakeIngestionClient) Parse(context.Context, tasks.FileProcessingTask, s
 }
 
 func (f *fakeIngestionClient) Chunk(context.Context, tasks.FileProcessingTask, orchestratorclient.ParsedArtifact, int, int) (orchestratorclient.ChunkResult, error) {
+	f.chunkCalls++
 	return f.chunkResult, f.chunkErr
 }
 

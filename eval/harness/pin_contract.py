@@ -13,10 +13,10 @@ The naive fix is to require them all.  That would be wrong twice over:
   Demanding those pins would make a correct SWE-bench manifest impossible —
   the same unreachable-gate defect that the trace contract's capability gating
   exists to prevent.
-* ``model_revision`` legitimately has no value for some providers.  Design map
-  §20.6.3 (E2) is explicit: *若 provider 不提供不可变 revision，状态必须为*
+* ``model_revision`` legitimately has no value for some providers. The E2
+  identity contract says: *若 provider 不提供不可变 revision，状态必须为*
   ``MODEL_IDENTITY_UNVERIFIED``.  The required outcome is a recorded status,
-  not an aborted run.  Hard-failing would contradict the design map.
+  not an aborted run. Hard-failing would discard valid but limited evidence.
 
 So pins fall into three classes:
 

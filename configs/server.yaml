@@ -4,10 +4,10 @@
 
 database:
   mysql:
-    dsn: "${MYSQL_DSN:codeagent:codeagent@tcp(127.0.0.1:3306)/codeagent?charset=utf8mb4&parseTime=True&loc=Local}"
+    dsn: "${MYSQL_DSN}"
   redis:
     addr: "127.0.0.1:6379"
-    password: "${REDIS_PASSWORD:codeagent}"
+    password: "${REDIS_PASSWORD}"
     db: 0
 
 jwt:
@@ -37,8 +37,8 @@ kafka:
 # MinIO 对象存储配置
 minio:
   endpoint: "127.0.0.1:9000" # 本地开发环境使用 127.0.0.1:9000
-  access_key_id: "${MINIO_ACCESS_KEY:minioadmin}"
-  secret_access_key: "${MINIO_SECRET_KEY:minioadmin}"
+  access_key_id: "${MINIO_ACCESS_KEY}"
+  secret_access_key: "${MINIO_SECRET_KEY}"
   use_ssl: false
   bucket_name: "uploads"
 
@@ -66,8 +66,8 @@ corpus:
 # cutover; floating tags (@main/@latest) are rejected by ValidateEmbeddingContract.
 # VERIFIED 2026-08-06: 5617a9f61b028005a4858fdac845db406aefb181 is the current
 # BAAI/bge-m3 main-branch commit per hf-mirror API (lastModified 2024-07-03);
-# local weights (D:/tools/mineru-models/models/BAAI--bge-m3) sha256-match the
-# HF LFS etags (pytorch_model.bin b5e0ce34...aad38, sentencepiece.bpe.model
+# Verified local weights sha256-match the HF LFS etags
+# (pytorch_model.bin b5e0ce34...aad38, sentencepiece.bpe.model
 # cfc8146a...2865, tokenizer.json 21106b6d...dd08). dims 1024 native.
 embedding:
     model: "BAAI/bge-m3"

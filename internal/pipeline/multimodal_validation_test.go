@@ -58,6 +58,12 @@ func TestValidatePDFStructuredChunkRejectsNonMineruParser(t *testing.T) {
 func TestProcessChunkExternalArtifactRejectsCrossPagePDFBeforePersistence(t *testing.T) {
 	chunk := validPDFStructuredChunk()
 	chunk.PageSpan = []int{2, 3}
+	chunk.DocumentID = "pdf-md5"
+	chunk.ChunkID = "pdf-md5:chunk:1"
+	chunk.PageID = "pdf-md5:p2"
+	chunk.ElementIDs = []string{"pdf-md5:p2:e1"}
+	chunk.BBoxRefs = []string{"pdf-md5:p2:e1:0,0,100,100"}
+	chunk.SourceSHA256 = testArtifactSHA
 	client := &fakeIngestionClient{
 		chunkResult: orchestratorclient.ChunkResult{
 			StructuredChunks: []model.StructuredChunk{chunk},
@@ -65,11 +71,7 @@ func TestProcessChunkExternalArtifactRejectsCrossPagePDFBeforePersistence(t *tes
 	}
 	repo := &fakeVectorRepo{}
 	processor := newExternalChunkProcessor(repo, client, &fakeDocumentRepo{})
-	artifactBytes, err := json.Marshal(orchestratorclient.ParsedArtifact{
-		ParsedText: "page evidence",
-		ParserName: "mineru",
-		Elements:   []json.RawMessage{json.RawMessage(`{"type":"text"}`)},
-	})
+	artifactBytes, err := json.Marshal(validMineruArtifactWithElementID("pdf-md5", "pdf-md5:p2:e1"))
 	if err != nil {
 		t.Fatal(err)
 	}

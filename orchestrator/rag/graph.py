@@ -287,8 +287,8 @@ def build_graph(settings: Settings, backend: GoBackendClient):
             }
 
         top_k = max(1, int(state.get("context_top_k", settings.context_top_k)))
-        # O2 (design map §20.6.4 item 2): rerank span at the real reranker call
-        # site.  §9.2's target tree wants model/revision/input_count here;
+        # O2 rerank span at the real reranker call site. The trace contract
+        # requires model/revision/input_count here;
         # input/output counts and the query hash are known Python-side, but the
         # reranker model identity is not (the ranking happens behind
         # ``backend.rerank_context`` in Go), so it is left to the Go span rather

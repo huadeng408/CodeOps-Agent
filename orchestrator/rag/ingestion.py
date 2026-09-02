@@ -20,27 +20,36 @@ from pathlib import Path
 import httpx
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 
-from .config import Settings
 from .chunking import chunk_elements, chunk_elements_for_modality
+from .config import Settings
 from .elements import Element, map_mineru_output
-from .native_documents import parse_docx_bytes, parse_pptx_bytes
-from .spreadsheet import parse_xlsx_bytes
+from .modality_policies import get_chunker_modality
 from .models import (
     ChunkRequestPayload,
     ChunkResponsePayload,
     EmbedRequestPayload,
     EmbedResponsePayload,
+    FileProcessingTaskPayload,
     IndexRequestPayload,
     IndexResponsePayload,
     ParseRequestPayload,
     ParseResponsePayload,
 )
+from .native_documents import parse_docx_bytes, parse_pptx_bytes
+from .spreadsheet import parse_xlsx_bytes
 from .trace import current_trace_id, elapsed_ms, log_request
 
 TOKEN_CHUNK_SIZE = 500
 TOKEN_CHUNK_OVERLAP = 50
+
+
+def _task_document_id(task: FileProcessingTaskPayload) -> str:
+    return task.document_id.strip() or task.file_md5
 
 
 class IngestionService:
@@ -72,11 +81,12 @@ class IngestionService:
 
         file_type = _detect_file_type(payload.task.file_name)
         is_pdf = file_type == "pdf" or source_resp.content.startswith(b"%PDF-")
+        document_id = _task_document_id(payload.task)
         if is_pdf:
             parsed_artifact = await _parse_pdf_with_mineru(
                 source_resp.content,
                 payload.task.file_name,
-                payload.task.file_md5,
+                document_id,
                 self._settings,
             )
             parsed = parsed_artifact.parsedText
@@ -87,10 +97,10 @@ class IngestionService:
                     parse_docx_bytes if payload.task.file_name.lower().endswith(".docx") else parse_pptx_bytes
                 )(
                     source_resp.content,
-                    document_id=payload.task.file_md5,
+                    document_id=document_id,
                     source_url=payload.objectUrl,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - parser failures intentionally fall back to Tika.
                 # A corrupt/non-Office payload may still be handled by the
                 # existing non-PDF text fallback.  PDF magic bytes were
                 # handled above and can never reach this branch.
@@ -111,7 +121,7 @@ class IngestionService:
         elif payload.task.file_name.lower().endswith(".xlsx"):
             spreadsheet = parse_xlsx_bytes(
                 source_resp.content,
-                document_id=payload.task.file_md5,
+                document_id=document_id,
                 source_url=payload.objectUrl,
             )
             parsed = "\n\n".join(element.text for element in spreadsheet.elements if element.text)
@@ -138,7 +148,7 @@ class IngestionService:
         if payload.task.file_name.lower().endswith((".docx", ".pptx")) and office is not None:
             return ParseResponsePayload(
                 parsedText=parsed_text,
-                documentId=payload.task.file_md5,
+                documentId=document_id,
                 parserName=office.parser_name,
                 parserVersion=office.parser_version,
                 sourceSha256=office.source_sha256,
@@ -148,7 +158,7 @@ class IngestionService:
         if payload.task.file_name.lower().endswith(".xlsx"):
             return ParseResponsePayload(
                 parsedText=parsed_text,
-                documentId=payload.task.file_md5,
+                documentId=document_id,
                 parserName=spreadsheet.parser_name,
                 parserVersion=spreadsheet.parser_version,
                 sourceSha256=spreadsheet.source_sha256,
@@ -164,8 +174,21 @@ class IngestionService:
         start = time.perf_counter()
         file_name = payload.task.file_name
         file_type = _detect_file_type(file_name)
+        if not payload.elements and (
+            file_type == "pdf" or _claims_mineru_identity(payload.parserName)
+        ):
+            raise ValueError("PDF chunks require MinerU element provenance")
         if payload.elements:
-            modality = _structured_modality(file_name)
+            parser_family = _validate_parser_provenance(
+                payload.parserName,
+                payload.elements,
+                parser_version=payload.parserVersion,
+                document_id=payload.documentId,
+                source_sha256=payload.sourceSha256,
+                task_document_id=_task_document_id(payload.task),
+                require_mineru=file_type == "pdf",
+            )
+            modality = _structured_modality(file_name, parser_name=parser_family)
             if modality:
                 structured = chunk_elements_for_modality(
                     payload.elements,
@@ -196,9 +219,7 @@ class IngestionService:
         cleaned_text = _clean_parsed_text(payload.text, file_name)
         # Non-PDF documents also produce structured chunks (native parser
         # path) so they carry corpus provenance and land in the v2 index.
-        from .elements import Element as _Element
-
-        text_elements = _text_to_elements(cleaned_text, document_id=payload.task.file_md5)
+        text_elements = _text_to_elements(cleaned_text, document_id=_task_document_id(payload.task))
         structured = chunk_elements(
             text_elements,
             child_tokens=payload.chunkSize,
@@ -224,7 +245,7 @@ class IngestionService:
             return EmbedResponsePayload(vectors=[])
         try:
             vectors = await self._embed_via_http_with_retry(payload.texts, use_dimensions=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider failures use the alternate client.
             if self._settings.embedding_dimensions > 0 and _is_dimension_mismatch_error(exc):
                 log_request(
                     "ingestion_embed_dimension_fallback",
@@ -281,7 +302,7 @@ class IngestionService:
                 client = self._embeddings if use_dimensions else self._embeddings_without_dimensions
                 vectors = await client.aembed_documents(texts)
                 return [[float(value) for value in item] for item in vectors]
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - retry all provider client failures.
                 last_exc = exc
                 if attempt == 3:
                     break
@@ -295,7 +316,7 @@ class IngestionService:
                 error=str(last_exc) if last_exc else "",
             )
             return direct_vectors
-        except Exception:
+        except Exception:  # noqa: BLE001 - preserve the original provider error after fallback.
             if last_exc is not None:
                 raise last_exc
         raise RuntimeError("embedding failed without exception")
@@ -326,7 +347,7 @@ class IngestionService:
         for attempt in range(1, 4):
             try:
                 return await self._embed_via_http(texts, use_dimensions=use_dimensions)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - retry all HTTP/provider failures.
                 last_exc = exc
                 if attempt == 3:
                     break
@@ -389,7 +410,7 @@ async def _parse_pdf_with_mineru(
             parsedText=parsed_text,
             documentId=document_id or file_name,
             parserName="mineru",
-            parserVersion=sorted(parser_versions)[0],
+            parserVersion=min(parser_versions),
             sourceSha256=hashlib.sha256(content).hexdigest(),
             elements=elements,
             assets=assets,
@@ -599,11 +620,105 @@ def _office_modality(file_name: str) -> str:
     return ""
 
 
-def _structured_modality(file_name: str) -> str:
-    """Return the explicit structured chunk route for a parsed document."""
+def _structured_modality(file_name: str, *, parser_name: str = "") -> str:
+    """Return the structured route, preferring the parser's identity.
+
+    Object names are user-controlled and can disagree with their bytes, so the
+    parse-stage parser identity must win when it is available. Older callers
+    may omit it and retain the extension-based fallback.
+    """
+    normalized_parser = parser_name.strip().lower()
+    parser_routes = {
+        "mineru": "pdf",
+        "python-docx": "word",
+        "python-pptx": "ppt",
+        "openpyxl": "excel",
+    }
+    for prefix, canonical in parser_routes.items():
+        if normalized_parser == prefix or normalized_parser.startswith(prefix + "-"):
+            return get_chunker_modality(canonical) or ""
     if _detect_file_type(file_name) == "pdf":
-        return "pdf"
-    return _office_modality(file_name)
+        return get_chunker_modality("pdf") or ""
+    office_modality = _office_modality(file_name)
+    if not office_modality:
+        return ""
+    canonical = {
+        "office_document": "word",
+        "slide": "ppt",
+        "spreadsheet": "excel",
+    }[office_modality]
+    return get_chunker_modality(canonical) or ""
+
+
+def _validate_parser_provenance(
+    parser_name: str,
+    elements: list[Element],
+    *,
+    parser_version: str = "",
+    document_id: str = "",
+    source_sha256: str = "",
+    task_document_id: str = "",
+    require_mineru: bool,
+) -> str:
+    """Return one parser family and reject inconsistent or unsafe provenance."""
+    declared = _parser_family(parser_name)
+    observed = {_parser_family(element.parser_name) for element in elements}
+    observed.discard("")
+    if len(observed) > 1 or (declared and observed and observed != {declared}):
+        raise ValueError("parser provenance mismatch between payload and elements")
+    effective = declared or (next(iter(observed)) if observed else "")
+    mineru_claimed = _claims_mineru_identity(parser_name) or any(
+        _claims_mineru_identity(element.parser_name) for element in elements
+    )
+    if require_mineru or mineru_claimed:
+        if parser_name.strip().lower() != "mineru" or any(
+            element.parser_name.strip().lower() != "mineru" for element in elements
+        ):
+            raise ValueError(
+                "PDF structured chunks require MinerU provenance with the exact MinerU parser identity"
+            )
+        effective = "mineru"
+    if not document_id.strip() or document_id != task_document_id:
+        raise ValueError("structured document provenance does not match the task document")
+    if not parser_name.strip():
+        raise ValueError("structured parser name is required")
+    if not parser_version.strip() or any(
+        element.parser_version != parser_version for element in elements
+    ):
+        raise ValueError("structured parser version provenance is inconsistent")
+    if not _is_lower_sha256(source_sha256):
+        raise ValueError("structured source hash is not a lowercase SHA-256")
+    if any(element.document_id != document_id for element in elements):
+        raise ValueError("structured element document provenance is inconsistent")
+    element_hashes = {element.source_sha256 for element in elements}
+    if len(element_hashes) != 1 or not all(
+        _is_lower_sha256(element_hash) for element_hash in element_hashes
+    ):
+        raise ValueError("structured element artifact hash provenance is inconsistent")
+    if not (require_mineru or mineru_claimed) and next(iter(element_hashes)) != source_sha256:
+        raise ValueError("structured element hash does not match the artifact source hash")
+    return effective
+
+
+def _parser_family(parser_name: str) -> str:
+    normalized = parser_name.strip().lower()
+    if not normalized:
+        return ""
+    if normalized == "mineru":
+        return normalized
+    for prefix in ("python-docx", "python-pptx", "openpyxl"):
+        if normalized == prefix or normalized.startswith(prefix + "-"):
+            return prefix
+    return normalized
+
+
+def _claims_mineru_identity(parser_name: str) -> bool:
+    normalized = parser_name.strip().lower()
+    return normalized == "mineru" or normalized.startswith("mineru-")
+
+
+def _is_lower_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 @lru_cache(maxsize=8)
@@ -884,7 +999,7 @@ def _build_excel_sections(text: str) -> list[str]:
 
 def _looks_like_excel_sheet_header(line: str) -> bool:
     lower_line = line.lower()
-    return lower_line.startswith("sheet") or lower_line.startswith("工作表") or lower_line.endswith(":")
+    return lower_line.startswith(("sheet", "工作表")) or lower_line.endswith(":")
 
 
 def _is_dimension_mismatch_error(exc: Exception) -> bool:

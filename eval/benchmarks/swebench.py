@@ -50,6 +50,7 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -403,7 +404,7 @@ def load_swebench_instances(
     dataset cannot be downloaded and *allow_synthetic* is ``True``, falls back
     to bundled synthetic instances for pipeline testing.  When
     *allow_synthetic* is ``False`` (the default for real evaluation), any
-    dataset-load failure is raised immediately — per the design map, synthetic
+    dataset-load failure is raised immediately: the official evaluation contract forbids synthetic
     instances must never be silently mixed into official results.
 
     Args:
@@ -1094,7 +1095,7 @@ def load_instances(
     """Module-level instance loader for the HarnessRun path in ``eval/run.py``.
 
     Loads real SWE-bench Verified instances from HuggingFace datasets.  Does
-    **not** fall back to synthetic data — per the design map, synthetic
+    **not** fall back to synthetic data: synthetic
     instances must never be mixed into official results.
 
     Args:
@@ -1466,7 +1467,7 @@ def _run_official_scoring_local(
         return False, f"official scoring failed: {e}"
 
 
-_WSL_REPO_ROOT = "/mnt/d/vscode/localcode"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _to_wsl_path(path: "str | Path") -> str:
@@ -1508,7 +1509,8 @@ def _to_wsl_path(path: "str | Path") -> str:
     while normalized.startswith("./"):
         normalized = normalized[2:]
     normalized = normalized.lstrip("/")
-    return f"{_WSL_REPO_ROOT}/{normalized}"
+    repo_root = _to_wsl_path(_REPO_ROOT).rstrip("/")
+    return f"{repo_root}/{normalized}"
 
 
 #: Labels the official SWE-bench harness prints in its closing summary.  These
@@ -1582,6 +1584,7 @@ def _run_official_scoring_wsl(
     """Run official scoring via WSL2 Ubuntu-24.04."""
     wsl_preds = _to_wsl_path(predictions_path)
     wsl_output = _to_wsl_path(output_dir)
+    wsl_repo_root = _to_wsl_path(_REPO_ROOT)
 
     # WSL inherits no Windows proxy variables (WSLENV is empty), so a proxy the
     # scorer needs has to be exported inside the WSL command.  On a mirrored-mode
@@ -1600,7 +1603,7 @@ def _run_official_scoring_wsl(
         )
 
     cmd = (
-        f"cd /mnt/d/vscode/localcode && "
+        f"cd {shlex.quote(wsl_repo_root)} && "
         f"{proxy_prefix}"
         f"python3 -c \""
         f"import sys; sys.path.insert(0, '.'); "

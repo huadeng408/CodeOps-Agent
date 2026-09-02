@@ -3,29 +3,43 @@ param(
     [string]$OutputDir = "eval_results/o3",
     [string]$ServerUrl = "http://127.0.0.1:8081",
     [string]$PhoenixUrl = "http://127.0.0.1:6006",
-    [int]$StartupTimeoutSeconds = 120
+    [int]$StartupTimeoutSeconds = 120,
+    [string]$Python = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-# This is deliberately a one-receipt runner.  Values read here remain only in
-# the process environment inherited by the short-lived Go and Python children.
+# This is deliberately a one-receipt runner. Credentials must already be in
+# the caller's environment and remain process-scoped for the short-lived Go
+# and Python children.
 $repoRoot = Split-Path -Parent $PSScriptRoot
-# Build the non-ASCII folder name from code points so this runner works even
-# when a Windows host invokes it with an incompatible script code page.
-$progressFolder = "{0}{1}{2}{3}" -f [char]0x9879, [char]0x76EE, [char]0x8FDB, [char]0x5C55
-$keyFile = Join-Path "D:\Obsidian\code-autogrowth" (Join-Path $progressFolder "api-key.md")
+$endpointHelper = Join-Path $PSScriptRoot "lib\receipt-endpoints.ps1"
+$redactionHelper = Join-Path $PSScriptRoot "lib\credential-redaction.ps1"
+. $endpointHelper
+$serverEndpoint = Resolve-LoopbackHttpEndpoint -Url $ServerUrl
+$ServerUrl = $serverEndpoint.Url
+$serverPort = [int]$serverEndpoint.Port
+$pythonCommand = if ([string]::IsNullOrWhiteSpace($Python)) {
+    (Get-Command python -ErrorAction Stop).Source
+} else {
+    $Python
+}
 $serverProcess = $null
-$serverExe = Join-Path $repoRoot ".tmp\o3-receipt-server.exe"
-$serverOut = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.stdout.log"
-$serverErr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.stderr.log"
+$runToken = [guid]::NewGuid().ToString("N")
+$serverExe = Join-Path $repoRoot ".tmp\o3-receipt-server-$runToken.exe"
+$serverRunner = Join-Path $repoRoot ".tmp\o3-receipt-server-$runToken.ps1"
+$serverOut = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.$runToken.stdout.log"
+$serverErr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.$runToken.stderr.log"
+$powerShellCommand = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $trackedNames = @(
     "LOCAL_LLM_BASE_URL", "LOCAL_LLM_API_KEY", "LOCAL_LLM_MODEL",
     "CODE_AGENT_RAG_SERVER_URL", "CODE_AGENT_RAG_INTERNAL_SECRET",
     "CODE_AGENT_RAG_USER_ID", "ORCHESTRATOR_SHARED_SECRET",
     "CODE_AGENT_RAG_TIMEOUT_SECONDS",
+    "CODE_AGENT_SERVER_PORT", "CODE_AGENT_O3_SERVER_EXE",
+    "CODE_AGENT_O3_SERVER_WORKDIR", "CODE_AGENT_REDACTION_HELPER",
     "CODE_AGENT_STRICT_TRACE_PINS", "PHOENIX_URL",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SERVICE_NAME"
 )
@@ -44,20 +58,6 @@ function Restore-Environment {
             Set-Item -LiteralPath ("Env:{0}" -f $name) -Value $previous[$name]
         }
     }
-}
-
-function Get-BeeApiKey {
-    $lines = Get-Content -LiteralPath $keyFile -Encoding UTF8
-    $beeIndex = -1
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match "(?i)^\s*beeapi\b") { $beeIndex = $i; break }
-    }
-    if ($beeIndex -lt 0) { throw "BeeAPI credential label was not found" }
-    for ($i = $beeIndex + 1; $i -lt [Math]::Min($beeIndex + 4, $lines.Count); $i++) {
-        $candidate = $lines[$i].Trim()
-        if ($candidate -match "^[A-Za-z0-9_\-]{20,}$") { return $candidate }
-    }
-    throw "BeeAPI credential was not found below its label"
 }
 
 function New-InternalSecret {
@@ -81,17 +81,33 @@ function Wait-ForHealth {
     throw "timed out waiting for short-lived O3 RAG server"
 }
 
+function Stop-ProcessTree {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -eq $Process -or $Process.HasExited) {
+        return
+    }
+    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+    try { $Process.WaitForExit(10000) | Out-Null } catch { }
+}
+
 Push-Location $repoRoot
 try {
-    $key = Get-BeeApiKey
+    if ([string]::IsNullOrWhiteSpace($env:LOCAL_LLM_API_KEY)) {
+        throw "LOCAL_LLM_API_KEY is not configured."
+    }
+    $key = $env:LOCAL_LLM_API_KEY
     $secret = New-InternalSecret
-    $env:LOCAL_LLM_BASE_URL = "https://beeapi.ai/v1"
+    if ([string]::IsNullOrWhiteSpace($env:LOCAL_LLM_BASE_URL)) {
+        $env:LOCAL_LLM_BASE_URL = "https://beeapi.ai/v1"
+    }
     $env:LOCAL_LLM_API_KEY = $key
     $env:LOCAL_LLM_MODEL = "gpt-5.6-sol"
     $env:CODE_AGENT_RAG_SERVER_URL = $ServerUrl
     $env:CODE_AGENT_RAG_INTERNAL_SECRET = $secret
     $env:CODE_AGENT_RAG_USER_ID = "1"
     $env:CODE_AGENT_RAG_TIMEOUT_SECONDS = "120"
+    $env:CODE_AGENT_SERVER_PORT = [string]$serverPort
     $env:ORCHESTRATOR_SHARED_SECRET = $secret
     $env:CODE_AGENT_STRICT_TRACE_PINS = "true"
     $env:PHOENIX_URL = $PhoenixUrl
@@ -101,25 +117,61 @@ try {
     $env:OTEL_EXPORTER_OTLP_ENDPOINT = $PhoenixUrl.TrimEnd('/')
     $env:OTEL_SERVICE_NAME = "code-agent-o3-rag"
 
-    if (Get-NetTCPConnection -LocalPort 8081 -State Listen -ErrorAction SilentlyContinue) {
-        throw "refusing to reuse an existing process on :8081"
+    if (Get-NetTCPConnection -LocalPort $serverPort -State Listen -ErrorAction SilentlyContinue) {
+        throw "refusing to reuse an existing process on :$serverPort"
     }
-    & go build -o $serverExe ./cmd/server
-    if ($LASTEXITCODE -ne 0) { throw "Go RAG server build failed" }
-    $serverProcess = Start-Process -FilePath $serverExe -WorkingDirectory $repoRoot `
+    New-Item -ItemType Directory -Path (Split-Path -Parent $serverExe) -Force | Out-Null
+    . $redactionHelper
+    $buildExitCode = 0
+    Invoke-RedactedNativeCommand `
+        -FilePath "go" `
+        -ArgumentList @("build", "-o", $serverExe, "./cmd/server") `
+        -Secrets @($key, $secret) `
+        -ExitCode ([ref]$buildExitCode)
+    if ($buildExitCode -ne 0) { throw "Go RAG server build failed" }
+
+    @'
+$ErrorActionPreference = "Stop"
+. $env:CODE_AGENT_REDACTION_HELPER
+Push-Location $env:CODE_AGENT_O3_SERVER_WORKDIR
+try {
+    $exitCode = 0
+    Invoke-RedactedNativeCommand `
+        -FilePath $env:CODE_AGENT_O3_SERVER_EXE `
+        -Secrets @(
+            $env:LOCAL_LLM_API_KEY,
+            $env:CODE_AGENT_RAG_INTERNAL_SECRET,
+            $env:ORCHESTRATOR_SHARED_SECRET
+        ) `
+        -ExitCode ([ref]$exitCode)
+    exit $exitCode
+}
+finally {
+    Pop-Location
+}
+'@ | Set-Content -LiteralPath $serverRunner -Encoding utf8
+    $env:CODE_AGENT_O3_SERVER_EXE = $serverExe
+    $env:CODE_AGENT_O3_SERVER_WORKDIR = $repoRoot
+    $env:CODE_AGENT_REDACTION_HELPER = $redactionHelper
+    $serverProcess = Start-Process -FilePath $powerShellCommand -WorkingDirectory $repoRoot `
+        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serverRunner) `
         -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -WindowStyle Hidden -PassThru
     Wait-ForHealth -Url "$($ServerUrl.TrimEnd('/'))/healthz" -TimeoutSeconds $StartupTimeoutSeconds
 
-    & C:\Python312\python.exe -m eval.run_o3 --execute --output-dir $OutputDir
-    exit $LASTEXITCODE
+    $evalExitCode = 0
+    Invoke-RedactedNativeCommand `
+        -FilePath $pythonCommand `
+        -ArgumentList @("-m", "eval.run_o3", "--execute", "--output-dir", $OutputDir) `
+        -Secrets @($key, $secret) `
+        -ExitCode ([ref]$evalExitCode)
+    exit $evalExitCode
 }
 finally {
     if ($null -ne $serverProcess) {
-        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
-        try { $serverProcess.WaitForExit() } catch { }
+        Stop-ProcessTree $serverProcess
         $serverProcess.Dispose()
     }
-    Remove-Item -LiteralPath $serverExe -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $serverExe, $serverRunner -Force -ErrorAction SilentlyContinue
     Restore-Environment
     Pop-Location
 }

@@ -1,0 +1,60 @@
+{
+  "schema_version": "audio-source-manifest/v1",
+  "dataset_id": "openslr/librispeech_asr",
+  "dataset_revision": "71cacbfb7e2354c4226d01e70d77d5fca3d04ba1",
+  "dataset_url": "https://huggingface.co/datasets/openslr/librispeech_asr",
+  "config": "clean",
+  "split": "test",
+  "license": "CC-BY-4.0",
+  "reference_source": "openslr/librispeech_asr dataset transcript field",
+  "rows": [
+    {
+      "row_index": 0,
+      "id": "6930-75918-0000",
+      "reference_text_sha256": "9c3fd9c37616a15061047594d2ccca4213721d77b81077613c9c1005bc3d0fe7",
+      "query_text": "where did Concord return"
+    },
+    {
+      "row_index": 1,
+      "id": "6930-75918-0001",
+      "reference_text_sha256": "825062619f36e473f4f2291947f5996ee75eec895ce49db8916a8fed678d1f59",
+      "query_text": "what did the French invite the English to"
+    },
+    {
+      "row_index": 2,
+      "id": "6930-75918-0002",
+      "reference_text_sha256": "28176eba884aa96b09ad6f37c9e31b7b272e4c37f72dfc6a9a48a11e75392742",
+      "query_text": "what happened to the princess during her journey"
+    },
+    {
+      "row_index": 3,
+      "id": "6930-75918-0003",
+      "reference_text_sha256": "2c468a05f960fda8fc1a2f865853942ea3b30e0d32b50b1ad400068d3731cc63",
+      "query_text": "why did the Queen Mother give France an affectionate reception"
+    },
+    {
+      "row_index": 4,
+      "id": "6930-75918-0004",
+      "reference_text_sha256": "06dbadf42702dd2d7e1868abafc9351edfbcd7cdd3e427a5d2adf034a396e65a",
+      "query_text": "what did she teach her daughter"
+    },
+    {
+      "row_index": 5,
+      "id": "6930-75918-0005",
+      "reference_text_sha256": "d267b3111e7e1f1836d98e62957dd3b16e74559ce337afd6755d78c72f3f0963",
+      "query_text": "how did the Count sit in the tent"
+    },
+    {
+      "row_index": 6,
+      "id": "6930-75918-0006",
+      "reference_text_sha256": "7ac6cfaa959dd2e1e62bb9c5aeea4566e81930cbbd7a92ae47f7004fd785e3f6",
+      "query_text": "what did the young man call the day"
+    },
+    {
+      "row_index": 7,
+      "id": "6930-75918-0007",
+      "reference_text_sha256": "940173fdc3fa533a38aea87fc3bc500f2043b89b81573f53d14db4ccf7980faa",
+      "query_text": "what did he promise about being frank"
+    }
+  ]
+}

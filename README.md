@@ -109,7 +109,6 @@ Python Orchestrator
 
 - Go 1.24+
 - Python 3.11+
-- `pytest`
 - `grpcio` / `grpcio-tools`，仅在运行或重新生成 Python protobuf 时需要
 - `protoc`，仅在重新生成 protobuf 时需要
 - MinerU CLI（命令名默认 `mineru`），读取和入库 PDF 时必需；所有 PDF 入口默认使用 MinerU `pipeline` 后端的 OCR 模式，不使用 Tika 或 `pdftotext`。Tika 仅处理 DOCX、PPTX、XLSX 等非 PDF 文档。可通过 `CODE_AGENT_MINERU_COMMAND`、`CODE_AGENT_MINERU_BACKEND` 和 `CODE_AGENT_MINERU_TIMEOUT_SECONDS` 覆盖命令、后端与超时
@@ -277,6 +276,12 @@ command-line arguments, logs, or committed artifacts.
 
 ## 开发与测试
 
+Python 3.12+ 可运行包含官方 Terminal-Bench 适配器的完整测试环境：
+
+```bash
+uv sync --locked --extra rag --extra eval --extra trace-e2e --extra audio --extra test
+```
+
 运行全部测试：
 
 ```bash
@@ -305,7 +310,7 @@ $env:OPENAI_API_KEY = '<从安全存储加载>'
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
 ```
 
-也可以使用 `-ApiKeyFile C:\secure\api-key.md` 指向仓库外的私有 Markdown 密钥文件。测试不会输出 API key，也不会把它写入仓库、临时文件或 Phoenix span。
+凭据必须由外部 secret manager 加载到当前进程的 `OPENAI_API_KEY`；仓库文档和脚本调用示例不依赖 Markdown 密钥文件。测试不会输出 API key，也不会把它写入仓库、临时文件或 Phoenix span。
 
 格式化和基础编译检查：
 
@@ -348,9 +353,12 @@ Windows 环境也可以使用：
 
 ## 当前状态
 
-本项目实现了设计方案（第 22 节"进一步改进建议"全部落地），已达对标 Claude Code 85%+ 核心能力的增强版：
+本项目按 [Goal](docs/GOAL.md) 持续改造中。现有仓库已经提供 Go Harness +
+Python Orchestrator 的可运行原型，但目标描述中的每项能力都必须以当前
+代码、测试和真实 runtime receipt 重新验收；历史文档中的完成度或旧指标不
+自动构成发布结论。
 
-### 核心闭环能力
+### 已有代码边界
 
 - **LLM 推理**：Extended Thinking / 深度思考（Anthropic thinking block + OpenAI reasoning_effort 模型门控）——复杂任务、多轮、计划模式自动触发。
 - **Prompt 缓存感知**：Anthropic 显式 ephemeral 缓存标记（cacheable 段：identity/capabilities/tools/project），缓存命中率在状态栏实时可见。
@@ -371,9 +379,15 @@ Windows 环境也可以使用：
 - **可观测性**：SessionMeta 随每轮上报 token/成本/缓存命中/模型；Go metrics `Collector` + session 持久化（SQLite）+ 状态栏实时渲染。
 - **会话持久化**：SQLite store + 确定性时间戳排序（`Résumé` 后强制单调递增，Windows 时钟分辨率健壮）。
 
-### 测试覆盖率
+### 验收边界
 
-- Python: 66 个 pytest（33→66，覆盖 thinking / cache / routing / streaming / interrupt / truncation / multimodal / notebook）
-- Go: `go test ./...` 全面通过（cli / skills / tools / orchestrator / 集成测试，2 轮无 flaky）
+以下门槛是发布前必须由新鲜、可复现证据满足的最低值：
 
-后续路线：LangGraph 深度集成（checkpointer PostgreSQL）、真实 TUI（bubbletea）、IDE 插件、PR 自动化、Agent loop + eval + trace 改造计划（详见 docs 目录）。
+- 故障恢复 `>=98.5%`（恢复任务数 / 全部任务数）。
+- 固定任务的输入 Token 降幅 `>=60%`，且任务结果不回退。
+- 锁定 1,000 个案例的 Skill 选型准确率 `>=948/1000`。
+- 固定预算和官方 scorer 下的 SWE 子集 `>=18/20`。
+
+`go test ./...`、`pytest -q`、集成测试和真实 E2E 是不同门禁；夹具、mock、
+合成 receipt 或开发 smoke 不得替代真实 E2E。当前未满足的门槛保持
+`BLOCKED`，不会用文档措辞升级为 `VERIFIED`。

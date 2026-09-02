@@ -1,8 +1,0 @@
-{"query_id": "docvqa:1016", "query": "What is the team leader's name?", "document_id": "docvqa:493", "page_id": "docvqa:493:2", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:1027", "query": "What is indicated as second or third line treatment of type 2 diabetes mellitus?", "document_id": "docvqa:496", "page_id": "docvqa:496:4", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:10294", "query": "What is the company's name on the letter head?", "document_id": "docvqa:3369", "page_id": "docvqa:3369:1", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:10297", "query": "What is written in the top right of the document ?", "document_id": "docvqa:3373", "page_id": "docvqa:3373:4", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:10307", "query": "Which Company's Fax transmission Cover Sheet is this ?", "document_id": "docvqa:3380", "page_id": "docvqa:3380:1", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:1050", "query": "When did the term of this agreement commence?", "document_id": "docvqa:498", "page_id": "docvqa:498:4", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:11345", "query": "What is the telephone number mentioned at the beginning?", "document_id": "docvqa:3776", "page_id": "docvqa:3776:1", "source": "vidore/docvqa_test_subsampled"}
-{"query_id": "docvqa:1172", "query": "what is the carcinoma(transitional cell )  of group 1 ?", "document_id": "docvqa:534", "page_id": "docvqa:534:2", "source": "vidore/docvqa_test_subsampled"}

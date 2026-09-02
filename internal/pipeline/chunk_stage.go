@@ -121,6 +121,10 @@ func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks
 	if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") && len(artifact.Elements) == 0 {
 		return errors.New("chunk: structured PDF artifact has no elements")
 	}
+	verifiedArtifact, err := validateParsedArtifactProvenance(task, artifact)
+	if err != nil {
+		return fmt.Errorf("chunk: structured artifact provenance is invalid: %w", err)
+	}
 
 	chunkResult, err := p.ingestionClient.Chunk(ctx, task, artifact, 1000, 100)
 	if err != nil {
@@ -136,7 +140,14 @@ func (p *Processor) processChunkExternalArtifact(ctx context.Context, task tasks
 	// legacy uploads that carry no provenance.
 	for index := range chunkResult.StructuredChunks {
 		chunk := &chunkResult.StructuredChunks[index]
-		chunk.SourceSHA256 = sourceSHA256ForChunk(task, chunk.SourceSHA256, textBytes)
+		if err := validateStructuredChunkBinding(verifiedArtifact, *chunk); err != nil {
+			return fmt.Errorf("chunk: structured chunk %d provenance is invalid: %w", index, err)
+		}
+		sourceSHA256 := chunk.SourceSHA256
+		if verifiedArtifact != nil && verifiedArtifact.mineru {
+			sourceSHA256 = artifact.SourceSHA256
+		}
+		chunk.SourceSHA256 = sourceSHA256ForChunk(task, sourceSHA256, textBytes)
 		if err := chunk.Validate(); err != nil {
 			return fmt.Errorf("chunk: structured chunk %d is invalid: %w", index, err)
 		}

@@ -1,6 +1,6 @@
 """Layer 4 must be able to reuse the corpus vectors the index already stores.
 
-Measured failure this replaces (design map §29): the driver re-embedded all
+Measured failure this replaces: the driver re-embedded all
 24,877 chunks through the bge-m3 service. One server-side sub-batch took
 183.57s against a 60s client read timeout, so layer 4 degraded to a recorded
 skip and the verdict was INCOMPLETE. Wall clock was 107.609s, well inside the

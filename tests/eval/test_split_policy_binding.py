@@ -1,7 +1,7 @@
-"""E3 — the split policy artifact is the only source of truth, and it is hash-bound.
+"""The split policy artifact is the only split source and is hash-bound.
 
-Per DESIGN-MAP-2026-08-07 §20.6.3 (E3) a split may not be decided by code
-defaults or by whatever happens to be on disk.  It is decided by a committed,
+The active Goal requires a split that is not decided by code defaults or by
+whatever happens to be on disk. It is decided by a committed,
 hashed policy artifact.  Consequently:
 
 * no policy file -> raise ``POLICY_MISSING``, never fall back to an implicit split
@@ -55,13 +55,32 @@ def test_policy_artifact_exists_and_matches_its_sidecar() -> None:
     assert policy_sha256() == actual
 
 
+@pytest.mark.parametrize("field", ["format_version", "policy_id", "policy_version", "seed"])
+def test_validate_manifest_rejects_policy_identity_drift(field: str) -> None:
+    from orchestrator.eval.split import validate_manifest
+
+    policy = load_policy()
+    manifest_path = REPO_ROOT / policy["manifest"]["path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if field == "format_version":
+        manifest[field] = "e3-split-manifest-tampered"
+    elif field == "policy_id":
+        manifest[field] = "other-policy"
+    elif field == "policy_version":
+        manifest[field] = "v99"
+    else:
+        manifest[field] = int(manifest[field]) + 1
+
+    with pytest.raises(ValueError, match="MANIFEST_POLICY_IDENTITY_MISMATCH"):
+        validate_manifest(manifest, policy=policy)
+
+
 def test_load_policy_returns_v1_schema() -> None:
     policy = load_policy()
     assert policy["policy_id"] == "e3-split-policy"
     assert policy["policy_version"] == "v1"
     assert policy["policy_version"] in SUPPORTED_POLICY_VERSIONS
     assert policy["seed"] == 20260809
-    assert policy["design_map_task"] == "E3"
 
     # Every failure code the policy declares must be a documented contract,
     # not a decorative list: each entry needs a code and a behaviour.

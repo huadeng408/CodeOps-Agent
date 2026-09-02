@@ -346,7 +346,7 @@ def _model_endpoint_allowlist(base_url: str) -> tuple[str, ...]:
 def _validate_benchmark_pins(agent_bench: Any) -> list[str]:
     """Validate a benchmark adapter's reproducibility pins BEFORE any run.
 
-    H3 (design map §20.6.1): "缺 pin 时启动前失败" — a run whose dataset,
+    H3 reproducibility rule: "缺 pin 时启动前失败" — a run whose dataset,
     scorer, or benchmark identity is not pinned is not reproducible, so it
     must abort before an instance is solved rather than emit an artifact
     tree that only looks complete.

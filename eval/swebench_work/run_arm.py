@@ -17,13 +17,14 @@ instances.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from eval.swebench_work.credential_redaction import run_redacted_command
 
 MODEL = "deepseek-v4-pro"
 BASE_URL = "https://api.deepseek.com/v1"
@@ -37,23 +38,12 @@ ARMS = {
 
 
 def read_key() -> str:
-    """Read the DeepSeek key, delegating to the one implementation that works.
-
-    An earlier version of this function searched the notes file for any
-    ``sk-``-prefixed token and returned the first one, which picked up a
-    neighbouring provider's key and produced ``HTTP 401`` on the first instance.
-    ``run_h5_full.read_key`` already solved this by anchoring the search on the
-    ``deepseek`` label — the comment there records the same 401. Reimplementing
-    it reintroduced the bug it documents, so this defers to it instead.
-
-    Never inlined, never echoed, never written to an artifact.
-    """
-    env_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if env_key:
-        return env_key
-    from eval.swebench_work.run_h5_full import read_key as anchored_read_key
-
-    return anchored_read_key() or ""
+    """Read a credential injected into this process, without file fallback."""
+    for env_name in ("LOCAL_LLM_API_KEY", "DEEPSEEK_API_KEY"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def preflight_auth(key: str) -> tuple[bool, str]:
@@ -84,7 +74,7 @@ def preflight_auth(key: str) -> tuple[bool, str]:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:200].replace(key, "<redacted>")
         return False, f"HTTP {exc.code}: {detail}"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - network/client failures fail closed
         return False, f"{type(exc).__name__}: {str(exc)[:200].replace(key, '<redacted>')}"
 
 
@@ -99,7 +89,7 @@ def main() -> int:
     if not key:
         print("FAIL: no DeepSeek key found; refusing to run with a placeholder")
         return 2
-    print(f"key loaded: yes (length {len(key)})")
+    print("credential loaded: yes")
 
     if not SUBSET.is_file():
         print(f"FAIL: pinned subset missing: {SUBSET}")
@@ -134,11 +124,14 @@ def main() -> int:
         "--output-dir", str(out_dir),
     ]
     print(f"[arm={arm}] launching:", " ".join(cmd[3:]))
-    result = subprocess.run(
-        cmd, cwd=str(REPO_ROOT), env=env, encoding="utf-8", errors="replace"
+    returncode = run_redacted_command(
+        cmd,
+        cwd=REPO_ROOT,
+        env=env,
+        secrets=(key,),
     )
-    print(f"[arm={arm}] eval.run exit code: {result.returncode}")
-    return result.returncode
+    print(f"[arm={arm}] eval.run exit code: {returncode}")
+    return returncode
 
 
 if __name__ == "__main__":

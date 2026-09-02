@@ -7,9 +7,9 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-import pytest
 
 
 def _write_json(path: Path, value: object) -> Path:
@@ -177,7 +177,9 @@ def _inputs(tmp_path: Path, count: int = 1) -> dict[str, object]:
 
 
 def test_materialize_page_qrels_requires_signed_human_evidence_link_and_pdf_allowlist(tmp_path: Path) -> None:
-    from orchestrator.eval.multimodal_page_qrels import materialize_human_reviewed_page_qrels
+    from orchestrator.eval.multimodal_page_qrels import (
+        materialize_human_reviewed_page_qrels,
+    )
 
     inputs = _inputs(tmp_path)
     out_dir = materialize_human_reviewed_page_qrels(
@@ -249,6 +251,82 @@ def test_materialize_page_qrels_rejects_tampered_ocr_receipt(tmp_path: Path) -> 
         )
 
 
+def test_materialize_page_qrels_uses_one_snapshot_for_signed_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        materialize_human_reviewed_page_qrels,
+    )
+
+    inputs = _inputs(tmp_path)
+    candidates = inputs["candidates"]
+    original_bytes = candidates.read_bytes()
+    tampered_rows = [
+        json.loads(line) for line in original_bytes.decode("utf-8").splitlines()
+    ]
+    tampered_rows[0]["bbox"] = [1.0, 2.0, 3.0, 4.0]
+    tampered_bytes = "".join(
+        json.dumps(row, sort_keys=True) + "\n" for row in tampered_rows
+    ).encode("utf-8")
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_after_first_read(self: Path, *args: object, **kwargs: object) -> bytes:
+        nonlocal replaced
+        value = original_read_bytes(self, *args, **kwargs)
+        if self == candidates and not replaced:
+            replaced = True
+            self.write_bytes(tampered_bytes)
+        return value
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_first_read)
+
+    out_dir = materialize_human_reviewed_page_qrels(
+        **_materialization_kwargs(inputs), out_dir=tmp_path / "page-qrels"
+    )
+
+    row = json.loads((out_dir / "qrels.jsonl").read_text(encoding="utf-8"))
+    manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert replaced is True
+    assert row["bbox"] == [100.0, 200.0, 300.0, 400.0]
+    assert manifest["candidates_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+
+
+def test_materialize_page_qrels_binds_verified_receipt_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        materialize_human_reviewed_page_qrels,
+    )
+
+    inputs = _inputs(tmp_path)
+    evidence_receipt = inputs["evidence_receipt"]
+    original_bytes = evidence_receipt.read_bytes()
+    replacement_bytes = b'{"tampered":true}\n'
+    original_read_text = Path.read_text
+    replaced = False
+
+    def replace_after_first_read(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal replaced
+        value = original_read_text(self, *args, **kwargs)
+        if self == evidence_receipt and not replaced:
+            replaced = True
+            self.write_bytes(replacement_bytes)
+        return value
+
+    monkeypatch.setattr(Path, "read_text", replace_after_first_read)
+
+    out_dir = materialize_human_reviewed_page_qrels(
+        **_materialization_kwargs(inputs), out_dir=tmp_path / "page-qrels"
+    )
+
+    manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert replaced is False
+    assert manifest["evidence_receipt_sha256"] == hashlib.sha256(
+        original_bytes
+    ).hexdigest()
+
+
 def test_materialize_page_qrels_rejects_document_missing_from_signed_allowlist(tmp_path: Path) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
@@ -308,7 +386,9 @@ def _materialization_kwargs(inputs: dict[str, object]) -> dict[str, object]:
 
 
 def _write_release_inputs(page_qrels_dir: Path, count: int) -> tuple[dict[str, object], Path, Path, Path, Path, Path, str, str]:
-    from orchestrator.eval.multimodal_page_qrels import materialize_human_reviewed_page_qrels
+    from orchestrator.eval.multimodal_page_qrels import (
+        materialize_human_reviewed_page_qrels,
+    )
 
     inputs = _inputs(page_qrels_dir.parent, count=count)
     materialize_human_reviewed_page_qrels(**_materialization_kwargs(inputs), out_dir=page_qrels_dir)
@@ -354,7 +434,188 @@ def _write_release_inputs(page_qrels_dir: Path, count: int) -> tuple[dict[str, o
     return inputs, split, contamination, contamination_report, scorer, scorer_predictions, _public_key_b64(release_key), release_key_id
 
 
-def test_release_page_qrels_rejects_less_than_120_unique_queries(tmp_path: Path) -> None:
+def _install_test_trust_root(
+    monkeypatch: pytest.MonkeyPatch,
+    inputs: dict[str, object],
+    release_key: str,
+    release_key_id: str,
+) -> None:
+    import orchestrator.eval.multimodal_page_qrels as page_qrels
+
+    monkeypatch.delenv(page_qrels.TRUST_ROOT_ENV, raising=False)
+    monkeypatch.setattr(
+        page_qrels,
+        "TRUSTED_PAGE_QRELS_SIGNERS",
+        {
+            "evidence": {str(inputs["evidence_key_id"]): str(inputs["evidence_key"])},
+            "query_link": {str(inputs["link_key_id"]): str(inputs["link_key"])},
+            "release": {release_key_id: release_key},
+        },
+    )
+
+
+def test_trust_root_loader_validates_roles_and_allows_key_rotation(tmp_path: Path) -> None:
+    from orchestrator.eval.multimodal_page_qrels import load_trusted_page_qrels_signers
+
+    public_key = base64.b64encode(b"k" * 32).decode("ascii")
+    path = _write_json(
+        tmp_path / "trust-root.json",
+        {
+            "schema_version": "page-qrels-trust-root/v1",
+            "signers": {
+                "evidence": {"evidence-v1": public_key},
+                "query_link": {"link-v1": public_key, "link-v2": public_key},
+                "release": {"release-v1": public_key},
+            },
+        },
+    )
+
+    loaded = load_trusted_page_qrels_signers(path)
+
+    assert loaded["query_link"]["link-v2"] == public_key
+    assert set(loaded) == {"evidence", "query_link", "release"}
+
+    invalid = _write_json(
+        tmp_path / "invalid-trust-root.json",
+        {
+            "schema_version": "page-qrels-trust-root/v1",
+            "signers": {"evidence": {"bad": "not-base64"}},
+        },
+    )
+    with pytest.raises(ValueError, match="PAGE_QRELS_TRUST_ROOT_INVALID"):
+        load_trusted_page_qrels_signers(invalid)
+
+
+def test_configured_trust_root_uses_one_byte_snapshot_for_hash_and_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orchestrator.eval.multimodal_page_qrels as page_qrels
+
+    initial_key = base64.b64encode(b"i" * 32).decode("ascii")
+    replacement_key = base64.b64encode(b"r" * 32).decode("ascii")
+    path = _write_json(
+        tmp_path / "trust-root.json",
+        {
+            "schema_version": "page-qrels-trust-root/v1",
+            "signers": {
+                "evidence": {"evidence-v1": initial_key},
+                "query_link": {"link-v1": initial_key},
+                "release": {"release-v1": initial_key},
+            },
+        },
+    )
+    initial_bytes = path.read_bytes()
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+    read_text_calls = 0
+    read_bytes_calls = 0
+
+    def replace_after_text_read(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_text_calls
+        if self == path:
+            read_text_calls += 1
+            value = original_read_text(self, *args, **kwargs)
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "page-qrels-trust-root/v1",
+                        "signers": {
+                            "evidence": {"evidence-v1": replacement_key},
+                            "query_link": {"link-v1": replacement_key},
+                            "release": {"release-v1": replacement_key},
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return value
+        return original_read_text(self, *args, **kwargs)
+
+    def count_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        nonlocal read_bytes_calls
+        if self == path:
+            read_bytes_calls += 1
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setenv(page_qrels.TRUST_ROOT_ENV, str(path))
+    monkeypatch.setattr(Path, "read_text", replace_after_text_read)
+    monkeypatch.setattr(Path, "read_bytes", count_read_bytes)
+
+    loaded, digest = page_qrels._configured_trust_root()
+
+    assert loaded["release"]["release-v1"] == initial_key
+    assert digest == hashlib.sha256(initial_bytes).hexdigest()
+    assert read_text_calls == 0
+    assert read_bytes_calls == 1
+
+
+def test_release_page_qrels_uses_external_trust_root_and_records_selected_signers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orchestrator.eval.multimodal_page_qrels as page_qrels
+    from orchestrator.eval.multimodal_page_qrels import (
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    (
+        inputs,
+        split,
+        contamination,
+        contamination_report,
+        scorer,
+        scorer_predictions,
+        release_key,
+        release_key_id,
+    ) = _write_release_inputs(page_qrels_dir, count=120)
+    trust_root = _write_json(
+        tmp_path / "trust-root.json",
+        {
+            "schema_version": "page-qrels-trust-root/v1",
+            "signers": {
+                "evidence": {str(inputs["evidence_key_id"]): str(inputs["evidence_key"])},
+                "query_link": {str(inputs["link_key_id"]): str(inputs["link_key"])},
+                "release": {release_key_id: release_key},
+            },
+        },
+    )
+    monkeypatch.setenv("CODE_AGENT_PAGE_QRELS_TRUST_ROOT", str(trust_root))
+    monkeypatch.setattr(
+        page_qrels,
+        "TRUSTED_PAGE_QRELS_SIGNERS",
+        {"evidence": {}, "query_link": {}, "release": {}},
+    )
+
+    released = release_human_reviewed_page_qrels(
+        page_qrels_dir=page_qrels_dir,
+        source_materialization_kwargs=_materialization_kwargs(inputs),
+        split_freeze_receipt_path=split,
+        contamination_receipt_path=contamination,
+        contamination_report_path=contamination_report,
+        independent_scorer_receipt_path=scorer,
+        scorer_predictions_path=scorer_predictions,
+        release_reviewer_public_key_b64=release_key,
+        expected_release_reviewer_key_id=release_key_id,
+        out_dir=tmp_path / "released",
+    )
+
+    manifest = json.loads((released / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["trust_root_sha256"] == _sha256(trust_root)
+    assert manifest["trusted_signer_key_ids"] == {
+        "evidence": [str(inputs["evidence_key_id"])],
+        "query_link": [str(inputs["link_key_id"])],
+        "release": [release_key_id],
+    }
+    assert manifest["signer_key_ids"] == {
+        "evidence": str(inputs["evidence_key_id"]),
+        "query_link": str(inputs["link_key_id"]),
+        "release": release_key_id,
+    }
+
+
+def test_release_page_qrels_rejects_less_than_120_unique_queries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
         release_human_reviewed_page_qrels,
@@ -362,6 +623,7 @@ def test_release_page_qrels_rejects_less_than_120_unique_queries(tmp_path: Path)
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=119)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
 
     with pytest.raises(HumanPageQrelsError, match="PAGE_QRELS_MINIMUM_QUERY_COUNT"):
         release_human_reviewed_page_qrels(
@@ -378,11 +640,14 @@ def test_release_page_qrels_rejects_less_than_120_unique_queries(tmp_path: Path)
         )
 
 
-def test_release_page_qrels_hash_binds_all_required_release_receipts(tmp_path: Path) -> None:
-    from orchestrator.eval.multimodal_page_qrels import release_human_reviewed_page_qrels
+def test_release_page_qrels_hash_binds_all_required_release_receipts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        release_human_reviewed_page_qrels,
+    )
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
 
     released = release_human_reviewed_page_qrels(
         page_qrels_dir=page_qrels_dir,
@@ -404,9 +669,116 @@ def test_release_page_qrels_hash_binds_all_required_release_receipts(tmp_path: P
     assert manifest["split_freeze_receipt_sha256"] == _sha256(split)
     assert manifest["contamination_receipt_sha256"] == _sha256(contamination)
     assert manifest["independent_scorer_receipt_sha256"] == _sha256(scorer)
+    assert len(manifest["trust_root_sha256"]) == 64
+    assert manifest["trusted_signer_key_ids"]["release"] == [release_key_id]
 
 
-def test_release_page_qrels_requires_materialized_human_and_ocr_provenance(tmp_path: Path) -> None:
+def test_release_page_qrels_publishes_the_validated_qrels_byte_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
+    qrels_path = page_qrels_dir / "qrels.jsonl"
+    validated_bytes = qrels_path.read_bytes()
+    replacement_bytes = b'{"query_id":"tampered-after-validation"}\n'
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_source_after_first_read(self: Path, *args: object, **kwargs: object) -> bytes:
+        nonlocal replaced
+        value = original_read_bytes(self, *args, **kwargs)
+        if self == qrels_path and not replaced:
+            replaced = True
+            self.write_bytes(replacement_bytes)
+        return value
+
+    monkeypatch.setattr(Path, "read_bytes", replace_source_after_first_read)
+
+    released = release_human_reviewed_page_qrels(
+        page_qrels_dir=page_qrels_dir,
+        source_materialization_kwargs=_materialization_kwargs(inputs),
+        split_freeze_receipt_path=split,
+        contamination_receipt_path=contamination,
+        contamination_report_path=contamination_report,
+        independent_scorer_receipt_path=scorer,
+        scorer_predictions_path=scorer_predictions,
+        release_reviewer_public_key_b64=release_key,
+        expected_release_reviewer_key_id=release_key_id,
+        out_dir=tmp_path / "released",
+    )
+
+    released_bytes = (released / "qrels.jsonl").read_bytes()
+    manifest = json.loads((released / "manifest.json").read_text(encoding="utf-8"))
+    assert replaced is True
+    assert qrels_path.read_bytes() == replacement_bytes
+    assert released_bytes == validated_bytes
+    assert manifest["qrels_sha256"] == hashlib.sha256(validated_bytes).hexdigest()
+
+
+def test_release_page_qrels_binds_the_verified_receipt_byte_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
+    verified_bytes = split.read_bytes()
+    replacement_bytes = b'{"tampered":true}\n'
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_receipt_after_read(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal replaced
+        value = original_read_text(self, *args, **kwargs)
+        if self == split and not replaced:
+            replaced = True
+            self.write_bytes(replacement_bytes)
+        return value
+
+    def replace_receipt_after_read_bytes(
+        self: Path, *args: object, **kwargs: object
+    ) -> bytes:
+        nonlocal replaced
+        value = original_read_bytes(self, *args, **kwargs)
+        if self == split and not replaced:
+            replaced = True
+            self.write_bytes(replacement_bytes)
+        return value
+
+    monkeypatch.setattr(Path, "read_text", replace_receipt_after_read)
+    monkeypatch.setattr(Path, "read_bytes", replace_receipt_after_read_bytes)
+
+    released = release_human_reviewed_page_qrels(
+        page_qrels_dir=page_qrels_dir,
+        source_materialization_kwargs=_materialization_kwargs(inputs),
+        split_freeze_receipt_path=split,
+        contamination_receipt_path=contamination,
+        contamination_report_path=contamination_report,
+        independent_scorer_receipt_path=scorer,
+        scorer_predictions_path=scorer_predictions,
+        release_reviewer_public_key_b64=release_key,
+        expected_release_reviewer_key_id=release_key_id,
+        out_dir=tmp_path / "released",
+    )
+
+    manifest = json.loads((released / "manifest.json").read_text(encoding="utf-8"))
+    assert replaced is True
+    assert split.read_bytes() == replacement_bytes
+    assert manifest["split_freeze_receipt_sha256"] == hashlib.sha256(
+        verified_bytes
+    ).hexdigest()
+
+
+def test_release_page_qrels_rejects_unconfigured_trust_root(tmp_path: Path) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
         release_human_reviewed_page_qrels,
@@ -414,6 +786,55 @@ def test_release_page_qrels_requires_materialized_human_and_ocr_provenance(tmp_p
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+
+    with pytest.raises(HumanPageQrelsError, match="PAGE_QRELS_TRUST_ROOT_UNCONFIGURED"):
+        release_human_reviewed_page_qrels(
+            page_qrels_dir=page_qrels_dir,
+            source_materialization_kwargs=_materialization_kwargs(inputs),
+            split_freeze_receipt_path=split,
+            contamination_receipt_path=contamination,
+            contamination_report_path=contamination_report,
+            independent_scorer_receipt_path=scorer,
+            scorer_predictions_path=scorer_predictions,
+            release_reviewer_public_key_b64=release_key,
+            expected_release_reviewer_key_id=release_key_id,
+            out_dir=tmp_path / "released",
+        )
+
+
+def test_trust_root_rejects_non_string_reviewer_key_without_leaking_type_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import orchestrator.eval.multimodal_page_qrels as page_qrels
+
+    monkeypatch.setattr(
+        page_qrels,
+        "TRUSTED_PAGE_QRELS_SIGNERS",
+        {
+            "evidence": {"evidence-v1": base64.b64encode(b"e" * 32).decode("ascii")},
+            "query_link": {"link-v1": base64.b64encode(b"l" * 32).decode("ascii")},
+            "release": {"release-v1": base64.b64encode(b"r" * 32).decode("ascii")},
+        },
+    )
+
+    with pytest.raises(page_qrels.HumanPageQrelsError, match="PAGE_QRELS_TRUST_ROOT_MISMATCH"):
+        page_qrels._require_configured_trusted_signer(
+            role="release",
+            trusted_signers=page_qrels.TRUSTED_PAGE_QRELS_SIGNERS,
+            reviewer_public_key_b64=None,
+            reviewer_key_id="release-v1",
+        )
+
+
+def test_release_page_qrels_requires_materialized_human_and_ocr_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestrator.eval.multimodal_page_qrels import (
+        HumanPageQrelsError,
+        release_human_reviewed_page_qrels,
+    )
+
+    page_qrels_dir = tmp_path / "page-qrels"
+    inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
     manifest_path = page_qrels_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     del manifest["query_links_receipt_sha256"]
@@ -434,7 +855,7 @@ def test_release_page_qrels_requires_materialized_human_and_ocr_provenance(tmp_p
         )
 
 
-def test_release_page_qrels_rejects_malformed_contamination_layers(tmp_path: Path) -> None:
+def test_release_page_qrels_rejects_malformed_contamination_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
         release_human_reviewed_page_qrels,
@@ -442,6 +863,7 @@ def test_release_page_qrels_rejects_malformed_contamination_layers(tmp_path: Pat
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
     contamination_payload = json.loads(contamination.read_text(encoding="utf-8"))
     contamination_payload["layers_completed"] = 4
     _write_json(contamination, contamination_payload)
@@ -461,7 +883,7 @@ def test_release_page_qrels_rejects_malformed_contamination_layers(tmp_path: Pat
         )
 
 
-def test_release_page_qrels_rejects_qrels_rewritten_after_materialization(tmp_path: Path) -> None:
+def test_release_page_qrels_rejects_qrels_rewritten_after_materialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
         release_human_reviewed_page_qrels,
@@ -469,6 +891,7 @@ def test_release_page_qrels_rejects_qrels_rewritten_after_materialization(tmp_pa
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
     qrels_path = page_qrels_dir / "qrels.jsonl"
     rows = [json.loads(line) for line in qrels_path.read_text(encoding="utf-8").splitlines()]
     rows[0]["query"] = "rewritten after signed materialization"
@@ -493,7 +916,7 @@ def test_release_page_qrels_rejects_qrels_rewritten_after_materialization(tmp_pa
         )
 
 
-def test_release_page_qrels_rejects_tampered_signed_contamination_receipt(tmp_path: Path) -> None:
+def test_release_page_qrels_rejects_tampered_signed_contamination_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from orchestrator.eval.multimodal_page_qrels import (
         HumanPageQrelsError,
         release_human_reviewed_page_qrels,
@@ -501,6 +924,7 @@ def test_release_page_qrels_rejects_tampered_signed_contamination_receipt(tmp_pa
 
     page_qrels_dir = tmp_path / "page-qrels"
     inputs, split, contamination, contamination_report, scorer, scorer_predictions, release_key, release_key_id = _write_release_inputs(page_qrels_dir, count=120)
+    _install_test_trust_root(monkeypatch, inputs, release_key, release_key_id)
     receipt = json.loads(contamination.read_text(encoding="utf-8"))
     receipt["verdict"] = "CLEAN_BUT_TAMPERED"
     _write_json(contamination, receipt)

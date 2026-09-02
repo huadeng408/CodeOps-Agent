@@ -1,12 +1,10 @@
-"""test_unified_harness_official_paths.py — H1/H2 HarnessRun lifecycle tests.
+"""HarnessRun lifecycle tests for the active Goal's official evaluation path.
 
-Per DESIGN-MAP-2026-08-07 §20.6.1 H1/H2: the CLI must route every benchmark
-through ``eval/run.py -> HarnessRun -> benchmark adapter -> official
-runner/scorer`` as the ONLY path.  The earlier versions of these tests (H1)
-proved the structural bypass (legacy ``benchmark_mod.run(driver, limit)`` path,
-scorer never wired).  After H2 (2026-08-09) the bypass is removed and these
-same tests verify the fix: scorer failure maps to ERROR_SCORER with non-zero
-exit code; synthetic must be explicit top-level opt-in.
+The CLI must route every benchmark through ``eval/run.py -> HarnessRun ->
+benchmark adapter -> official runner/scorer`` as the only official path. The
+tests preserve the regression boundary for the removed legacy bypass: scorer
+failure maps to ERROR_SCORER with a non-zero exit code, and synthetic mode
+requires an explicit top-level opt-in.
 """
 
 from __future__ import annotations
@@ -289,6 +287,34 @@ class TestHarnessRunAdapterIsNeverOfficialRunner:
         assert "terminal_bench.harness" not in solve_src, (
             "BUG: HeadlessDriver references terminal_bench — re-evaluate bypass"
         )
+
+    def test_search_knowledge_fails_closed_without_optional_otel_propagators(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The optional trace extra must not make the headless module unloadable.
+
+        SearchKnowledge still needs an active W3C context for an auditable O3
+        request, so missing propagators must become a tool error rather than a
+        request with fabricated or absent trace headers.
+        """
+        import eval.driver_headless as driver_headless
+        from eval.driver_headless import LocalToolExecutor
+
+        monkeypatch.setattr(driver_headless, "TraceContextTextMapPropagator", None)
+        monkeypatch.setattr(driver_headless, "W3CBaggagePropagator", None)
+        monkeypatch.setattr(
+            driver_headless, "current_join_attributes", lambda: {"eval.run_id": "test-run"}
+        )
+        monkeypatch.setenv("CODE_AGENT_RAG_SERVER_URL", "http://127.0.0.1:1")
+        monkeypatch.setenv("CODE_AGENT_RAG_INTERNAL_SECRET", "test-secret")
+        monkeypatch.setenv("CODE_AGENT_RAG_USER_ID", "1")
+
+        result = LocalToolExecutor(str(tmp_path)).execute(
+            "SearchKnowledge", '{"query":"test"}'
+        )
+
+        assert result.exit_code == 1
+        assert "OpenTelemetry propagation" in result.error
 
     def test_harness_run_calls_adapter_solve_instance_which_is_agent_not_scorer(
         self, tmp_path: Path

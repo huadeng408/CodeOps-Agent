@@ -50,7 +50,7 @@ func TestChunkClientFillsMissingProvenance(t *testing.T) {
 		IngestionEnabled: true,
 		BaseURL:          server.URL,
 	})
-	artifact := ParsedArtifact{ParsedText: "body", Elements: []json.RawMessage{json.RawMessage(`{"type":"text"}`)}}
+	artifact := ParsedArtifact{ParsedText: "body"}
 	result, err := client.Chunk(context.Background(), tasks.FileProcessingTask{FileName: "doc.md"}, artifact, 1000, 100)
 	if err != nil {
 		t.Fatalf("Chunk() should fill provenance and pass validation: %v", err)

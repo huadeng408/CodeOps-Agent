@@ -33,6 +33,7 @@ class ContextSnippetPayload(BaseModel):
 
 class FileProcessingTaskPayload(BaseModel):
     file_md5: str
+    document_id: str = ""
     object_url: str = ""
     file_name: str
     user_id: int
@@ -212,6 +213,10 @@ class ParseResponsePayload(BaseModel):
 class ChunkRequestPayload(BaseModel):
     task: FileProcessingTaskPayload
     text: str
+    documentId: str = ""
+    parserName: str = ""
+    parserVersion: str = ""
+    sourceSha256: str = ""
     chunkSize: int = 500
     chunkOverlap: int = 50
     elements: list[Element] = Field(default_factory=list)

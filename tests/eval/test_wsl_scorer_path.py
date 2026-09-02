@@ -1,6 +1,6 @@
 """H5 precondition: the WSL2 official-scorer path translation must be correct.
 
-Design map §24.5 risk #4: ``_run_official_scoring_wsl()`` blindly prefixed
+Historical scorer risk: ``_run_official_scoring_wsl()`` blindly prefixed
 ``/mnt/d/vscode/localcode/`` onto whatever path it was handed.  That is only
 correct for a path that is *relative to the repo root*.  The unified Harness
 hands the scorer an **absolute** workspace path (``RunArtifacts.root`` is
@@ -71,6 +71,15 @@ class TestRepoRelativePaths:
     def test_dot_prefixed_relative_path(self):
         got = _to_wsl_path("./eval_results/run/predictions.jsonl")
         assert got == "/mnt/d/vscode/localcode/eval_results/run/predictions.jsonl"
+
+    def test_relative_path_uses_the_actual_checkout_location(self, monkeypatch):
+        from eval.benchmarks import swebench as mod
+
+        monkeypatch.setattr(mod, "_REPO_ROOT", Path(r"C:\projects\code-agent"))
+
+        assert mod._to_wsl_path("eval_results/run/predictions.jsonl") == (
+            "/mnt/c/projects/code-agent/eval_results/run/predictions.jsonl"
+        )
 
 
 class TestAlreadyTranslatedPaths:

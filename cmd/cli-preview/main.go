@@ -40,8 +40,16 @@ func main() {
 	}
 }
 
+func previewWorkspace(getwd func() (string, error)) string {
+	workspace, err := getwd()
+	if err != nil || workspace == "" {
+		return "."
+	}
+	return workspace
+}
+
 func renderAll(renderer *cli.StreamRenderer) {
-	renderer.PrintBootstrap(cli.BootstrapView{Version: "v0.1", Branch: "main", Workspace: `D:\vscode\localcode`, Mode: "chat", Model: "deepseek-v4-pro"})
+	renderer.PrintBootstrap(cli.BootstrapView{Version: "v0.1", Branch: "main", Workspace: previewWorkspace(os.Getwd), Mode: "chat", Model: "deepseek-v4-pro"})
 	renderer.PrintLine("/help | /ingest | /diff | /plan")
 	renderSuccess(renderer)
 	renderFailure(renderer)

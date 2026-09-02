@@ -255,7 +255,7 @@ def test_pdf_parse_path_survives_loop_without_subprocess_support(tmp_path: Path)
 
 
 def test_grpc_aio_server_can_launch_mineru_subprocess() -> None:
-    """The design map requires the fix to work under the async gRPC server.
+    """The subprocess contract must work under the async gRPC server.
 
     A real grpc.aio server is started on a loop that refuses subprocess
     transports, and its handler launches a real child process through the

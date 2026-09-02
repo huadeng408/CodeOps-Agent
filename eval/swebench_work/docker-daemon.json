@@ -1,7 +1,0 @@
-{
-  "proxies": {
-    "http-proxy": "http://127.0.0.1:7890",
-    "https-proxy": "http://127.0.0.1:7890",
-    "no-proxy": "localhost,127.0.0.1,*.internal"
-  }
-}

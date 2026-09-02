@@ -8,7 +8,10 @@ preserving the separate split, contamination, and evaluator gates.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
+import os
 import re
 import tempfile
 from collections.abc import Mapping
@@ -37,8 +40,18 @@ STATUS = "HUMAN_REVIEWED_PAGE_QRELS_NOT_RELEASED"
 RELEASE_SCHEMA_VERSION = "multimodal-page-qrels-release/v1"
 RELEASE_STATUS = "HUMAN_REVIEWED_PAGE_QRELS_RELEASED"
 MINIMUM_RELEASE_QUERY_COUNT = 120
+TRUST_ROOT_SCHEMA_VERSION = "page-qrels-trust-root/v1"
+TRUST_ROOT_ENV = "CODE_AGENT_PAGE_QRELS_TRUST_ROOT"
+_TRUST_ROOT_ROLES = frozenset({"evidence", "query_link", "release"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ANSWER_FIELDS = frozenset({"answer", "answers", "gold_answer", "expected_answer"})
+# Production starts closed: a separately controlled key-installation change must
+# populate these public keys before any reviewed page Qrels can be released.
+TRUSTED_PAGE_QRELS_SIGNERS: Mapping[str, Mapping[str, str]] = {
+    "evidence": {},
+    "query_link": {},
+    "release": {},
+}
 
 
 class HumanPageQrelsError(ValueError):
@@ -68,12 +81,49 @@ def release_human_reviewed_page_qrels(
     source_manifest_path = source_dir / "manifest.json"
     qrels_path = source_dir / "qrels.jsonl"
     try:
-        source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-        rows = [json.loads(line) for line in qrels_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    except (OSError, json.JSONDecodeError) as exc:
+        source_manifest_bytes = source_manifest_path.read_bytes()
+        qrels_bytes = qrels_path.read_bytes()
+        source_manifest = json.loads(source_manifest_bytes)
+        rows = [
+            json.loads(line)
+            for line in qrels_bytes.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HumanPageQrelsError("PAGE_QRELS_SOURCE_INVALID") from exc
-    _revalidate_materialized_qrels(source_dir, source_materialization_kwargs)
-    qrels_sha256 = _sha256_file(qrels_path)
+    trust_root, trust_root_sha256 = _configured_trust_root()
+    evidence_reviewer_key_id = source_materialization_kwargs.get(
+        "expected_evidence_reviewer_key_id"
+    )
+    link_reviewer_key_id = source_materialization_kwargs.get(
+        "expected_link_reviewer_key_id"
+    )
+    _require_configured_trusted_signer(
+        role="evidence",
+        trusted_signers=trust_root,
+        reviewer_public_key_b64=source_materialization_kwargs.get(
+            "evidence_reviewer_public_key_b64"
+        ),
+        reviewer_key_id=evidence_reviewer_key_id,
+    )
+    _require_configured_trusted_signer(
+        role="query_link",
+        trusted_signers=trust_root,
+        reviewer_public_key_b64=source_materialization_kwargs.get("link_reviewer_public_key_b64"),
+        reviewer_key_id=link_reviewer_key_id,
+    )
+    _require_configured_trusted_signer(
+        role="release",
+        trusted_signers=trust_root,
+        reviewer_public_key_b64=release_reviewer_public_key_b64,
+        reviewer_key_id=expected_release_reviewer_key_id,
+    )
+    _revalidate_materialized_qrels(
+        source_dir,
+        source_materialization_kwargs,
+        expected_qrels_bytes=qrels_bytes,
+    )
+    qrels_sha256 = hashlib.sha256(qrels_bytes).hexdigest()
     source_ocr_receipts = source_manifest.get("mineru_ocr_receipt_sha256_by_document") if isinstance(source_manifest, Mapping) else None
     source_document_ids = {
         row.get("document_id")
@@ -104,7 +154,10 @@ def release_human_reviewed_page_qrels(
     ):
         raise HumanPageQrelsError("PAGE_QRELS_MINIMUM_QUERY_COUNT")
 
-    split_receipt = _load_release_receipt(split_freeze_receipt_path, "SPLIT_FREEZE_RECEIPT_INVALID")
+    split_receipt, split_receipt_sha256 = _load_release_receipt(
+        split_freeze_receipt_path,
+        "SPLIT_FREEZE_RECEIPT_INVALID",
+    )
     _verify_release_receipt_signature(
         split_receipt,
         reviewer_public_key_b64=release_reviewer_public_key_b64,
@@ -119,7 +172,10 @@ def release_human_reviewed_page_qrels(
     ):
         raise HumanPageQrelsError("SPLIT_FREEZE_RECEIPT_INVALID")
 
-    contamination_receipt = _load_release_receipt(contamination_receipt_path, "CONTAMINATION_RECEIPT_INVALID")
+    contamination_receipt, contamination_receipt_sha256 = _load_release_receipt(
+        contamination_receipt_path,
+        "CONTAMINATION_RECEIPT_INVALID",
+    )
     _verify_release_receipt_signature(
         contamination_receipt,
         reviewer_public_key_b64=release_reviewer_public_key_b64,
@@ -142,7 +198,10 @@ def release_human_reviewed_page_qrels(
     ):
         raise HumanPageQrelsError("CONTAMINATION_RECEIPT_INVALID")
 
-    scorer_receipt = _load_release_receipt(independent_scorer_receipt_path, "INDEPENDENT_SCORER_RECEIPT_INVALID")
+    scorer_receipt, scorer_receipt_sha256 = _load_release_receipt(
+        independent_scorer_receipt_path,
+        "INDEPENDENT_SCORER_RECEIPT_INVALID",
+    )
     _verify_release_receipt_signature(
         scorer_receipt,
         reviewer_public_key_b64=release_reviewer_public_key_b64,
@@ -167,17 +226,26 @@ def release_human_reviewed_page_qrels(
         raise HumanPageQrelsError("PAGE_QRELS_RELEASE_OUTPUT_EXISTS")
     destination.mkdir(parents=True)
     released_qrels = destination / "qrels.jsonl"
-    released_qrels.write_bytes(qrels_path.read_bytes())
+    released_qrels.write_bytes(qrels_bytes)
     manifest = {
         "schema_version": RELEASE_SCHEMA_VERSION,
         "status": RELEASE_STATUS,
         "scoreable": True,
         "qrels_count": len(rows),
         "qrels_sha256": qrels_sha256,
-        "source_manifest_sha256": _sha256_file(source_manifest_path),
-        "split_freeze_receipt_sha256": _sha256_file(Path(split_freeze_receipt_path)),
-        "contamination_receipt_sha256": _sha256_file(Path(contamination_receipt_path)),
-        "independent_scorer_receipt_sha256": _sha256_file(Path(independent_scorer_receipt_path)),
+        "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
+        "split_freeze_receipt_sha256": split_receipt_sha256,
+        "contamination_receipt_sha256": contamination_receipt_sha256,
+        "independent_scorer_receipt_sha256": scorer_receipt_sha256,
+        "trust_root_sha256": trust_root_sha256,
+        "trusted_signer_key_ids": {
+            role: sorted(keys) for role, keys in trust_root.items()
+        },
+        "signer_key_ids": {
+            "evidence": evidence_reviewer_key_id,
+            "query_link": link_reviewer_key_id,
+            "release": expected_release_reviewer_key_id,
+        },
     }
     (destination / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -185,18 +253,134 @@ def release_human_reviewed_page_qrels(
     return destination
 
 
-def _load_release_receipt(path: Path | str, error_code: str) -> Mapping[str, Any]:
+def _load_release_receipt(
+    path: Path | str,
+    error_code: str,
+) -> tuple[Mapping[str, Any], str]:
     try:
-        receipt = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = Path(path).read_bytes()
+        receipt = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HumanPageQrelsError(error_code) from exc
     if not isinstance(receipt, Mapping):
         raise HumanPageQrelsError(error_code)
-    return receipt
+    return receipt, hashlib.sha256(raw).hexdigest()
 
 
 def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def load_trusted_page_qrels_signers(path: Path | str) -> dict[str, dict[str, str]]:
+    """Load and validate a versioned public-key trust root for release checks.
+
+    The file contains public Ed25519 keys only.  Keeping it outside the source
+    tree lets operators rotate a signer without changing code or committing
+    credentials; an absent file still leaves the release path fail-closed.
+    """
+    signers, _ = _load_trusted_page_qrels_snapshot(path)
+    return signers
+
+
+def _load_trusted_page_qrels_snapshot(
+    path: Path | str,
+) -> tuple[dict[str, dict[str, str]], str]:
+    """Read, validate, and hash a trust-root file from one byte snapshot."""
+    try:
+        raw = Path(path).read_bytes()
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("PAGE_QRELS_TRUST_ROOT_INVALID") from exc
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != TRUST_ROOT_SCHEMA_VERSION:
+        raise ValueError("PAGE_QRELS_TRUST_ROOT_INVALID")
+    try:
+        signers = _validate_trusted_signers(payload.get("signers"), require_all_roles=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PAGE_QRELS_TRUST_ROOT_INVALID") from exc
+    return signers, hashlib.sha256(raw).hexdigest()
+
+
+def _configured_trust_root() -> tuple[dict[str, dict[str, str]], str]:
+    """Resolve the operator trust root without accepting caller-provided keys.
+
+    Tests may replace ``TRUSTED_PAGE_QRELS_SIGNERS`` in-process. Production
+    callers configure the same value through a separately managed JSON file
+    named by ``CODE_AGENT_PAGE_QRELS_TRUST_ROOT``. The release API deliberately
+    has no per-call mapping override: otherwise a caller could self-authorize a
+    new signing key and bypass the trust boundary.
+    """
+    configured_path = os.environ.get(TRUST_ROOT_ENV, "").strip()
+    if configured_path:
+        path = Path(configured_path)
+        try:
+            trust_root, trust_root_sha256 = _load_trusted_page_qrels_snapshot(path)
+        except (OSError, ValueError) as exc:
+            raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_INVALID") from exc
+        return trust_root, trust_root_sha256
+
+    raw = TRUSTED_PAGE_QRELS_SIGNERS
+    if not isinstance(raw, Mapping):
+        raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_INVALID")
+    if set(raw) != _TRUST_ROOT_ROLES or any(
+        not isinstance(keys, Mapping) or not keys for keys in raw.values()
+    ):
+        raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_UNCONFIGURED")
+    try:
+        trust_root = _validate_trusted_signers(raw, require_all_roles=True)
+    except (TypeError, ValueError) as exc:
+        raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_INVALID") from exc
+    canonical = json.dumps(trust_root, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return trust_root, hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_trusted_signers(
+    value: Any, *, require_all_roles: bool
+) -> dict[str, dict[str, str]]:
+    if not isinstance(value, Mapping):
+        raise TypeError("trust root signers must be an object")
+    roles = set(value)
+    if require_all_roles and roles != _TRUST_ROOT_ROLES:
+        raise ValueError("trust root must define evidence, query_link and release roles")
+    if not roles.issubset(_TRUST_ROOT_ROLES):
+        raise ValueError("trust root contains an unknown role")
+    result: dict[str, dict[str, str]] = {}
+    for role, keys in value.items():
+        if not isinstance(role, str) or role not in _TRUST_ROOT_ROLES or not isinstance(keys, Mapping) or not keys:
+            raise ValueError("trust root role keys are invalid")
+        role_result: dict[str, str] = {}
+        for key_id, public_key in keys.items():
+            if not isinstance(key_id, str) or not key_id.strip() or not isinstance(public_key, str):
+                raise ValueError("trust root key entry is invalid")
+            try:
+                decoded = base64.b64decode(public_key, validate=True)
+            except (ValueError, TypeError, base64.binascii.Error) as exc:
+                raise ValueError("trust root public key is not valid base64") from exc
+            if len(decoded) != 32:
+                raise ValueError("trust root public key must be 32 bytes")
+            role_result[key_id] = public_key
+        result[role] = role_result
+    return result
+
+
+def _require_configured_trusted_signer(
+    *,
+    role: str,
+    trusted_signers: Mapping[str, Mapping[str, str]],
+    reviewer_public_key_b64: Any,
+    reviewer_key_id: Any,
+) -> None:
+    configured_keys = trusted_signers.get(role)
+    configured_key = (
+        configured_keys.get(reviewer_key_id)
+        if isinstance(configured_keys, Mapping) and isinstance(reviewer_key_id, str)
+        else None
+    )
+    if not isinstance(configured_key, str) or not configured_key:
+        raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_UNCONFIGURED")
+    if not isinstance(reviewer_public_key_b64, str) or not hmac.compare_digest(
+        configured_key, reviewer_public_key_b64
+    ):
+        raise HumanPageQrelsError("PAGE_QRELS_TRUST_ROOT_MISMATCH")
 
 
 def _release_artifact_sha(path: Path | str, error_code: str) -> str:
@@ -225,7 +409,12 @@ def _verify_release_receipt_signature(
         raise HumanPageQrelsError(error_code) from exc
 
 
-def _revalidate_materialized_qrels(source_dir: Path, kwargs: Mapping[str, Any]) -> None:
+def _revalidate_materialized_qrels(
+    source_dir: Path,
+    kwargs: Mapping[str, Any],
+    *,
+    expected_qrels_bytes: bytes,
+) -> None:
     required = {
         "candidates_path",
         "decisions_path",
@@ -247,13 +436,84 @@ def _revalidate_materialized_qrels(source_dir: Path, kwargs: Mapping[str, Any]) 
                 **kwargs,
                 out_dir=Path(temporary_dir) / "rebuilt",
             )
-            if (source_dir / "qrels.jsonl").read_bytes() != (rebuilt_dir / "qrels.jsonl").read_bytes():
+            if expected_qrels_bytes != (rebuilt_dir / "qrels.jsonl").read_bytes():
                 raise ValueError("qrels bytes differ")
         except (HumanPageQrelsError, OSError, TypeError, ValueError) as exc:
             raise HumanPageQrelsError("PAGE_QRELS_SOURCE_REBUILD_INVALID") from exc
 
 
 def materialize_human_reviewed_page_qrels(
+    *,
+    candidates_path: Path | str,
+    decisions_path: Path | str,
+    evidence_receipt_path: Path | str,
+    evidence_reviewer_public_key_b64: str,
+    expected_evidence_reviewer_key_id: str,
+    query_links_path: Path | str,
+    query_links_receipt_path: Path | str,
+    link_reviewer_public_key_b64: str,
+    expected_link_reviewer_key_id: str,
+    license_allowlist_path: Path | str,
+    ocr_receipts_by_document: Mapping[str, Path | str],
+    out_dir: Path | str,
+) -> Path:
+    """Snapshot every signed input once before validating or materializing."""
+    snapshots = {
+        "candidates": _snapshot_bytes(candidates_path, "EVIDENCE_REVIEW_INVALID"),
+        "decisions": _snapshot_bytes(decisions_path, "EVIDENCE_REVIEW_INVALID"),
+        "evidence_receipt": _snapshot_bytes(
+            evidence_receipt_path, "EVIDENCE_REVIEW_INVALID"
+        ),
+        "query_links": _snapshot_bytes(query_links_path, "QUERY_LINKS_INVALID"),
+        "query_links_receipt": _snapshot_bytes(
+            query_links_receipt_path, "QUERY_LINK_RECEIPT_INVALID"
+        ),
+        "license_allowlist": _snapshot_bytes(
+            license_allowlist_path, "PDF_LICENSE_ALLOWLIST_INVALID"
+        ),
+    }
+    ocr_snapshots = {
+        document_id: _snapshot_bytes(path, "MINERU_OCR_RECEIPT_INVALID")
+        for document_id, path in ocr_receipts_by_document.items()
+    }
+
+    with tempfile.TemporaryDirectory(prefix="page-qrels-input-snapshot-") as temporary_dir:
+        snapshot_dir = Path(temporary_dir)
+        snapshot_paths: dict[str, Path] = {}
+        for name, raw in snapshots.items():
+            path = snapshot_dir / name
+            path.write_bytes(raw)
+            snapshot_paths[name] = path
+        ocr_snapshot_paths: dict[str, Path] = {}
+        for index, (document_id, raw) in enumerate(sorted(ocr_snapshots.items())):
+            path = snapshot_dir / f"ocr-{index:04d}.json"
+            path.write_bytes(raw)
+            ocr_snapshot_paths[document_id] = path
+
+        return _materialize_human_reviewed_page_qrels_from_snapshot(
+            candidates_path=snapshot_paths["candidates"],
+            decisions_path=snapshot_paths["decisions"],
+            evidence_receipt_path=snapshot_paths["evidence_receipt"],
+            evidence_reviewer_public_key_b64=evidence_reviewer_public_key_b64,
+            expected_evidence_reviewer_key_id=expected_evidence_reviewer_key_id,
+            query_links_path=snapshot_paths["query_links"],
+            query_links_receipt_path=snapshot_paths["query_links_receipt"],
+            link_reviewer_public_key_b64=link_reviewer_public_key_b64,
+            expected_link_reviewer_key_id=expected_link_reviewer_key_id,
+            license_allowlist_path=snapshot_paths["license_allowlist"],
+            ocr_receipts_by_document=ocr_snapshot_paths,
+            out_dir=out_dir,
+        )
+
+
+def _snapshot_bytes(path: Path | str, error_code: str) -> bytes:
+    try:
+        return Path(path).read_bytes()
+    except (OSError, TypeError) as exc:
+        raise HumanPageQrelsError(error_code) from exc
+
+
+def _materialize_human_reviewed_page_qrels_from_snapshot(
     *,
     candidates_path: Path | str,
     decisions_path: Path | str,

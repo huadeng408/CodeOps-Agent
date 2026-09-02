@@ -8,10 +8,10 @@ services:
     ports:
       - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: codeagent
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in the environment}
       MYSQL_DATABASE: codeagent
       MYSQL_USER: codeagent
-      MYSQL_PASSWORD: codeagent
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in the environment}
     volumes:
       - codeagent-mysql:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --explicit_defaults_for_timestamp=true --lower_case_table_names=1
@@ -29,10 +29,12 @@ services:
       - "6379:6379"
     volumes:
       - codeagent-redis:/data
-    command: redis-server --bind 0.0.0.0 --port 6379 --requirepass codeagent --appendonly yes
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment}
+    command: redis-server --bind 0.0.0.0 --port 6379 --requirepass "$${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment}" --appendonly yes
     healthcheck:
       start_period: 5s
-      test: ["CMD", "redis-cli", "-a", "codeagent", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -45,8 +47,8 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in the environment}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in the environment}
     command: server /data --console-address ":9001"
     volumes:
       - codeagent-minio:/data
@@ -56,10 +58,13 @@ services:
     container_name: codeagent-minio-init
     depends_on:
       - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in the environment}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in the environment}
     entrypoint: >
       sh -c "
       sleep 5;
-      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
       mc mb -p local/uploads || true
       "
     restart: "no"
@@ -168,7 +173,7 @@ services:
       EMBEDDING_OUTPUT_DIMENSIONS: "0"
     volumes:
       - codeagent-embedding-cache:/root/.cache
-      - D:/tools/mineru-models/hf-cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181:/models/bge-m3:ro
+      - "${EMBEDDING_MODEL_PATH:-./models/bge-m3}:/models/bge-m3:ro"
 
   reranker:
     build:

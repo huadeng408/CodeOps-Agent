@@ -1,4 +1,4 @@
-"""O1: the unified, versioned trace acceptance contract (design map §20.6.4).
+"""O1: the unified, versioned trace acceptance contract.
 
 Why this module exists
 ----------------------
@@ -72,7 +72,7 @@ SPAN_EMBEDDING = "embedding"
 SPAN_RERANK = "rerank"
 SPAN_SCORER_OFFICIAL = "scorer.official"
 
-#: §9.2's unified join attribute set, in the order the design map lists them.
+#: Unified join attribute set in stable serialization order.
 JOIN_ATTRIBUTES = (
     "eval.run_id",
     "eval.instance_id",
@@ -408,6 +408,15 @@ def evaluate_trace_contract(
     for span in span_list:
         label = f"span {span.name!r}"
 
+        if not span.ended:
+            problems.append(f"{label} was not ended")
+        status = str(span.status).upper()
+        if status in {"ERROR", "CANCELLED", "TIMEOUT", "SKIPPED"}:
+            if profile == TRACE_PROFILE_O3:
+                problems.append(f"O3 success chain includes {status} span {span.name!r}")
+            else:
+                problems.append(f"{label} has disallowed status {status}")
+
         # Same trace, or an explicit link back to it.
         if span.trace_id != primary_trace_id and primary_trace_id:
             if primary_trace_id not in span.links:
@@ -501,8 +510,6 @@ def _evaluate_o3_topology(
     by_id: dict[str, CapturedSpan] = {}
     by_kind: dict[str, list[CapturedSpan]] = {}
     for span in spans:
-        if not span.ended:
-            problems.append(f"span {span.name!r} was not ended")
         if span.span_id in by_id:
             problems.append(f"duplicate span identity {span.trace_id!r}/{span.span_id!r}")
         else:
@@ -511,9 +518,6 @@ def _evaluate_o3_topology(
             if _matches_kind(span.name, kind.name):
                 by_kind.setdefault(kind.name, []).append(span)
                 break
-        status = str(span.status).upper()
-        if status in {"ERROR", "CANCELLED", "TIMEOUT", "SKIPPED"}:
-            problems.append(f"O3 success chain includes {status} span {span.name!r}")
         for attr in ("rag.degraded", "rag.reranker_timeout"):
             if span.attributes.get(attr) is True:
                 problems.append(f"O3 success chain has {attr}=true on {span.name!r}")

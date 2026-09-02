@@ -2,15 +2,13 @@
   "policy_id": "e3-split-policy",
   "policy_version": "v1",
   "created_utc": "2026-08-09T10:05:00Z",
-  "design_map_task": "E3",
-  "design_map_ref": "docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md line 1104",
   "authored_by": "main-session (not a subagent); three TDD agents correctly refused to fabricate this file",
 
   "seed": 20260809,
   "seed_rationale": "Fixed date-derived seed. Frozen at policy v1. Any change to this value requires a new policy_version so a re-split can never be passed off as the original split.",
 
   "status_vocabulary": ["DESIGNED", "IMPLEMENTED", "VERIFIED", "BLOCKED"],
-  "status_note": "Evidence qualifiers such as MODEL_IDENTITY_UNVERIFIED are labels only and never promote to VERIFIED (design map line 921).",
+  "status_note": "Evidence qualifiers such as MODEL_IDENTITY_UNVERIFIED are labels only and never promote to VERIFIED.",
 
   "provenance": {
     "note": "Every number below was measured from on-disk artifacts in this session, not copied from prior prose.",
@@ -22,9 +20,9 @@
     "pure_negative_rows": 17,
     "distinct_docs_referenced_by_qrels": 143,
     "seen_evidence": [
-      "data/eval/techdocs/reports/bm25-report.json overall.queries == 180",
-      "data/eval/techdocs/reports/bge_m3-report.json overall.queries == 180",
-      "data/eval/techdocs/reports/hybrid_rrf-report.json overall.queries == 180",
+      "git:0661afcef559b53bcb3a164973d11c6cbe194dab:data/eval/techdocs/reports/bm25-report.json overall.queries == 180",
+      "git:0661afcef559b53bcb3a164973d11c6cbe194dab:data/eval/techdocs/reports/bge_m3-report.json overall.queries == 180",
+      "git:0661afcef559b53bcb3a164973d11c6cbe194dab:data/eval/techdocs/reports/hybrid_rrf-report.json overall.queries == 180",
       "data/eval/techdocs/qrels.sol-review-pass-a.jsonl covers all 180 qids",
       "data/eval/techdocs/qrels.sol-review-pass-b.jsonl covers all 180 qids"
     ]
@@ -53,7 +51,7 @@
     ],
     "unblock_requirements": [
       "author net-new queries against corpus documents not referenced by dev qrels (143 of the active corpus docs are referenced; the untouched remainder is the only legitimate pool)",
-      "produce gold labels for those queries through a review path that records real model identity per design map E2 / section 26",
+      "produce gold labels for those queries through a review path that records real model identity",
       "register the new qids in a policy v2 with its own seed and hash manifest",
       "never expose the new queries to any tuning or scoring run before the holdout evaluation"
     ],

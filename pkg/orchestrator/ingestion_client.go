@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,11 +83,15 @@ type ParsedArtifact struct {
 }
 
 type chunkRequest struct {
-	Task         tasks.FileProcessingTask `json:"task"`
-	Text         string                   `json:"text"`
-	Elements     []json.RawMessage        `json:"elements,omitempty"`
-	ChunkSize    int                      `json:"chunkSize"`
-	ChunkOverlap int                      `json:"chunkOverlap"`
+	Task          tasks.FileProcessingTask `json:"task"`
+	Text          string                   `json:"text"`
+	DocumentID    string                   `json:"documentId,omitempty"`
+	ParserName    string                   `json:"parserName,omitempty"`
+	ParserVersion string                   `json:"parserVersion,omitempty"`
+	SourceSHA256  string                   `json:"sourceSha256,omitempty"`
+	Elements      []json.RawMessage        `json:"elements,omitempty"`
+	ChunkSize     int                      `json:"chunkSize"`
+	ChunkOverlap  int                      `json:"chunkOverlap"`
 }
 
 // ChunkResult contains both the structured contract and the legacy text list.
@@ -154,12 +159,19 @@ func (c *httpIngestionClient) Parse(ctx context.Context, task tasks.FileProcessi
 
 // Chunk delegates chunk-stage execution to the external ingestion worker.
 func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessingTask, artifact ParsedArtifact, chunkSize, chunkOverlap int) (ChunkResult, error) {
+	if err := validateStructuredArtifactProvenance(task, artifact); err != nil {
+		return ChunkResult{}, err
+	}
 	resp, err := c.doJSON(ctx, "/v1/ingestion/chunk", chunkRequest{
-		Task:         task,
-		Text:         artifact.ParsedText,
-		Elements:     artifact.Elements,
-		ChunkSize:    chunkSize,
-		ChunkOverlap: chunkOverlap,
+		Task:          task,
+		Text:          artifact.ParsedText,
+		DocumentID:    artifact.DocumentID,
+		ParserName:    artifact.ParserName,
+		ParserVersion: artifact.ParserVersion,
+		SourceSHA256:  artifact.SourceSHA256,
+		Elements:      artifact.Elements,
+		ChunkSize:     chunkSize,
+		ChunkOverlap:  chunkOverlap,
 	})
 	if err != nil {
 		return ChunkResult{}, err
@@ -171,23 +183,154 @@ func (c *httpIngestionClient) Chunk(ctx context.Context, task tasks.FileProcessi
 	if len(artifact.Elements) > 0 && len(parsed.StructuredChunks) == 0 {
 		return ChunkResult{}, fmt.Errorf("structured chunk response is empty")
 	}
-	// Native-parser documents (md/rst/html) have no MinerU payload hash and
-	// no parser version; fill the provenance fields the v2 contract requires
-	// so validation passes and the chunk stays traceable.
+	// Native text documents have no parser artifact metadata. Structured
+	// parser responses must carry their own provenance and are never repaired
+	// with synthetic native values.
 	sourceHash := hashSHA256([]byte(artifact.ParsedText))
+	structuredArtifact := len(artifact.Elements) > 0
+	requireMinerU := strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || claimsMinerUIdentity(artifact.ParserName)
+	if requireMinerU && strings.TrimSpace(strings.ToLower(artifact.ParserName)) != "mineru" {
+		return ChunkResult{}, fmt.Errorf("MinerU parser identity must be exact")
+	}
 	for index := range parsed.StructuredChunks {
 		chunk := &parsed.StructuredChunks[index]
-		if strings.TrimSpace(chunk.SourceSHA256) == "" {
+		if !structuredArtifact && strings.TrimSpace(chunk.SourceSHA256) == "" {
 			chunk.SourceSHA256 = sourceHash
 		}
-		if strings.TrimSpace(chunk.ParserVersion) == "" {
+		if !structuredArtifact && strings.TrimSpace(chunk.ParserVersion) == "" {
 			chunk.ParserVersion = "native-text-v1"
+		}
+		if structuredArtifact {
+			if strings.TrimSpace(artifact.DocumentID) != "" && chunk.DocumentID != artifact.DocumentID {
+				return ChunkResult{}, fmt.Errorf("structured chunk %d document_id provenance does not match artifact", index)
+			}
+			if strings.TrimSpace(artifact.ParserName) != "" && !strings.EqualFold(strings.TrimSpace(chunk.ParserName), strings.TrimSpace(artifact.ParserName)) {
+				return ChunkResult{}, fmt.Errorf("structured chunk %d parser provenance does not match artifact", index)
+			}
+			if strings.TrimSpace(artifact.ParserVersion) != "" && chunk.ParserVersion != artifact.ParserVersion {
+				return ChunkResult{}, fmt.Errorf("structured chunk %d parser_version provenance does not match artifact", index)
+			}
+		}
+		if requireMinerU && !isLowerSHA256(chunk.SourceSHA256) {
+			return ChunkResult{}, fmt.Errorf("structured chunk %d source_sha256 must be a lowercase SHA-256", index)
 		}
 		if err := chunk.Validate(); err != nil {
 			return ChunkResult{}, fmt.Errorf("structured chunk %d is invalid: %w", index, err)
 		}
 	}
 	return parsed, nil
+}
+
+func claimsMinerUIdentity(parserName string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(parserName))
+	return normalized == "mineru" || strings.HasPrefix(normalized, "mineru-")
+}
+
+type chunkElementProvenance struct {
+	DocumentID    string `json:"document_id"`
+	ParserName    string `json:"parser_name"`
+	ParserVersion string `json:"parser_version"`
+	SourceSHA256  string `json:"source_sha256"`
+}
+
+// validateStructuredArtifactProvenance checks the worker input at the Go
+// boundary. The HTTP worker is not allowed to reinterpret an element as a
+// different parser family or document, especially when a non-PDF extension
+// hides a forged MinerU claim.
+func validateStructuredArtifactProvenance(task tasks.FileProcessingTask, artifact ParsedArtifact) error {
+	taskDocumentID := taskDocumentIdentity(task)
+	if len(artifact.Elements) == 0 {
+		if strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || claimsMinerUIdentity(artifact.ParserName) {
+			return fmt.Errorf("PDF chunks require MinerU element provenance")
+		}
+		if strings.TrimSpace(artifact.DocumentID) != "" || strings.TrimSpace(artifact.ParserName) != "" || strings.TrimSpace(artifact.ParserVersion) != "" {
+			return fmt.Errorf("structured artifacts require element provenance")
+		}
+		return nil
+	}
+	if strings.TrimSpace(artifact.DocumentID) == "" || artifact.DocumentID != taskDocumentID {
+		return fmt.Errorf("structured document provenance does not match task document identity")
+	}
+	if strings.TrimSpace(artifact.ParserName) == "" {
+		return fmt.Errorf("structured parser name is required")
+	}
+	if strings.TrimSpace(artifact.ParserVersion) == "" {
+		return fmt.Errorf("structured parser version is required")
+	}
+	requireMinerU := strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || claimsMinerUIdentity(artifact.ParserName)
+	if requireMinerU && strings.TrimSpace(strings.ToLower(artifact.ParserName)) != "mineru" {
+		return fmt.Errorf("MinerU parser identity must be exact")
+	}
+	if !isLowerSHA256(artifact.SourceSHA256) {
+		return fmt.Errorf("structured source_sha256 must be a lowercase SHA-256")
+	}
+	if task.Provenance != nil && strings.TrimSpace(task.Provenance.SourceSHA256) != "" && artifact.SourceSHA256 != task.Provenance.SourceSHA256 {
+		return fmt.Errorf("structured source_sha256 does not match task provenance")
+	}
+	elements := make([]chunkElementProvenance, 0, len(artifact.Elements))
+	payloadSHA256 := ""
+	for index, raw := range artifact.Elements {
+		var element chunkElementProvenance
+		if err := json.Unmarshal(raw, &element); err != nil {
+			return fmt.Errorf("structured element %d provenance is invalid: %w", index, err)
+		}
+		if element.DocumentID != artifact.DocumentID {
+			return fmt.Errorf("structured element %d document_id provenance does not match artifact", index)
+		}
+		if strings.TrimSpace(element.ParserName) == "" {
+			return fmt.Errorf("structured element %d parser name is required", index)
+		}
+		if claimsMinerUIdentity(element.ParserName) {
+			requireMinerU = true
+		}
+		if !strings.EqualFold(strings.TrimSpace(element.ParserName), strings.TrimSpace(artifact.ParserName)) {
+			if claimsMinerUIdentity(element.ParserName) || claimsMinerUIdentity(artifact.ParserName) {
+				return fmt.Errorf("MinerU parser identity must be exact")
+			}
+			return fmt.Errorf("structured element %d parser provenance does not match artifact", index)
+		}
+		if element.ParserVersion != artifact.ParserVersion {
+			return fmt.Errorf("structured element %d parser_version provenance does not match artifact", index)
+		}
+		if !isLowerSHA256(element.SourceSHA256) {
+			return fmt.Errorf("structured element %d source_sha256 must be a lowercase SHA-256", index)
+		}
+		elements = append(elements, element)
+		if payloadSHA256 == "" {
+			payloadSHA256 = element.SourceSHA256
+		} else if element.SourceSHA256 != payloadSHA256 {
+			return fmt.Errorf("structured element %d payload hash does not match prior elements", index)
+		}
+	}
+	if requireMinerU {
+		for _, element := range elements {
+			if strings.TrimSpace(strings.ToLower(element.ParserName)) != "mineru" {
+				return fmt.Errorf("MinerU parser identity must be exact")
+			}
+		}
+	} else if payloadSHA256 != artifact.SourceSHA256 {
+		return fmt.Errorf("structured element payload hash does not match artifact source hash")
+	}
+	return nil
+}
+
+func taskDocumentIdentity(task tasks.FileProcessingTask) string {
+	if documentID := strings.TrimSpace(task.DocumentID); documentID != "" {
+		return documentID
+	}
+	return task.FileMD5
+}
+
+func isLowerSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Embed delegates embedding-stage execution to the external ingestion worker.

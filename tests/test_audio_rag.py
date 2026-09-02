@@ -128,6 +128,36 @@ def test_transcribe_audio_converts_faster_whisper_segments_without_recording_tex
     assert calls == [(str(source), {"beam_size": 1, "vad_filter": False})]
 
 
+def test_transcribe_audio_binds_the_requested_model_revision(tmp_path) -> None:
+    source = tmp_path / "sample.wav"
+    source.write_bytes(b"handled-by-injected-model")
+    model_calls: list[dict[str, object]] = []
+
+    class Model:
+        def transcribe(self, _path, **_kwargs):
+            return iter(()), object()
+
+    def model_factory(**kwargs):
+        model_calls.append(kwargs)
+        return Model()
+
+    transcribe_audio(
+        source,
+        model_id="Systran/faster-whisper-tiny",
+        model_revision="revision-123",
+        model_factory=model_factory,
+    )
+
+    assert model_calls == [
+        {
+            "model_id": "Systran/faster-whisper-tiny",
+            "device": "cpu",
+            "compute_type": "int8",
+            "revision": "revision-123",
+        }
+    ]
+
+
 def test_audio_wer_requires_independent_reference_and_reports_edit_rate() -> None:
     assert compute_word_error_rate("hello brave world", "hello world", reference_source="human") == {
         "status": "VERIFIED",

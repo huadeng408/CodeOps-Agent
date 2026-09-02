@@ -44,7 +44,7 @@ class Element(BaseModel):
     caption_of: str | None = None
     footnote_of: str | None = None
     continuation_of: str | None = None
-    parser_name: str = "mineru"
+    parser_name: str = ""
     parser_version: str = ""
     backend: str = ""
     source_payload_ref: str = ""
@@ -112,6 +112,7 @@ def map_mineru_output(
             image_path=str(raw.get("img_path", raw.get("image_path", "")) or ""),
             caption=_caption_value(raw),
             footnote=_footnote_value(raw),
+            parser_name="mineru",
             parser_version=parser_version,
             backend=backend,
             source_payload_ref=source_ref,

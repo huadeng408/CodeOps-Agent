@@ -3,15 +3,19 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"code-agent/pkg/log"
 	"code-agent/pkg/objectpath"
+	orchestratorclient "code-agent/pkg/orchestrator"
 	"code-agent/pkg/tasks"
 )
 
@@ -86,6 +90,9 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	if err != nil {
 		return fmt.Errorf("parse: external worker failed: %w", err)
 	}
+	if err := p.verifyExternalArtifactSourceHash(ctx, task, artifact); err != nil {
+		return fmt.Errorf("parse: external artifact source integrity check failed: %w", err)
+	}
 	if strings.TrimSpace(artifact.ParsedText) == "" {
 		// A corpus document (carries a DocumentID) whose parsed text comes back
 		// empty — e.g. a k8s _index.md that is pure Hugo front matter with no
@@ -104,6 +111,9 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 	if structuredArtifact(task, artifact) {
 		if strings.TrimSpace(artifact.DocumentID) == "" || strings.TrimSpace(artifact.ParserName) == "" || strings.TrimSpace(artifact.ParserVersion) == "" || len(artifact.Elements) == 0 {
 			return errors.New("parse: structured MinerU PDF provenance is incomplete")
+		}
+		if _, err := validateParsedArtifactProvenance(task, artifact); err != nil {
+			return fmt.Errorf("parse: structured artifact provenance is invalid: %w", err)
 		}
 	}
 
@@ -131,5 +141,42 @@ func (p *Processor) processParseExternal(ctx context.Context, task tasks.FilePro
 		return fmt.Errorf("parse: enqueue chunk task failed: %w", err)
 	}
 	log.Infof("[Processor][parse] done file=%s text_len=%d worker=external", task.FileMD5, utf8.RuneCountInString(artifact.ParsedText))
+	return nil
+}
+
+// verifyExternalArtifactSourceHash binds worker output to the bytes stored by
+// Go. The worker receives a URL and is therefore not itself the authority for
+// source identity; when it reports a raw source hash, compare it with a fresh
+// stream from the canonical merged object before persisting the artifact.
+func (p *Processor) verifyExternalArtifactSourceHash(ctx context.Context, task tasks.FileProcessingTask, artifact orchestratorclient.ParsedArtifact) error {
+	workerHash := strings.TrimSpace(artifact.SourceSHA256)
+	provenanceHash := ""
+	if task.Provenance != nil {
+		provenanceHash = strings.TrimSpace(task.Provenance.SourceSHA256)
+	}
+	expected := workerHash
+	if provenanceHash != "" {
+		expected = provenanceHash
+	}
+	if expected == "" {
+		return nil
+	}
+	objectName := objectpath.MergedObjectName(task.FileMD5, task.FileName)
+	object, err := p.objectStorePort().Read(ctx, p.minioCfg.BucketName, objectName)
+	if err != nil {
+		return fmt.Errorf("read canonical source object: %w", err)
+	}
+	defer object.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, object); err != nil {
+		return fmt.Errorf("hash canonical source object: %w", err)
+	}
+	actual := hex.EncodeToString(hasher.Sum(nil))
+	if actual != expected {
+		return fmt.Errorf("raw source_sha256 does not match canonical object")
+	}
+	if workerHash != "" && workerHash != actual {
+		return fmt.Errorf("worker source_sha256 does not match canonical object")
+	}
 	return nil
 }

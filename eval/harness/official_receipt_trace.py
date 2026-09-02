@@ -235,6 +235,8 @@ def write_official_receipt_trace(
     traces.mkdir(parents=True, exist_ok=True)
     summary = capture.summary()
     source_spans = capture.spans()
+    phoenix_verification_requested = bool(phoenix_url and phoenix_start_time)
+    phoenix_verified = False
     if phoenix_url and phoenix_start_time:
         try:
             if phoenix_reader is None:
@@ -251,6 +253,7 @@ def write_official_receipt_trace(
             if not readback_spans:
                 raise RuntimeError("Phoenix returned no spans for receipt run")
             source_spans = readback_spans
+            phoenix_verified = True
             summary.update(
                 {
                     "collector": "phoenix-readback",
@@ -273,6 +276,10 @@ def write_official_receipt_trace(
                 }
             )
     report = evaluate_official_receipt_trace(source_spans, run_id, instance_id)
+    if phoenix_verification_requested and not phoenix_verified:
+        report["verdict"] = "PHOENIX_UNVERIFIED"
+        report["phoenix_verified"] = False
+        report["verification_problem"] = "Phoenix readback was not verified"
     (traces / "trace-summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

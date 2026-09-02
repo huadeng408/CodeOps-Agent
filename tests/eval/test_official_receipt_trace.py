@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from eval.harness.official_receipt_trace import (
     OfficialReceiptTrace,
     evaluate_official_receipt_trace,
@@ -158,3 +160,42 @@ def test_receipt_trace_writer_never_claims_phoenix_when_readback_fails(tmp_path)
     assert summary["phoenix_verified"] is False
     assert summary["collector"] == "otlp-http-unverified"
     assert summary["phoenix_readback_error"] == "PhoenixReadbackError"
+
+
+def test_receipt_trace_writer_fails_closed_when_complete_local_trace_lacks_phoenix_readback(
+    tmp_path,
+) -> None:
+    """Local export cannot substitute for the requested Phoenix verification."""
+    from eval.harness.official_receipt_trace import write_official_receipt_trace
+    from eval.harness.phoenix import PhoenixReadbackError
+
+    attrs = {"eval.run_id": RUN_ID, "eval.instance_id": INSTANCE_ID}
+    trace_id = "4" * 32
+    spans = [
+        CapturedSpan("eval.run", trace_id, "1" * 16, "", "UNSET", attrs),
+        CapturedSpan("eval.instance", trace_id, "2" * 16, "1" * 16, "UNSET", attrs),
+        CapturedSpan("invoke_agent", trace_id, "3" * 16, "2" * 16, "UNSET", attrs),
+        CapturedSpan("chat", trace_id, "4" * 16, "3" * 16, "UNSET", attrs),
+        CapturedSpan("scorer.official", trace_id, "5" * 16, "2" * 16, "UNSET", attrs),
+    ]
+
+    class CompleteLocalCapture:
+        def summary(self):
+            return {"collector": "otlp-http", "spans": [span.to_dict() for span in spans]}
+
+        def spans(self):
+            return spans
+
+    report = write_official_receipt_trace(
+        tmp_path,
+        CompleteLocalCapture(),
+        RUN_ID,
+        INSTANCE_ID,
+        phoenix_url="http://phoenix.test",
+        phoenix_start_time="2026-08-14T00:00:00Z",
+        phoenix_reader=lambda *_: (_ for _ in ()).throw(PhoenixReadbackError("unavailable")),
+    )
+
+    summary = json.loads((tmp_path / "traces" / "trace-summary.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "PHOENIX_UNVERIFIED"
+    assert summary["phoenix_verified"] is False

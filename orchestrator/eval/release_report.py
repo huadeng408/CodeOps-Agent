@@ -1,6 +1,6 @@
 """E5 — RAG release report that refuses to score an inadequate golden set.
 
-Design map line 1108 asks E5 to score "only the locked golden set", report
+The E5 release contract scores "only the locked golden set", reports
 pure negatives separately, bind every hash, and emit per-query detail with a
 bootstrap CI.  Measured against the corpus as it actually exists, the honest
 deliverable is a scorer that **refuses**, because the golden set cannot carry
@@ -116,7 +116,7 @@ EXIT_ELIGIBLE = 0
 EXIT_RESERVED_UNUSED = 1
 EXIT_DATA_FAULT = 2
 EXIT_NOT_ELIGIBLE = 3
-TRUSTED_POLICY_SHA256 = "eb6b5dc238a36fd0401e7c435e641420f31f79538ba0ced07f554b5ee7547129"
+TRUSTED_POLICY_SHA256 = "db898b98f7d368f12db4a51f248d05d19cae7b27c0807561cde4f3539e06c7f2"
 
 _REPORTER_OWNED_BINDINGS = frozenset(
     {

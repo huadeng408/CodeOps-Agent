@@ -1,6 +1,6 @@
 """O2: a real ``rerank`` span at the real reranker call site (§20.6.4 item 2).
 
-The design map asks for the rerank span "在真实 reranker 调用点" — at the actual
+The trace contract requires the rerank span at the actual
 call site, not in a test.  The call site is ``rerank_context`` inside
 ``orchestrator/rag/graph.py``'s ``build_graph`` closure, which calls
 ``backend.rerank_context``.

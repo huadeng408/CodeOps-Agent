@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# ScreenSpot grounding evaluates GUI coordinates and does not use the RAG
+# trace/pin contract.
+TRACE_CAPABILITIES: tuple[str, ...] = ()
+
 SCREENSPOT_REPOSITORY = "likaixin/ScreenSpot-Pro"
 SCREENSPOT_REVISION = "210e78d3844251110bff86c95835ebd37a6930fa"
 SCREENSPOT_SAMPLE_MANIFEST = {

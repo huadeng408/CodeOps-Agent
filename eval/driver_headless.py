@@ -36,8 +36,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-from opentelemetry.baggage.propagation import W3CBaggagePropagator
+try:
+    from opentelemetry.baggage.propagation import W3CBaggagePropagator
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+except ImportError:
+    # Telemetry is optional for ordinary headless evaluation. Strict O3
+    # SearchKnowledge requests check these sentinels and fail closed below.
+    W3CBaggagePropagator = None
+    TraceContextTextMapPropagator = None
 
 from eval.adapter import DefaultAgentAdapter, EvalInstance, EvalResult
 from eval.harness.trace_contract import SPAN_EXECUTE_TOOL, SPAN_INVOKE_AGENT
@@ -474,6 +480,11 @@ class LocalToolExecutor:
             "Content-Type": "application/json",
             "X-Internal-Token": internal_secret,
         }
+        if TraceContextTextMapPropagator is None or W3CBaggagePropagator is None:
+            return _LocalToolResult(
+                error="SearchKnowledge requires OpenTelemetry propagation dependencies",
+                exit_code=1,
+            )
         try:
             TraceContextTextMapPropagator().inject(headers)
             W3CBaggagePropagator().inject(headers)

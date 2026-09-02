@@ -1,8 +1,8 @@
-"""E3 — evaluation firewall: fail-closed path gating.
+"""Evaluation firewall: fail-closed path gating.
 
-Per DESIGN-MAP-2026-08-07 §20.6.3 (E3) an agent under evaluation may read the
-question and the corpus, and must never reach the answer, the label, or any
-prior score.  The policy artifact
+Under the active Goal, an agent under evaluation may read the question and
+the corpus, and must never reach the answer, the label, or any prior score.
+The versioned policy artifact
 ``data/eval/techdocs/split-policy.v1.json`` declares
 ``firewall.enforcement == "fail_closed"``: a path matching no rule is DENIED,
 not allowed, and a denial must *raise* rather than silently return empty

@@ -1,19 +1,63 @@
 param(
     [string]$RunId = ("current-head-" + (Get-Date -Format "yyyyMMdd-HHmmss")),
-    [string]$CheckoutPath = "D:\vscode\tau2-bench-v1.0.1",
+    [string]$CheckoutPath = "",
     [string]$PhoenixUrl = "http://127.0.0.1:6006",
     [string]$ExpectedCommit = "fc0055dc4e0a316c3f83133267fbd6faaa770992",
     [ValidateSet("llm_agent", "llm_agent_solo")]
     [string]$Agent = "llm_agent",
     [ValidateSet("user_simulator", "dummy_user")]
-    [string]$User = "user_simulator"
+    [string]$User = "user_simulator",
+    [string]$Python = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$projectProgress = [string]::Concat([char[]](0x9879, 0x76ee, 0x8fdb, 0x5c55))
-$keyFile = Join-Path "D:\Obsidian\code-autogrowth" "$projectProgress\api-key.md"
+$runIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z'
+if ($RunId -notmatch $runIdPattern) {
+    throw "RunId must match $runIdPattern."
+}
+
+$trackedEnvironmentNames = @(
+    "LOCALCODE_REPO_ROOT",
+    "TAU2_RECEIPT_RUN_ID", "TAU2_RECEIPT_ROOT", "TAU2_RECEIPT_CHECKOUT",
+    "TAU2_RECEIPT_EXPECTED_COMMIT", "TAU2_RECEIPT_API_KEY", "TAU2_RECEIPT_BASE_URL",
+    "TAU2_RECEIPT_PYTHON", "TAU2_RECEIPT_AGENT", "TAU2_RECEIPT_USER",
+    "TAU2_RECEIPT_REDACTION_HELPER",
+    "PYTHONUTF8", "PYTHONIOENCODING"
+)
+$previousEnvironment = @{}
+foreach ($name in $trackedEnvironmentNames) {
+    $item = Get-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+    $previousEnvironment[$name] = if ($null -ne $item) { $item.Value } else { $null }
+}
+
+function Restore-ReceiptEnvironment {
+    foreach ($name in $trackedEnvironmentNames) {
+        if ($null -eq $previousEnvironment[$name]) {
+            Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item -LiteralPath ("Env:{0}" -f $name) -Value $previousEnvironment[$name]
+        }
+    }
+}
+
+$CheckoutPath = if ([string]::IsNullOrWhiteSpace($CheckoutPath)) {
+    if ([string]::IsNullOrWhiteSpace($env:TAU2_CHECKOUT_PATH)) {
+        Join-Path (Split-Path -Parent $repoRoot) "tau2-bench-v1.0.1"
+    } else {
+        $env:TAU2_CHECKOUT_PATH
+    }
+} else {
+    $CheckoutPath
+}
+$pythonCommand = if ([string]::IsNullOrWhiteSpace($Python)) {
+    (Get-Command python -ErrorAction Stop).Source
+} else {
+    $Python
+}
+$redactionHelper = Join-Path $PSScriptRoot "lib\credential-redaction.ps1"
 $runRoot = Join-Path $repoRoot "eval_results\tau2official\$RunId"
 $driverPath = Join-Path $runRoot "official_driver.py"
 $finalizerPath = Join-Path $runRoot "finalize_driver.ps1"
@@ -21,6 +65,16 @@ $stdoutPath = Join-Path $runRoot "stdout.log"
 $stderrPath = Join-Path $runRoot "stderr.log"
 $exitPath = Join-Path $runRoot "exit-code.txt"
 $pidPath = Join-Path $runRoot "pid.txt"
+
+if ([string]::IsNullOrWhiteSpace($env:LOCAL_LLM_API_KEY)) {
+    throw "LOCAL_LLM_API_KEY is not configured."
+}
+$apiKey = $env:LOCAL_LLM_API_KEY
+$baseUrl = if ([string]::IsNullOrWhiteSpace($env:LOCAL_LLM_BASE_URL)) {
+    "https://beeapi.ai/v1"
+} else {
+    $env:LOCAL_LLM_BASE_URL
+}
 
 if (Test-Path -LiteralPath $runRoot) {
     throw "Refusing to overwrite existing receipt directory: $runRoot"
@@ -30,21 +84,10 @@ if (-not (Test-Path -LiteralPath $CheckoutPath)) {
 }
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 
-$lines = Get-Content -LiteralPath $keyFile
-$keyHeader = [array]::IndexOf($lines, ($lines | Where-Object { $_ -match '(?i)beeapi.*apikey' } | Select-Object -First 1))
-if ($keyHeader -lt 0 -or $keyHeader + 1 -ge $lines.Count) {
-    throw "The approved key file has no BeeAPI key value after its labeled field."
-}
-$apiKey = $lines[$keyHeader + 1].Trim()
-if (-not $apiKey) {
-    throw "The approved key file is missing the BeeAPI API key."
-}
-
 @'
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -55,6 +98,7 @@ sys.path.insert(0, str(repo))
 
 from eval.benchmarks.tau2official import (
     TAU2_V101_COMMIT,
+    TAU2_V101_DATA_TREE_SHA256,
     Tau2OfficialConfig,
     Tau2OfficialRunner,
     source_data_tree_sha256,
@@ -102,13 +146,12 @@ runner = Tau2OfficialRunner(
         domain="mock",
         agent=os.environ["TAU2_RECEIPT_AGENT"],
         user=os.environ["TAU2_RECEIPT_USER"],
+        expected_data_tree_sha256=TAU2_V101_DATA_TREE_SHA256,
+        require_clean_checkout=True,
     )
 )
 if problems := runner.validate():
     raise RuntimeError("; ".join(problems))
-actual_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
-if actual_commit != expected_commit:
-    raise RuntimeError("pinned tau2 checkout source commit does not match")
 
 capture = TraceCapture()
 capture.install(os.environ.get("TAU2_PHOENIX_OTLP_ENDPOINT", ""))
@@ -123,9 +166,14 @@ try:
     with OfficialReceiptTrace(run_id, "mock/1") as trace:
         command = runner.command(run_name)
         assert command[:4] == ["uv", "run", "tau2", "run"]
-        completed = subprocess.run(command, cwd=checkout, env={**os.environ, **child_env}, check=False)
+        execution = runner.prepare_run(run_name)
+        completed = execution.run(command, env={**os.environ, **child_env})
+        (receipt_root / "process.json").write_text(
+            json.dumps({"returncode": completed.returncode}, indent=2) + "\n",
+            encoding="utf-8",
+        )
         with trace.scorer():
-            receipt = runner.collect_receipt(run_name, receipt_root)
+            receipt = runner.collect_receipt(execution, receipt_root)
     try:
         from opentelemetry import trace as trace_api
 
@@ -141,12 +189,11 @@ try:
         phoenix_start_time=phoenix_start_time,
         phoenix_reader=phoenix_readback_with_retry,
     )
-    (receipt_root / "process.json").write_text(
-        json.dumps({"returncode": completed.returncode}, indent=2) + "\n", encoding="utf-8"
-    )
     refresh_receipt_checksums(receipt_root)
     print(json.dumps({"receipt_status": receipt["status"]}, ensure_ascii=True))
     print(json.dumps({"trace_verdict": trace_report["verdict"]}, ensure_ascii=True))
+    if trace_report["verdict"] != "PASS":
+        raise SystemExit(1)
     raise SystemExit(completed.returncode)
 finally:
     capture.stop()
@@ -161,14 +208,24 @@ param(
 
 $env:TAU2_PHOENIX_URL = $PhoenixUrl.TrimEnd("/")
 $env:TAU2_PHOENIX_OTLP_ENDPOINT = "$($env:TAU2_PHOENIX_URL)/v1/traces"
+. $env:TAU2_RECEIPT_REDACTION_HELPER
 try {
-    & "C:\Python312\python.exe" $DriverPath
-    $driverExitCode = $LASTEXITCODE
+    $driverExitCode = 0
+    Invoke-RedactedNativeCommand `
+        -FilePath $env:TAU2_RECEIPT_PYTHON `
+        -ArgumentList @($DriverPath) `
+        -Secrets @($env:TAU2_RECEIPT_API_KEY) `
+        -ExitCode ([ref]$driverExitCode)
     $driverExitCode | Set-Content -LiteralPath $ExitPath -Encoding ascii
     if (Test-Path -LiteralPath (Join-Path $env:TAU2_RECEIPT_ROOT "receipt.json")) {
-        & "C:\Python312\python.exe" -c "from eval.harness.official_receipt_trace import refresh_receipt_checksums; import os; refresh_receipt_checksums(os.environ['TAU2_RECEIPT_ROOT'])"
-        if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+        $refreshExitCode = 0
+        Invoke-RedactedNativeCommand `
+            -FilePath $env:TAU2_RECEIPT_PYTHON `
+            -ArgumentList @("-c", "from eval.harness.official_receipt_trace import refresh_receipt_checksums; import os; refresh_receipt_checksums(os.environ['TAU2_RECEIPT_ROOT'])") `
+            -Secrets @($env:TAU2_RECEIPT_API_KEY) `
+            -ExitCode ([ref]$refreshExitCode)
+        if ($refreshExitCode -ne 0) {
+            exit $refreshExitCode
         }
     }
     exit $driverExitCode
@@ -178,13 +235,16 @@ try {
 }
 '@ | Set-Content -LiteralPath $finalizerPath -Encoding utf8
 
+try {
 $env:LOCALCODE_REPO_ROOT = $repoRoot
 $env:TAU2_RECEIPT_RUN_ID = $RunId
 $env:TAU2_RECEIPT_ROOT = $runRoot
 $env:TAU2_RECEIPT_CHECKOUT = $CheckoutPath
 $env:TAU2_RECEIPT_EXPECTED_COMMIT = $ExpectedCommit
 $env:TAU2_RECEIPT_API_KEY = $apiKey
-$env:TAU2_RECEIPT_BASE_URL = "https://beeapi.ai/v1"
+$env:TAU2_RECEIPT_BASE_URL = $baseUrl
+$env:TAU2_RECEIPT_PYTHON = $pythonCommand
+$env:TAU2_RECEIPT_REDACTION_HELPER = $redactionHelper
 $env:TAU2_RECEIPT_AGENT = $Agent
 $env:TAU2_RECEIPT_USER = $User
 $env:PYTHONUTF8 = "1"
@@ -200,3 +260,7 @@ $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
 Write-Output "Started tau2 official receipt: $RunId"
 Write-Output "PID: $($process.Id)"
 Write-Output "Receipt root: $runRoot"
+}
+finally {
+    Restore-ReceiptEnvironment
+}

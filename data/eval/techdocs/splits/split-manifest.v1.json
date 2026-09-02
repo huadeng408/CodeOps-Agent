@@ -7,7 +7,7 @@
   "holdout_size": 0,
   "holdout_status": "BLOCKED",
   "policy_id": "e3-split-policy",
-  "policy_sha256": "c053d3564eacd7d9d18519d9ccbafb308654968c6372fa70803dd894f488e5f9",
+  "policy_sha256": "d07a25b67fb8e7fbe5d3095f28d997e424f520dc7446464c7293c973f3dcfc94",
   "policy_version": "v1",
   "seed": 20260809
 }

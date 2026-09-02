@@ -118,3 +118,34 @@ async def test_xlsx_parse_uses_native_extractor_and_never_tika() -> None:
     assert [element.type for element in response.elements] == ["heading", "table", "equation"]
     assert response.tableRegions[0]["range_ref"] == "Budget!A1:A2"
     assert response.formulaCachePresent["Budget!A2"] is False
+
+
+@pytest.mark.asyncio
+async def test_xlsx_parse_preserves_stable_corpus_document_id() -> None:
+    workbook = Workbook()
+    workbook.active.title = "Budget"
+    workbook.active.append(["Amount"])
+    payload = BytesIO()
+    workbook.save(payload)
+    service = IngestionService.__new__(IngestionService)
+    service._http = _XlsxHTTP(payload.getvalue())
+    service._settings = SimpleNamespace(tika_url="http://tika.invalid")
+    document_id = "go@0123456789abcdef0123456789abcdef01234567:docs/budget.xlsx"
+
+    response = await service.parse(
+        ParseRequestPayload.model_validate(
+            {
+                "task": {
+                    "file_md5": "file-md5-not-document-id",
+                    "document_id": document_id,
+                    "file_name": "budget.xlsx",
+                    "user_id": 1,
+                    "stage": "parse",
+                },
+                "objectUrl": "http://source.invalid/budget.xlsx",
+            }
+        )
+    )
+
+    assert response.documentId == document_id
+    assert {element.document_id for element in response.elements} == {document_id}

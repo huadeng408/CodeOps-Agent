@@ -110,8 +110,8 @@ class PassVerdict:
     confidence: float  # 0.0–1.0; 0.0 when failed
     prompt_hash: str  # sha256 hex[:16]
     evidence_refs: tuple[str, ...]  # "es:<index>:<doc_id>:<source_path>" per chunk
-    # Provider-reported model identity, read from the response body (design map
-    # §20.6.3 task E2).  Never derived from the requested model / --revision:
+    # Provider-reported model identity is read from the response body. Never
+    # derived from the requested model / --revision:
     # an input echoed into an artifact is not evidence of what served the call.
     model_identity: dict[str, Any] = field(default_factory=dict)
 
@@ -129,7 +129,7 @@ def redact_text(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Provider model identity (design map §20.6.3 task E2)
+# Provider model identity gate
 # ---------------------------------------------------------------------------
 
 IDENTITY_VERIFIED: str = "MODEL_IDENTITY_VERIFIED"
@@ -167,8 +167,8 @@ def resolve_identity_status(identities: "list[dict[str, Any]] | tuple[dict[str, 
     a provider-reported model name and an immutable build discriminator
     (``system_fingerprint``).  Anything else — no calls at all, a silent
     provider, or a single unverified call in a batch — is
-    ``MODEL_IDENTITY_UNVERIFIED``, per the design map: "若 provider 不提供不可变
-    revision，状态必须为 MODEL_IDENTITY_UNVERIFIED".
+    ``MODEL_IDENTITY_UNVERIFIED``: "若 provider 不提供不可变 revision，状态必须为
+    MODEL_IDENTITY_UNVERIFIED".
 
     Deliberately ignores ``requested_model``: that is a value we chose, and the
     §20.4 failure was treating it as proof of what served the request.
@@ -734,7 +734,7 @@ async def review_one(
         )
 
     # Capture the provider's *own* answer to "what served this request?".
-    # Direct attribute read on purpose (design map §20.6.3 E2): an indirect
+    # Direct attribute read on purpose: an indirect
     # getattr chain would let this wire be removed while the gate test in
     # tests/eval/test_sol_reviewer_identity_capture.py still passed.  The
     # try/except only tolerates a foreign/legacy response object — it never
@@ -825,7 +825,7 @@ def _verdict_to_row(verdict: PassVerdict, qrel: dict[str, Any], model: str, revi
         # `reviewer_model` / `reviewer_revision` are the values we *requested*.
         # They are kept for reproducibility but are NOT identity evidence — the
         # `reviewer_reported_model` / `reviewer_system_fingerprint` fields below
-        # come from the provider's own response body (design map §20.6.3 E2).
+        # come from the provider's own response body.
         "reviewer_model": model,
         "reviewer_revision": revision,
         **_identity_artifact_fields(verdict.model_identity),
@@ -1206,8 +1206,8 @@ def arbitrate(
             "review_prompt_hash": a.prompt_hash,
             "review_evidence": "|".join(a.evidence_refs),
             "review_timestamp": _review_timestamp(),
-            # Provider-reported identity across BOTH passes (design map §20.6.3
-            # E2).  Reported alongside the verdict, never folded into it: an
+            # Provider-reported identity across BOTH passes. Reported alongside
+            # the verdict, never folded into it: an
             # unverifiable reviewer identity is a disclosure obligation, not a
             # reason to relabel a qrel.
             "reviewer_identity_status": resolve_identity_status(
@@ -1327,7 +1327,7 @@ def summarize(
     disputed_qids = [r["query_id"] for r in disputed]
 
     # Provider-reported identity, folded across every observed call in both
-    # passes (design map §20.6.3 task E2).  One silent call is enough to make
+    # passes. One silent call is enough to make
     # the whole review MODEL_IDENTITY_UNVERIFIED — the artifact must not claim
     # a model identity it cannot evidence from response bodies.
     identities = [

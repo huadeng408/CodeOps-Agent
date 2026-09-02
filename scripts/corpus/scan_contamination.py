@@ -670,8 +670,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no benchmark queries found in {args.queries}", file=sys.stderr)
         return 2
 
-    # 层 4 的向量来源。默认复用索引里已有的 dense_vector：设计地图 §29 记录的
-    # 那次真实执行里，重新编码整个语料把服务顶到单批 183.57s（客户端 60s 读超时），
+    # 层 4 的向量来源。默认复用索引里已有的 dense_vector：首次全量真实执行中，
+    # 重新编码整个语料把服务顶到单批 183.57s（客户端 60s 读超时），
     # 层 4 因此没跑完；而库内向量与冻结 revision 同源，实测
     # cos(stored, fresh[embedding_text]) = 1.000000，冻结策略的 ann_note 与
     # peak_rss_rationale 写的本来就是「持有这批向量做一次 matmul」。

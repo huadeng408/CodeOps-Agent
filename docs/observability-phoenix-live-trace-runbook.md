@@ -2,7 +2,8 @@
 
 > 日期：2026-08-04
 > 状态：**BLOCKED on environment** —— 真实语料导入进行中（3095 份 → `knowledge_base_v2_bge_m3`），Phoenix 容器未启动，本 runbook 只做核对与准备，**不启动任何服务**。
-> 依据：`internal/telemetry/genai/{semconv.go, schema_test.go, semconv_test.go, tracer.go}`、`orchestrator/rag/trace.py`、`orchestrator/config/env.py`、`scripts/eval/trace_assert.py`、`tests/eval/test_trace_assert.py`、`tests/test_trace_schema.py`、`tests/integration/trace_e2e.py`、`scripts/test-trace-e2e.ps1`、`docker-compose.yml`、设计文档 `docs/superpowers/specs/2026-07-29-phoenix-trace-e2e-design.md`。
+> 依据：`docs/GOAL.md`、`internal/telemetry/genai/{semconv.go, schema_test.go, semconv_test.go, tracer.go}`、`orchestrator/rag/trace.py`、`orchestrator/config/env.py`、`scripts/eval/trace_assert.py`、`tests/eval/test_trace_assert.py`、`tests/test_trace_schema.py`、`tests/integration/trace_e2e.py`、`scripts/test-trace-e2e.ps1`、`docker-compose.yml`。
+> 当前边界：本文是历史运行记录，不再具有执行约束力。当前验收以 active Goal、当前仓库契约和新鲜端到端证据为准；旧指标和旧环境状态仅供追溯。
 
 ---
 
@@ -35,9 +36,8 @@
 
 ### 1.2 DeepSeek API key
 
-- 来源文件：`D:\Obsidian\code-autogrowth\项目进展\api-key.md`
-- runner 的解析规则（`Get-DeepSeekApiKey`）：文件中必须**恰好一行含 "deepseek" 标签**，且其后只能解析出**恰好一个 `sk-` token**，否则 preflight 直接失败。
-- 也可用环境变量 `OPENAI_API_KEY` 代替（优先级高于 `-ApiKeyFile`）。
+- 通过批准的外部 secret manager 将凭据注入当前进程的 `OPENAI_API_KEY`。
+- 当前运行说明不依赖 Markdown 密钥文件或本机固定路径；缺失或空凭据时 preflight 必须失败。
 - key 只注入子进程环境块，不进命令行/临时文件/日志；诊断输出会先做 `<redacted>` 脱敏。
 
 ### 1.3 运行时与依赖
@@ -79,7 +79,7 @@ Go `semconv.go`（第 76–95 行）定义、`schema_test.go::TestRAGAttributeNa
 | 10 | `rag.document_hash` | string | `DocumentHashKV` |
 | 11 | `rag.document_length` | int | `DocumentLengthKV` |
 
-隐私约束（设计文档 §6.2）：只存 hash/长度，绝不落原始 query/document 内容；`schema_test.go::TestQueryHashIsStableAndPrivacySafe` 保证哈希稳定且不含原文。
+隐私约束：只存 hash/长度，绝不落原始 query/document 内容；`schema_test.go::TestQueryHashIsStableAndPrivacySafe` 保证哈希稳定且不含原文。
 
 备注：`semconv_test.go` 覆盖的是操作名常量、基础属性、截断、NoopTracer、`parseOTLPEndpoint`；**rag.* 冻结清单在 `schema_test.go`**（两个测试文件分工不同，别混淆）。
 
@@ -100,7 +100,7 @@ Go `semconv.go`（第 76–95 行）定义、`schema_test.go::TestRAGAttributeNa
 
 阶段（`$stage` 标记，与源码一致）：
 
-1. **preflight**：取 key（env 优先，其次 `-ApiKeyFile` 解析）→ 检查 `python`/`go`/`docker` 可用 → 探测 Python trace 依赖 → `check-model` 调 DeepSeek `/v1/models` 确认 `deepseek-v4-pro` 在列。支持 `-ValidateApiKeyOnly` 只验 key。
+1. **preflight**：从当前进程的 `OPENAI_API_KEY` 取 key → 检查 `python`/`go`/`docker` 可用 → 探测 Python trace 依赖 → `check-model` 调 DeepSeek `/v1/models` 确认 `deepseek-v4-pro` 在列。支持 `-ValidateApiKeyOnly` 只验 key。
 2. **docker-phoenix**：`docker compose ps --status running --services` 判断 phoenix 是否已在跑；**未跑才** `docker compose up -d phoenix`（300s 超时）；随后轮询 `GET {PhoenixUrl}/v1/projects?limit=1` 至就绪（60s）。
 3. **temporary-workspace**：生成 run_id（GUID）→ 临时目录 `code-agent-trace-e2e-<runId>` → 写 `.agent/settings.json`（model、`model_fast=disabled`、orchestrator 自动启动 `python -m orchestrator.server`、空闲环回端口、Read 全放行权限）→ 写 fixture `trace-e2e-<runId>.txt`（内容 `TRACE_E2E_FIXTURE:<runId>`）。
 4. **go-build**：`go build -o <tmp>/code-agent-e2e.exe ./cmd/agent`（120s）。
@@ -114,6 +114,8 @@ Go `semconv.go`（第 76–95 行）定义、`schema_test.go::TestRAGAttributeNa
 ---
 
 ## 3. 逐步执行命令（解除阻塞后按序执行）
+
+> 本节保留历史复现步骤，仅用于理解当时的环境和证据；当前工作不得把它当作执行授权或路径规范，须遵循 active Goal、当前仓库契约和 `main` 工作边界。
 
 ### Step 0：确认导入完成 + 内存充足（闸门）
 
@@ -143,15 +145,16 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:6006/v1/projects?limit=1
 ### Step 2：真实 E2E（Go + Python + DeepSeek live trace）
 
 ```powershell
+# 先由外部 secret manager 注入当前进程；不要把值写入脚本、命令历史或 Markdown 文件
+$env:OPENAI_API_KEY = '<从安全存储加载>'
+
 # 先只验证 key（可选，不发模型请求）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 `
-  -ApiKeyFile 'D:\Obsidian\code-autogrowth\项目进展\api-key.md' `
   -Model deepseek-v4-pro -ValidateApiKeyOnly
 # 期望输出：api_key=valid
 
 # 完整 E2E
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 `
-  -ApiKeyFile 'D:\Obsidian\code-autogrowth\项目进展\api-key.md' `
   -Model deepseek-v4-pro
 ```
 
@@ -190,7 +193,7 @@ docker compose stop phoenix
 |---|---|---|
 | Phoenix 里没有任何 Go span | Go tracer 探测 6006 不通 → NoopTracer（`tracer.go` 日志 `Phoenix not reachable ... traces disabled`） | 确认容器已起、端口通；勿靠设 `OTEL_EXPORTER_OTLP_ENDPOINT` 绕过语义差异 |
 | `Python trace dependencies are unavailable` | 缺 grpc/OTel 包 | `python -m pip install -e ".[trace-e2e]"` |
-| `expected exactly one DeepSeek ...` | api-key.md 里标签或 sk- token 数量 ≠1 | 清理 key 文件或改用 `OPENAI_API_KEY` |
+| `expected exactly one DeepSeek ...` | `OPENAI_API_KEY` 缺失、为空或格式无效 | 从批准的 secret manager 重新注入当前进程环境 |
 | `model 'deepseek-v4-pro' is unavailable` | preflight 调 `/v1/models` 失败（鉴权/网络/模型名） | 按 stderr 列出的可用模型名核对 |
 | `Phoenix did not become ready ... within 60s` | 容器慢/端口占用 | `docker compose ps`、查 6006 占用；首拉镜像给足 300s |
 | Docker daemon 500/内存压力 | 与导入栈争资源 | **等导入完成**再试；导入期间不要重启 Docker Desktop |

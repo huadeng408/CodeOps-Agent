@@ -11,7 +11,7 @@ read.  A preflight that cannot fail is not a preflight, and here it actively
 misreported -- the one command a person runs to check "am I set up correctly"
 was the command that could not detect the setup being wrong.
 
-Design map §20.6.1 requires an unpinned run to fail before an instance is
+The reproducibility contract requires an unpinned run to fail before an instance is
 solved.  ``--dry-run`` is the cheapest way to reach that check, so it must
 enforce it rather than skip it.
 

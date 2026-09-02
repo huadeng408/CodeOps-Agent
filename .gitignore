@@ -12,12 +12,18 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
 .env
 .env.*
 !.env.example
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.coverage*
+htmlcov/
 
 # Local design notes and scratch docs
 设计方案.md
@@ -25,8 +31,10 @@ venv/
 notes/
 *.bak
 *.backup
+*.orig
 
-# Claude Code local overrides (settings.json is shared; *.local.json is personal)
+# Agent-specific permissions and local overrides are machine-owned.
+.claude/settings.json
 .claude/settings.local.json
 
 # Logs
@@ -36,10 +44,8 @@ logs/
 # Local agent state
 .worktrees/
 .agent/settings.local.json
-.agent/memory/*
-!.agent/memory/.gitkeep
-.agent/sessions/*
-!.agent/sessions/.gitkeep
+.agent/memory/
+.agent/sessions/
 .agent/worktrees/*
 !.agent/worktrees/.gitkeep
 .agent/mcp-tools.json
@@ -53,9 +59,15 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Eval intermediate artifacts (final SHA-bound results are tracked)
+# Evaluation outputs stay outside the source tree. Curated, redacted receipts
+# may be promoted under data/eval after their hashes and denominators are audited.
 eval/swebench_work/flask/
 eval/swebench_work/predictions_*.jsonl
+/eval/swebench_work/*.patch
+/eval/eval_final_*.json
+/eval/samples_*.jsonl
+/eval/*.workflow.js
+/ground-truth-test*.json
 # Repository clones and per-run scratch created by the SWE-bench harness.
 # These are checkouts of upstream projects (astropy alone is 91MB), reproducible
 # from the instance's base_commit, so they are artifacts and never source.
@@ -88,7 +100,6 @@ results/
 /eval_checkpoint_*.json
 /eval_results_*.jsonl
 /eval_results_*.json
-/eval_results/
 /eval/benchmark_data/
 
 # Go build caches (multiple audit copies, ~3.2 GB total)
@@ -106,13 +117,8 @@ docs/superpowers/
 # Generated audit / report snapshots
 data/reports/corpus/
 
-# Personal session scratch at root
+# Local evaluation experiments and session scratch
 CLAUDE-CODE-*.md
-# Personal agent instructions (not for publication)
-eval/swebench_work/repos/
-eval/swebench_work/astropy/
-eval/swebench_work/agent_run/
-.mnm/
 eval/swebench_work/run_swebench_honest_10.py
 eval/swebench_work/run_terminalbench_honest_5.py
 eval/swebench_work/run_tau2bench_honest_5.py
@@ -125,14 +131,87 @@ eval/swebench_work/run_terminalbench_honest.py
 eval/swebench_work/score_agent.py
 eval/swebench_work/score_honest.py
 eval/swebench_work/score_honest_10.py
-eval/swebench_work/run_swebench_honest_10.py
-eval/swebench_work/run_terminalbench_honest_5.py
-eval/swebench_work/run_tau2bench_honest_5.py
-deepseek-chat-honest-20s.honest-test-v1.json
+eval/swebench_work/gen_smoke_predictions.py
+eval/swebench_work/show_instance.py
+eval/swebench_work/smoke_score*.py
+eval/swebench_work/wsl_load_dataset.py
+eval/swebench_work/run_swebench_eval.py
+eval/swebench_solve.py
+eval/swebench_solve_light.py
+eval/swebench_work/list_instances.py
+eval/swebench_work/run_swebench_honest_v2.py
+eval/swebench_work/run_tb_single.py
 
 # Official SWE-bench scorer output written relative to its working directory.
 # Regenerable per run and keyed by a per-process run_id, so it would otherwise
 # accumulate one file per instance per run in the repository root.
 code-agent-*.swebench-*.json
-logs/run_evaluation/
-logs/build_images/
+
+# Local runtime, dependency caches and generated process state.  These paths
+# are reproducible or machine-specific and must never enter the repository.
+.runtime/
+.tmp/
+.playwright-mcp/
+internal/cli/.agent/
+*.pid
+*.prof
+*.coverage
+/.tmp-native-test.log
+/$taskDiag
+
+# Scratch outputs created by local UI/evaluation runs.
+/brainstorm-portal-layout.png
+/phoenix-v0.1-playwright-mcp*
+/resume-backend-developer.html
+/output/
+
+# Generated evaluation trees and review intermediates. Stable inputs and
+# canonical evidence belong under data/eval; run directories stay local.
+/eval_results/
+/data/reports/
+/data/eval/techdocs/reports/
+
+# Downloaded audio payloads are reproducible run inputs, not repository
+# fixtures.  Keep the pinned source manifest under data/eval/multimodal/audio.
+/data/eval/multimodal/audio/**/*.wav
+/data/eval/multimodal/audio/**/source/
+
+# Human-review source records and canonical qrels are stable audit inputs.
+# Only the local portal helper and rendered worksheet are generated scratch.
+/data/eval/techdocs/review/disputed-worksheet.jsonl
+/data/eval/techdocs/review/disputed-worksheet.md
+/data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/_apply_review.py
+/data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/human-review-worksheet.md
+# Row-level review projections stay local until their provenance and verdict
+# reconciliation are explicitly approved.  Force-add only an audited release
+# input after that review; ordinary repository staging must not include them.
+/data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/_human_review_batches/
+/data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/*.merged.jsonl
+
+# Machine-local benchmark configuration.
+/eval/swebench_work/docker-daemon.json
+
+# Optional local model weights mounted by docker-compose.yml.
+/models/
+
+# Design-map migration and session notes are local working material. The
+# active Goal and docs/GOAL.md remain the source of truth.
+/scripts/design_map/
+/eval/swebench_work/proxy_patch.py
+/eval/swebench_work/run_tau2bench_10.py
+/eval/swebench_work/run_tau2bench_v2.py
+/eval/swebench_work/score_honest_v2.py
+/eval/swebench_work/score_honest_v3.py
+/docs/RESEARCH-2026-08-14-MULTIMODAL-RAG-MODALITIES.md
+
+# Historical plans, progress logs and design maps are local context, not the
+# active goal or public source of truth.
+/docs/DESIGN-MAP*.md
+/docs/HANDOFF-*.md
+/docs/PROGRESS-*.md
+/docs/RAG-FOUNDATION-PLAN1-IMPLEMENTATION-2026-07-30.md
+/docs/agent-eval-trace-plan.md
+/docs/archive/
+/docs/design/
+/docs/qrels/BUILD-*.md
+/docs/qrels/RUN-*.md

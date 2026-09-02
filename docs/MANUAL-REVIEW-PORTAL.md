@@ -11,8 +11,8 @@
 - `data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/qrels.sol-review-arbitrated.jsonl`
 - `data/eval/techdocs/queries.text.jsonl`
 
-不要使用 `data/eval/techdocs/review/disputed-worksheet.md` 或其 JSONL；它们
-是旧的 157 行预览，不能代表当前恢复后的 143 条争议。
+不要使用 `data/eval/techdocs/review/` 下的旧预览（Markdown 或 JSONL）。这些
+文件是本地生成且不纳入版本控制的历史工作包，不能代表当前恢复后的争议。
 
 在仓库根目录、并确保 Elasticsearch 可用后，运行：
 

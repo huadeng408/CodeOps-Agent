@@ -1,6 +1,6 @@
 """E2 gate: the Sol review artifact must carry provider-reported identity.
 
-Design map §20.6.3 task E2.  §20.4 recorded the concrete dishonesty this gate
+The E2 provider-identity gate addresses the concrete dishonesty this check
 exists to prevent: ``reviewer_revision`` was written from
 ``args.revision or read_env("OPENAI_MODEL_REVISION") or "unknown"`` — a value we
 chose ourselves on the CLI.  An input echoed back into an artifact is not

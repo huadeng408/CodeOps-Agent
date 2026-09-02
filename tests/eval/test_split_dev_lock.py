@@ -1,7 +1,7 @@
-"""E3 — permanent dev lock, BLOCKED holdout, and the split manifest.
+"""Permanent dev lock, BLOCKED holdout, and the split manifest.
 
-Per DESIGN-MAP-2026-08-07 §20.6.3 (task E3) all 180 techdocs queries are
-provably *seen*: each appears in the denominator of three retrieval bake-off
+The versioned split policy records that all 180 techdocs queries are provably
+*seen*: each appears in the denominator of three retrieval bake-off
 reports and both Sol review passes.  Exposure is irreversible, so the policy
 locks all 180 into ``dev`` PERMANENTLY and declares ``holdout`` BLOCKED at
 size 0.

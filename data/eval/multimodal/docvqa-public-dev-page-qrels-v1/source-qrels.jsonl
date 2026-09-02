@@ -1,0 +1,120 @@
+{"query_id": "docvqa:1016", "query": "What is the team leader's name?", "document_id": "docvqa:493", "page_id": "docvqa:493:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1027", "query": "What is indicated as second or third line treatment of type 2 diabetes mellitus?", "document_id": "docvqa:496", "page_id": "docvqa:496:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:10294", "query": "What is the company's name on the letter head?", "document_id": "docvqa:3369", "page_id": "docvqa:3369:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:10297", "query": "What is written in the top right of the document ?", "document_id": "docvqa:3373", "page_id": "docvqa:3373:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:10307", "query": "Which Company's Fax transmission Cover Sheet is this ?", "document_id": "docvqa:3380", "page_id": "docvqa:3380:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1050", "query": "When did the term of this agreement commence?", "document_id": "docvqa:498", "page_id": "docvqa:498:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:11345", "query": "What is the telephone number mentioned at the beginning?", "document_id": "docvqa:3776", "page_id": "docvqa:3776:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1172", "query": "what is the carcinoma(transitional cell )  of group 1 ?", "document_id": "docvqa:534", "page_id": "docvqa:534:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1187", "query": "who is the lead responsibility for evaluating data from study OCT020", "document_id": "docvqa:537", "page_id": "docvqa:537:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1284", "query": "What is the component that needs to included?", "document_id": "docvqa:559", "page_id": "docvqa:559:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1288", "query": "what is the trend of patient growth?", "document_id": "docvqa:564", "page_id": "docvqa:564:18", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1293", "query": "What is the title of the document ?", "document_id": "docvqa:566", "page_id": "docvqa:566:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1306", "query": "What is the latency period associated with cancer?", "document_id": "docvqa:607", "page_id": "docvqa:607:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1330", "query": "What is the name of the person who has signed the letter?", "document_id": "docvqa:347", "page_id": "docvqa:347:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:14981", "query": "What is the name of the meeting?", "document_id": "docvqa:5028", "page_id": "docvqa:5028:9", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1637", "query": "What is the fullform of ils?", "document_id": "docvqa:460", "page_id": "docvqa:460:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16384", "query": "What is the name of the person in the CC field ?", "document_id": "docvqa:5160", "page_id": "docvqa:5160:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16390", "query": "What is the Log-in No. ?", "document_id": "docvqa:5167", "page_id": "docvqa:5167:9", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16478", "query": "What is the % Promoted Volume in EDLP stores?", "document_id": "docvqa:5198", "page_id": "docvqa:5198:38", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16512", "query": "What is the fullform of AAN?", "document_id": "docvqa:5226", "page_id": "docvqa:5226:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16584", "query": "What is the title of the document ?", "document_id": "docvqa:5248", "page_id": "docvqa:5248:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16624", "query": "From which university does James V. Fiorca come ?", "document_id": "docvqa:5260", "page_id": "docvqa:5260:15", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16653", "query": "What is the purchase order number?", "document_id": "docvqa:5264", "page_id": "docvqa:5264:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16673", "query": "What is osteoporosis corelated to?", "document_id": "docvqa:5273", "page_id": "docvqa:5273:27", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16690", "query": "What is the name of the company on top of the document ?", "document_id": "docvqa:5283", "page_id": "docvqa:5283:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16724", "query": "What is the abbreviation of Hormone Intelligent Notification Transmission?", "document_id": "docvqa:5290", "page_id": "docvqa:5290:40", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1675", "query": "what is the company's name on the letter head?", "document_id": "docvqa:506", "page_id": "docvqa:506:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16804", "query": "What is the title of the document ?", "document_id": "docvqa:5317", "page_id": "docvqa:5317:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16810", "query": "What is the name of the company on the letter head ?", "document_id": "docvqa:5319", "page_id": "docvqa:5319:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16897", "query": "What is the budget offered for 3 Posters( including production)?", "document_id": "docvqa:5345", "page_id": "docvqa:5345:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16913", "query": "What Budget Estimate is given in this document?", "document_id": "docvqa:5350", "page_id": "docvqa:5350:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16925", "query": "Who is the sender of the Fax?", "document_id": "docvqa:5352", "page_id": "docvqa:5352:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16939", "query": "What is the Budget Estimate for CME Reviewer Provider Fee?", "document_id": "docvqa:5355", "page_id": "docvqa:5355:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16955", "query": "What is the Fax no of Karen Mittleman?", "document_id": "docvqa:5356", "page_id": "docvqa:5356:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:16960", "query": "Which company's fax message is this?", "document_id": "docvqa:5359", "page_id": "docvqa:5359:12", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:17155", "query": "What is the Budget estimate for recruit editorial board/monthly newsletter development?", "document_id": "docvqa:5404", "page_id": "docvqa:5404:42", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:17160", "query": "What is the client name mentioned in this document?", "document_id": "docvqa:5405", "page_id": "docvqa:5405:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1799", "query": "What is the full form of FERS?", "document_id": "docvqa:756", "page_id": "docvqa:756:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1804", "query": "What is the full form of EPA?", "document_id": "docvqa:766", "page_id": "docvqa:766:7", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18532", "query": "What is the title of the document ?", "document_id": "docvqa:5671", "page_id": "docvqa:5671:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18592", "query": "What is the title of the sheet?", "document_id": "docvqa:5683", "page_id": "docvqa:5683:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18637", "query": "What is the name of the person repsonsible for implementing ?", "document_id": "docvqa:5690", "page_id": "docvqa:5690:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18644", "query": "What kind of voucher is given here?", "document_id": "docvqa:5699", "page_id": "docvqa:5699:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18684", "query": "Which department is mentioned in this document?", "document_id": "docvqa:5716", "page_id": "docvqa:5716:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18709", "query": "What is the RJR Account number ?", "document_id": "docvqa:5722", "page_id": "docvqa:5722:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18786", "query": "What is the title of the document ?", "document_id": "docvqa:5740", "page_id": "docvqa:5740:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:18883", "query": "What is the name of the company on the letter head?", "document_id": "docvqa:5761", "page_id": "docvqa:5761:7", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1895", "query": "Whose name is mentioned first under EPA Attendees?", "document_id": "docvqa:835", "page_id": "docvqa:835:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1897", "query": "What is the title?", "document_id": "docvqa:839", "page_id": "docvqa:839:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:19034", "query": "What is the name of the originator ?", "document_id": "docvqa:5780", "page_id": "docvqa:5780:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1904", "query": "What is the last for profit sponsor listed here?", "document_id": "docvqa:864", "page_id": "docvqa:864:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1906", "query": "What is step 6 in the flow chart?", "document_id": "docvqa:865", "page_id": "docvqa:865:13", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1912", "query": "On which page is Appendix D?", "document_id": "docvqa:875", "page_id": "docvqa:875:8", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:19204", "query": "what is the date mentioned in the given page ?", "document_id": "docvqa:688", "page_id": "docvqa:688:11", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1966", "query": "What is the Doc #?", "document_id": "docvqa:902", "page_id": "docvqa:902:17", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1989", "query": "In which page number is \"Introduction\"?", "document_id": "docvqa:1077", "page_id": "docvqa:1077:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:1992", "query": "Whose picture is given?", "document_id": "docvqa:1029", "page_id": "docvqa:1029:14", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:20073", "query": "What is the Title of the document?", "document_id": "docvqa:6054", "page_id": "docvqa:6054:10", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:206", "query": "What is SCGP?", "document_id": "docvqa:210", "page_id": "docvqa:210:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:209", "query": "What is written in red ink at the top?", "document_id": "docvqa:222", "page_id": "docvqa:222:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:21320", "query": "what is the name of the university ?", "document_id": "docvqa:6350", "page_id": "docvqa:6350:35", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2178", "query": "What is the subject?", "document_id": "docvqa:1599", "page_id": "docvqa:1599:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2183", "query": "Who is this letter sent to ?", "document_id": "docvqa:1612", "page_id": "docvqa:1612:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:221", "query": "Experiences of the which branch of the clan will you be most interested in?", "document_id": "docvqa:212", "page_id": "docvqa:212:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2219", "query": "Which company is Martin Miller associated with?", "document_id": "docvqa:1466", "page_id": "docvqa:1466:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2224", "query": "Who is the secretary of chamber of commerce?", "document_id": "docvqa:1519", "page_id": "docvqa:1519:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2230", "query": "What is the PO box number of Mr and Mrs. Edward Lehman?", "document_id": "docvqa:1602", "page_id": "docvqa:1602:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2300", "query": "What is the P.O.Box Number?", "document_id": "docvqa:1017", "page_id": "docvqa:1017:14", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2312", "query": "What is the date on which the letter has been filed?", "document_id": "docvqa:1021", "page_id": "docvqa:1021:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:23166", "query": "which committee is mentioned in the document?", "document_id": "docvqa:6700", "page_id": "docvqa:6700:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2325", "query": "Who is the sender ?", "document_id": "docvqa:1022", "page_id": "docvqa:1022:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:2328", "query": "What is the date of sending on the letter?", "document_id": "docvqa:1024", "page_id": "docvqa:1024:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:238", "query": "Which work area is this related?", "document_id": "docvqa:231", "page_id": "docvqa:231:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:246", "query": "Who is the third person in CC", "document_id": "docvqa:232", "page_id": "docvqa:232:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:249", "query": "Who is this question addressed to?", "document_id": "docvqa:233", "page_id": "docvqa:233:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25428", "query": "Who is the Professor of History of Religions?", "document_id": "docvqa:7235", "page_id": "docvqa:7235:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25442", "query": "When was this meeting happened?", "document_id": "docvqa:7236", "page_id": "docvqa:7236:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25492", "query": "Who sent this form?", "document_id": "docvqa:7241", "page_id": "docvqa:7241:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25644", "query": "where did this program happen?", "document_id": "docvqa:7307", "page_id": "docvqa:7307:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25671", "query": "Who is the staff representative as per the agenda?", "document_id": "docvqa:7312", "page_id": "docvqa:7312:14", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25688", "query": "What is the page no mentioned in this document?", "document_id": "docvqa:7316", "page_id": "docvqa:7316:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25699", "query": "When was the Nutrition Committee held?", "document_id": "docvqa:7318", "page_id": "docvqa:7318:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:257", "query": "How much menthol does KOOL \"C\" have?", "document_id": "docvqa:236", "page_id": "docvqa:236:8", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:25742", "query": "What is the page no mentioned in this newspaper?", "document_id": "docvqa:7337", "page_id": "docvqa:7337:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:260", "query": "Where is this Philip Morris office located at?", "document_id": "docvqa:238", "page_id": "docvqa:238:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:262", "query": "Whose contact is given at the end?", "document_id": "docvqa:243", "page_id": "docvqa:243:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:26336", "query": "To Whom is this letter addressed to?", "document_id": "docvqa:7648", "page_id": "docvqa:7648:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:268", "query": "Who signed this?", "document_id": "docvqa:246", "page_id": "docvqa:246:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:26953", "query": "What is written in top of the document ?", "document_id": "docvqa:7543", "page_id": "docvqa:7543:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:26982", "query": "What is the Title of the document ?", "document_id": "docvqa:7555", "page_id": "docvqa:7555:2", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:272", "query": "To whom is the letter is addressed?", "document_id": "docvqa:251", "page_id": "docvqa:251:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:27317", "query": "What is the year specified in the logo?", "document_id": "docvqa:7963", "page_id": "docvqa:7963:87", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:277", "query": "What is the average age of camel smoker?", "document_id": "docvqa:253", "page_id": "docvqa:253:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:280", "query": "To whom the letter is addressed?", "document_id": "docvqa:254", "page_id": "docvqa:254:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:286", "query": "What is the heading?", "document_id": "docvqa:257", "page_id": "docvqa:257:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:291", "query": "When was the meeting held?", "document_id": "docvqa:250", "page_id": "docvqa:250:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:301", "query": "For when is startup of the wiegand evaporator system at park 500 is scheduled?", "document_id": "docvqa:265", "page_id": "docvqa:265:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:302", "query": "what is the slope of set #1?", "document_id": "docvqa:267", "page_id": "docvqa:267:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:3026", "query": "What is the kind of water ?", "document_id": "docvqa:1200", "page_id": "docvqa:1200:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:3035", "query": "What is the name of the memo ?", "document_id": "docvqa:1202", "page_id": "docvqa:1202:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:3054", "query": "What is the name of the factory ?", "document_id": "docvqa:1207", "page_id": "docvqa:1207:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:3095", "query": "What is the analysis about?", "document_id": "docvqa:1214", "page_id": "docvqa:1214:9", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:310", "query": "At what rate is Methoprene currently added to B&W's tobaccos?", "document_id": "docvqa:269", "page_id": "docvqa:269:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:3108", "query": "What is the name of the factory ?", "document_id": "docvqa:1215", "page_id": "docvqa:1215:3", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:311", "query": "What is the heading of the document?", "document_id": "docvqa:270", "page_id": "docvqa:270:4", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:322", "query": "What is cut tobacco no in this page?", "document_id": "docvqa:276", "page_id": "docvqa:276:7", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:327", "query": "what is the title of this page ?", "document_id": "docvqa:277", "page_id": "docvqa:277:6", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32850", "query": "How many adult deaths were in 1978 as per 2nd quarter report ?", "document_id": "docvqa:9249", "page_id": "docvqa:9249:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32866", "query": "Which year was the meeting held?", "document_id": "docvqa:9256", "page_id": "docvqa:9256:10", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32884", "query": "What is the order no. ?", "document_id": "docvqa:9516", "page_id": "docvqa:9516:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32895", "query": "Which hospital is mentioned in Appendix V ?", "document_id": "docvqa:9258", "page_id": "docvqa:9258:11", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32901", "query": "When is the memorandum dated?", "document_id": "docvqa:9431", "page_id": "docvqa:9431:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32967", "query": "What is the deadline date?", "document_id": "docvqa:9287", "page_id": "docvqa:9287:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32973", "query": "What is the negotiated budget for Rutgers Med. Sch. given in the document?", "document_id": "docvqa:9301", "page_id": "docvqa:9301:15", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:32982", "query": "Which department is mentioned in the document?", "document_id": "docvqa:9303", "page_id": "docvqa:9303:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:33011", "query": "How much is the Mean square value of the Children variation?", "document_id": "docvqa:9338", "page_id": "docvqa:9338:13", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:34265", "query": "what is the minimum value of sodium in mg/100kcal?", "document_id": "docvqa:9722", "page_id": "docvqa:9722:23", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:34275", "query": "What is the Title of the document?", "document_id": "docvqa:9727", "page_id": "docvqa:9727:5", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:350", "query": "what is the subject of this letter?", "document_id": "docvqa:285", "page_id": "docvqa:285:1", "source": "vidore/docvqa_test_subsampled"}
+{"query_id": "docvqa:35201", "query": "what is the docket number?", "document_id": "docvqa:10157", "page_id": "docvqa:10157:1", "source": "vidore/docvqa_test_subsampled"}

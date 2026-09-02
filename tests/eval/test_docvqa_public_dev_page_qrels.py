@@ -33,6 +33,17 @@ def test_public_dev_page_qrels_are_hash_bound_and_never_represented_as_gold() ->
     }
     assert manifest["qrels_count"] == 120 == len(rows)
     assert manifest["qrels_sha256"] == hashlib.sha256(qrels_path.read_bytes()).hexdigest()
+    source = manifest["source_receipt"]
+    source_root = DATASET_DIR / source["path"]
+    source_files = {
+        source["checksums_file"]: source["receipt_checksums_sha256"],
+        source["manifest_file"]: source["manifest_sha256"],
+        source["qrels_file"]: source["source_qrels_sha256"],
+    }
+    assert all(
+        hashlib.sha256((source_root / path).read_bytes()).hexdigest() == expected_sha256
+        for path, expected_sha256 in source_files.items()
+    )
     assert all(set(row) == {"query_id", "query", "document_id", "page_id", "source"} for row in rows)
     assert {row["source"] for row in rows} == {"vidore/docvqa_test_subsampled"}
     assert len({row["query_id"] for row in rows}) == 120

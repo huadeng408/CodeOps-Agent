@@ -71,6 +71,8 @@ class ClaudeMemClient:
             project, query
         ):
             return self._finish("", started, failure_category="invalid_input")
+        if _contains_sensitive_content(query):
+            return self._finish("", started, failure_category="privacy_rejected")
 
         try:
             async with asyncio.timeout(self._timeout_seconds):

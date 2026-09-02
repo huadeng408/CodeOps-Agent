@@ -381,7 +381,7 @@ class OpenAIClient(LLMClient):
     ) -> dict[str, Any]:
         """Extract provider-reported model identity from a response body.
 
-        Design map §20.6.3 task E2.  The *requested* model name is an input we
+        The *requested* model name is an input we
         chose; it can never testify to which model actually served the request.
         Only fields the provider wrote into its own response body count as
         evidence, so a silent provider yields blank strings here rather than a

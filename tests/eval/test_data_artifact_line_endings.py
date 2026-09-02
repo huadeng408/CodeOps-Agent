@@ -1,4 +1,4 @@
-"""Byte-pinned artifacts must not carry CRLF.
+"""Byte-pinned artifacts must use one stable line-ending representation.
 
 The defect this pins: with ``core.autocrlf=true`` (the Windows default) Git
 rewrites LF to CRLF on checkout.  For the artifacts under ``data/`` the bytes
@@ -12,13 +12,16 @@ portfolio's defect chain.
 
 ``.gitattributes`` marks these paths ``-text`` so Git stops converting them.
 These tests fail if that guard is removed, if a new pinned artifact is added
-outside its coverage, or if someone commits CRLF bytes directly.
+outside its coverage, or if someone commits mixed/stray line endings.  A
+uniform CRLF file remains valid when its recorded hash intentionally binds
+those bytes; the contamination policy has a separate LF-only contract.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -32,13 +35,34 @@ PINNED_SUFFIXES = (".json", ".jsonl", ".sha256", ".rc")
 
 
 def _pinned_files() -> list[Path]:
+    """Return tracked byte-pinned artifacts, excluding local ignored outputs.
+
+    The repository deliberately keeps generated evaluation trees beside the
+    stable evidence.  Walking the whole ``data`` directory made a local,
+    ignored run artifact fail the repository gate, so the gate follows the
+    index when Git is available and falls back to a source-tree scan for
+    exported archives.
+    """
     if not DATA_ROOT.is_dir():
         return []
-    return sorted(
-        p
-        for p in DATA_ROOT.rglob("*")
-        if p.is_file() and p.suffix in PINNED_SUFFIXES
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", "data"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        result = None
+    if result is not None and result.returncode == 0:
+        paths = [
+            REPO_ROOT / item
+            for item in result.stdout.decode("utf-8").split("\x00")
+            if item
+        ]
+    else:
+        paths = list(DATA_ROOT.rglob("*"))
+    return sorted(p for p in paths if p.is_file() and p.suffix in PINNED_SUFFIXES)
 
 
 def test_there_are_pinned_files_to_check() -> None:
@@ -51,18 +75,28 @@ def test_there_are_pinned_files_to_check() -> None:
 
 
 @pytest.mark.parametrize("path", _pinned_files(), ids=lambda p: p.name)
-def test_pinned_artifact_has_no_crlf(path: Path) -> None:
+def test_pinned_artifact_has_stable_line_endings(path: Path) -> None:
+    """Reject mixed/stray line endings while preserving pinned historical bytes.
+
+    ``.gitattributes`` marks these files ``-text`` because some historical
+    receipts are intentionally pinned as CRLF.  Uniform LF and uniform CRLF
+    are both valid; a mixed file is not reproducible and cannot be interpreted
+    as either representation.
+    """
     raw = path.read_bytes()
-    crlf = raw.count(b"\r\n")
-    assert crlf == 0, (
-        f"{path.relative_to(REPO_ROOT)} contains {crlf} CRLF sequences. "
-        "Its bytes are pinned, so a line-ending conversion silently breaks the "
-        "hash. Check that .gitattributes marks this path -text, then re-checkout."
+    without_crlf = raw.replace(b"\r\n", b"")
+    assert b"\r" not in without_crlf, (
+        f"{path.relative_to(REPO_ROOT)} contains a stray CR byte; use uniform LF "
+        "or the receipt's pinned CRLF representation."
     )
+    if b"\r\n" in raw:
+        assert b"\n" not in without_crlf, (
+            f"{path.relative_to(REPO_ROOT)} mixes CRLF and LF line endings"
+        )
 
 
 def test_gitattributes_marks_data_artifacts_as_non_text() -> None:
-    """The guard itself must exist; the CRLF assertions above rely on it."""
+    """The guard itself must exist; byte pins rely on it."""
     assert GITATTRIBUTES.is_file(), ".gitattributes is missing"
     body = GITATTRIBUTES.read_text(encoding="utf-8")
     for pattern in ("data/**/*.json", "data/**/*.jsonl", "data/**/*.sha256"):
@@ -73,7 +107,12 @@ def test_gitattributes_marks_data_artifacts_as_non_text() -> None:
 
 def test_every_sidecar_matches_its_target() -> None:
     """End-to-end: the pin the sidecar records is the pin on disk."""
-    sidecars = sorted(DATA_ROOT.rglob("*.sha256"))
+    # Ignore local run trees here as well as in ``_pinned_files``.  A generated
+    # sidecar is not part of the repository contract until it is deliberately
+    # staged and reviewed.
+    sidecars = sorted(
+        path for path in _pinned_files() if path.name.endswith(".sha256")
+    )
     assert sidecars, "no .sha256 sidecars found"
     for sidecar in sidecars:
         target = sidecar.with_suffix("")

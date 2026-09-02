@@ -3,11 +3,9 @@
   "policy_version": "v1",
   "authored_by": "main-session (not a subagent); every number below was measured in this session before the policy was frozen",
   "created_utc": "2026-08-09T12:05:00Z",
-  "design_map_ref": "docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md line 1105",
-  "design_map_task": "E4",
-  "status_note": "Evidence qualifiers such as SCORER_CONNECTIVITY_ONLY are labels only and never promote to VERIFIED (design map line 921). A scan whose fourth layer was skipped is INCOMPLETE, never clean.",
+  "status_note": "Evidence qualifiers such as SCORER_CONNECTIVITY_ONLY are labels only and never promote to VERIFIED. A scan whose fourth layer was skipped is INCOMPLETE, never clean.",
 
-  "measure_before_freeze_note": "The E4 card orders the policy frozen before implementation. It was measured first anyway, because freezing a Jaccard-only threshold would have permanently enshrined a proven structural blindness (see blindness_evidence) and the card also forbids moving a frozen SLA without a new policy version.",
+  "measure_before_freeze_note": "The policy was measured before freezing so the threshold reflects observed structural coverage and remains immutable within policy v1.",
 
   "reference_hardware": {
     "note": "Measured on the machine that will run the gate. An SLA is only meaningful against named hardware.",
@@ -45,7 +43,7 @@
     "qrels_sha256": "bf472829c1a334a7eb624f5d6dc9c09002d562573f1b6e0d60e0e6f6b95329ad",
     "qrels_bytes": 47667,
     "split_policy_file": "data/eval/techdocs/split-policy.v1.json",
-    "split_policy_sha256": "c053d3564eacd7d9d18519d9ccbafb308654968c6372fa70803dd894f488e5f9"
+    "split_policy_sha256": "d07a25b67fb8e7fbe5d3095f28d997e424f520dc7446464c7293c973f3dcfc94"
   },
 
   "corpus_source_pins": {

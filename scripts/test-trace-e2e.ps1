@@ -11,16 +11,12 @@ through the Phoenix REST API. This script is intentionally excluded from the
 default Go and Python test suites.
 
 .EXAMPLE
-$env:OPENAI_API_KEY = Get-Content C:\secure\deepseek-key.txt -Raw
+$env:OPENAI_API_KEY = '<injected by an approved secret manager>'
 powershell -NoProfile -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
-
-.EXAMPLE
-powershell -NoProfile -File scripts/test-trace-e2e.ps1 -ApiKeyFile C:\secure\api-key.md -Model deepseek-v4-pro
 #>
 
 [CmdletBinding()]
 param(
-    [string]$ApiKeyFile,
     [string]$Model = 'deepseek-v4-pro',
     [string]$OpenAIBaseUrl = 'https://api.deepseek.com',
     [string]$PhoenixUrl = 'http://127.0.0.1:6006',
@@ -33,6 +29,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$endpointHelper = Join-Path $PSScriptRoot 'lib\receipt-endpoints.ps1'
+. $endpointHelper
+$otlpTraceEndpoint = Resolve-OtlpHttpTraceEndpoint -PhoenixUrl $PhoenixUrl
 
 function Get-ScrubbedText {
     param(
@@ -59,50 +58,12 @@ function Get-BoundedText {
         $Text.Substring($Text.Length - $MaxCharacters)
 }
 
-function Get-DeepSeekApiKey {
-    param([string]$Path)
-
+function Get-OpenAIApiKey {
     $fromEnvironment = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY')
-    if (-not [string]::IsNullOrWhiteSpace($fromEnvironment)) {
-        return $fromEnvironment.Trim()
+    if ([string]::IsNullOrWhiteSpace($fromEnvironment)) {
+        throw 'OPENAI_API_KEY is required'
     }
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        throw 'OPENAI_API_KEY or -ApiKeyFile is required'
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "API key file does not exist: $Path"
-    }
-
-    $lines = @(Get-Content -LiteralPath $Path -Encoding utf8)
-    $labelIndexes = @(
-        for ($index = 0; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -match '(?i)deepseek') {
-                $index
-            }
-        }
-    )
-    if ($labelIndexes.Count -ne 1) {
-        throw "expected exactly one DeepSeek label in $Path; found $($labelIndexes.Count)"
-    }
-
-    $deepSeekLines = [System.Collections.Generic.List[string]]::new()
-    for ($index = $labelIndexes[0]; $index -lt $lines.Count; $index++) {
-        if ($index -gt $labelIndexes[0] -and [string]::IsNullOrWhiteSpace($lines[$index])) {
-            break
-        }
-        $deepSeekLines.Add($lines[$index])
-    }
-    $tokens = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in $deepSeekLines) {
-        foreach ($match in [regex]::Matches($line, 'sk-[A-Za-z0-9_-]+')) {
-            $tokens.Add($match.Value)
-        }
-    }
-    $uniqueTokens = @($tokens | Select-Object -Unique)
-    if ($uniqueTokens.Count -ne 1) {
-        throw "expected exactly one DeepSeek API key in $Path; found $($uniqueTokens.Count)"
-    }
-    return $uniqueTokens[0]
+    return $fromEnvironment.Trim()
 }
 
 function Assert-Command {
@@ -360,7 +321,7 @@ $summary = $null
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
-    $apiKey = Get-DeepSeekApiKey $ApiKeyFile
+    $apiKey = Get-OpenAIApiKey
     if ($ValidateApiKeyOnly) {
         Write-Output 'api_key=valid'
         return
@@ -469,9 +430,9 @@ try {
         THINKING_ENABLED = 'false'
         MODEL_FAST = 'disabled'
         OTEL_SERVICE_NAME = 'code-agent-orchestrator'
+        OTEL_EXPORTER_OTLP_ENDPOINT = $otlpTraceEndpoint
         PYTHONPATH = $repositoryRoot
     }
-    $startInfo.EnvironmentVariables.Remove('OTEL_EXPORTER_OTLP_ENDPOINT')
     foreach ($entry in $childEnvironment.GetEnumerator()) {
         $startInfo.EnvironmentVariables[$entry.Key] = [string]$entry.Value
     }

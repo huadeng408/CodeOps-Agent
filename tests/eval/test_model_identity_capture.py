@@ -1,6 +1,6 @@
 """E2 gate: the provider's *self-reported* model identity must be captured.
 
-Design map §20.6.3 task E2 ("验证 GPT-5.6 Sol 身份"):
+The E2 model-identity gate requires:
 
     记录非敏感 provider/base URL 摘要以及响应中的 model/provider/revision/
     request ID。若 provider 不提供不可变 revision，状态必须为

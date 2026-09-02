@@ -7,8 +7,11 @@ development set for page-retrieval experiments.
 
 `qrels.jsonl` intentionally preserves only the upstream query, document, and
 page identifiers needed to score page retrieval. It is normalized to UTF-8/LF
-for repository hygiene. `manifest.json` records both the normalized copy hash
-and the original ignored receipt hash.
+for repository hygiene. `source-run-manifest.json`, `source-checksums.json`,
+and `source-qrels.jsonl` are the minimal immutable source receipt promoted from
+the ignored run tree. Machine-local runtime metadata (platform, device,
+timestamps and physical index names) is intentionally excluded;
+`manifest.json` binds every retained file by SHA-256.
 
 ## Strict limits
 

@@ -1,6 +1,6 @@
 """E5 — the release report must refuse to score an ineligible golden set.
 
-Design map line 1108 asks E5 to score "only the locked golden set", report
+The E5 release contract scores "only the locked golden set", reports
 pure negatives separately, bind every hash, and emit per-query detail with a
 bootstrap CI.  Measured against the corpus as it actually exists, the honest
 deliverable is a scorer that **refuses**:

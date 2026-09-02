@@ -55,6 +55,24 @@ async def test_invalid_boundary_returns_empty_without_request(
 
 
 @pytest.mark.asyncio
+async def test_sensitive_query_fails_open_without_calling_worker() -> None:
+    transport = httpx.MockTransport(
+        lambda _: (_ for _ in ()).throw(AssertionError("must not request"))
+    )
+    client = ClaudeMemClient("http://127.0.0.1:37777", transport=transport)
+
+    assert (
+        await client.context(
+            "localcode",
+            query="OPENAI_API_KEY=fixture-placeholder",
+            memory_mode="enabled",
+        )
+        == ""
+    )
+    assert client.last_outcome.failure_category == "privacy_rejected"
+
+
+@pytest.mark.asyncio
 async def test_enabled_mode_searches_then_fetches_selected_project_ids() -> None:
     requests: list[httpx.Request] = []
 
@@ -146,8 +164,8 @@ def _client_returning_observation(title: str) -> ClaudeMemClient:
 @pytest.mark.parametrize(
     "unsafe_text",
     [
-        "OPENAI_API_KEY=sk-secret-value",
-        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        "OPENAI_API_KEY=fixture-placeholder",
+        "Authorization: Bearer fixture-bearer-token",
         r"C:\Users\private\notes.txt",
         "-----BEGIN PRIVATE KEY-----",
     ],

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codeops-agent.example/schemas/page-qrels-trust-root-v1.json",
+  "title": "Page Qrels trust root",
+  "description": "External public-key configuration for the human page-Qrels release gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "signers"],
+  "properties": {
+    "schema_version": {"const": "page-qrels-trust-root/v1"},
+    "signers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "query_link", "release"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/keyMap"},
+        "query_link": {"$ref": "#/$defs/keyMap"},
+        "release": {"$ref": "#/$defs/keyMap"}
+      }
+    }
+  },
+  "$defs": {
+    "keyMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9+/]{43}=$"
+      }
+    }
+  }
+}

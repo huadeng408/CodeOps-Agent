@@ -1,4 +1,4 @@
-"""O1: the unified, versioned trace acceptance contract (design map §20.6.4).
+"""O1: the unified, versioned trace acceptance contract.
 
 Before this module existed the repository carried *three* disagreeing trace
 contracts:
@@ -107,8 +107,8 @@ def test_contract_version_is_explicit_and_versioned() -> None:
     assert CONTRACT_VERSION.startswith("v")
 
 
-def test_schema_covers_every_span_kind_the_design_map_names() -> None:
-    """§20.6.4 item 1 enumerates the kinds the schema must cover."""
+def test_schema_covers_every_required_evaluation_span_kind() -> None:
+    """The evaluation contract enumerates every span kind it must cover."""
     names = {kind.name for kind in span_kinds()}
     # root, instance, agent/chat, tool, retrieve, embedding, rerank, scorer
     assert SPAN_EVAL_RUN in names
@@ -149,7 +149,7 @@ def test_every_span_kind_declares_a_producer() -> None:
         assert isinstance(kind, SpanKind)
 
 
-def test_join_attributes_match_design_map_section_9_2() -> None:
+def test_join_attributes_match_evaluation_contract() -> None:
     assert JOIN_ATTRIBUTES == (
         "eval.run_id",
         "eval.instance_id",
@@ -171,6 +171,45 @@ def test_full_capture_passes() -> None:
     assert report["verdict"] == VERDICT_PASS, report["problems"]
     assert report["problems"] == []
     assert report["contract_version"] == CONTRACT_VERSION
+
+
+def test_default_profile_rejects_error_spans() -> None:
+    """A complete capture with an error is not successful trace evidence."""
+    spans = _full_capture()
+    spans[2] = CapturedSpan(
+        name=spans[2].name,
+        trace_id=spans[2].trace_id,
+        span_id=spans[2].span_id,
+        parent_span_id=spans[2].parent_span_id,
+        status="ERROR",
+        attributes=dict(spans[2].attributes),
+        links=spans[2].links,
+    )
+
+    report = evaluate_trace_contract(spans, run_id="run-1")
+
+    assert report["verdict"] == VERDICT_FAIL
+    assert any("ERROR" in problem for problem in report["problems"])
+
+
+def test_default_profile_rejects_unfinished_spans() -> None:
+    """A capture is not complete while one of its recorded spans is open."""
+    spans = _full_capture()
+    spans[2] = CapturedSpan(
+        name=spans[2].name,
+        trace_id=spans[2].trace_id,
+        span_id=spans[2].span_id,
+        parent_span_id=spans[2].parent_span_id,
+        status=spans[2].status,
+        attributes=dict(spans[2].attributes),
+        links=spans[2].links,
+        ended=False,
+    )
+
+    report = evaluate_trace_contract(spans, run_id="run-1")
+
+    assert report["verdict"] == VERDICT_FAIL
+    assert any("not ended" in problem for problem in report["problems"])
 
 
 def test_empty_capture_never_passes() -> None:

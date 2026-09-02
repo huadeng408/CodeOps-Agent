@@ -222,6 +222,15 @@ def test_every_driver_tool_is_classified() -> None:
     assert not (M.SEARCH_TOOLS & M.EDIT_TOOLS)
 
 
+def test_search_knowledge_is_counted_as_search() -> None:
+    instance_id = SOURCE_IDS[1]
+    arm = M.load_arm(
+        _run("optimized", spans=[_tool_span(instance_id, "SearchKnowledge")])
+    )
+    assert M.summarise(arm)["search_calls"] == 1
+    assert M.summarise(arm)["auxiliary_tool_counts"] == {}
+
+
 def test_blocked_main_does_not_render_or_overwrite_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

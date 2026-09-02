@@ -12,7 +12,7 @@
 #      (Evaluating while only pilot data is imported yields pilot-level
 #      numbers only and is not the alias-switch gate.)
 #   2. The predictions JSONL for each run has been produced by the retrieval
-#      system per docs/qrels/RUN-RETRIEVAL-EVAL.md (one hit per line:
+#      system with one hit per line:
 #      {"query_id","document_id","section_path","score"}, top-10+ per query).
 # Runs whose predictions file is missing are reported as SKIPPED, never
 # fabricated. A reranker outage means hybrid_rerank stays skipped/disabled.
@@ -76,7 +76,7 @@ foreach ($run in $Runs) {
 
     if (-not (Test-Path $predictionsPath)) {
         Write-Host "[$run] SKIPPED: predictions not found: $predictionsPath"
-        Write-Host "       generate it via the retrieval system first (see docs/qrels/RUN-RETRIEVAL-EVAL.md)"
+        Write-Host "       generate it via the retrieval system first (one JSON hit per line, top-10+ per query)"
         $results += [pscustomobject]@{ Run = $run; Status = "SKIPPED"; Report = "-" }
         continue
     }

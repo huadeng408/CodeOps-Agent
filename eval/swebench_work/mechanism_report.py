@@ -22,7 +22,7 @@ from eval.swebench_work.report_gate import (  # noqa: E402
     load_verified_runs,
 )
 
-SEARCH_TOOLS = frozenset({"Grep", "Read", "Glob", "Bash", "LS"})
+SEARCH_TOOLS = frozenset({"Grep", "Read", "Glob", "Bash", "LS", "SearchKnowledge"})
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "str_replace_editor"})
 
 

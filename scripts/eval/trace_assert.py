@@ -47,9 +47,9 @@ def _spans_url(phoenix_url: str, project: str, start_time: str) -> str:
 def required_span_kinds() -> list[str]:
     """The span names that must be present in a joined run trace.
 
-    O1 (design map §20.6.4) made ``eval.harness.trace_contract`` the single
-    authority for span names, so these are derived from it rather than spelled
-    out a second time.  §20.6.4 records the problem this fixes: this module's
+    ``eval.harness.trace_contract`` is the single authority for span names, so
+    these are derived from it rather than spelled out a second time. This fixes
+    the earlier problem where this module's
     five kinds were "又是另一套契约" — a third, independent definition alongside
     ``tests/integration/trace_e2e.py`` and the contract itself.  Names now move
     in one place.

@@ -1,4 +1,4 @@
-"""E4 contamination-policy binding tests (design map line 1105).
+"""E4 contamination-policy binding tests.
 
 The E4 card orders the contamination policy committed and hash-pinned BEFORE
 implementation, and forbids moving a frozen SLA without a new policy version.
@@ -67,7 +67,7 @@ def test_sidecar_follows_the_split_policy_convention() -> None:
     """``<sha256>  <basename>\\n``, LF-only -- parity with split-policy.v1.json."""
     raw = SIDECAR_PATH.read_bytes()
     assert b"\r\n" not in raw, "sidecar must be LF-only, not CRLF"
-    expected = f"{_sha256_of(POLICY_PATH)}  {POLICY_PATH.name}\n".encode("utf-8")
+    expected = f"{_sha256_of(POLICY_PATH)}  {POLICY_PATH.name}\n".encode()
     assert raw == expected
 
 
@@ -80,8 +80,6 @@ def test_policy_identity_and_version() -> None:
     policy = _policy()
     assert policy["policy_id"] == "e4-contamination-policy"
     assert policy["policy_version"] in SUPPORTED_POLICY_VERSIONS
-    assert policy["design_map_task"] == "E4"
-    assert "line 1105" in policy["design_map_ref"]
 
 
 # --------------------------------------------------------------------------- #

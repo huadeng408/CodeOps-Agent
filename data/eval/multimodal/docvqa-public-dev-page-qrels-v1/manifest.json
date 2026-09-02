@@ -12,10 +12,13 @@
     "count": 120
   },
   "source_receipt": {
-    "path": "eval_results/multimodal/docvqa-clip-public-120-20260814-rerun01",
-    "receipt_checksums_sha256": "26a6347f456d07f5c81ec2fc96efe28e491a9efb0b59bca02175b20682eaad69",
-    "manifest_sha256": "7363c2942586b42e31c92ab471ca5080e0904119c407fbb9cdb860b32efc794b",
-    "source_qrels_sha256": "bfc059576d287ed7a01299e7b5465afc47747b079956ed64a20b806eb746ab73"
+    "path": ".",
+    "checksums_file": "source-checksums.json",
+    "receipt_checksums_sha256": "a5b1a8dbcb093e4d47ad10be63adf4014b97b2ddb795e65d33f37a462e490dab",
+    "manifest_file": "source-run-manifest.json",
+    "manifest_sha256": "736ff36145f9200f0fe2e990ea5491e459be86d6c572a74789c34a21a0ef170c",
+    "qrels_file": "source-qrels.jsonl",
+    "source_qrels_sha256": "6e00b1ccbf74935079c49f442377f771b622aa5a9af5487c47cbcf19fe4147ba"
   },
   "qrels_count": 120,
   "qrels_encoding": "UTF-8 LF",

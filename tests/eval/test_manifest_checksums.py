@@ -1,7 +1,7 @@
-"""H3 — manifest pins + artifact checksums (plan Task 6).
+"""Manifest pins and artifact checksums for the active Goal's audit contract.
 
-Per DESIGN-MAP-2026-08-07 §20.7 the run manifest must bind mandatory pins
-(git_sha, model, ...) and every run tree must end with a verifiable
+The run manifest must bind mandatory pins (git_sha, model, ...) and every run
+tree must end with a verifiable
 ``checksums.sha256``.  A run missing mandatory pins must fail closed —
 no manifest is emitted, so a non-reproducible run is never reported as
 reproducible.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -18,7 +19,7 @@ import pytest
 
 from eval.adapter import EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
-from eval.harness.runner import HarnessRun
+from eval.harness.runner import HarnessRun, _mark_workspace_preserved
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -53,7 +54,7 @@ def test_manifest_requires_git_sha_and_dirty_hash(tmp_path: Path) -> None:
     """HarnessRun with an empty config must fail closed at _build_manifest.
 
     A run without pinned git/model identity is not reproducible; writing a
-    manifest anyway would fake a pin that does not exist (design map §20.7).
+    manifest anyway would fake a pin that does not exist.
     """
     instances = [EvalInstance(instance_id="i1", task_description="")]
 
@@ -130,6 +131,260 @@ def test_checksums_generated_after_run(tmp_path: Path) -> None:
 
     # Re-running on an unchanged tree produces the identical checksum file
     assert artifacts.write_checksums().read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("run_id", ["../outside", "nested/run", r"nested\run"])
+def test_run_artifacts_rejects_run_ids_outside_one_run_directory(
+    tmp_path: Path, run_id: str
+) -> None:
+    """A run identifier cannot select a sibling or nested artifact root."""
+    with pytest.raises(ValueError, match="run_id"):
+        RunArtifacts(run_id, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("writer", "name"),
+    [
+        ("write", "../outside.json"),
+        ("append_line", "../outside.jsonl"),
+        ("record_scorer_output", "../../outside.txt"),
+        ("record_trace", "../../outside.json"),
+    ],
+)
+def test_artifact_writers_reject_paths_outside_the_run_root(
+    tmp_path: Path, writer: str, name: str
+) -> None:
+    """Caller-controlled artifact names cannot escape the run directory."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+
+    with pytest.raises(ValueError, match="artifact path"):
+        if writer == "write":
+            artifacts.write(name, {"ok": True})
+        elif writer == "append_line":
+            artifacts.append_line(name, {"ok": True})
+        elif writer == "record_scorer_output":
+            artifacts.record_scorer_output(name, "output")
+        else:
+            artifacts.record_trace(name, {"ok": True})
+
+    assert not (tmp_path / "outside.json").exists()
+    assert not (tmp_path / "outside.jsonl").exists()
+    assert not (tmp_path / "outside.txt").exists()
+
+
+def test_checksum_verification_rejects_paths_outside_the_run_root(tmp_path: Path) -> None:
+    """A malicious checksum manifest cannot make verification read a sibling file."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external", encoding="utf-8")
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    digest = hashlib.sha256(outside.read_bytes()).hexdigest()
+    (artifacts.root / "checksums.sha256").write_text(
+        f"{digest}  ../outside.txt\n", encoding="utf-8"
+    )
+
+    assert artifacts.verify_checksums() == ["unsafe:../outside.txt"]
+
+
+def test_checksum_manifest_symlink_cannot_read_or_overwrite_outside_run_root(
+    tmp_path: Path,
+) -> None:
+    """The reserved checksum filename cannot redirect finalization outside the run."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+    manifest = artifacts.root / "checksums.sha256"
+    try:
+        manifest.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - host policy, not product behavior
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    assert artifacts.verify_checksums() == ["unsafe:checksums.sha256"]
+    with pytest.raises(ValueError, match="checksum manifest"):
+        artifacts.write_checksums()
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_checksum_finalization_replaces_existing_link_without_mutating_target(
+    tmp_path: Path,
+) -> None:
+    """Atomic finalization must not truncate another path sharing the target file."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    artifacts.write("artifact.json", {"value": 1})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+    manifest = artifacts.root / "checksums.sha256"
+    try:
+        manifest.hardlink_to(outside)
+    except OSError as exc:  # pragma: no cover - host filesystem policy
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    artifacts.write_checksums()
+
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+    assert "artifact.json" in manifest.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("writer", "name"),
+    [
+        ("write", "artifact.json"),
+        ("record_scorer_output", "official.log"),
+        ("record_trace", "trace.json"),
+    ],
+)
+def test_overwrite_artifact_writers_replace_hardlinks_without_mutating_target(
+    tmp_path: Path, writer: str, name: str
+) -> None:
+    """Overwrite writers must replace a shared directory entry, not its inode."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+    subtree = {
+        "write": artifacts.root,
+        "record_scorer_output": artifacts.root / "scorer",
+        "record_trace": artifacts.root / "traces",
+    }[writer]
+    subtree.mkdir(parents=True, exist_ok=True)
+    artifact_path = subtree / name
+    try:
+        artifact_path.hardlink_to(outside)
+    except OSError as exc:  # pragma: no cover - host filesystem policy
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    if writer == "write":
+        artifacts.write(name, {"value": 1})
+    elif writer == "record_scorer_output":
+        artifacts.record_scorer_output(name, "official output")
+    else:
+        artifacts.record_trace(name, {"trace_id": "trace-1"})
+
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+    assert artifact_path.read_text(encoding="utf-8") != "sentinel"
+
+
+def test_append_line_rejects_preexisting_hardlink_without_mutating_target(
+    tmp_path: Path,
+) -> None:
+    """Appending must fail before writing when the file has another hard link."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+    artifact_path = artifacts.root / "events.jsonl"
+    try:
+        artifact_path.hardlink_to(outside)
+    except OSError as exc:  # pragma: no cover - host filesystem policy
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="hard link"):
+        artifacts.append_line("events.jsonl", {"status": "started"})
+
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_append_line_does_not_mutate_hardlink_created_after_link_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raced hard link must retain the bytes that existed before append."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    artifact_path = artifacts.root / "events.jsonl"
+    artifact_path.write_text("existing\n", encoding="utf-8")
+    raced_link = tmp_path / "raced.txt"
+    real_fstat = os.fstat
+
+    def fstat_then_link(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        if not raced_link.exists():
+            raced_link.hardlink_to(artifact_path)
+        return result
+
+    monkeypatch.setattr(os, "fstat", fstat_then_link)
+
+    artifacts.append_line("events.jsonl", {"status": "started"})
+
+    assert raced_link.read_text(encoding="utf-8") == "existing\n"
+    assert artifact_path.read_text(encoding="utf-8") == (
+        'existing\n{"status": "started"}\n'
+    )
+
+
+def test_checksum_verification_rejects_duplicate_manifest_paths(tmp_path: Path) -> None:
+    """A checksum manifest has one unambiguous digest per artifact path."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    target = artifacts.write("a.txt", {"value": 1})
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    (artifacts.root / "checksums.sha256").write_text(
+        f"{digest}  a.txt\n{digest}  a.txt\n", encoding="utf-8"
+    )
+
+    assert artifacts.verify_checksums() == ["duplicate:a.txt"]
+
+
+def test_checksum_verification_rejects_canonical_path_aliases(tmp_path: Path) -> None:
+    """Lexical aliases cannot pin the same artifact more than once."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    target = artifacts.write("a.txt", {"value": 1})
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    (artifacts.root / "checksums.sha256").write_text(
+        f"{digest}  a.txt\n{digest}  ./a.txt\n", encoding="utf-8"
+    )
+
+    assert artifacts.verify_checksums() == ["duplicate:a.txt"]
+
+
+def test_checksum_verification_rejects_non_sha256_digests(tmp_path: Path) -> None:
+    """Only canonical lowercase SHA-256 values are accepted as evidence pins."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    artifacts.write("a.txt", {"value": 1})
+    (artifacts.root / "checksums.sha256").write_text(
+        f"{'g' * 64}  a.txt\n", encoding="utf-8"
+    )
+
+    assert artifacts.verify_checksums() == [
+        "malformed-digest:a.txt",
+        "unpinned:a.txt",
+    ]
+
+
+def test_raw_scorer_output_redacts_credential_shapes(tmp_path: Path) -> None:
+    """Official raw output remains auditable without persisting bearer tokens."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    token = "sk-testonly0123456789"
+
+    path = artifacts.record_scorer_output(
+        "official.log", f"authorization=Bearer {token}\ndirect={token}\n"
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert token not in content
+    assert "Bearer <redacted>" in content
+    assert "direct=<redacted>" in content
+
+
+def test_all_structured_artifact_writers_redact_credential_shapes(
+    tmp_path: Path,
+) -> None:
+    """Failures, events, predictions, manifests, traces and summaries are safe."""
+    artifacts = RunArtifacts("run-safe", tmp_path)
+    token = "sk-structured0123456789"
+    bearer = f"Bearer {token}"
+
+    artifacts.record_failure("i-1", "ERROR_AGENT", bearer)
+    artifacts.record_event("i-1", "failed", bearer)
+    artifacts.record_prediction({"instance_id": "i-1", "nested": [token]})
+    artifacts.write_manifest({"endpoint_error": bearer})
+    artifacts.record_trace("trace.json", {"authorization": bearer})
+    artifacts.write_summary({"failure": {"message": token}})
+    _mark_workspace_preserved(tmp_path, "ERROR_AGENT", bearer)
+
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in artifacts.root.rglob("*")
+        if path.is_file()
+    )
+    marker = (tmp_path / "WORKSPACE_PRESERVED").read_text(encoding="utf-8")
+    assert token not in persisted + marker
+    assert "<redacted>" in persisted
+    assert "<redacted>" in marker
 
 
 def test_finalize_writes_all_expected_files(tmp_path: Path) -> None:

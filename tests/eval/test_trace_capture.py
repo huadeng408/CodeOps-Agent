@@ -1,4 +1,4 @@
-"""O2: in-process span capture from *real* OTel execution (design map §20.6.4).
+"""O2: in-process span capture from *real* OTel execution.
 
 Phoenix `:6006` is not running, and §20.6.4's artifact list still requires
 ``traces/trace-summary.json`` + ``traces/span-assertion.json``.  The capture
@@ -17,10 +17,18 @@ from __future__ import annotations
 
 import pytest
 
+from eval.harness.runner import _span
 from eval.harness.trace_capture import TraceCapture
 
 trace_api = pytest.importorskip("opentelemetry.trace")
-from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+trace_sdk = pytest.importorskip("opentelemetry.sdk.trace")
+trace_export = pytest.importorskip("opentelemetry.sdk.trace.export")
+trace_memory_export = pytest.importorskip(
+    "opentelemetry.sdk.trace.export.in_memory_span_exporter"
+)
+TracerProvider = trace_sdk.TracerProvider
+SimpleSpanProcessor = trace_export.SimpleSpanProcessor
+InMemorySpanExporter = trace_memory_export.InMemorySpanExporter
 
 
 @pytest.fixture()
@@ -81,6 +89,25 @@ def test_capture_records_error_status(provider: TracerProvider) -> None:
 
     spans = capture.spans()
     assert spans[0].status == "ERROR"
+
+
+def test_runner_error_span_omits_exception_body_from_exported_trace() -> None:
+    """An error status is useful; a provider credential in an event is not."""
+    isolated_provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    isolated_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = isolated_provider.get_tracer(__name__)
+    token = "sk-traceevent0123456789"
+
+    with pytest.raises(RuntimeError):
+        with _span(tracer, "eval.instance", {}):
+            raise RuntimeError(f"provider rejected {token}")
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].status.status_code.name == "ERROR"
+    assert token not in repr(spans[0].events)
+    assert not spans[0].events
 
 
 def test_capture_is_empty_before_any_span(provider: TracerProvider) -> None:

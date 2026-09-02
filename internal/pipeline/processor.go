@@ -118,7 +118,11 @@ func (p *Processor) processIndex(ctx context.Context, task tasks.FileProcessingT
 }
 
 func structuredArtifact(task tasks.FileProcessingTask, artifact orchestratorclient.ParsedArtifact) bool {
-	return strings.EqualFold(filepath.Ext(task.FileName), ".pdf") || len(artifact.Elements) > 0 || strings.EqualFold(artifact.ParserName, "mineru")
+	return strings.EqualFold(filepath.Ext(task.FileName), ".pdf") ||
+		len(artifact.Elements) > 0 ||
+		strings.TrimSpace(artifact.DocumentID) != "" ||
+		strings.TrimSpace(artifact.ParserName) != "" ||
+		strings.TrimSpace(artifact.ParserVersion) != ""
 }
 
 func documentVectorFromStructuredChunk(task tasks.FileProcessingTask, index int, chunk model.StructuredChunk, modelVersion string) *model.DocumentVector {

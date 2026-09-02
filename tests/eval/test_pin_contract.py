@@ -128,7 +128,9 @@ def test_every_benchmark_module_declares_its_capabilities() -> None:
     benchmarks_dir = REPO_ROOT / "eval" / "benchmarks"
     modules = sorted(
         p for p in benchmarks_dir.glob("*.py")
-        if p.stem not in {"__init__", "base"} and not p.stem.endswith("_predictions")
+        if not p.stem.startswith("_")
+        and p.stem != "base"
+        and not p.stem.endswith("_predictions")
     )
     assert modules, "no benchmark modules found — this test would be vacuous"
     undeclared: list[str] = []
@@ -190,7 +192,7 @@ def test_unknown_capability_is_surfaced() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the design map's degradable case
+# degradable provider-identity case
 # ---------------------------------------------------------------------------
 
 

@@ -2,7 +2,7 @@
 
 Why validation belongs in the harness
 -------------------------------------
-The baseline measured in the design map's §32.1 had no idea whether its own
+The recorded baseline had no idea whether its own
 output was worth submitting. It produced 0-byte patches and submitted them; it
 produced a correct fix as chat text and submitted nothing. A harness that cannot
 tell those apart cannot improve, because it has no signal to act on.
@@ -27,8 +27,8 @@ too: existing tests that newly fail are strong evidence of a regression, while
 existing tests that pass say little, since they passed before the patch as well.
 
 So this module reports evidence, with the direction of that evidence attached,
-and never converts weak evidence into a verdict. The design map's §32.3 records
-the reason: the published test-time-compute results show that validation built on
+and never converts weak evidence into a verdict. Published test-time-compute
+results show that validation built on
 low-coverage signals plus random tie-breaking made results *worse*, not better.
 A validator that overclaims is how that happens.
 """

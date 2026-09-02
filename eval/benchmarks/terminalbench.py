@@ -580,7 +580,7 @@ class TerminalBenchAdapter(AgentBenchmark):
 
         # 3. Make the agent importable: the harness imports the module by
         #    dotted path in its own process, so the repo root must be on
-        #    sys.path (mirrors eval/swebench_work/run_tb_single.py).
+        #    sys.path before the harness starts its worker process.
         repo_root = Path(__file__).resolve().parents[2]
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))

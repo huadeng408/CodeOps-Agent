@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterator, Sequence
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
 from eval.harness.budget import Budget, BudgetExceeded, BudgetUsage, check_budget
+from eval.harness.redaction import redact_credential_text
 from eval.harness.trace_capture import TraceCapture
 from eval.harness.trace_contract import (
     SPAN_EVAL_INSTANCE,
@@ -71,7 +72,7 @@ SCORER_RAW_OUTPUT_KEY = "scorer_raw_output"
 NETWORK_DISABLED_MARKER = "NETWORK_DISABLED"
 WORKSPACE_PRESERVED_MARKER = "WORKSPACE_PRESERVED"
 
-# O2 (design map §20.6.4): trace artifact filenames under ``traces/``.
+# O2 trace artifact filenames under ``traces/``.
 TRACE_SUMMARY_FILENAME = "trace-summary.json"
 SPAN_ASSERTION_FILENAME = "span-assertion.json"
 
@@ -145,7 +146,11 @@ def _span(tracer: Any, name: str, attributes: dict[str, Any]) -> Iterator[Any]:
         yield None
         return
     try:
-        manager = tracer.start_as_current_span(name, attributes=attributes)
+        manager = tracer.start_as_current_span(
+            name,
+            attributes=attributes,
+            record_exception=False,
+        )
     except Exception:  # noqa: BLE001 - telemetry is never load-bearing
         yield None
         return
@@ -521,7 +526,7 @@ class HarnessRun:
 def _finalize(harness: HarnessRun, summary: dict[str, Any]) -> str:
     """Write summary, environment, manifest, and checksums; return summary path.
 
-    Order matters (H3, design map §20.7): summary and environment first,
+    Order matters for H3 finalization: summary and environment first,
     then the manifest built from harness config + summary (fail-closed on
     missing pins via :func:`_build_manifest`), and finally
     ``checksums.sha256`` pinning every artifact written so far.  A
@@ -698,7 +703,7 @@ def _validate_o3_evidence(evidence: Any) -> dict[str, list[dict[str, Any]]]:
 def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, Any]:
     """Build run-manifest.json from harness config and run summary.
 
-    Fail-closed (design map §20.7) via :mod:`eval.harness.pin_contract`.  This
+    Fail closed via :mod:`eval.harness.pin_contract`.  This
     previously required only ``git_sha`` and ``model``, so ``prompt_hash``,
     ``qrels_hash`` and ``physical_index`` could all be empty strings and the
     manifest was written regardless — an unpinned run was indistinguishable
@@ -813,7 +818,7 @@ def _mark_workspace_preserved(workspace: Path, category: str, message: str) -> N
     the workspace was kept (failure category + error message)."""
     try:
         (workspace / WORKSPACE_PRESERVED_MARKER).write_text(
-            f"category: {category}\nerror: {message}\n",
+            f"category: {category}\nerror: {redact_credential_text(message)}\n",
             encoding="utf-8",
         )
     except OSError:

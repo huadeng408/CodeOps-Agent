@@ -2,14 +2,12 @@
   "policy_id": "e5-release-policy",
   "policy_version": "v1",
   "created_utc": "2026-08-10T04:20:00Z",
-  "design_map_task": "E5",
-  "design_map_ref": "docs/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md line 1108",
   "authored_by": "main-session; every number below measured from on-disk artifacts and a live Elasticsearch query in this session",
 
   "purpose": "Decide whether the technical-documentation retrieval corpus may emit a RELEASE report, and refuse to emit scores when it may not. A release report that scores an inadequate golden set is worse than no report: it launders exploratory numbers into evidence.",
 
   "status_vocabulary": ["DESIGNED", "IMPLEMENTED", "VERIFIED", "BLOCKED"],
-  "status_note": "Evidence qualifiers such as MODEL_IDENTITY_UNVERIFIED are labels only and never promote to VERIFIED (design map line 921).",
+  "status_note": "Evidence qualifiers such as MODEL_IDENTITY_UNVERIFIED are labels only and never promote to VERIFIED.",
 
   "provenance": {
     "note": "Measured 2026-08-10 from data/eval/techdocs/qrels.sol-review.jsonl (180 rows) and index knowledge_base_v2_bge_m3 (24877 chunks, live query).",
@@ -88,7 +86,7 @@
     "granularity_locked_reason": "section_path is unresolvable for 178 of 180 rows (see section_path_defect)",
     "eligible_rows_rule": "review_status == AI_REVIEWED only. DISPUTED rows are never scored, never averaged, and never counted in a denominator.",
     "pure_negative_handling": "Reported separately as false-positive rate and empty-rate. Pure negatives must NEVER enter the macro-average of a relevance metric: a query with no relevant document scores 0.0 by construction and would silently deflate the mean.",
-    "known_prior_defect": "data/eval/techdocs/reports/bm25-report.json scored all 180 rows including 157 DISPUTED, and let the 17 pure negatives score 0.0 inside the macro-average. Those reports are exploratory and are not release evidence.",
+    "known_prior_defect": "Historical artifact git:0661afcef559b53bcb3a164973d11c6cbe194dab:data/eval/techdocs/reports/bm25-report.json scored all 180 rows including 157 DISPUTED, and let the 17 pure negatives score 0.0 inside the macro-average. Those reports are exploratory and are not release evidence.",
     "required_bindings": [
       "git_sha",
       "dirty_hash",

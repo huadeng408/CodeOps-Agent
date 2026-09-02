@@ -1,4 +1,4 @@
-"""Layer-2 directional containment tests (design map E4, line 1105).
+"""Layer-2 directional containment tests for the E4 contamination contract.
 
 Regression for D1, the defect this layer exists to fix: the pre-v1 scanner
 could not detect a benchmark query copied verbatim into a longer corpus

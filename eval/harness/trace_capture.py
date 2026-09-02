@@ -1,4 +1,4 @@
-"""O2: in-process capture of real OTel spans (design map §20.6.4).
+"""O2: in-process capture of real OTel spans.
 
 Why in-process rather than a Phoenix query
 ------------------------------------------

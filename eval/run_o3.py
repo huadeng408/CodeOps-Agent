@@ -12,12 +12,10 @@ import argparse
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import urlparse
 
 from eval.benchmarks import trace_o3
@@ -179,7 +177,12 @@ def _git_head() -> str:
     import subprocess
 
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 

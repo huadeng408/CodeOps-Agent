@@ -1,6 +1,8 @@
-"""Phase 1 gate compliance — verbatim checks against DESIGN-MAP §20.6.1 / §20.7.
+"""Phase 1 gate compliance under the repository's active Goal.
 
-These tests encode the design map's literal gate wording, not a paraphrase:
+``docs/GOAL.md`` is the current acceptance authority.  H0/H3/H4/H5 retain
+their historical names here because the code contracts originated under those
+labels, but the old design map is not a runtime or clean-clone dependency.
 
 - H0: "每个 adapter 声明 official package、dataset revision、image digest、
   prediction schema 与 scorer parser，缺 pin 时启动前失败"
@@ -34,7 +36,6 @@ from eval.harness.runner import HarnessRun
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-
 def _pinned_config(**overrides: object) -> dict[str, object]:
     config: dict[str, object] = {
         "git_sha": "a1b2c3d",
@@ -60,7 +61,7 @@ class TestH0PinPreflight:
     def test_eval_run_calls_validate_pins_before_launch(self):
         """eval/run.py must call validate_pins() on the AgentBenchmark.
 
-        Design map H0: "缺 pin 时启动前失败".  Constructing an adapter that
+        H0 rule: "缺 pin 时启动前失败". Constructing an adapter that
         reports missing pins and running anyway produces artifacts that claim
         reproducibility they do not have.
         """
@@ -167,7 +168,7 @@ class TestH3ChecksumTreeCoverage:
         assert "\\" not in text, f"backslash in checksum manifest: {text!r}"
 
     def test_verify_checksums_detects_tampering(self, tmp_path: Path) -> None:
-        """Design map H3 says 生成并校验 — generation alone is not the gate."""
+        """H3 requires 生成并校验 — generation alone is not the gate."""
         artifacts = RunArtifacts("run-verify", tmp_path)
         artifacts.record_prediction({"instance_id": "i1", "answer": "x"})
         (artifacts.root / "scorer").mkdir()
@@ -226,7 +227,7 @@ class TestH4MaxProcessesReachable:
     def test_runner_records_process_lifecycle(self):
         """runner.py must call record_process_start/end around the adapter.
 
-        Design map H4 requires max_processes to be implemented, and explicitly
+        H4 requires max_processes to be implemented, and explicitly
         rejects marker files as a substitute for enforcement.  A budget field
         that nothing increments is dead code.
         """
@@ -291,16 +292,12 @@ class TestH4MaxProcessesReachable:
 
 
 class TestH5NotSilentlyClaimed:
-    def test_design_map_marks_h5_blocked(self):
-        """The design map must not record H5 as passed while no smoke ran."""
-        text = (
-            PROJECT_ROOT
-            / "docs"
-            / "DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md"
-        ).read_text(encoding="utf-8")
-        assert "H5" in text
-        h5_context = [line for line in text.splitlines() if "H5" in line]
-        joined = " ".join(h5_context)
-        assert "BLOCKED" in joined or "未执行" in joined or "推迟" in joined, (
-            f"H5 status not marked as unexecuted: {joined[:400]}"
-        )
+    def test_active_goal_keeps_unverified_release_blocked(self):
+        """Acceptance stays blocked until fresh real-runtime E2E receipts pass."""
+        goal_path = PROJECT_ROOT / "docs" / "GOAL.md"
+        assert goal_path.is_file(), "clean clone is missing the active acceptance Goal"
+
+        text = goal_path.read_text(encoding="utf-8")
+        assert "验收状态：`BLOCKED`" in text
+        assert "真实运行时 E2E" in text
+        assert "不能替代真实 E2E" in text

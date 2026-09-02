@@ -21,7 +21,6 @@ from tests.integration.trace_e2e import (
     select_run_trace,
 )
 
-
 RUN_ID = "run-123"
 TRACE_ID = "a" * 32
 ROOT_ID = "1" * 16
@@ -250,15 +249,13 @@ def test_sanitize_text_removes_exact_api_key():
     assert "<redacted>" in sanitized
 
 
-def test_runner_accepts_key_on_line_after_deepseek_label(tmp_path: Path):
+def test_runner_uses_environment_credential_without_file_fallback():
     powershell = shutil.which("powershell.exe")
     if not powershell:
         pytest.skip("Windows PowerShell is unavailable")
-    key_file = tmp_path / "api-key.md"
-    key_file.write_text("DeepSeek official:\nsk-test\n", encoding="utf-8")
     script = Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1"
     environment = os.environ.copy()
-    environment.pop("OPENAI_API_KEY", None)
+    environment["OPENAI_API_KEY"] = "sk-test"
 
     result = subprocess.run(
         [
@@ -268,8 +265,6 @@ def test_runner_accepts_key_on_line_after_deepseek_label(tmp_path: Path):
             "Bypass",
             "-File",
             str(script),
-            "-ApiKeyFile",
-            str(key_file),
             "-ValidateApiKeyOnly",
         ],
         capture_output=True,
@@ -282,6 +277,40 @@ def test_runner_accepts_key_on_line_after_deepseek_label(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "api_key=valid" in result.stdout
     assert "sk-test" not in result.stdout + result.stderr
+
+    source = script.read_text(encoding="utf-8")
+    assert "ApiKeyFile" not in source
+    assert "Get-Content -LiteralPath" not in source
+
+
+def test_trace_runner_routes_custom_phoenix_url_to_otlp_http_endpoint():
+    powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
+    root = Path(__file__).parents[1]
+    endpoint_helper = root / "scripts" / "lib" / "receipt-endpoints.ps1"
+    command = (
+        f". '{endpoint_helper}'; "
+        "Resolve-OtlpHttpTraceEndpoint -PhoenixUrl 'http://127.0.0.1:6111/'"
+    )
+
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", command],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "http://127.0.0.1:6111/v1/traces"
+
+    source = (root / "scripts" / "test-trace-e2e.ps1").read_text(encoding="utf-8")
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT = $otlpTraceEndpoint" in source
+    assert "EnvironmentVariables.Remove('OTEL_EXPORTER_OTLP_ENDPOINT')" not in source
 
 
 def test_compose_uses_official_phoenix_image():

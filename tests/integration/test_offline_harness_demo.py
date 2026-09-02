@@ -110,4 +110,6 @@ def test_offline_demo_emits_honest_checksum_verified_artifacts(tmp_path: Path) -
     )
     assert SECRET_SENTINEL not in artifact_text
     environment = json.loads((run_root / "environment.txt").read_text(encoding="utf-8"))
-    assert environment["environment"]["DEMO_API_KEY"] == "<redacted>"
+    assert {"platform", "python", "machine", "processor"} <= set(environment)
+    assert "environment" not in environment
+    assert "DEMO_API_KEY" not in artifact_text

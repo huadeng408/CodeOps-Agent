@@ -92,6 +92,7 @@ def transcribe_audio(
     source: Path | str,
     *,
     model_id: str,
+    model_revision: str | None = None,
     device: str = "cpu",
     compute_type: str = "int8",
     cache_dir: Path | str | None = None,
@@ -112,6 +113,10 @@ def transcribe_audio(
     kwargs: dict[str, Any] = {"device": device, "compute_type": compute_type}
     if cache_dir is not None:
         kwargs["download_root"] = str(cache_dir)
+    if model_revision is not None:
+        if not model_revision.strip():
+            raise ValueError("audio transcription model revision must not be empty")
+        kwargs["revision"] = model_revision
     if model_factory is None:
         from faster_whisper import WhisperModel
 

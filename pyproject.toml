@@ -31,6 +31,11 @@ rag = [
     "typing-extensions>=4.12,<5",
     "uvicorn>=0.29,<1",
 ]
+audio = [
+    # The real LibriSpeech runner records this parser version in its receipt.
+    # Keep ASR separate so document-only RAG installs stay lightweight.
+    "faster-whisper==1.2.1",
+]
 trace-e2e = [
     "opentelemetry-api>=1.30,<2",
     "opentelemetry-sdk>=1.30,<2",
@@ -41,6 +46,19 @@ eval = [
     # previously undeclared.  Capped below 2.0: verified only against 1.26.x, and
     # numpy 2.0 removed APIs these modules have not been re-checked against.
     "numpy>=1.26,<2",
+]
+test = [
+    # Direct imports used by the repository test suite. Keep these explicit so
+    # a clean checkout can reproduce validation without relying on transitive
+    # packages or a developer's global Python environment.
+    "cryptography>=43,<47",
+    "jsonschema>=4.23,<5",
+    "pymysql>=1.1,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<2",
+    "pyyaml>=6,<7",
+    "requests>=2.32,<3",
+    "terminal-bench==0.2.18; python_version >= '3.12'",
 ]
 visual-eval = [
     # Pinned model revisions are recorded by the runner; these are the runtime

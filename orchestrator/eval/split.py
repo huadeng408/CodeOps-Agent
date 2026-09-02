@@ -1,8 +1,8 @@
-"""E3 — dev/holdout split policy binding, dev lock, and the evaluation firewall.
+"""Dev/holdout split policy binding, dev lock, and the evaluation firewall.
 
-Per DESIGN-MAP-2026-08-07 §20.6.3 (task E3) the split of the techdocs
-evaluation set is *not* a code default and *not* whatever happens to be on
-disk.  It is decided by a committed, hashed policy artifact
+The active Goal requires reproducible, leak-free evaluation. The techdocs
+split is therefore *not* a code default and *not* whatever happens to be on
+disk. It is decided by a committed, hashed policy artifact
 (``data/eval/techdocs/split-policy.v1.json``) and this module is the only
 sanctioned reader of it.
 
@@ -38,28 +38,28 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
 __all__ = [
+    "EMPTY_SET_SHA256",
     "POLICY_PATH",
     "SUPPORTED_POLICY_VERSIONS",
-    "EMPTY_SET_SHA256",
-    "load_policy",
-    "policy_sha256",
-    "dev_qids",
-    "holdout_qids",
-    "qid_set_hash",
-    "require_holdout_measurable",
-    "set_holdout_status",
-    "require_no_dev_holdout_overlap",
-    "require_dev_not_shrunk",
-    "generate_manifest",
-    "validate_manifest",
-    "normalize_repo_path",
-    "firewall_decision",
     "check_path",
+    "dev_qids",
+    "firewall_decision",
+    "generate_manifest",
+    "holdout_qids",
+    "load_policy",
+    "normalize_repo_path",
+    "policy_sha256",
+    "qid_set_hash",
+    "require_dev_not_shrunk",
+    "require_holdout_measurable",
+    "require_no_dev_holdout_overlap",
+    "set_holdout_status",
+    "validate_manifest",
 ]
 
 
@@ -339,7 +339,7 @@ def generate_manifest(*, path: Path | str | None = None, policy: dict | None = N
         "policy_version": policy["policy_version"],
         "policy_sha256": policy_sha256(),
         "seed": policy["seed"],
-        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dev_qids_sha256": qid_set_hash(dev),
         "dev_size": len(dev),
         "holdout_qids_sha256": qid_set_hash(holdout),
@@ -374,6 +374,21 @@ def validate_manifest(manifest: dict, *, policy: dict | None = None) -> None:
         raise ValueError(
             f"MANIFEST_STALE: manifest pins policy_sha256={manifest['policy_sha256']} "
             f"but the policy on disk hashes to {current}."
+        )
+
+    identity_expected = {
+        "format_version": policy["manifest"]["format_version"],
+        "policy_id": policy["policy_id"],
+        "policy_version": policy["policy_version"],
+        "seed": policy["seed"],
+    }
+    identity_mismatched = [
+        key for key, value in identity_expected.items() if manifest.get(key) != value
+    ]
+    if identity_mismatched:
+        raise ValueError(
+            "MANIFEST_POLICY_IDENTITY_MISMATCH: split manifest identity does not "
+            f"match the policy for {', '.join(identity_mismatched)}"
         )
 
     expected_dev = dev_qids()

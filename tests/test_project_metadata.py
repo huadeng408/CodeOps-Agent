@@ -33,3 +33,13 @@ def test_visual_eval_extra_declares_late_interaction_runtime_imports() -> None:
 
     for prefix in ("colpali-engine", "peft", "pillow", "datasets"):
         assert any(item.lower().startswith(prefix) for item in dependencies), prefix
+
+
+def test_audio_extra_pins_the_verified_faster_whisper_runtime() -> None:
+    project = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert project["project"]["optional-dependencies"]["audio"] == [
+        "faster-whisper==1.2.1"
+    ]
