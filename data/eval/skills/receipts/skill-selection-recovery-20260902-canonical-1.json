@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REAL_PROCESS_SQLITE_SKILL_SELECTION_RECOVERY",
+  "limitations": [
+    "The provider is a deterministic loopback fixture; this receipt verifies process recovery, not external-model Skill selection accuracy.",
+    "The recovery corpus has 20 cases and 2 Skills; the separate 1,000-case remote-provider receipt remains the accuracy evidence.",
+    "VERIFIED applies only to the Skill evaluation recovery lane, not the full project Goal."
+  ],
+  "run_id": "skill-selection-process-recovery",
+  "trace_id": "55a5d328c49a4d69a2195981479302dc",
+  "source_pin": {
+    "git_sha": "8237de50e24a198593b97fa67bd41a6ef38c21e0",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "dataset_pin": {
+    "dataset_id": "skill-selection-test-v1",
+    "sha256": "299340cbdbcd26f9efc9393e3845ba098fb696eaa05b0a41075cbc2f9d71726d",
+    "license": "CC0-1.0",
+    "provenance": "repository-authored test fixture",
+    "case_count": 20
+  },
+  "catalog_pin": {
+    "sha256": "e3438a26432482eaefae495be5252779bea3b6832fe236be1395c92556740e8b",
+    "skill_count": 2
+  },
+  "prompt_pins": {
+    "system_sha256": "554ac7f5a6407349753057b214a6b0e81e9f928fce8f948bd67e36e8f8ffaa1f",
+    "tool_schema_sha256": "4bc1da9d3700741a702eec566521e61ce8db43a9e8186183744a5219667887c0"
+  },
+  "model_pin": "deterministic-loopback-provider-v1",
+  "provider_endpoint": {
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": "59059",
+    "path": "/v1"
+  },
+  "budget": {
+    "max_output_tokens_per_case": 32,
+    "timeout_seconds_per_case": 10.0,
+    "max_concurrency": 2,
+    "calls": 20,
+    "max_provider_attempts_per_case": 1,
+    "temperature": 0.0,
+    "minimum_required_accuracy": 1.0
+  },
+  "process_fault": {
+    "requested": 1,
+    "applied": 1,
+    "method": "subprocess terminate after observing durable SQLite rows",
+    "minimum_rows_before_termination": 4
+  },
+  "recovery": {
+    "denominator": 20,
+    "completed": 20,
+    "checkpointed_before_resume": 4,
+    "checkpointed_reused": 4,
+    "provider_calls_after_resume": 16,
+    "repeated_checkpointed_calls": 0,
+    "ordered_result_count": 20,
+    "success_rate": 1.0
+  },
+  "checkpoint": {
+    "contract_sha256": "98bc6a73fe5765d5d2dc89cc7ce021a79a0ec03b31d5ec94c20f7389a591d4a6",
+    "journal_mode_after_finalization": "delete",
+    "contains_prompt": false,
+    "contains_expected_skill": false,
+    "contains_test_credential": false
+  },
+  "tests": {
+    "command": "python -m pytest -q tests/eval/test_skill_selection_eval.py::test_cli_resumes_after_real_process_termination_without_repeating_commits --basetemp .tmp/skill-selection-recovery-20260902-canonical-1",
+    "exit_code": 0,
+    "result": "1 passed in 3.07s",
+    "test_file_sha256": "1869f9a977dd16128a9a0941ddba465def63ed7c3203ff199e0e3dd2a4546e25"
+  },
+  "checksum_verification": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": ".tmp/skill-selection-recovery-20260902-canonical-1/test_cli_resumes_after_real_pr0/eval_results/skill-selection-process-recovery",
+    "checksum_manifest_sha256": "1713caa93f7a0fe690614587bee011ca06e43396a53285e0ee161c2e50a6de95",
+    "source_receipt_sha256": "ab79e41b260079d1b56bf04272ccaf59082b01e5860eab1e444d1dac0abcbca2",
+    "run_manifest_sha256": "75a5570e024288c3430013d06125a82b59362116b27649d390d2b49c49e9a4b9",
+    "checkpoint_sqlite_sha256": "8eb58fa35f45063ef7335ce72bd7507d5afcddeee560e036aca6a282d6f6e531",
+    "selection_results_sha256": "dfa7ed639d14d5dc94d71207c9757b64b77653fcdb97bdfb257d8884ecae6a5b"
+  }
+}

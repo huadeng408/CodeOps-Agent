@@ -387,6 +387,12 @@ CC0-1.0 的仓库原创 catalog-routing 数据，不代表外部真实任务的�
 `system_fingerprint`，因此精简 receipt 保持 `BLOCKED`，该结果证明锁定数据集上的
 选型准确率，不构成不可变模型 revision 已验证的正式发布结论。
 
+断点恢复批次 `skill-selection-recovery-20260902-canonical-1` 在 clean commit
+`8237de50` 上使用本地确定性 provider：独立评测进程在 4/20 条 SQLite 结果提交后
+被真实终止，`--resume` 复用 4 条且只调用剩余 16 条，最终按固定顺序完成 20/20，
+已提交 case 重复调用数为 0，最终主库和 checksums 校验通过。该 receipt 的
+`VERIFIED` 仅适用于恢复机制，不替代上面的 1,000 案例远端选型准确率证据。
+
 ### Phoenix 跨语言 Trace 显式集成测试
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。
