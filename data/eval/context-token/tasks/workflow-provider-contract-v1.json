@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "task_id": "workflow-provider-contract-v1",
+  "question": "Inspect the workflow provider implementation. Return exactly one JSON object with the keys executor_class, missing_provider_error_prefix, and completion_factory. For the error prefix, omit the interpolated provider value and retain the trailing colon. For the factory, use its qualified name.",
+  "corpus_paths": [
+    "orchestrator/context/memory.py",
+    "orchestrator/llm/client.py",
+    "eval/harness/artifacts.py",
+    "orchestrator/workflows/engine.py",
+    "orchestrator/workflows/store.py",
+    "orchestrator/workflows/models.py",
+    "orchestrator/workflows/providers.py"
+  ],
+  "p3_paths": [
+    "orchestrator/workflows/providers.py"
+  ],
+  "expected": {
+    "executor_class": "ProviderWorkerExecutor",
+    "missing_provider_error_prefix": "provider is unavailable:",
+    "completion_factory": [
+      "WorkerResult.completed",
+      "orchestrator.workflows.models.WorkerResult.completed"
+    ]
+  }
+}

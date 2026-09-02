@@ -312,6 +312,31 @@ runner 会启动真实 Python 子进程，复用 `WorkflowEngine` 和 SQLite che
 只有故障次数、任务分母、最终状态和 checksum 全部满足约束时才会输出
 `VERIFIED`，夹具或 mock 不会被计为该验收证据。
 
+运行 Context/Memory 的固定双臂输入 Token 验收：
+
+```powershell
+$env:OPENAI_API_KEY = '<从安全存储加载>'
+$env:OPENAI_BASE_URL = '<OpenAI-compatible HTTPS endpoint>'
+$env:OPENAI_MODEL = '<locked model>'
+python -m eval.harness.context_token_eval `
+  --task data/eval/context-token/tasks/workflow-provider-contract-v1.json `
+  --project-root . `
+  --artifact-root eval_results `
+  --run-id context-token-<timestamp> `
+  --model $env:OPENAI_MODEL `
+  --max-output-tokens 512 `
+  --minimum-reduction 0.60
+```
+
+runner 对同一锁定任务、模型和预算分别发送完整语料 baseline 与生产
+`LayeredContext` 生成的 P0/P1/P3 上下文。正式降幅只读取 provider 返回的
+`usage.input_tokens`；两臂任一结果回退、usage 缺失、模型身份不一致或降幅低于
+60% 都会输出 `BLOCKED`。回环地址只产生 `SMOKE_PASS`，远端 HTTPS provider
+才可产生该单项验收的 `VERIFIED`。这条 lane 验证 Context A/B，不代表完整产品
+E2E。原始回答和运行数据库只保留在已忽略的 `eval_results/<run_id>/`，精简
+receipt 不含 gold、prompt 正文或回答正文。任务文件预先 pin 住 P3 路径，因此该
+lane 不评测自动上下文选择准确率。
+
 ### Phoenix 跨语言 Trace 显式集成测试
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。

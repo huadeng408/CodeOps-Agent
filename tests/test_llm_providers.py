@@ -185,6 +185,62 @@ def test_openai_reasoning_effort_only_for_reasoning_models() -> None:
         server.server_close()
 
 
+def test_openai_client_sends_configured_output_token_budget(monkeypatch) -> None:
+    server, captured = _json_server(
+        {
+            "id": "response-budget",
+            "model": "locked-model",
+            "system_fingerprint": "revision-1",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        }
+    )
+    try:
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+        )
+        monkeypatch.setenv("OPENAI_MODEL", "locked-model")
+        monkeypatch.setenv("OPENAI_MAX_TOKENS", "128")
+
+        client = OpenAIClient.from_env()
+        assert client is not None
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="locked-model",
+                    messages=[ChatMessage(role="user", content="bounded response")],
+                    temperature=0.0,
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body.get("max_tokens") == 128
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_openai_stream_payload_sends_configured_output_token_budget() -> None:
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url="https://example.test",
+        model="locked-model",
+        max_tokens=128,
+    )
+
+    payload = client._stream_payload(
+        ChatRequest(
+            model="locked-model",
+            messages=[ChatMessage(role="user", content="bounded stream")],
+            temperature=0.0,
+        )
+    )
+
+    assert payload.get("max_tokens") == 128
+
+
 def test_openai_reasoning_effort_sent_for_reasoning_model() -> None:
     """reasoning_effort IS sent for reasoning models, and reasoning content is parsed back."""
     server, captured = _json_server(

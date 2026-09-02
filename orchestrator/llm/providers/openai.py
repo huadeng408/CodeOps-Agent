@@ -34,6 +34,7 @@ class OpenAIClient(LLMClient):
     model: str = "gpt-4o"
     timeout: float = 60.0
     max_retries: int = 3
+    max_tokens: int = 0
     # thinking gating is deferred to is_thinking_enabled() +
     # request.thinking_enabled + per-model _is_reasoning_model check;
     # removed the dead per-client thinking_enabled field that was
@@ -50,6 +51,7 @@ class OpenAIClient(LLMClient):
             model=read_env("OPENAI_MODEL", "gpt-4o"),
             timeout=_read_float("OPENAI_TIMEOUT", 60.0),
             max_retries=_read_int("OPENAI_MAX_RETRIES", 3),
+            max_tokens=max(0, _read_int("OPENAI_MAX_TOKENS", 0)),
         )
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
@@ -63,6 +65,8 @@ class OpenAIClient(LLMClient):
         }
         if request.tools:
             payload["tools"] = request.tools
+        if self.max_tokens > 0:
+            payload["max_tokens"] = self.max_tokens
         model = request.model or self.model
         if (
             request.thinking_enabled
@@ -229,6 +233,8 @@ class OpenAIClient(LLMClient):
         }
         if request.tools:
             payload["tools"] = request.tools
+        if self.max_tokens > 0:
+            payload["max_tokens"] = self.max_tokens
         model = request.model or self.model
         if (
             request.thinking_enabled

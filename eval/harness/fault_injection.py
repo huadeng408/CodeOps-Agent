@@ -29,6 +29,7 @@ from typing import Any
 
 from eval.harness.artifacts import RunArtifacts
 from eval.harness.redaction import redact_credential_text
+from eval.harness.source_pin import source_pin
 from orchestrator.workflows import (
     SQLiteWorkflowStore,
     WorkerResult,
@@ -330,39 +331,7 @@ def _assign_tasks(task_ids: list[str], worker_count: int) -> dict[int, list[str]
 
 
 def _source_pin() -> dict[str, Any]:
-    root = Path(__file__).resolve().parents[2]
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    ).stdout.strip()
-    diff = subprocess.run(
-        ["git", "diff", "HEAD", "--no-ext-diff", "--binary"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    untracked_raw = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    untracked = sorted(path for path in untracked_raw.decode("utf-8", errors="replace").split("\x00") if path)
-    digest = hashlib.sha256()
-    digest.update(diff)
-    for relative in untracked:
-        path = root / relative
-        if not path.is_file():
-            continue
-        digest.update(relative.replace("\\", "/").encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-    return {"git_sha": sha, "dirty_hash": digest.hexdigest(), "untracked_files": len(untracked)}
+    return source_pin(Path(__file__).resolve().parents[2])
 
 
 def _launch_child(
