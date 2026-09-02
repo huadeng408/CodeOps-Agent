@@ -1,0 +1,416 @@
+{
+  "schema_version": 1,
+  "dataset_id": "skill-selection-v1",
+  "license": "CC0-1.0",
+  "provenance": "Repository-authored English coding-agent routing cases; no external text was copied.",
+  "expected_case_count": 1000,
+  "prompt_templates": [
+    "{request}",
+    "For the current repository, {request}",
+    "Before changing unrelated code, {request}",
+    "Use the most appropriate focused capability to {request}",
+    "The requested outcome is this: {request}"
+  ],
+  "skills": [
+    {
+      "name": "inspect",
+      "requests": [
+        "locate the files and directories relevant to an unfamiliar request.",
+        "find where a named behavior is implemented before proposing changes.",
+        "survey the repository structure and identify likely entrypoints.",
+        "identify the smallest set of source files needed to understand a feature.",
+        "map a user-visible command to the code that handles it."
+      ]
+    },
+    {
+      "name": "task-decomposition",
+      "requests": [
+        "split a large feature into ordered work items with acceptance checks.",
+        "turn a broad request into small tasks with explicit dependencies.",
+        "separate a cross-module change into independently verifiable steps.",
+        "define a work breakdown that isolates risky changes from routine ones.",
+        "convert a long implementation request into a dependency-aware execution sequence."
+      ]
+    },
+    {
+      "name": "architecture",
+      "requests": [
+        "map module boundaries, dependencies, and invariants for a planned subsystem.",
+        "decide where the interface between orchestration and execution should live.",
+        "evaluate how major packages should collaborate without circular dependencies.",
+        "propose a high-level structure for a feature spanning several modules.",
+        "identify ownership boundaries before restructuring a core subsystem."
+      ]
+    },
+    {
+      "name": "api-design",
+      "requests": [
+        "define a stable callable contract with inputs, outputs, and error modes.",
+        "shape a small public interface that can support two implementations.",
+        "specify request and response semantics for a new endpoint.",
+        "review a public contract for compatibility and versioning risks.",
+        "design the caller-facing methods for a reusable module."
+      ]
+    },
+    {
+      "name": "data-model",
+      "requests": [
+        "check entity relationships and persistence invariants for a new workflow.",
+        "review database tables for missing constraints and ownership rules.",
+        "define durable records for tasks, attempts, and state transitions.",
+        "assess whether the domain entities match the storage schema.",
+        "identify normalization and integrity risks in a proposed schema."
+      ]
+    },
+    {
+      "name": "dependency-audit",
+      "requests": [
+        "check package versions, licenses, and lockfile provenance.",
+        "identify vulnerable or unmaintained third-party libraries in the build.",
+        "verify that declared packages match the resolved dependency graph.",
+        "assess an upgrade for transitive compatibility and licensing risk.",
+        "produce an evidence-backed inventory of external libraries."
+      ]
+    },
+    {
+      "name": "debug",
+      "requests": [
+        "reproduce a deterministic crash and isolate its root cause.",
+        "trace why a command fails only after the second invocation.",
+        "diagnose an exception from a minimal failing example.",
+        "localize a broken behavior before suggesting the smallest fix.",
+        "explain why a previously passing request now returns an error."
+      ]
+    },
+    {
+      "name": "performance",
+      "requests": [
+        "profile a slow execution path and identify the dominant bottleneck.",
+        "measure where request latency is spent before optimizing it.",
+        "compare CPU, memory, and I/O costs for a hot path.",
+        "find the cause of a throughput regression using before and after measurements.",
+        "reduce tail latency while preserving a measured baseline."
+      ]
+    },
+    {
+      "name": "concurrency",
+      "requests": [
+        "analyze races, cancellation, and backpressure in parallel workers.",
+        "review shared-state access for deadlocks and unsafe interleavings.",
+        "verify that bounded workers stop promptly when their parent is cancelled.",
+        "check a queue consumer for ordering and duplicate execution hazards.",
+        "harden parallel task scheduling against starvation and leaked goroutines."
+      ]
+    },
+    {
+      "name": "implementation",
+      "requests": [
+        "build the already specified bounded feature and preserve existing contracts.",
+        "add the requested behavior to the identified module with focused tests.",
+        "complete a concrete repository change whose design is already approved.",
+        "write production code for a small, fully defined capability.",
+        "carry an accepted change from failing test to working code."
+      ]
+    },
+    {
+      "name": "refactor",
+      "requests": [
+        "reorganize tangled code without changing observable behavior.",
+        "extract a clearer module while keeping callers compatible.",
+        "remove duplication from an implementation under existing tests.",
+        "simplify an overgrown class without adding features.",
+        "improve code locality while preserving all external semantics."
+      ]
+    },
+    {
+      "name": "migration",
+      "requests": [
+        "move stored records to a new schema with backward compatibility and rollback.",
+        "upgrade persisted data without losing old readers or audit history.",
+        "plan a staged format transition with dual-read compatibility.",
+        "convert legacy configuration to a new representation safely.",
+        "execute a versioned storage change with integrity checks."
+      ]
+    },
+    {
+      "name": "error-handling",
+      "requests": [
+        "make failure paths explicit, bounded, and actionable for callers.",
+        "replace swallowed exceptions with stable classified outcomes.",
+        "define retryable versus terminal failure semantics in a module.",
+        "improve propagated errors without exposing sensitive details.",
+        "ensure partial failures cannot be reported as successful completion."
+      ]
+    },
+    {
+      "name": "serialization",
+      "requests": [
+        "validate a JSON wire format for schema versions and malformed values.",
+        "make encoded records deterministic across platforms and line endings.",
+        "review structured message compatibility between two processes.",
+        "harden decoding against missing fields and invalid primitive types.",
+        "pin a canonical byte representation for hashing and replay."
+      ]
+    },
+    {
+      "name": "parser",
+      "requests": [
+        "review document decoding for malformed input and provenance fidelity.",
+        "choose the correct reader for a file type and preserve typed elements.",
+        "fix syntax ingestion without guessing content that could not be read.",
+        "verify that source locations survive conversion into structured nodes.",
+        "harden an input reader against truncated and adversarial files."
+      ]
+    },
+    {
+      "name": "cli",
+      "requests": [
+        "improve a command-line flow with clear flags, output, and exit codes.",
+        "add a subcommand while preserving scripted behavior and help text.",
+        "make terminal errors concise and machine-detectable.",
+        "define argument validation for a repository command.",
+        "streamline an operator workflow executed from a shell."
+      ]
+    },
+    {
+      "name": "tests",
+      "requests": [
+        "add focused unit coverage for a specified behavior and its edge cases.",
+        "write behavioral checks for an existing module contract.",
+        "expand automated coverage around a newly identified boundary.",
+        "capture expected outputs for valid and invalid local inputs.",
+        "improve deterministic verification of one isolated function."
+      ]
+    },
+    {
+      "name": "integration-test",
+      "requests": [
+        "verify the real interaction between two modules across their interface.",
+        "exercise a database adapter and its caller in one automated scenario.",
+        "test a request through the process boundary rather than with mocks.",
+        "prove that independently tested packages work together in a realistic path.",
+        "add a cross-layer check using actual serialization and persistence."
+      ]
+    },
+    {
+      "name": "regression",
+      "requests": [
+        "turn a previously observed bug into a durable failing example before fixing it.",
+        "preserve the exact case that broke after a recent change.",
+        "add protection against recurrence of a fixed production defect.",
+        "reproduce an old failure and lock its corrected behavior.",
+        "create a test that proves a specific defect cannot return."
+      ]
+    },
+    {
+      "name": "fuzz",
+      "requests": [
+        "probe a decoder with malformed, boundary, and adversarial inputs.",
+        "search automatically for crashing values in a pure function.",
+        "generate unusual inputs and retain any minimal counterexample.",
+        "stress an input contract beyond hand-written examples.",
+        "explore random operation sequences for invariant violations."
+      ]
+    },
+    {
+      "name": "benchmark",
+      "requests": [
+        "run a fixed-budget comparison and record denominator and environment.",
+        "measure two implementations under an identical repeatable workload.",
+        "establish a reproducible speed baseline with variance.",
+        "quantify an optimization against pinned inputs and limits.",
+        "produce comparable throughput results without changing the corpus."
+      ]
+    },
+    {
+      "name": "lint",
+      "requests": [
+        "run repository style checks and fix only relevant violations.",
+        "resolve formatter and static style failures in the changed files.",
+        "bring a patch into compliance with configured source rules.",
+        "identify code-quality diagnostics emitted by the configured checker.",
+        "clean up formatting failures without changing program behavior."
+      ]
+    },
+    {
+      "name": "type-check",
+      "requests": [
+        "run static typing and compilation checks for affected modules.",
+        "find incompatible annotations before runtime.",
+        "verify that interfaces satisfy compiler-enforced contracts.",
+        "diagnose build-time type errors in a multi-language change.",
+        "confirm generic and protocol usage with the configured analyzer."
+      ]
+    },
+    {
+      "name": "release",
+      "requests": [
+        "prepare a reproducible candidate with pinned inputs and checksums.",
+        "assemble verified artifacts for publication without overstating evidence.",
+        "check version, changelog, provenance, and acceptance gates before shipping.",
+        "produce a publishable candidate only after all required checks pass.",
+        "package the current revision with auditable evidence and rollback notes."
+      ]
+    },
+    {
+      "name": "ci",
+      "requests": [
+        "review automated build workflows for reproducibility and failure visibility.",
+        "add a required pipeline check for tests and credential scanning.",
+        "diagnose why a hosted build job differs from local execution.",
+        "harden continuous build configuration and artifact retention.",
+        "verify branch checks, caching, and matrix jobs in automation."
+      ]
+    },
+    {
+      "name": "docker",
+      "requests": [
+        "validate container configuration, health checks, and resource limits.",
+        "diagnose a compose service that starts but never becomes healthy.",
+        "review image construction for reproducibility and minimal privileges.",
+        "verify safe lifecycle behavior for a containerized dependency stack.",
+        "fix networking and volume configuration for a local container environment."
+      ]
+    },
+    {
+      "name": "wsl",
+      "requests": [
+        "diagnose path and process behavior across Windows and Linux integration.",
+        "fix a command that works in PowerShell but fails in the Linux subsystem.",
+        "review cross-platform filesystem mounts and executable invocation.",
+        "trace networking differences between the host and its Linux environment.",
+        "validate path translation and line-ending behavior across operating systems."
+      ]
+    },
+    {
+      "name": "sandbox",
+      "requests": [
+        "review execution isolation, permissions, and resource limits.",
+        "ensure an untrusted command cannot escape its allowed workspace.",
+        "validate deny-by-default filesystem and network policy.",
+        "harden constrained execution against path traversal and privilege escalation.",
+        "test that restricted tools fail closed outside approved capabilities."
+      ]
+    },
+    {
+      "name": "mcp",
+      "requests": [
+        "review model context protocol server lifecycle and tool schemas.",
+        "connect an external tool server with bounded startup and shutdown.",
+        "validate discovered tool metadata and untrusted output handling.",
+        "diagnose a protocol tool that is advertised but cannot be invoked.",
+        "verify timeouts and process cleanup for a stdio tool server."
+      ]
+    },
+    {
+      "name": "observability",
+      "requests": [
+        "add privacy-safe metrics and logs for an operational path.",
+        "define stable diagnostic fields for failures and latency.",
+        "make a background workflow measurable without exposing content.",
+        "review dashboards and signals for actionable operational coverage.",
+        "instrument a module with bounded, allowlisted telemetry."
+      ]
+    },
+    {
+      "name": "trace",
+      "requests": [
+        "validate OpenTelemetry span parentage and context propagation.",
+        "join execution and scorer spans by a stable run identifier.",
+        "find a broken distributed span chain across process boundaries.",
+        "check required trace attributes and exporter failure behavior.",
+        "prove that one workflow appears as a connected span topology."
+      ]
+    },
+    {
+      "name": "security",
+      "requests": [
+        "assess trust boundaries, authorization, and injection risks.",
+        "review a feature for unsafe privilege and data exposure paths.",
+        "threat-model an untrusted tool execution flow.",
+        "verify authentication and fail-closed access control behavior.",
+        "identify exploitable input paths and propose bounded mitigations."
+      ]
+    },
+    {
+      "name": "secrets",
+      "requests": [
+        "scan the exact change set for credential patterns without printing values.",
+        "check whether tokens or private keys entered tracked files.",
+        "audit staged content for sensitive authentication material.",
+        "verify that configuration examples contain placeholders rather than credentials.",
+        "detect leaked access material while redacting every match."
+      ]
+    },
+    {
+      "name": "incident",
+      "requests": [
+        "triage a production-like outage from logs and telemetry.",
+        "preserve evidence and identify a bounded mitigation for an active failure.",
+        "classify impact and likely cause during an operational disruption.",
+        "coordinate diagnosis of a live degradation without destroying evidence.",
+        "summarize timeline, symptoms, and immediate containment for an outage."
+      ]
+    },
+    {
+      "name": "rollback",
+      "requests": [
+        "plan a reversible return to the last known good revision.",
+        "define how to undo a deployment while preserving data and evidence.",
+        "prepare an inverse operation for a risky schema rollout.",
+        "restore prior behavior without deleting historical artifacts.",
+        "write a recovery path that can safely reverse the proposed change."
+      ]
+    },
+    {
+      "name": "git-history",
+      "requests": [
+        "use commit provenance to distinguish current behavior from stale claims.",
+        "find when and why a line changed using repository history.",
+        "trace a feature across revisions and identify its introducing change.",
+        "compare the current tree with an earlier commit for evidence.",
+        "audit authorship and change lineage for a sensitive module."
+      ]
+    },
+    {
+      "name": "documentation",
+      "requests": [
+        "write concise repository guidance that matches verified behavior.",
+        "update user-facing instructions without copying stale design claims.",
+        "document a command with prerequisites, examples, and evidence limits.",
+        "improve reference text for a newly supported workflow.",
+        "replace misleading project prose with accurate current capabilities."
+      ]
+    },
+    {
+      "name": "review",
+      "requests": [
+        "examine the current change set for concrete bugs and regression risks.",
+        "assess a patch against its requirements and repository conventions.",
+        "report correctness findings before summarizing a proposed merge.",
+        "check modified code for behavioral gaps and missing coverage.",
+        "evaluate staged changes and rank actionable defects by severity."
+      ]
+    },
+    {
+      "name": "commit",
+      "requests": [
+        "draft a conventional change message from the current diff.",
+        "summarize staged modifications into a concise version-control message.",
+        "propose a clear subject and body for recording this patch.",
+        "write the repository history entry that describes the current changes.",
+        "turn the verified diff into one conventional revision message."
+      ]
+    },
+    {
+      "name": "init",
+      "requests": [
+        "bootstrap project instructions and a minimal repository structure.",
+        "set up the initial agent configuration for a new codebase.",
+        "create the starting files needed to use the coding assistant here.",
+        "establish a clean project skeleton and explain its entrypoints.",
+        "prepare first-run repository metadata and baseline directories."
+      ]
+    }
+  ]
+}

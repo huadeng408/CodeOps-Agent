@@ -49,6 +49,7 @@ logs/
 .agent/worktrees/*
 !.agent/worktrees/.gitkeep
 .agent/mcp-tools.json
+.agent/skills.json
 *.sqlite
 *.sqlite3
 *.db

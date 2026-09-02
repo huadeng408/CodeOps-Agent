@@ -337,6 +337,35 @@ E2E。原始回答和运行数据库只保留在已忽略的 `eval_results/<run_
 receipt 不含 gold、prompt 正文或回答正文。任务文件预先 pin 住 P3 路径，因此该
 lane 不评测自动上下文选择准确率。
 
+运行 Skill 自主选型的固定 1,000 案例验收：
+
+```powershell
+go run ./cmd/skills-manifest `
+  --output .agent/skills.json `
+  --project-dir .agent/skills
+$env:OPENAI_API_KEY = '<从安全存储加载>'
+$env:OPENAI_BASE_URL = '<OpenAI-compatible HTTPS endpoint>'
+$env:OPENAI_MODEL = '<locked model>'
+python -m eval.harness.skill_selection_eval `
+  --manifest .agent/skills.json `
+  --dataset data/eval/skills/skill-selection-v1.json `
+  --artifact-root eval_results `
+  --run-id skill-selection-<timestamp> `
+  --model $env:OPENAI_MODEL `
+  --max-output-tokens 64 `
+  --max-concurrency 10 `
+  --minimum-accuracy 0.948 `
+  --required-case-count 1000
+```
+
+manifest 由 Go Harness 的真实 Skill registry 导出，只含名称、描述和工具元数据，
+不加载 Skill 正文。runner 对每个案例发起一次独立 `Skill` tool-call，gold 标签不进
+模型输入、运行结果或精简 receipt；少于 1,000 个案例、catalog 不完全覆盖、数据
+sidecar 不匹配、并发超过 10、provider usage 缺失或超预算、模型名/fingerprint
+无法锁定，或低于 `948/1000` 都 fail-closed。回环 provider 仍只产生
+`SMOKE_PASS`。`skill-selection-v1` 是明确标为
+CC0-1.0 的仓库原创 catalog-routing 数据，不代表外部真实任务的泛化准确率。
+
 ### Phoenix 跨语言 Trace 显式集成测试
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。
