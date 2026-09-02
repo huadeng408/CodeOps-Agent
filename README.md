@@ -364,6 +364,15 @@ python -m eval.harness.skill_selection_eval `
   --required-case-count 1000
 ```
 
+进程中断后使用完全相同的命令并追加 `--resume`。runner 以
+`checkpoint.sqlite3` 在每个案例完成时独立事务提交结果，只调度 checkpoint 中缺失
+的 case，并按锁定数据集顺序原子重建 `selections.jsonl`。恢复契约同时 pin 源码、
+数据集、catalog、模型、去凭据 endpoint、prompt schema 与全部预算；任一 pin 变化
+都会在 provider 调用前 fail-closed。未指定 `--resume` 时仍拒绝覆盖非空 run 目录。
+checkpoint 不保存 prompt、`expected_skill`、gold/qrels 或凭据；provider 错误详情仅
+保留去敏内容摘要。运行期间 SQLite 使用 WAL 与 `synchronous=FULL`，最终发布前回写
+主库并移除瞬态 journal sidecar，使 checksums 可重复验证。
+
 manifest 由 Go Harness 的真实 Skill registry 导出，只含名称、描述和工具元数据，
 不加载 Skill 正文。runner 对每个案例发起一次独立 `Skill` tool-call，gold 标签不进
 模型输入、运行结果或精简 receipt；少于 1,000 个案例、catalog 不完全覆盖、数据

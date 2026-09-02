@@ -25,6 +25,7 @@ import platform
 import re
 import tempfile
 import threading
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -64,9 +65,7 @@ class RunArtifacts:
         path = self._artifact_path(name)
         _atomic_write_text(
             path,
-            json.dumps(
-                redact_credential_value(payload), indent=2, ensure_ascii=False
-            )
+            json.dumps(redact_credential_value(payload), indent=2, ensure_ascii=False)
             + "\n",
         )
         return path
@@ -86,6 +85,17 @@ class RunArtifacts:
             except FileNotFoundError:
                 pass
             _atomic_write_text(path, existing + line)
+
+    def write_jsonl(self, name: str, records: Iterable[dict[str, Any]]) -> Path:
+        """Atomically replace a JSONL artifact in caller-provided order."""
+
+        path = self._artifact_path(name)
+        lines = [
+            json.dumps(redact_credential_value(record), ensure_ascii=False)
+            for record in records
+        ]
+        _atomic_write_text(path, "\n".join(lines) + ("\n" if lines else ""))
+        return path
 
     def write_manifest(self, manifest: dict[str, Any]) -> Path:
         return self.write("run-manifest.json", manifest)
@@ -133,9 +143,7 @@ class RunArtifacts:
         path = self._artifact_path(Path("traces") / name)
         _atomic_write_text(
             path,
-            json.dumps(
-                redact_credential_value(payload), indent=2, ensure_ascii=False
-            )
+            json.dumps(redact_credential_value(payload), indent=2, ensure_ascii=False)
             + "\n",
         )
         return path

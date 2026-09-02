@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 import threading
 import time
+from collections import Counter
+from contextlib import closing
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -123,6 +130,7 @@ def _provider_server(
     always_skill: str = "",
     delay_s: float = 0.0,
     output_tokens: int = 5,
+    echo_prompt_error: bool = False,
 ) -> tuple[ThreadingHTTPServer, _ProviderState]:
     state = _ProviderState(always_skill=always_skill, delay_s=delay_s)
 
@@ -138,6 +146,14 @@ def _provider_server(
                 if state.delay_s:
                     time.sleep(state.delay_s)
                 prompt = payload["messages"][-1]["content"]
+                if echo_prompt_error:
+                    encoded = json.dumps({"error": prompt}).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
                 selected = state.select(prompt)
                 body = {
                     "id": f"response-{len(state.requests)}",
@@ -165,11 +181,14 @@ def _provider_server(
                     },
                 }
                 encoded = json.dumps(body).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             finally:
                 with state.lock:
                     state.active -= 1
@@ -191,6 +210,7 @@ def _config(
     required_case_count: int,
     minimum_accuracy: float = 1.0,
     max_concurrency: int = 2,
+    resume: bool = False,
 ) -> SkillSelectionEvalConfig:
     return SkillSelectionEvalConfig(
         run_id=run_id,
@@ -203,6 +223,7 @@ def _config(
         max_concurrency=max_concurrency,
         minimum_accuracy=minimum_accuracy,
         required_case_count=required_case_count,
+        resume=resume,
     )
 
 
@@ -376,6 +397,312 @@ async def test_provider_requests_respect_configured_concurrency_cap(
     assert receipt["budget"]["max_concurrency"] == 3
 
 
+@pytest.mark.asyncio
+async def test_resume_skips_checkpointed_cases_and_rebuilds_dataset_order(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    dataset = load_skill_selection_dataset(dataset_path, manifest_path)
+    server, state = _provider_server()
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="locked-model",
+        timeout=10.0,
+        max_retries=0,
+    )
+    try:
+        await run_skill_selection_eval(
+            _config(
+                tmp_path,
+                manifest_path,
+                dataset_path,
+                run_id="skill-selection-resume-complete",
+                required_case_count=4,
+            ),
+            client,
+        )
+        calls_before_resume = len(state.requests)
+
+        receipt = await run_skill_selection_eval(
+            _config(
+                tmp_path,
+                manifest_path,
+                dataset_path,
+                run_id="skill-selection-resume-complete",
+                required_case_count=4,
+                resume=True,
+            ),
+            client,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert calls_before_resume == 4
+    assert len(state.requests) == calls_before_resume
+    assert receipt["scoring"]["denominator"] == 4
+    assert receipt["checkpoint"] == {
+        "contract_sha256": receipt["checkpoint"]["contract_sha256"],
+        "resumed": True,
+        "reused_case_count": 4,
+        "provider_call_case_count": 0,
+        "path": "checkpoint.sqlite3",
+    }
+    result_path = (
+        tmp_path
+        / "eval_results"
+        / "skill-selection-resume-complete"
+        / "selections.jsonl"
+    )
+    result_ids = [
+        json.loads(line)["case_id"]
+        for line in result_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert result_ids == [case.case_id for case in dataset.cases]
+    assert (
+        RunArtifacts(
+            "skill-selection-resume-complete", tmp_path / "eval_results"
+        ).verify_checksums()
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_changed_budget_before_provider_calls(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    server, state = _provider_server()
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="locked-model",
+        timeout=10.0,
+        max_retries=0,
+    )
+    initial = _config(
+        tmp_path,
+        manifest_path,
+        dataset_path,
+        run_id="skill-selection-resume-budget",
+        required_case_count=4,
+    )
+    try:
+        await run_skill_selection_eval(initial, client)
+        artifacts = RunArtifacts(
+            "skill-selection-resume-budget", tmp_path / "eval_results"
+        )
+        checkpoint_path = artifacts.root / "checkpoint.sqlite3"
+        checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        assert artifacts.verify_checksums() == []
+        calls_before_resume = len(state.requests)
+        with pytest.raises(ValueError, match="contract"):
+            await run_skill_selection_eval(
+                replace(initial, resume=True, max_output_tokens=16),
+                client,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(state.requests) == calls_before_resume
+    assert hashlib.sha256(checkpoint_path.read_bytes()).hexdigest() == checkpoint_sha256
+    assert artifacts.verify_checksums() == []
+
+
+@pytest.mark.asyncio
+async def test_non_resume_still_rejects_nonempty_run_directory(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    run_root = tmp_path / "eval_results" / "skill-selection-existing"
+    run_root.mkdir(parents=True)
+    (run_root / "existing.txt").write_text("do not overwrite", encoding="utf-8")
+    server, state = _provider_server()
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="locked-model",
+        timeout=10.0,
+        max_retries=0,
+    )
+    try:
+        with pytest.raises(ValueError, match="must be empty"):
+            await run_skill_selection_eval(
+                _config(
+                    tmp_path,
+                    manifest_path,
+                    dataset_path,
+                    run_id="skill-selection-existing",
+                    required_case_count=4,
+                ),
+                client,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert state.requests == []
+    assert (run_root / "existing.txt").read_text(encoding="utf-8") == (
+        "do not overwrite"
+    )
+
+
+def _checkpoint_case_ids(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    try:
+        with closing(
+            sqlite3.connect(
+                f"file:{path.as_posix()}?mode=ro",
+                uri=True,
+                timeout=0.1,
+            )
+        ) as connection:
+            return {
+                str(row[0]) for row in connection.execute("SELECT case_id FROM results")
+            }
+    except sqlite3.Error:
+        return set()
+
+
+def test_cli_resumes_after_real_process_termination_without_repeating_commits(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path, requests_per_skill=10)
+    dataset = load_skill_selection_dataset(dataset_path, manifest_path)
+    server, state = _provider_server(delay_s=0.12)
+    artifact_root = tmp_path / "eval_results"
+    run_id = "skill-selection-process-recovery"
+    checkpoint_path = artifact_root / run_id / "checkpoint.sqlite3"
+    repo_root = Path(__file__).resolve().parents[2]
+    command = [
+        sys.executable,
+        "-m",
+        "eval.harness.skill_selection_eval",
+        "--manifest",
+        str(manifest_path),
+        "--dataset",
+        str(dataset_path),
+        "--artifact-root",
+        str(artifact_root),
+        "--run-id",
+        run_id,
+        "--model",
+        "locked-model",
+        "--max-output-tokens",
+        "32",
+        "--timeout",
+        "10",
+        "--max-concurrency",
+        "2",
+        "--minimum-accuracy",
+        "1.0",
+        "--required-case-count",
+        "20",
+    ]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+            "OPENAI_MODEL": "locked-model",
+            "OPENAI_MAX_RETRIES": "0",
+        }
+    )
+    process = subprocess.Popen(
+        command,
+        cwd=repo_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15.0
+        committed_before_kill: set[str] = set()
+        while time.monotonic() < deadline:
+            committed_before_kill = _checkpoint_case_ids(checkpoint_path)
+            if len(committed_before_kill) >= 4:
+                break
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(
+                    "evaluator exited before the kill point: "
+                    f"code={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+                )
+            time.sleep(0.05)
+        assert 4 <= len(committed_before_kill) < len(dataset.cases)
+
+        process.terminate()
+        process.wait(timeout=10.0)
+        time.sleep(0.2)
+        committed_before_resume = _checkpoint_case_ids(checkpoint_path)
+        assert committed_before_kill <= committed_before_resume
+        assert len(committed_before_resume) < len(dataset.cases)
+        with state.lock:
+            requests_before_resume = list(state.requests)
+
+        resumed = subprocess.run(
+            [*command, "--resume"],
+            cwd=repo_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+        assert resumed.returncode == 0, resumed.stderr
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10.0)
+        server.shutdown()
+        server.server_close()
+
+    result_root = artifact_root / run_id
+    receipt = json.loads((result_root / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "SMOKE_PASS"
+    assert receipt["scoring"]["denominator"] == 20
+    assert receipt["checkpoint"]["resumed"] is True
+    assert receipt["checkpoint"]["reused_case_count"] == len(committed_before_resume)
+    assert receipt["checkpoint"]["provider_call_case_count"] == (
+        len(dataset.cases) - len(committed_before_resume)
+    )
+
+    final_prompts = Counter(
+        str(request["messages"][-1]["content"]) for request in state.requests
+    )
+    initial_prompts = Counter(
+        str(request["messages"][-1]["content"]) for request in requests_before_resume
+    )
+    case_prompts = {case.case_id: case.prompt for case in dataset.cases}
+    for case_id in committed_before_resume:
+        prompt = case_prompts[case_id]
+        assert initial_prompts[prompt] == 1
+        assert final_prompts[prompt] == 1
+
+    result_rows = [
+        json.loads(line)
+        for line in (result_root / "selections.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["case_id"] for row in result_rows] == [
+        case.case_id for case in dataset.cases
+    ]
+    with closing(sqlite3.connect(checkpoint_path)) as connection:
+        persisted = "\n".join(connection.iterdump())
+        assert connection.execute("SELECT COUNT(*) FROM results").fetchone()[0] == 20
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert "expected_skill" not in persisted
+    assert "test-key" not in persisted
+    assert all(case.prompt not in persisted for case in dataset.cases)
+    assert RunArtifacts(run_id, artifact_root).verify_checksums() == []
+
+
 def test_config_rejects_concurrency_above_global_provider_cap(tmp_path: Path) -> None:
     manifest_path, dataset_path = _write_inputs(tmp_path)
     config = _config(
@@ -485,3 +812,43 @@ async def test_provider_output_over_budget_blocks_all_affected_cases(
     assert "provider_integrity" in {
         failure["category"] for failure in receipt["failures"]
     }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_does_not_persist_prompt_echoed_in_provider_error(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    dataset = load_skill_selection_dataset(dataset_path, manifest_path)
+    server, _ = _provider_server(echo_prompt_error=True)
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="locked-model",
+        timeout=10.0,
+        max_retries=0,
+    )
+    try:
+        await run_skill_selection_eval(
+            _config(
+                tmp_path,
+                manifest_path,
+                dataset_path,
+                run_id="skill-selection-prompt-error",
+                required_case_count=4,
+            ),
+            client,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    checkpoint_path = (
+        tmp_path
+        / "eval_results"
+        / "skill-selection-prompt-error"
+        / "checkpoint.sqlite3"
+    )
+    with closing(sqlite3.connect(checkpoint_path)) as connection:
+        persisted = "\n".join(connection.iterdump())
+    assert all(case.prompt not in persisted for case in dataset.cases)

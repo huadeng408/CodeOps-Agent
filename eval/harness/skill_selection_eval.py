@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from eval.harness.artifacts import RunArtifacts
 from eval.harness.redaction import redact_credential_text
+from eval.harness.skill_selection_checkpoint import SkillSelectionCheckpoint
 from eval.harness.source_pin import source_pin
 from orchestrator.config import load_dotenv
 from orchestrator.llm import ChatMessage, ChatRequest, ChatResponse
@@ -26,6 +27,8 @@ _SYSTEM_PROMPT = (
     "Call the Skill tool once with its exact name. Do not answer the request."
 )
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_CHECKPOINT_FILENAME = "checkpoint.sqlite3"
+_SELECTIONS_FILENAME = "selections.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,7 @@ class SkillSelectionEvalConfig:
     max_concurrency: int = 10
     minimum_accuracy: float = 0.948
     required_case_count: int = 1_000
+    resume: bool = False
 
     def validate(self) -> None:
         if not self.run_id or Path(self.run_id).name != self.run_id:
@@ -123,6 +127,16 @@ def _sha256_text(value: str) -> str:
 
 def _status_exit_code(status: str) -> int:
     return 0 if status in {"VERIFIED", "SMOKE_PASS"} else 2
+
+
+def _provider_failure_message(exc: Exception) -> str:
+    redacted = redact_credential_text(str(exc))
+    status_match = re.search(r"\bHTTP\s+(\d{3})\b", redacted)
+    status = f" HTTP {status_match.group(1)}" if status_match else ""
+    return (
+        f"{type(exc).__name__}: provider{status} call failed; "
+        f"detail_sha256={_sha256_text(redacted)}"
+    )
 
 
 def _verify_checksum_sidecar(path: Path, raw: bytes) -> None:
@@ -251,11 +265,24 @@ def load_skill_selection_dataset(
     )
 
 
-def _evidence_scope(client: OpenAIClient) -> tuple[str, str, dict[str, str]]:
+def _endpoint_pin(client: OpenAIClient) -> dict[str, str]:
     parsed = urlparse(client.base_url)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
-    endpoint = {"scheme": scheme, "host": host}
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    endpoint = {
+        "scheme": scheme,
+        "host": host,
+        "port": str(parsed.port or default_port or ""),
+        "path": parsed.path.rstrip("/") or "/",
+    }
+    return endpoint
+
+
+def _evidence_scope(client: OpenAIClient) -> tuple[str, str, dict[str, str]]:
+    endpoint = _endpoint_pin(client)
+    scheme = endpoint["scheme"]
+    host = endpoint["host"]
     if scheme in {"http", "https"} and host in _LOOPBACK_HOSTS:
         return "LOCAL_PROVIDER_INTEGRATION", "", endpoint
     if scheme == "https" and host:
@@ -265,6 +292,106 @@ def _evidence_scope(client: OpenAIClient) -> tuple[str, str, dict[str, str]]:
         "formal Skill selection evidence requires remote HTTPS or loopback smoke",
         endpoint,
     )
+
+
+def _prompt_pins(catalog: _Catalog) -> dict[str, str]:
+    return {
+        "system_sha256": _sha256_text(_SYSTEM_PROMPT),
+        "tool_schema_sha256": _sha256_bytes(
+            json.dumps(
+                catalog.tool_schema,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ),
+    }
+
+
+def _budget_pin(
+    config: SkillSelectionEvalConfig,
+    client: OpenAIClient,
+    case_count: int,
+) -> dict[str, int | float]:
+    return {
+        "max_output_tokens_per_case": config.max_output_tokens,
+        "timeout_seconds_per_case": config.timeout_s,
+        "max_concurrency": config.max_concurrency,
+        "calls": case_count,
+        "max_provider_attempts_per_case": client.max_retries + 1,
+        "temperature": 0.0,
+        "minimum_required_accuracy": config.minimum_accuracy,
+    }
+
+
+def _checkpoint_contract(
+    config: SkillSelectionEvalConfig,
+    dataset: SkillSelectionDataset,
+    catalog: _Catalog,
+    source: dict[str, Any],
+    endpoint: dict[str, str],
+    prompt_pins: dict[str, str],
+    budget: dict[str, int | float],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "run_id": config.run_id,
+        "source_pin": source,
+        "dataset_pin": {
+            "dataset_id": dataset.dataset_id,
+            "sha256": dataset.sha256,
+            "case_count": len(dataset.cases),
+        },
+        "catalog_pin": {
+            "sha256": catalog.sha256,
+            "skill_count": len(catalog.names),
+        },
+        "model": config.model,
+        "endpoint": endpoint,
+        "prompt_pins": prompt_pins,
+        "budget": budget,
+    }
+
+
+def _selection_result(payload: dict[str, Any]) -> _SelectionResult:
+    try:
+        return _SelectionResult(
+            case_id=str(payload["case_id"]),
+            call_completed=bool(payload["call_completed"]),
+            selected_skill=str(payload["selected_skill"]),
+            correct=bool(payload["correct"]),
+            provider_input_tokens=int(payload["provider_input_tokens"]),
+            provider_output_tokens=int(payload["provider_output_tokens"]),
+            reported_model=str(payload["reported_model"]),
+            system_fingerprint=str(payload["system_fingerprint"]),
+            response_sha256=str(payload["response_sha256"]),
+            response_id_sha256=str(payload["response_id_sha256"]),
+            issue=str(payload.get("issue", "")),
+            failure_category=str(payload.get("failure_category", "")),
+            failure_message=str(payload.get("failure_message", "")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("checkpoint selection result is invalid") from exc
+
+
+def _resume_trace_id(
+    artifacts: RunArtifacts, contract: dict[str, Any], digest: str
+) -> str:
+    manifest_path = artifacts.root / "run-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("resume requires a valid run manifest") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("run_id") != contract["run_id"]
+        or manifest.get("checkpoint_contract_sha256") != digest
+        or manifest.get("checkpoint_contract") != contract
+    ):
+        raise ValueError("run manifest does not match the checkpoint contract")
+    trace_id = str(manifest.get("trace_id", ""))
+    if re.fullmatch(r"[0-9a-f]{32}", trace_id) is None:
+        raise ValueError("run manifest trace_id is invalid")
+    return trace_id
 
 
 def _selected_skill(response: ChatResponse, catalog: _Catalog) -> tuple[str, str]:
@@ -318,7 +445,7 @@ async def _run_case(
                 response_sha256="",
                 response_id_sha256="",
                 failure_category="provider_call",
-                failure_message=redact_credential_text(str(exc))[:400],
+                failure_message=_provider_failure_message(exc),
             )
 
     identity = response.model_identity or {}
@@ -369,7 +496,7 @@ async def run_skill_selection_eval(
         )
     catalog = _load_catalog(config.manifest_path)
     artifacts = RunArtifacts(config.run_id, config.artifact_root)
-    if any(artifacts.root.iterdir()):
+    if not config.resume and any(artifacts.root.iterdir()):
         raise ValueError("run artifact directory must be empty")
     evaluation_client = replace(
         client,
@@ -377,40 +504,88 @@ async def run_skill_selection_eval(
         max_tokens=config.max_output_tokens,
     )
     scope, transport_failure, endpoint = _evidence_scope(evaluation_client)
-    trace_id = uuid.uuid4().hex
     run_source_pin = source_pin(Path(__file__).resolve().parents[2])
-    artifacts.write_manifest(
-        {
-            "schema_version": 1,
-            "run_id": config.run_id,
-            "trace_id": trace_id,
-            "source_pin": run_source_pin,
-            "dataset_id": dataset.dataset_id,
-            "dataset_sha256": dataset.sha256,
-            "catalog_sha256": catalog.sha256,
-            "requested_model": config.model,
-            "provider_endpoint": endpoint,
-            "budget": {
-                "max_output_tokens_per_case": config.max_output_tokens,
-                "timeout_seconds_per_case": config.timeout_s,
-                "max_concurrency": config.max_concurrency,
-                "calls": len(dataset.cases),
-                "max_provider_attempts_per_case": evaluation_client.max_retries + 1,
-                "temperature": 0.0,
-            },
-        }
+    prompt_pins = _prompt_pins(catalog)
+    budget = _budget_pin(config, evaluation_client, len(dataset.cases))
+    contract = _checkpoint_contract(
+        config,
+        dataset,
+        catalog,
+        run_source_pin,
+        endpoint,
+        prompt_pins,
+        budget,
     )
-    artifacts.write_environment()
+    checkpoint_path = (artifacts.root / _CHECKPOINT_FILENAME).resolve()
+    if not checkpoint_path.is_relative_to(artifacts.root):
+        raise ValueError("checkpoint path must stay within the run artifact directory")
+    if config.resume and not checkpoint_path.is_file():
+        raise ValueError("resume requires an existing checkpoint")
 
-    semaphore = asyncio.Semaphore(config.max_concurrency)
-    results = await asyncio.gather(
-        *(
-            _run_case(evaluation_client, config, catalog, case, semaphore)
-            for case in dataset.cases
-        )
+    checkpoint = SkillSelectionCheckpoint(checkpoint_path)
+    try:
+        if config.resume:
+            contract_sha256 = checkpoint.validate_contract(contract)
+            trace_id = _resume_trace_id(artifacts, contract, contract_sha256)
+        else:
+            contract_sha256 = checkpoint.initialize(contract)
+            trace_id = uuid.uuid4().hex
+            artifacts.write_manifest(
+                {
+                    "schema_version": 1,
+                    "run_id": config.run_id,
+                    "trace_id": trace_id,
+                    "source_pin": run_source_pin,
+                    "dataset_id": dataset.dataset_id,
+                    "dataset_sha256": dataset.sha256,
+                    "catalog_sha256": catalog.sha256,
+                    "requested_model": config.model,
+                    "provider_endpoint": endpoint,
+                    "budget": budget,
+                    "checkpoint_contract_sha256": contract_sha256,
+                    "checkpoint_contract": contract,
+                }
+            )
+            artifacts.write_environment()
+
+        completed_ids = checkpoint.completed_case_ids()
+        dataset_ids = frozenset(case.case_id for case in dataset.cases)
+        unknown_ids = completed_ids - dataset_ids
+        if unknown_ids:
+            raise ValueError(
+                "checkpoint contains case IDs outside the locked dataset: "
+                + ", ".join(sorted(unknown_ids))
+            )
+        pending_cases = [
+            case for case in dataset.cases if case.case_id not in completed_ids
+        ]
+        semaphore = asyncio.Semaphore(config.max_concurrency)
+
+        async def run_and_checkpoint(case: SkillSelectionCase) -> None:
+            result = await _run_case(
+                evaluation_client,
+                config,
+                catalog,
+                case,
+                semaphore,
+            )
+            checkpoint.save_result(case.case_id, result.artifact_value())
+
+        await asyncio.gather(*(run_and_checkpoint(case) for case in pending_cases))
+        results = [
+            _selection_result(payload)
+            for payload in checkpoint.load_ordered_results(
+                case.case_id for case in dataset.cases
+            )
+        ]
+        checkpoint.finalize()
+    finally:
+        checkpoint.close()
+
+    artifacts.write_jsonl(
+        _SELECTIONS_FILENAME,
+        (result.artifact_value() for result in results),
     )
-    for result in results:
-        artifacts.append_line("selections.jsonl", result.artifact_value())
 
     correct = sum(result.correct for result in results)
     denominator = len(dataset.cases)
@@ -503,29 +678,20 @@ async def run_skill_selection_eval(
             "sha256": catalog.sha256,
             "skill_count": len(catalog.names),
         },
-        "prompt_pins": {
-            "system_sha256": _sha256_text(_SYSTEM_PROMPT),
-            "tool_schema_sha256": _sha256_bytes(
-                json.dumps(
-                    catalog.tool_schema,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ),
-        },
+        "prompt_pins": prompt_pins,
         "provider": {
             "requested_model": config.model,
             "endpoint": endpoint,
             "model_revision_status": model_revision_status,
             "system_fingerprints": sorted(fingerprints),
         },
-        "budget": {
-            "max_output_tokens_per_case": config.max_output_tokens,
-            "timeout_seconds_per_case": config.timeout_s,
-            "max_concurrency": config.max_concurrency,
-            "calls": denominator,
-            "max_provider_attempts_per_case": evaluation_client.max_retries + 1,
-            "temperature": 0.0,
+        "budget": budget,
+        "checkpoint": {
+            "contract_sha256": contract_sha256,
+            "resumed": config.resume,
+            "reused_case_count": len(completed_ids),
+            "provider_call_case_count": len(pending_cases),
+            "path": _CHECKPOINT_FILENAME,
         },
         "scoring": {
             "correct": correct,
@@ -539,7 +705,8 @@ async def run_skill_selection_eval(
         "operational_failure_case_ids": [result.case_id for result in operational],
         "failures": failures,
         "artifacts": {
-            "selection_results": "selections.jsonl",
+            "selection_results": _SELECTIONS_FILENAME,
+            "checkpoint": _CHECKPOINT_FILENAME,
             "run_manifest": "run-manifest.json",
             "checksum_file": "checksums.sha256",
         },
@@ -572,6 +739,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrency", default=10, type=int)
     parser.add_argument("--minimum-accuracy", default=0.948, type=float)
     parser.add_argument("--required-case-count", default=1_000, type=int)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume only from a checkpoint whose full evaluation contract matches",
+    )
     return parser
 
 
@@ -592,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         max_concurrency=args.max_concurrency,
         minimum_accuracy=args.minimum_accuracy,
         required_case_count=args.required_case_count,
+        resume=args.resume,
     )
     receipt = asyncio.run(run_skill_selection_eval(config, client))
     print(
