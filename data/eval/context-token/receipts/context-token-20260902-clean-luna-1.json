@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REMOTE_PROVIDER_REPORTED_USAGE",
+  "limitations": [
+    "This lane verifies provider-reported context A/B usage, not the full product E2E.",
+    "P3 paths are task-pinned; this lane does not measure context-selection accuracy.",
+    "The full raw artifact tree is retained in the local ignored eval_results directory."
+  ],
+  "run_id": "context-token-20260902-clean-luna-1",
+  "trace_id": "440f3e7ab96344b393abe089dd7a2390",
+  "source_pin": {
+    "git_sha": "24bdfad65d64d5d1525217acb5737c55f1363eaa",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_id": "workflow-provider-contract-v1",
+    "task_sha256": "dffbe79dc36a97a5b28e45b686fa80322a34e0095034ce1a8cac3bc734abc77c",
+    "corpus_sha256": "b3f20d32ae1eff77324e8126676fba068a602ab3deba395481fb148893b80a6d",
+    "corpus_file_count": 7,
+    "redacted_file_count": 0
+  },
+  "prompt_pins": {
+    "system_sha256": "4cbd2597800c89437aa7bb5be314da273371915bb3f03de24a81ed41f2525787",
+    "task_sha256": "9842b160235baf1042a3b82267678109f8bc4d7def1080a376ad7853ffd03ab7",
+    "baseline_context_sha256": "dac48f0d51b6db1fe42ce53c1a4c20275ad8cfbbd86ab45632bb85ab80a2ede7",
+    "layered_context_sha256": "adb4910b7fe7e38ee72d516991fc5076a7470b311f698a926c098c3df7be5023"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-luna",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED"
+  },
+  "budget": {
+    "max_output_tokens_per_arm": 512,
+    "max_input_tokens_per_arm": 100000,
+    "timeout_seconds_per_arm": 180.0,
+    "temperature": 0.0,
+    "calls_per_arm": 1
+  },
+  "arms": {
+    "baseline": {
+      "call_completed": true,
+      "provider_input_tokens": 17293,
+      "provider_output_tokens": 133,
+      "cached_input_tokens": 17152,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "reported_model": "gpt-5.6-luna",
+      "response_id_sha256": "29fcf3035412528ccfbfaebd2ae4cb5190b151831d7878fede03ec380c462f43",
+      "system_fingerprint": ""
+    },
+    "layered": {
+      "call_completed": true,
+      "provider_input_tokens": 545,
+      "provider_output_tokens": 245,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "1dfd2e0a263bb70834fc9f98b93f3f2454662af3308a420c68cce10df373ce19",
+      "reported_model": "gpt-5.6-luna",
+      "response_id_sha256": "e5f2480aa558b7027c0846f0c83a1c79018226930e1d05e2bca92570eb0c0983",
+      "system_fingerprint": ""
+    }
+  },
+  "comparison": {
+    "baseline_input_token_denominator": 17293,
+    "layered_input_token_denominator": 545,
+    "saved_input_tokens": 16748,
+    "input_token_reduction": 0.9684843578326491,
+    "minimum_required_reduction": 0.6,
+    "outcome_regressed": false
+  },
+  "failures": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": "eval_results/context-token-20260902-clean-luna-1",
+    "checksum_manifest_sha256": "5d1f6e07326dffae51c9d54761e890cfd817ca694ce89288f7a9990bb7261db3",
+    "source_receipt_sha256": "594faf69591aaccb513cdd55fe16c6626f9e15fd2f44a59e79b577b1d91c576f",
+    "run_manifest_sha256": "770f699f02c9e7935b2ff07548464c785b10ac86685f301b779a2fedd0c9c6c5",
+    "arm_results_sha256": "5fe9a97345efb7be63211cde452d6404169b4805032a8e267a5b6fe2c08f5322",
+    "context_database_sha256": "66bd9ebd8ac1455ff46988303ce59b2e2b7013b09a6553d4e3cfc762937f4f7b"
+  }
+}
