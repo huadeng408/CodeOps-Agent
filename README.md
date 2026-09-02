@@ -507,6 +507,11 @@ Python Orchestrator 的可运行原型，但目标描述中的每项能力都必
 - 锁定 1,000 个案例的 Skill 选型准确率 `>=948/1000`。
 - 固定预算和官方 scorer 下的 SWE 子集 `>=18/20`。
 
+Windows 上的 SWE 官方 scorer 默认使用 WSL2 `Ubuntu-24.04`，并在实际评分前用同一
+distro 做 Docker/Python 能力探测。若主机安装了其他健康的 Linux distro，可设置
+`SWEBENCH_WSL_DISTRO` 覆盖默认值；探测或评分超时会保持 `BLOCKED`，不会降级为
+合成或非官方 verdict。
+
 `go test ./...`、`pytest -q`、集成测试和真实 E2E 是不同门禁；夹具、mock、
 合成 receipt 或开发 smoke 不得替代真实 E2E。当前未满足的门槛保持
 `BLOCKED`，不会用文档措辞升级为 `VERIFIED`。

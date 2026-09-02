@@ -66,6 +66,34 @@ class TestResolveNamespace:
         assert sb._resolve_namespace() == "myorg"
 
 
+def test_wsl_distro_uses_explicit_override(monkeypatch):
+    monkeypatch.setenv("SWEBENCH_WSL_DISTRO", "  Ubuntu-22.04  ")
+    assert sb._wsl_distro() == "Ubuntu-22.04"
+
+
+def test_wsl_runner_uses_same_explicit_distro(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setenv("SWEBENCH_WSL_DISTRO", "Ubuntu-22.04")
+    monkeypatch.setattr(sb.subprocess, "run", fake_run)
+
+    sb._run_official_scoring_wsl(
+        "preds.jsonl", "out", "ds", "test", 1, "rid", 60, "swebench"
+    )
+
+    assert captured["argv"][:4] == ["wsl.exe", "-d", "Ubuntu-22.04", "--"]
+
+
 class TestDispatchPassesNamespace:
     """The resolved namespace must reach whichever implementation runs."""
 

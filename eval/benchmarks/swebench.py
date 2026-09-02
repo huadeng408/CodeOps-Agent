@@ -1335,6 +1335,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _wsl_distro() -> str:
+    """Return the WSL distribution used for official scoring on Windows.
+
+    ``Ubuntu-24.04`` remains the default for reproducibility. Hosts with a
+    stopped or unhealthy default distro can select another installed distro
+    through ``SWEBENCH_WSL_DISTRO``; the same value is used for probing and
+    scoring so availability cannot be checked in one environment and run in
+    another.
+    """
+    return os.environ.get("SWEBENCH_WSL_DISTRO", "Ubuntu-24.04").strip() or "Ubuntu-24.04"
+
+
 def _can_score_official() -> tuple[bool, str]:
     """Check whether the official swebench scorer can run in this environment.
 
@@ -1355,9 +1367,10 @@ def _can_score_official() -> tuple[bool, str]:
 
     # Windows: check WSL2 availability
     if platform.system() == "Windows":
+        distro = _wsl_distro()
         try:
             process = subprocess.Popen(
-                ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c",
+                ["wsl.exe", "-d", distro, "--", "bash", "-c",
                  "python3 -c 'import docker; print(\"ok\")' 2>/dev/null || echo 'no-docker'"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1369,14 +1382,14 @@ def _can_score_official() -> tuple[bool, str]:
                 stdout, stderr = process.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 _terminate_windows_process_tree(process)
-                return False, "Windows but WSL2 check timed out after 30s"
+                return False, f"Windows but WSL2 {distro} check timed out after 30s"
             if process.returncode == 0 and "ok" in stdout:
-                return True, "Windows + WSL2 Ubuntu-24.04 + Docker available"
+                return True, f"Windows + WSL2 {distro} + Docker available"
             else:
                 detail = (stderr or stdout).strip()
-                return False, f"Windows + WSL2 but Docker not available in WSL: {detail}"
+                return False, f"Windows + WSL2 {distro} but Docker not available in WSL: {detail}"
         except Exception as e:
-            return False, f"Windows but WSL2 check failed: {e}"
+            return False, f"Windows but WSL2 {distro} check failed: {e}"
 
     return False, f"unsupported platform: {platform.system()}"
 
@@ -1673,7 +1686,8 @@ def _run_official_scoring_wsl(
     timeout: float,
     namespace: "str | None" = None,
 ) -> tuple[bool, str]:
-    """Run official scoring via WSL2 Ubuntu-24.04."""
+    """Run official scoring via the configured WSL2 distribution."""
+    distro = _wsl_distro()
     wsl_preds = _to_wsl_path(predictions_path)
     wsl_output = _to_wsl_path(output_dir)
     wsl_repo_root = _to_wsl_path(_REPO_ROOT)
@@ -1729,7 +1743,7 @@ def _run_official_scoring_wsl(
         )
         try:
             result = subprocess.run(
-                ["wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-c", cmd],
+                ["wsl.exe", "-d", distro, "--", "bash", "-c", cmd],
                 # Pin UTF-8: this call's stdout becomes ``scorer_status`` evidence.
                 # With bare ``text=True`` a zh-CN Windows decodes it as gbk, and the
                 # official harness emits ✔/✗ and box-drawing characters, so the
