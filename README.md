@@ -366,6 +366,12 @@ sidecar 不匹配、并发超过 10、provider usage 缺失或超预算、模型
 `SMOKE_PASS`。`skill-selection-v1` 是明确标为
 CC0-1.0 的仓库原创 catalog-routing 数据，不代表外部真实任务的泛化准确率。
 
+最新真实 provider 批次 `skill-selection-20260902-sol-1` 在 clean commit
+`9447e390` 上以 `gpt-5.6-sol`、10 并发和单例 256 output-token 预算完成
+`960/1000`（96.0%），无传输、usage、预算或 tool-call 完整性失败。BeeAPI 未返回
+`system_fingerprint`，因此精简 receipt 保持 `BLOCKED`，该结果证明锁定数据集上的
+选型准确率，不构成不可变模型 revision 已验证的正式发布结论。
+
 ### Phoenix 跨语言 Trace 显式集成测试
 
 该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。

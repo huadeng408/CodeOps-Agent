@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "status": "BLOCKED",
+  "exit_code": 2,
+  "evidence_scope": "REMOTE_PROVIDER_TOOL_SELECTION",
+  "limitations": [
+    "Repository-authored cases measure selection against this catalog, not external task validity.",
+    "A blank provider fingerprint leaves the immutable model revision unverified.",
+    "The full raw artifact tree is retained in the local ignored eval_results directory."
+  ],
+  "run_id": "skill-selection-20260902-sol-1",
+  "trace_id": "510dec0537254491bbdc0bf448fc37e5",
+  "source_pin": {
+    "git_sha": "9447e390889e18fba152f13dd6cbd2ec6dfab2da",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "dataset_pin": {
+    "dataset_id": "skill-selection-v1",
+    "sha256": "a89c2b77e241aea00c94a3a86be8fe254c10ee1ccd9cc90763d2eb38d3ba4239",
+    "license": "CC0-1.0",
+    "provenance": "Repository-authored English coding-agent routing cases; no external text was copied.",
+    "case_count": 1000
+  },
+  "catalog_pin": {
+    "sha256": "c3c82070630a283e8a9e77f5969a22bf3ba09961444f25e88260787649c183d9",
+    "skill_count": 40
+  },
+  "prompt_pins": {
+    "system_sha256": "554ac7f5a6407349753057b214a6b0e81e9f928fce8f948bd67e36e8f8ffaa1f",
+    "tool_schema_sha256": "456dd52e6a6671f7afed91f3c8858ccfb00b186da16710ba035f604b4048ac24"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-sol",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED",
+    "system_fingerprints": [
+      ""
+    ]
+  },
+  "budget": {
+    "max_output_tokens_per_case": 256,
+    "timeout_seconds_per_case": 120.0,
+    "max_concurrency": 10,
+    "calls": 1000,
+    "max_provider_attempts_per_case": 3,
+    "temperature": 0.0
+  },
+  "scoring": {
+    "correct": 960,
+    "incorrect": 40,
+    "denominator": 1000,
+    "accuracy": 0.96,
+    "minimum_required_accuracy": 0.948
+  },
+  "incorrect_case_ids": [
+    "skill-selection-v1-00-04-02",
+    "skill-selection-v1-00-04-03",
+    "skill-selection-v1-07-02-00",
+    "skill-selection-v1-07-02-01",
+    "skill-selection-v1-07-02-02",
+    "skill-selection-v1-07-02-03",
+    "skill-selection-v1-07-02-04",
+    "skill-selection-v1-07-03-00",
+    "skill-selection-v1-07-03-02",
+    "skill-selection-v1-07-03-04",
+    "skill-selection-v1-13-01-00",
+    "skill-selection-v1-13-01-01",
+    "skill-selection-v1-13-01-02",
+    "skill-selection-v1-13-03-04",
+    "skill-selection-v1-14-01-00",
+    "skill-selection-v1-14-01-01",
+    "skill-selection-v1-14-01-04",
+    "skill-selection-v1-14-04-01",
+    "skill-selection-v1-14-04-03",
+    "skill-selection-v1-15-02-00",
+    "skill-selection-v1-15-02-01",
+    "skill-selection-v1-15-02-02",
+    "skill-selection-v1-15-02-04",
+    "skill-selection-v1-15-03-00",
+    "skill-selection-v1-16-02-02",
+    "skill-selection-v1-16-03-01",
+    "skill-selection-v1-16-03-02",
+    "skill-selection-v1-21-03-00",
+    "skill-selection-v1-24-02-02",
+    "skill-selection-v1-24-02-04",
+    "skill-selection-v1-26-04-00",
+    "skill-selection-v1-26-04-04",
+    "skill-selection-v1-27-03-01",
+    "skill-selection-v1-27-03-02",
+    "skill-selection-v1-27-04-01",
+    "skill-selection-v1-27-04-04",
+    "skill-selection-v1-29-01-00",
+    "skill-selection-v1-30-01-02",
+    "skill-selection-v1-30-01-04",
+    "skill-selection-v1-31-02-02"
+  ],
+  "selection_issue_case_ids": [],
+  "operational_failure_case_ids": [],
+  "failures": [
+    {
+      "category": "model_revision",
+      "message": "remote verification requires one non-empty provider system fingerprint across all cases"
+    }
+  ],
+  "artifacts": {
+    "selection_results": "selections.jsonl",
+    "run_manifest": "run-manifest.json",
+    "checksum_file": "checksums.sha256"
+  },
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": "eval_results/skill-selection-20260902-sol-1",
+    "checksum_manifest_sha256": "35f3d477bc76a1323a78c27279f4946a14d3a1a9c2ecec86c07aa79366b4230c",
+    "source_receipt_sha256": "ae603ec3e23b3f615aa00f9c81663b503783407cd5087c9dc6f7204b53c59c30",
+    "run_manifest_sha256": "530db38f149a9fe789133883d6294488e1e58f91c6f0363daca5e383544faf48",
+    "selection_results_sha256": "c50c456e41f1a655324586752aa1e62b009b104caf9d6c48210e679a6898babe"
+  }
+}
