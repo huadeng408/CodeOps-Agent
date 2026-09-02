@@ -147,6 +147,8 @@ eval/swebench_work/run_tb_single.py
 # Regenerable per run and keyed by a per-process run_id, so it would otherwise
 # accumulate one file per instance per run in the repository root.
 code-agent-*.swebench-*.json
+# Native Windows scorer reports are also reproducible run artifacts.
+code-agent-*.native-*.json
 
 # Local runtime, dependency caches and generated process state.  These paths
 # are reproducible or machine-specific and must never enter the repository.

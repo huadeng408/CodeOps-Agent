@@ -71,6 +71,17 @@ def test_wsl_distro_uses_explicit_override(monkeypatch):
     assert sb._wsl_distro() == "Ubuntu-22.04"
 
 
+def test_windows_scorer_backend_defaults_to_wsl(monkeypatch):
+    monkeypatch.delenv("SWEBENCH_WINDOWS_BACKEND", raising=False)
+    assert sb._windows_scorer_backend() == "wsl"
+
+
+def test_windows_scorer_backend_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("SWEBENCH_WINDOWS_BACKEND", "unknown")
+    with pytest.raises(ValueError, match="SWEBENCH_WINDOWS_BACKEND"):
+        sb._windows_scorer_backend()
+
+
 def test_wsl_runner_uses_same_explicit_distro(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -111,16 +122,33 @@ class TestDispatchPassesNamespace:
             seen["args"] = args
             return True, "stub"
 
+        def fake_native(*args, **kwargs):
+            seen["impl"] = "native"
+            seen["args"] = args
+            return True, "stub"
+
         monkeypatch.setattr(sb.platform, "system", lambda: system)
         monkeypatch.setattr(sb, "_run_official_scoring_wsl", fake_wsl)
         monkeypatch.setattr(sb, "_run_official_scoring_local", fake_local)
+        monkeypatch.setattr(
+            sb, "_run_official_scoring_windows_native", fake_native, raising=False
+        )
         return seen
 
     def test_windows_path_receives_default_namespace(self, monkeypatch):
         monkeypatch.delenv("SWEBENCH_NAMESPACE", raising=False)
+        monkeypatch.delenv("SWEBENCH_WINDOWS_BACKEND", raising=False)
         seen = self._capture(monkeypatch, "Windows")
         sb._run_official_scoring("preds.jsonl", "out")
         assert seen["impl"] == "wsl"
+        assert seen["args"][-1] == "swebench"
+
+    def test_windows_native_backend_receives_default_namespace(self, monkeypatch):
+        monkeypatch.delenv("SWEBENCH_NAMESPACE", raising=False)
+        monkeypatch.setenv("SWEBENCH_WINDOWS_BACKEND", "native")
+        seen = self._capture(monkeypatch, "Windows")
+        sb._run_official_scoring("preds.jsonl", "out")
+        assert seen["impl"] == "native"
         assert seen["args"][-1] == "swebench"
 
     def test_linux_path_receives_default_namespace(self, monkeypatch):
@@ -385,6 +413,66 @@ class TestLocalScorerDeadline:
         sb._terminate_local_scorer_tree(process, 0.1)
 
         assert process.communicate_calls == 1
+
+
+class TestWindowsNativeScorer:
+    """The native Windows path must keep the same deadline and UTF-8 contract."""
+
+    def test_native_scorer_shims_resource_and_pins_utf8(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        class Process:
+            pid = 6789
+            returncode = 0
+
+            def communicate(self, *, timeout):
+                captured["communicate_timeout"] = timeout
+                return "Instances resolved: 1", ""
+
+        def fake_popen(argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Process()
+
+        monkeypatch.setattr(sb.subprocess, "Popen", fake_popen)
+        ok, detail = sb._run_official_scoring_windows_native(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 0.5, "swebench"
+        )
+
+        assert ok is True
+        assert "Instances resolved: 1" in detail
+        assert captured["env"]["PYTHONUTF8"] == "1"
+        assert captured["creationflags"] == getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+        command = captured["argv"][2]
+        assert "sys.modules['resource']" in command
+        assert "from swebench.harness.run_evaluation import main" in command
+        assert 0 < float(captured["communicate_timeout"]) < 0.5
+
+    def test_native_scorer_timeout_reaps_windows_process_tree(self, monkeypatch) -> None:
+        class Process:
+            pid = 6790
+            returncode = None
+
+            def communicate(self, *, timeout):
+                raise subprocess.TimeoutExpired(["python"], timeout)
+
+        terminated: list[int] = []
+        monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: Process())
+        monkeypatch.setattr(
+            sb,
+            "_terminate_windows_process_tree",
+            lambda process: terminated.append(process.pid),
+            raising=False,
+        )
+
+        with pytest.raises(TimeoutError, match="Harness deadline"):
+            sb._run_official_scoring_windows_native(
+                "preds.jsonl", "out", "ds", "test", 1, "rid", 0.5, "swebench"
+            )
+
+        assert terminated == [6790]
 
 
 def test_wsl_availability_probe_reaps_hung_process_tree(monkeypatch) -> None:

@@ -17,12 +17,14 @@ from pathlib import Path
 import pytest
 
 from eval.harness.artifacts import RunArtifacts
+import eval.harness.skill_selection_eval as skill_selection_module
 from eval.harness.skill_selection_eval import (
     SkillSelectionEvalConfig,
     load_skill_selection_dataset,
     run_skill_selection_eval,
 )
 from orchestrator.llm import ChatResponse, ToolCall, Usage
+from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.llm.providers.openai import OpenAIClient
 
 
@@ -121,6 +123,21 @@ class _StaticRemoteClient(OpenAIClient):
                 "reported_model": request.model,
                 "response_id": "remote-response",
                 "system_fingerprint": f"fp-{selected}",
+            },
+        )
+
+
+class _StaticAnthropicClient(AnthropicClient):
+    async def chat(self, request) -> ChatResponse:
+        prompt = request.messages[-1].content
+        selected = "debug" if "crashes" in prompt else "inspect"
+        return ChatResponse(
+            tool_calls=[ToolCall(name="Skill", arguments={"name": selected})],
+            usage=Usage(input_tokens=100, output_tokens=5),
+            model_identity={
+                "reported_model": request.model,
+                "response_id": "anthropic-response",
+                "system_fingerprint": "anthropic-fp",
             },
         )
 
@@ -244,6 +261,49 @@ def test_dataset_expands_locked_denominator_and_requires_catalog_coverage(
     assert len({case.case_id for case in dataset.cases}) == 8
     assert {case.expected_skill for case in dataset.cases} == {"debug", "inspect"}
     assert all("expected_skill" not in case.prompt for case in dataset.cases)
+
+
+def test_cli_accepts_anthropic_compatible_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    client = _StaticAnthropicClient(
+        api_key="test-key",
+        base_url="http://127.0.0.1/v1",
+        model="locked-model",
+        max_retries=0,
+    )
+    monkeypatch.setattr(
+        skill_selection_module, "build_default_client", lambda: client
+    )
+
+    exit_code = skill_selection_module.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--dataset",
+            str(dataset_path),
+            "--artifact-root",
+            str(tmp_path / "eval_results"),
+            "--run-id",
+            "skill-selection-anthropic-cli",
+            "--model",
+            "locked-model",
+            "--required-case-count",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    receipt = json.loads(
+        (
+            tmp_path
+            / "eval_results"
+            / "skill-selection-anthropic-cli"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "SMOKE_PASS"
 
     payload = json.loads(dataset_path.read_text(encoding="utf-8"))
     payload["skills"] = payload["skills"][:1]

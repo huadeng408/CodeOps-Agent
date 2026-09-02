@@ -512,6 +512,18 @@ distro 做 Docker/Python 能力探测。若主机安装了其他健康的 Linux 
 `SWEBENCH_WSL_DISTRO` 覆盖默认值；探测或评分超时会保持 `BLOCKED`，不会降级为
 合成或非官方 verdict。
 
+如果 WSL 发行版不可用但 Docker Desktop 和 Windows Python 已安装，可显式选择原生
+Windows scorer：
+
+```powershell
+$env:SWEBENCH_WINDOWS_BACKEND = 'native'
+```
+
+该路径在子进程中注入仅用于兼容官方包的 `resource` 限制空实现，并固定
+`PYTHONUTF8=1` 读取 UTF-8 predictions；仍调用同一个 `swebench.harness.run_evaluation`
+官方 scorer，超时通过 `taskkill /T /F` 回收整个进程树。默认值仍为 `wsl`，两种路径
+都要求 Docker 可用并在不可用时保持 `BLOCKED`。
+
 `go test ./...`、`pytest -q`、集成测试和真实 E2E 是不同门禁；夹具、mock、
 合成 receipt 或开发 smoke 不得替代真实 E2E。当前未满足的门槛保持
 `BLOCKED`，不会用文档措辞升级为 `VERIFIED`。

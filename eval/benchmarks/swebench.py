@@ -1347,6 +1347,29 @@ def _wsl_distro() -> str:
     return os.environ.get("SWEBENCH_WSL_DISTRO", "Ubuntu-24.04").strip() or "Ubuntu-24.04"
 
 
+def _windows_scorer_backend() -> str:
+    """Select the Windows official scorer backend without guessing silently."""
+    backend = os.environ.get("SWEBENCH_WINDOWS_BACKEND", "wsl").strip().lower()
+    if not backend:
+        backend = "wsl"
+    if backend not in {"wsl", "native"}:
+        raise ValueError(
+            "SWEBENCH_WINDOWS_BACKEND must be either 'wsl' or 'native'"
+        )
+    return backend
+
+
+def _windows_resource_shim() -> str:
+    """Return the child bootstrap needed because Python on Windows lacks resource."""
+    return (
+        "import sys,types; "
+        "resource=types.ModuleType('resource'); "
+        "resource.RLIMIT_NOFILE=7; "
+        "resource.setrlimit=lambda *_args: None; "
+        "sys.modules['resource']=resource; "
+    )
+
+
 def _can_score_official() -> tuple[bool, str]:
     """Check whether the official swebench scorer can run in this environment.
 
@@ -1367,6 +1390,40 @@ def _can_score_official() -> tuple[bool, str]:
 
     # Windows: check WSL2 availability
     if platform.system() == "Windows":
+        if _windows_scorer_backend() == "native":
+            probe = (
+                _windows_resource_shim()
+                + "import docker; docker.from_env().ping(); "
+                + "import swebench.harness.run_evaluation; print('ok')"
+            )
+            env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            process = None
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, "-c", probe],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    _terminate_windows_process_tree(process)
+                    return False, "Windows native scorer check timed out after 30s"
+                if process.returncode == 0 and "ok" in stdout:
+                    return True, "Windows native Python + Docker + swebench available"
+                detail = (stderr or stdout).strip()
+                return False, f"Windows native scorer unavailable: {detail}"
+            except Exception as exc:
+                if process is not None:
+                    _terminate_windows_process_tree(process)
+                return False, f"Windows native scorer check failed: {exc}"
+
         distro = _wsl_distro()
         try:
             process = subprocess.Popen(
@@ -1466,6 +1523,11 @@ def _run_official_scoring(
     if namespace is _UNSET:
         namespace = _resolve_namespace()
     if platform.system() == "Windows":
+        if _windows_scorer_backend() == "native":
+            return _run_official_scoring_windows_native(
+                predictions_path, output_dir, dataset_name, split,
+                max_workers, run_id, timeout, namespace,
+            )
         return _run_official_scoring_wsl(
             predictions_path, output_dir, dataset_name, split,
             max_workers, run_id, timeout, namespace,
@@ -1570,6 +1632,83 @@ def _terminate_local_scorer_tree(
     except ProcessLookupError:
         pass
     process.communicate()
+
+
+def _run_official_scoring_windows_native(
+    predictions_path: str,
+    output_dir: str,
+    dataset_name: str,
+    split: str,
+    max_workers: int,
+    run_id: str,
+    timeout: float,
+    namespace: "str | None" = None,
+) -> tuple[bool, str]:
+    """Run the official scorer in a native Windows process with Docker Desktop."""
+    if timeout <= 0:
+        raise TimeoutError("official scorer deadline exhausted before native start")
+    kill_margin = min(1.0, timeout / 4)
+    launch_margin = min(0.05, timeout / 4)
+    process_timeout = timeout - kill_margin - launch_margin
+    if process_timeout <= 0:
+        raise TimeoutError("official scorer deadline exhausted before native start")
+    scorer_args = {
+        "dataset_name": dataset_name,
+        "split": split,
+        "instance_ids": [],
+        "predictions_path": predictions_path,
+        "max_workers": max_workers,
+        "force_rebuild": False,
+        "cache_level": "env",
+        "clean": False,
+        "open_file_limit": 4096,
+        "run_id": run_id,
+        "timeout": max(1, int(process_timeout)),
+        "namespace": namespace,
+        "rewrite_reports": False,
+        "modal": False,
+        "report_dir": output_dir,
+    }
+    command = [
+        sys.executable,
+        "-c",
+        _windows_resource_shim()
+        + "import json,sys; "
+        + "from swebench.harness.run_evaluation import main; "
+        + "main(**json.loads(sys.argv[1]))",
+        json.dumps(scorer_args, separators=(",", ":")),
+    ]
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(_REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        stdout, stderr = process.communicate(timeout=process_timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_windows_process_tree(process)
+        raise TimeoutError(
+            f"Native Windows official scorer exceeded the {timeout:.3f}s Harness deadline"
+        ) from exc
+    except Exception as exc:
+        return False, f"native Windows scoring failed: {exc}"
+    if process.returncode == 0:
+        return True, (
+            "native Windows official scoring completed: "
+            + _summarise_official_stdout(stdout)
+        )
+    combined = f"{stderr}\n{stdout}".strip()
+    return False, (
+        f"native Windows scoring failed (exit {process.returncode}): {combined[-500:]}"
+    )
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

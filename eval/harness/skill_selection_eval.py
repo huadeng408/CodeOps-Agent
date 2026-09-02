@@ -18,8 +18,8 @@ from eval.harness.redaction import redact_credential_text
 from eval.harness.skill_selection_checkpoint import SkillSelectionCheckpoint
 from eval.harness.source_pin import source_pin
 from orchestrator.config import load_dotenv
-from orchestrator.llm import ChatMessage, ChatRequest, ChatResponse
-from orchestrator.llm.providers import OpenAIClient, build_default_client
+from orchestrator.llm import ChatMessage, ChatRequest, ChatResponse, LLMClient
+from orchestrator.llm.providers import build_default_client
 from orchestrator.runtime.tools import ToolRegistry
 
 _SYSTEM_PROMPT = (
@@ -265,7 +265,7 @@ def load_skill_selection_dataset(
     )
 
 
-def _endpoint_pin(client: OpenAIClient) -> dict[str, str]:
+def _endpoint_pin(client: LLMClient) -> dict[str, str]:
     parsed = urlparse(client.base_url)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
@@ -279,7 +279,7 @@ def _endpoint_pin(client: OpenAIClient) -> dict[str, str]:
     return endpoint
 
 
-def _evidence_scope(client: OpenAIClient) -> tuple[str, str, dict[str, str]]:
+def _evidence_scope(client: LLMClient) -> tuple[str, str, dict[str, str]]:
     endpoint = _endpoint_pin(client)
     scheme = endpoint["scheme"]
     host = endpoint["host"]
@@ -309,7 +309,7 @@ def _prompt_pins(catalog: _Catalog) -> dict[str, str]:
 
 def _budget_pin(
     config: SkillSelectionEvalConfig,
-    client: OpenAIClient,
+    client: LLMClient,
     case_count: int,
 ) -> dict[str, int | float]:
     return {
@@ -409,7 +409,7 @@ def _selected_skill(response: ChatResponse, catalog: _Catalog) -> tuple[str, str
 
 
 async def _run_case(
-    client: OpenAIClient,
+    client: LLMClient,
     config: SkillSelectionEvalConfig,
     catalog: _Catalog,
     case: SkillSelectionCase,
@@ -485,7 +485,7 @@ async def _run_case(
 
 async def run_skill_selection_eval(
     config: SkillSelectionEvalConfig,
-    client: OpenAIClient,
+    client: LLMClient,
 ) -> dict[str, Any]:
     config.validate()
     dataset = load_skill_selection_dataset(config.dataset_path, config.manifest_path)
@@ -751,8 +751,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     load_dotenv()
     client = build_default_client()
-    if not isinstance(client, OpenAIClient):
-        raise TypeError("an OpenAI-compatible provider client is required")
+    if not isinstance(client, LLMClient):
+        raise TypeError("a configured LLM provider client is required")
     config = SkillSelectionEvalConfig(
         run_id=args.run_id,
         artifact_root=args.artifact_root,
