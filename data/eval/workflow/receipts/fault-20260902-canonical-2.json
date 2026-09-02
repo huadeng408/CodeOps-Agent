@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REAL_PROCESS_SQLITE_WORKFLOW_RECOVERY",
+  "limitations": [
+    "The workload uses deterministic 80 ms worker tasks and does not call an external model provider.",
+    "VERIFIED applies only to the fixed process-fault recovery lane, not the full project Goal."
+  ],
+  "run_id": "fault-20260902-canonical-2",
+  "trace_id": "2f10957829c14d30af5cc9f113114176",
+  "source_pin": {
+    "git_sha": "e6f176af72d973fff9ab6e688a27acbd9348f5a2",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_manifest_sha256": "599b4707c5720da7ef7a2506bfc9b226c19f0b7b258a5a4e84d59d3e7e28eea0"
+  },
+  "model_pin": "deterministic-workflow-executor-v1",
+  "budget": {
+    "worker_count": 8,
+    "task_count": 200,
+    "fault_count": 30,
+    "task_duration_s": 0.08,
+    "fault_interval_s": 0.04,
+    "timeout_s": 180.0,
+    "canonical": true
+  },
+  "fault_injection": {
+    "requested": 30,
+    "applied": 30,
+    "events": 30,
+    "unique_process_ids": 30
+  },
+  "recovery": {
+    "denominator": 200,
+    "successes": 200,
+    "failures": 0,
+    "success_rate": 1.0,
+    "minimum_required_success_rate": 0.985,
+    "incomplete_task_ids": []
+  },
+  "processes": {
+    "started": 38,
+    "injected_terminations": 30,
+    "injected_nonzero_exits": 30
+  },
+  "sqlite": {
+    "integrity_check": "ok",
+    "workflow_count": 200,
+    "event_count": 912
+  },
+  "failures": [],
+  "checksum_verification": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": ".tmp/fault-injection/fault-20260902-canonical-2",
+    "checksum_manifest_sha256": "f5518bf7fa7edec6c8fa34ddf39d3f5f25b9e600c5e04d5c8a13ba2f958664c5",
+    "source_receipt_sha256": "81fd871c750554521254d1221447dbe29efdbe4d192c6a6a119126f19574572d",
+    "run_manifest_sha256": "ea760b6bf65160a63ef1d9ba5fd9e9a255abaecd87699eededb10b431b7fcb3d",
+    "task_manifest_file_sha256": "4789cd95969e3a3d82edd0c9bcb5648d69374a8cf3a312af824e4054cb383f75",
+    "fault_events_sha256": "f4fb3255c07e6f987db53ad960d1329033161a20627cd267d440d80ee82b7010",
+    "process_exits_sha256": "74efe49d266c9d8ab50963bcd5c53c6e8fdf12cd44ccbcc83c523e9667297b13",
+    "workflow_sqlite_sha256": "31544741841df8a4193c3dae697c9a5f135c9eab77f7abca30cf7a586ad86cb3"
+  }
+}
