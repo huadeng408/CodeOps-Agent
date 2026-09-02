@@ -5,6 +5,20 @@ import json
 from orchestrator.skills.manager import SkillManager
 
 
+def test_default_skill_manager_exposes_goal_catalog_without_project_manifest() -> None:
+    manager = SkillManager()
+
+    skills = manager.list()
+    assert len(skills) >= 40
+    assert {skill.name for skill in skills} >= {
+        "inspect",
+        "task-decomposition",
+        "integration-test",
+        "release",
+    }
+    assert all(skill.description and skill.prompt and skill.tools for skill in skills)
+
+
 def test_skill_manager_mirrors_harness_manifest_without_loading_prompt_bodies(tmp_path) -> None:
     agent_dir = tmp_path / ".agent"
     agent_dir.mkdir()

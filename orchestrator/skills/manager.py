@@ -22,6 +22,8 @@ class SkillManager:
     def __init__(self, project_root: str | Path | None = None) -> None:
         self._skills: dict[str, Skill] = {}
         self._builtin_names: set[str] = set()
+        self._catalog_names: set[str] = set()
+        self._catalog_defaults: dict[str, Skill] = {}
         self._manifest_names: set[str] = set()
         self._manifest_path = (
             Path(project_root).resolve() / ".agent" / "skills.json"
@@ -40,6 +42,25 @@ class SkillManager:
         ):
             self.register(skill)
             self._builtin_names.add(skill.name)
+
+        # Keep the standalone Python orchestrator useful before the Go Harness
+        # has emitted its project manifest. Specialized built-ins above retain
+        # their richer prompts; catalog entries fill the remaining names.
+        from .catalog import goal_skill_specs
+
+        for name, description, tools in goal_skill_specs():
+            if name in self._skills:
+                continue
+            skill = Skill(
+                name=name,
+                description=description,
+                prompt=f"Use the {name} Skill to {description}.",
+                tools=list(tools),
+            )
+            self.register(skill)
+            self._builtin_names.add(name)
+            self._catalog_names.add(name)
+            self._catalog_defaults[name] = skill
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.name] = skill
@@ -67,6 +88,8 @@ class SkillManager:
             if self._manifest_names:
                 for name in self._manifest_names - self._builtin_names:
                     self._skills.pop(name, None)
+                for name in self._manifest_names & self._catalog_names:
+                    self._skills[name] = self._catalog_defaults[name]
                 self._manifest_names.clear()
                 self._manifest_mtime_ns = None
             return
@@ -89,7 +112,13 @@ class SkillManager:
             if not isinstance(tools, list):
                 tools = []
             existing = self._skills.get(name)
-            prompt = existing.prompt if existing is not None and name in self._builtin_names else ""
+            prompt = (
+                existing.prompt
+                if existing is not None
+                and name in self._builtin_names
+                and name not in self._catalog_names
+                else ""
+            )
             self._skills[name] = Skill(
                 name=name,
                 description=description,
@@ -97,6 +126,11 @@ class SkillManager:
                 tools=[str(item).strip() for item in tools if str(item).strip()],
             )
             next_names.add(name)
+        # A valid project manifest is authoritative for catalog-only Skills;
+        # this keeps discovery semantics deterministic when a manifest is
+        # regenerated with a smaller set.
+        for name in self._catalog_names - next_names:
+            self._skills.pop(name, None)
         for name in self._manifest_names - next_names - self._builtin_names:
             self._skills.pop(name, None)
         self._manifest_names = next_names
