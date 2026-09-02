@@ -87,6 +87,8 @@ class SQLiteWorkflowStore:
             destination = sqlite3.connect(destination_path)
             try:
                 self._connection.backup(destination)
+                destination.execute("PRAGMA journal_mode = DELETE")
+                destination.commit()
             finally:
                 destination.close()
         return destination_path

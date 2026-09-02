@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from eval.harness.fault_injection import (
@@ -9,7 +10,6 @@ from eval.harness.fault_injection import (
     run_fault_injection,
     verify_receipt,
 )
-from orchestrator.workflows import SQLiteWorkflowStore
 
 
 def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Path) -> None:
@@ -40,13 +40,15 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     assert receipt["sqlite"]["event_count"] > 0
     assert len(receipt["processes"]["exit_codes"]) >= 2
     assert verify_receipt(config.artifact_root / config.run_id) == []
-    artifact_store = SQLiteWorkflowStore(config.artifact_root / config.run_id / "workflow.sqlite")
+    artifact_path = config.artifact_root / config.run_id / "workflow.sqlite"
+    artifact_store = sqlite3.connect(f"file:{artifact_path.as_posix()}?mode=ro", uri=True)
     try:
-        artifact_event_count = sum(len(artifact_store.events(task_id)) for task_id in receipt["sqlite"]["events_per_workflow"])
+        artifact_event_count = artifact_store.execute("select count(*) from workflow_events").fetchone()[0]
         assert artifact_event_count == receipt["sqlite"]["event_count"]
-        assert artifact_store.load("task-0001") is not None
+        assert artifact_store.execute("select count(*) from workflow_checkpoints").fetchone()[0] == 6
     finally:
         artifact_store.close()
+    assert verify_receipt(config.artifact_root / config.run_id) == []
 
 
 def test_fault_injection_receipt_is_tamper_evident(tmp_path: Path) -> None:
