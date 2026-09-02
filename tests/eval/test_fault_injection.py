@@ -46,6 +46,8 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     receipt = run_fault_injection(config)
 
     assert receipt["status"] == "SMOKE_VERIFIED"
+    assert len(receipt["trace_id"]) == 32
+    assert receipt["exit_code"] == 2
     assert receipt["run_id"] == "fault-test"
     assert receipt["budget"]["worker_count"] == 2
     assert receipt["budget"]["task_count"] == 6
@@ -130,6 +132,7 @@ def test_unexpected_child_exit_is_recorded_and_not_verified(tmp_path: Path) -> N
     receipt = run_fault_injection(config)
 
     assert receipt["status"] == "INCOMPLETE"
+    assert receipt["exit_code"] == 2
     assert any(item["category"] == "process_exit" for item in receipt["failures"])
     failure = next(item for item in receipt["failures"] if item["category"] == "process_exit")
     assert "unexpected child failure" in failure["detail"]

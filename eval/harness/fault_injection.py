@@ -117,10 +117,12 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
     task_manifest_bytes = json.dumps(task_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     data_pin = hashlib.sha256(task_manifest_bytes).hexdigest()
     source_pin = _source_pin()
+    trace_id = uuid.uuid4().hex
     artifacts.write_manifest(
         {
             "schema_version": 1,
             "run_id": config.run_id,
+            "trace_id": trace_id,
             "git_sha": source_pin["git_sha"],
             "dirty_hash": source_pin["dirty_hash"],
             "model": config.model_pin,
@@ -251,19 +253,24 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
         artifacts.write("failures.json", {"failures": failures})
         recovery_successes = len(complete)
         recovery_rate = recovery_successes / len(task_ids)
+        status = (
+            "VERIFIED"
+            if _is_canonical(config)
+            and not failures
+            and applied_faults == config.fault_count
+            and recovery_successes == len(task_ids)
+            else "SMOKE_VERIFIED"
+            if not failures
+            and applied_faults == config.fault_count
+            and recovery_successes == len(task_ids)
+            else "INCOMPLETE"
+        )
         receipt = {
             "schema_version": 1,
-            "status": (
-                "VERIFIED"
-                if _is_canonical(config)
-                and not failures
-                and applied_faults == config.fault_count
-                and recovery_successes == len(task_ids)
-                else "SMOKE_VERIFIED"
-                if not failures and applied_faults == config.fault_count and recovery_successes == len(task_ids)
-                else "INCOMPLETE"
-            ),
+            "status": status,
+            "exit_code": 0 if status == "VERIFIED" else 2,
             "run_id": config.run_id,
+            "trace_id": trace_id,
             "source_pin": source_pin,
             "data_pin": {"task_manifest_sha256": data_pin},
             "model_pin": config.model_pin,
@@ -643,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     print(json.dumps({"status": receipt["status"], "run_id": receipt["run_id"], "success_rate": receipt["recovery"]["success_rate"]}, ensure_ascii=True))
-    return 0 if receipt["status"] == "VERIFIED" else 2
+    return int(receipt["exit_code"])
 
 
 if __name__ == "__main__":
