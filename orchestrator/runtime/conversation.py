@@ -65,6 +65,7 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 MAX_HISTORY_MESSAGES = 40
 MAX_HISTORY_CHARS = 32_000
 MAX_HISTORY_MESSAGE_CHARS = 4_000
+MAX_CONSECUTIVE_EMPTY_RESPONSES = 3
 
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 THINKING_BUDGET_TOKENS: int = 10000
@@ -345,13 +346,16 @@ class ConversationRunner:
                 return
             if not response.text.strip() and not response.tool_calls:
                 consecutive_empty_responses += 1
-                if consecutive_empty_responses == 1:
+                if consecutive_empty_responses < MAX_CONSECUTIVE_EMPTY_RESPONSES:
                     messages.append(
                         ChatMessage(
                             role="system",
                             content=(
-                                "The provider returned no assistant text or tool calls. "
-                                "Continue the task from the existing context."
+                                "The provider returned no assistant text or "
+                                "tool calls. "
+                                "Continue the task from the existing context. "
+                                f"Recovery attempt {consecutive_empty_responses} of "
+                                f"{MAX_CONSECUTIVE_EMPTY_RESPONSES - 1}."
                             ),
                         )
                     )

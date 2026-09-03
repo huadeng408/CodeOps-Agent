@@ -183,14 +183,16 @@ class UsageFakeLLM:
 class EmptyResponseFakeLLM:
     model = "gpt-4o"
 
-    def __init__(self, recover: bool) -> None:
+    def __init__(self, recover_on_attempt: int | None) -> None:
         self.requests = []
-        self.recover = recover
+        self.recover_on_attempt = recover_on_attempt
 
     async def chat(self, request):
         self.requests.append(request)
-        if self.recover and len(self.requests) == 2:
-            return ChatResponse(text="recovered after empty response")
+        if len(self.requests) == self.recover_on_attempt:
+            return ChatResponse(
+                text=f"recovered on request {self.recover_on_attempt}"
+            )
         return ChatResponse()
 
 
@@ -971,7 +973,7 @@ def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
 def test_converse_retries_one_empty_model_response(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
-    app.llm = EmptyResponseFakeLLM(recover=True)
+    app.llm = EmptyResponseFakeLLM(recover_on_attempt=2)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
         OrchestratorService(app), server
@@ -996,19 +998,19 @@ def test_converse_retries_one_empty_model_response(monkeypatch, tmp_path) -> Non
         text = "".join(
             response.text.text for response in responses if response.HasField("text")
         )
-        assert text == "recovered after empty response"
+        assert text == "recovered on request 2"
         assert len(app.llm.requests) == 2
         assert responses[-1].done.success is True
     finally:
         server.stop(grace=0)
 
 
-def test_converse_fails_after_repeated_empty_model_responses(
+def test_converse_keeps_context_for_second_empty_response_recovery(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
-    app.llm = EmptyResponseFakeLLM(recover=False)
+    app.llm = EmptyResponseFakeLLM(recover_on_attempt=3)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
         OrchestratorService(app), server
@@ -1030,7 +1032,56 @@ def test_converse_fails_after_repeated_empty_model_responses(
                 )
             )
 
-        assert len(app.llm.requests) == 2
+        text = "".join(
+            response.text.text for response in responses if response.HasField("text")
+        )
+        assert text == "recovered on request 3"
+        assert len(app.llm.requests) == 3
+        third_messages = app.llm.requests[2].messages
+        assert any(
+            message.role == "user" and message.content == "continue"
+            for message in third_messages
+        )
+        recovery_messages = [
+            message
+            for message in third_messages
+            if message.role == "system"
+            and "provider returned no assistant text" in message.content
+        ]
+        assert len(recovery_messages) == 2
+        assert responses[-1].done.success is True
+    finally:
+        server.stop(grace=0)
+
+
+def test_converse_fails_after_three_empty_model_responses(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = EmptyResponseFakeLLM(recover_on_attempt=None)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorService(app), server
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(text="continue")
+                            )
+                        ]
+                    )
+                )
+            )
+
+        assert len(app.llm.requests) == 3
         assert responses[-1].done.success is False
     finally:
         server.stop(grace=0)
