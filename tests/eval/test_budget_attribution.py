@@ -123,6 +123,32 @@ def test_explicit_instance_and_scorer_phase_budgets_are_honoured():
     assert budget.scorer_reserve_seconds == 240.0
 
 
+def test_instance_budget_is_capped_by_total_budget():
+    budget = _sized_budget(
+        1,
+        {
+            "EVAL_BUDGET_SECONDS": "100",
+            "EVAL_INSTANCE_BUDGET_SECONDS": "900",
+            "EVAL_SCORER_RESERVE_SECONDS": "20",
+        },
+    )
+    assert budget.wall_clock_seconds == 100.0
+    assert budget.instance_wall_clock_seconds == 100.0
+    assert budget.scorer_reserve_seconds == 20.0
+
+
+def test_scorer_reserve_is_checked_against_effective_instance_budget():
+    with pytest.raises(ValueError, match="smaller than the effective"):
+        _sized_budget(
+            1,
+            {
+                "EVAL_BUDGET_SECONDS": "100",
+                "EVAL_INSTANCE_BUDGET_SECONDS": "900",
+                "EVAL_SCORER_RESERVE_SECONDS": "100",
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "name,value",
     [

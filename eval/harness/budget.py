@@ -119,6 +119,9 @@ def build_run_budget(
         "EVAL_INSTANCE_BUDGET_SECONDS",
         total_wall_clock / count,
     )
+    # An explicit per-instance value cannot extend the run-level deadline. Keep
+    # one effective wall-clock budget for phase allocation and enforcement.
+    instance_wall_clock = min(total_wall_clock, instance_wall_clock)
     default_scorer_reserve = min(
         MAX_DEFAULT_SCORER_RESERVE_SECONDS,
         instance_wall_clock * DEFAULT_SCORER_RESERVE_FRACTION,
@@ -132,7 +135,7 @@ def build_run_budget(
     if scorer_reserve < 0 or scorer_reserve >= instance_wall_clock:
         raise ValueError(
             "scorer reserve must be non-negative and smaller than the "
-            "per-instance wall-clock budget"
+            "effective per-instance wall-clock budget"
         )
 
     max_cost = read("EVAL_BUDGET_COST", 2.0 * count)
