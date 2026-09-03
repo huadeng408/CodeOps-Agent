@@ -114,6 +114,11 @@ type Client struct {
 	// accumulated into the final return value.
 	OnTextDelta func(delta string)
 
+	// OnCompaction receives a durable surface replacement emitted by the
+	// Python orchestrator. Returning an error aborts the current turn so a
+	// failed Harness persistence operation cannot be reported as success.
+	OnCompaction func(update *codeagentpb.CompactionUpdate) error
+
 	// Tracer provides gen_ai execute_tool spans; when nil tool spans are skipped.
 	tracer genai.Tracer
 }
@@ -355,6 +360,12 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 		case *codeagentpb.OrchestratorMessage_SessionMeta:
 			if eventHandler != nil {
 				eventHandler(ctx, Event{SessionMeta: payload.SessionMeta})
+			}
+		case *codeagentpb.OrchestratorMessage_CompactionUpdate:
+			if payload.CompactionUpdate != nil && c.OnCompaction != nil {
+				if err := c.OnCompaction(payload.CompactionUpdate); err != nil {
+					return "", fmt.Errorf("persist compaction update: %w", err)
+				}
 			}
 		case *codeagentpb.OrchestratorMessage_AgentSpawn:
 			if eventHandler != nil {

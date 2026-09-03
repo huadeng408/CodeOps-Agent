@@ -195,6 +195,7 @@ class ConversationRunner:
     layered_context: LayeredContext | None = None
     context_window: int | None = None
     max_overflow_retries: int = 2
+    _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -252,6 +253,7 @@ class ConversationRunner:
         plan_mode_active = False
         tool_cache: dict[str, CachedToolResult] = {}
         overflow_retries = 0
+        self._pending_compaction_updates.clear()
 
         for turn in range(1, self.max_tool_rounds + 1):
             # ── Cooperative user interrupt (design 22.8) ──────────────
@@ -292,8 +294,12 @@ class ConversationRunner:
                     thinking_kwargs["reasoning_effort"] = "medium"
             try:
                 response_box: list[ChatResponse] = []
+                request_messages = self._compact_messages(
+                    messages, session_id=session_id, trigger="pressure"
+                )
+                yield from self._emit_compaction_updates()
                 yield from self._stream_chat(
-                    self._compact_messages(messages, session_id=session_id, trigger="pressure"),
+                    request_messages,
                     response_box=response_box,
                     cancel_event=cancel_event,
                     **thinking_kwargs,
@@ -727,8 +733,12 @@ class ConversationRunner:
         )
         try:
             response_box: list[ChatResponse] = []
+            request_messages = self._compact_messages(
+                messages, session_id=session_id, trigger="pressure"
+            )
+            yield from self._emit_compaction_updates()
             yield from self._stream_chat(
-                self._compact_messages(messages, session_id=session_id, trigger="pressure"),
+                request_messages,
                 allow_tools=False,
                 response_box=response_box,
                 cancel_event=cancel_event,
@@ -1877,6 +1887,14 @@ class ConversationRunner:
                             "summary_tokens": self.compactor.estimate_tokens([current[1]]),
                         },
                     )
+                self._queue_compaction_update(
+                    summary=summary,
+                    removed_messages=len(compactable),
+                    keep_recent_messages=len(recent),
+                    estimated_before_tokens=before_tokens,
+                    estimated_after_tokens=after_tokens,
+                    trigger=trigger,
+                )
                 if force:
                     return current
                 try:
@@ -1974,6 +1992,40 @@ class ConversationRunner:
             "artifacts": result.artifacts,
             "notes": result.notes,
         }
+
+    def _queue_compaction_update(
+        self,
+        *,
+        summary: str,
+        removed_messages: int,
+        keep_recent_messages: int,
+        estimated_before_tokens: int,
+        estimated_after_tokens: int,
+        trigger: str,
+    ) -> None:
+        pending = getattr(self, "_pending_compaction_updates", None)
+        if pending is None:
+            return
+        pending.append(
+            {
+                "summary": summary,
+                "removed_messages": max(0, int(removed_messages)),
+                "keep_recent_messages": max(0, int(keep_recent_messages)),
+                "estimated_before_tokens": max(0, int(estimated_before_tokens)),
+                "estimated_after_tokens": max(0, int(estimated_after_tokens)),
+                "trigger": trigger,
+            }
+        )
+
+    def _emit_compaction_updates(self) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        pending = getattr(self, "_pending_compaction_updates", None)
+        if not pending:
+            return
+        while pending:
+            update = pending.pop(0)
+            yield orchestrator_pb2.OrchestratorMessage(
+                compaction_update=orchestrator_pb2.CompactionUpdate(**update)
+            )
 
     def _run_workflow(self, workflow: WorkflowSpec) -> dict[str, object]:
         store = SQLiteWorkflowStore(Path(self.project_root) / ".agent" / "workflows.sqlite")

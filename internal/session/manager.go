@@ -505,6 +505,45 @@ func (m *Manager) Compact(keep int) (Session, int, string) {
 	return cloneSession(m.current), dropCount, summary
 }
 
+// ReplaceMessages installs a caller-provided checkpoint summary and preserves
+// the requested recent tail. It is used by the Python orchestrator when its
+// token-aware compactor has already selected a safe surface boundary.
+func (m *Manager) ReplaceMessages(summary string, keep int) (Session, int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	previous := cloneSession(m.current)
+	if keep < 0 {
+		keep = 0
+	}
+	summary = strings.TrimSpace(summary)
+	total := len(m.current.Messages)
+	if summary == "" || total <= keep {
+		return cloneSession(m.current), 0, true
+	}
+	dropCount := total - keep
+	kept := append([]Message(nil), m.current.Messages[dropCount:]...)
+	now := time.Now()
+	compacted := make([]Message, 0, len(kept)+1)
+	compacted = append(compacted, Message{
+		Role:      RoleSystem,
+		Content:   "[Conversation summary]\n" + summary,
+		CreatedAt: now,
+	})
+	compacted = append(compacted, kept...)
+	m.ensureCurrentLocked(now)
+	m.ensureMetadataLocked()
+	m.current.Messages = compacted
+	m.current.UpdatedAt = now
+	m.current.Metadata["last_compacted_at"] = now.Format(time.RFC3339)
+	m.current.Metadata["last_compacted_removed"] = fmt.Sprint(dropCount)
+	m.current.Metadata["last_compacted_keep"] = fmt.Sprint(keep)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous), 0, false
+	}
+	return cloneSession(m.current), dropCount, true
+}
+
 func (m *Manager) Reset() Session {
 	return m.NewSession(m.current.WorkingDir)
 }

@@ -2,6 +2,7 @@ package codeagent_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -110,6 +111,90 @@ func TestClientReceivesTodoUpdates(t *testing.T) {
 	}
 	if meta == nil || meta.GetTokensIn() != 100 || meta.GetTokensOut() != 50 || meta.GetModel() != "gpt-4o" {
 		t.Fatalf("unexpected session meta: %+v", meta)
+	}
+}
+
+type compactionEventServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+func (s *compactionEventServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
+	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
+}
+
+func (s *compactionEventServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_CompactionUpdate{
+			CompactionUpdate: &codeagentpb.CompactionUpdate{
+				Summary:               "checkpoint summary",
+				KeepRecentMessages:    3,
+				RemovedMessages:       5,
+				EstimatedBeforeTokens: 100,
+				EstimatedAfterTokens:  40,
+				Trigger:               "pressure",
+			},
+		},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{Done: &codeagentpb.Done{Success: true}},
+	})
+}
+
+func TestClientReceivesCompactionUpdates(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &compactionEventServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var update *codeagentpb.CompactionUpdate
+	client.OnCompaction = func(value *codeagentpb.CompactionUpdate) error {
+		update = value
+		return nil
+	}
+	if _, err := client.Converse(context.Background(), "compact"); err != nil {
+		t.Fatalf("converse with compaction update failed: %v", err)
+	}
+	if update == nil || update.GetSummary() != "checkpoint summary" || update.GetKeepRecentMessages() != 3 {
+		t.Fatalf("unexpected compaction update: %+v", update)
+	}
+}
+
+func TestClientPropagatesCompactionPersistenceFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &compactionEventServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	client.OnCompaction = func(*codeagentpb.CompactionUpdate) error {
+		return errors.New("session persistence failed")
+	}
+	if _, err := client.Converse(context.Background(), "compact"); err == nil || !strings.Contains(err.Error(), "session persistence failed") {
+		t.Fatalf("expected compaction persistence error, got %v", err)
 	}
 }
 

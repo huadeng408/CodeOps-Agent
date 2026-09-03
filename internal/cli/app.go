@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/config"
 	"code-agent/internal/hooks"
 	"code-agent/internal/mcp"
@@ -203,6 +204,9 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	app.input.SetInterruptHandler(func() bool {
 		return app.handleInterrupt(time.Now(), func() {})
 	})
+	if app.orchestrator != nil {
+		app.orchestrator.OnCompaction = app.handleCompactionUpdate
+	}
 	app.input.SetWorkspaceDir(cfg.WorkingDir)
 	return app
 }
@@ -426,6 +430,7 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 				a.renderer.AppendAssistantText(delta)
 			}
 			a.orchestrator.SetTracer(a.telemetry)
+			a.orchestrator.OnCompaction = a.handleCompactionUpdate
 			a.renderer.PrintLine("[Orchestrator restarted. Session preserved.]")
 			reply2, err2 := a.converse(teleCtx, input)
 			if err2 == nil && strings.TrimSpace(reply2) != "" {
@@ -441,6 +446,17 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 
 	span.RecordError(err)
 	return "[orchestrator error] " + err.Error()
+}
+
+func (a *App) handleCompactionUpdate(update *codeagentpb.CompactionUpdate) error {
+	if update == nil || a.session == nil {
+		return nil
+	}
+	_, _, ok := a.session.ReplaceMessages(update.GetSummary(), int(update.GetKeepRecentMessages()))
+	if !ok {
+		return errors.New("session persistence failed")
+	}
+	return nil
 }
 
 // converse runs a single orchestrator turn using the persisted session.

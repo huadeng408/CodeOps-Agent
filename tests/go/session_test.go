@@ -402,3 +402,30 @@ func TestManagerCompactSummarizesMessages(t *testing.T) {
 		t.Fatalf("unexpected retained messages: %#v", messages)
 	}
 }
+
+func TestSessionReplaceMessagesUsesProvidedSummaryAndTail(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	manager.Append(session.RoleUser, "old request")
+	manager.Append(session.RoleAssistant, "old answer")
+	manager.Append(session.RoleUser, "recent request")
+	manager.Append(session.RoleAssistant, "recent answer")
+
+	replaced, removed, ok := manager.ReplaceMessages("checkpoint summary", 2)
+
+	if !ok {
+		t.Fatal("expected replacement to commit")
+	}
+	if removed != 2 {
+		t.Fatalf("removed messages = %d, want 2", removed)
+	}
+	if len(replaced.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(replaced.Messages))
+	}
+	if replaced.Messages[0].Role != session.RoleSystem || replaced.Messages[0].Content != "[Conversation summary]\ncheckpoint summary" {
+		t.Fatalf("unexpected summary message: %+v", replaced.Messages[0])
+	}
+	if replaced.Messages[2].Content != "recent answer" {
+		t.Fatalf("tail was not preserved: %+v", replaced.Messages)
+	}
+}

@@ -62,6 +62,17 @@ class DeterministicContextLLM(LLMClient):
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 
+        if latest_user == "COMPACTION_RECOVER":
+            recovered = "[Conversation summary]" in rendered
+            return ChatResponse(
+                text=(
+                    f"COMPACTION_RECOVERED:{os.getpid()}"
+                    if recovered
+                    else f"COMPACTION_MISSING:{os.getpid()}"
+                ),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
         if any(
             message.role == "tool" and message.tool_call_id == _TOOL_CALL_ID
             for message in request.messages
@@ -90,6 +101,7 @@ class DeterministicContextLLM(LLMClient):
 
 def main() -> None:
     args = build_parser().parse_args()
+    context_window = int(os.environ.get("CODE_AGENT_CONTEXT_E2E_WINDOW", args.context_window))
     app = OrchestratorServer(
         ServerConfig(
             host=args.host,
@@ -99,7 +111,7 @@ def main() -> None:
             working_dir=args.working_dir,
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
-            context_window=args.context_window,
+            context_window=context_window,
         )
     )
     deterministic = DeterministicContextLLM()
