@@ -73,6 +73,26 @@ class DeterministicContextLLM(LLMClient):
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 
+        if latest_user == "PERSIST_MEMORY_ANCHOR":
+            return ChatResponse(
+                text=f"MEMORY_ANCHOR_WRITTEN:{os.getpid()}",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
+        if latest_user == "SEARCH MEMORY ANCHOR AFTER RESTART":
+            recovered = (
+                "Long-term memory:" in rendered
+                and "MEMORY_ANCHOR_WRITTEN:" in rendered
+            )
+            return ChatResponse(
+                text=(
+                    f"MEMORY_RECOVERED:{os.getpid()}"
+                    if recovered
+                    else f"MEMORY_MISSING:{os.getpid()}"
+                ),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
         if any(
             message.role == "tool" and message.tool_call_id == _TOOL_CALL_ID
             for message in request.messages

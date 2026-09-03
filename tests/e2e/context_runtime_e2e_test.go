@@ -26,6 +26,117 @@ import (
 )
 
 const contextE2ESessionID = "context-runtime-e2e"
+const contextE2EMemorySessionID = "context-memory-runtime-e2e"
+
+func TestLongTermMemoryRuntimeSurvivesOrchestratorRestart(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
+	}
+
+	repositoryRoot := contextE2ERepositoryRoot(t)
+	python := contextE2EPython(t)
+	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
+	projectRoot := t.TempDir()
+	address := contextE2EAddress(t)
+	pythonPath := repositoryRoot
+	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
+		pythonPath += string(os.PathListSeparator) + inherited
+	}
+	t.Setenv("PYTHONPATH", pythonPath)
+
+	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
+		Address:             address,
+		AutoStart:           true,
+		Command:             python,
+		Args:                []string{fixture},
+		ProjectRoot:         projectRoot,
+		WorkingDir:          projectRoot,
+		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
+		StartupTimeout:      15 * time.Second,
+		ConversationTimeout: 30 * time.Second,
+	})
+	t.Cleanup(manager.Stop)
+
+	client, err := manager.Client(context.Background())
+	if err != nil {
+		t.Fatalf("start real Python orchestrator: %v", err)
+	}
+	first, err := client.ConverseWithHistory(
+		context.Background(),
+		"PERSIST_MEMORY_ANCHOR",
+		contextE2EMemorySessionID,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("persist reflection conversation: %v", err)
+	}
+	firstProcessID := contextE2EProcessID(t, first, "MEMORY_ANCHOR_WRITTEN:")
+
+	restartedClient, err := manager.Restart(context.Background())
+	if err != nil {
+		t.Fatalf("restart real Python orchestrator: %v", err)
+	}
+	second, err := restartedClient.ConverseWithHistory(
+		context.Background(),
+		"SEARCH MEMORY ANCHOR AFTER RESTART",
+		contextE2EMemorySessionID,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("search reflection after restart: %v", err)
+	}
+	secondProcessID := contextE2EProcessID(t, second, "MEMORY_RECOVERED:")
+	if secondProcessID == firstProcessID {
+		t.Fatalf("orchestrator process did not change across restart: pid=%d", firstProcessID)
+	}
+
+	database, err := sql.Open("sqlite", filepath.Join(projectRoot, ".agent", "context.sqlite"))
+	if err != nil {
+		t.Fatalf("open context SQLite: %v", err)
+	}
+	defer database.Close()
+	var content string
+	if err := database.QueryRow(
+		"SELECT content FROM long_term_memory WHERE session_id = ? AND content LIKE ? ORDER BY created_at ASC LIMIT 1",
+		contextE2EMemorySessionID,
+		"%MEMORY_ANCHOR_WRITTEN%",
+	).Scan(&content); err != nil {
+		t.Fatalf("read persisted reflection: %v", err)
+	}
+	if !strings.Contains(content, "MEMORY_ANCHOR_WRITTEN") || !strings.Contains(content, "turn 1") {
+		t.Fatalf("persisted reflection = %q, want searchable outcome and turn metadata", content)
+	}
+	if strings.Contains(strings.ToLower(content), "api_key") {
+		t.Fatalf("persisted reflection contains credential-shaped text: %q", content)
+	}
+	contextE2EAssertMemorySQLite(t, filepath.Join(projectRoot, ".agent", "context.sqlite"))
+	var schemaVersion int
+	if err := database.QueryRow("PRAGMA user_version").Scan(&schemaVersion); err != nil {
+		t.Fatalf("read context schema version: %v", err)
+	}
+	receipt := map[string]any{
+		"status":                 "VERIFIED",
+		"git_sha":                contextE2EGitSHA(t, repositoryRoot),
+		"session_id":             contextE2EMemorySessionID,
+		"initial_response_pid":   firstProcessID,
+		"recovery_response_pid":  secondProcessID,
+		"orchestrator_restarted": true,
+		"sqlite_user_version":    schemaVersion,
+		"reflection_search":      true,
+		"sensitive_content":      false,
+	}
+	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("encode long-term memory receipt: %v", err)
+	}
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-memory-process-recovery.json")
+	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
+		t.Fatalf("create long-term memory receipt directory: %v", err)
+	}
+	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatalf("write long-term memory receipt: %v", err)
+	}
+}
 
 func TestContextRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
@@ -530,6 +641,19 @@ func contextE2EToolHandler(executor *tools.Executor, calls *atomic.Int32) orches
 }
 
 func contextE2EAssertSQLite(t *testing.T, databasePath string) {
+	contextE2EAssertSQLiteSession(
+		t,
+		databasePath,
+		contextE2ESessionID,
+		[]string{"tool_call", "file_diff", "reflection"},
+	)
+}
+
+func contextE2EAssertMemorySQLite(t *testing.T, databasePath string) {
+	contextE2EAssertSQLiteSession(t, databasePath, contextE2EMemorySessionID, []string{"reflection"})
+}
+
+func contextE2EAssertSQLiteSession(t *testing.T, databasePath, sessionID string, kinds []string) {
 	t.Helper()
 	database, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -545,18 +669,18 @@ func contextE2EAssertSQLite(t *testing.T, databasePath string) {
 		t.Fatalf("context SQLite integrity = %q", integrity)
 	}
 
-	for _, kind := range []string{"tool_call", "file_diff", "reflection"} {
+	for _, kind := range kinds {
 		var count int
 		err := database.QueryRow(
 			"SELECT COUNT(*) FROM context_events WHERE session_id = ? AND kind = ?",
-			contextE2ESessionID,
+			sessionID,
 			kind,
 		).Scan(&count)
 		if err != nil {
 			t.Fatalf("count %s events: %v", kind, err)
 		}
 		if count == 0 {
-			t.Fatalf("no persisted %s event survived restart", kind)
+			t.Fatalf("no persisted %s event survived restart for %s", kind, sessionID)
 		}
 	}
 }

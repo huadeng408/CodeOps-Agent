@@ -82,6 +82,53 @@ def test_reflection_is_searchable_and_privacy_filtered(tmp_path: Path) -> None:
     store.close()
 
 
+def test_runner_reflection_persists_searchable_outcome_excerpt(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path)
+    from orchestrator.runtime.conversation import ConversationRunner
+
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.layered_context = context
+    runner._context_persistence_error = ""
+
+    runner._persist_reflection(
+        "session-1",
+        "Implemented durable worker recovery and verified the checkpoint path.",
+        4,
+    )
+
+    matches = context.search_memory("worker recovery")
+    assert len(matches) == 1
+    assert "Implemented durable worker recovery" in matches[0].content
+    assert "turn 4" in matches[0].content
+    assert "sha256=" in matches[0].content
+    store.close()
+
+
+def test_runner_reflection_omits_sensitive_response(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path)
+    from orchestrator.runtime.conversation import ConversationRunner
+
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.layered_context = context
+    runner._context_persistence_error = ""
+
+    runner._persist_reflection(
+        "session-1",
+        "Deployment completed with OPENAI_API_KEY=fixture-secret",
+        2,
+    )
+
+    matches = context.search_memory("Conversation outcome")
+    assert len(matches) == 1
+    assert "fixture-secret" not in matches[0].content
+    assert "[sensitive response omitted]" in matches[0].content
+    assert "turn 2" in matches[0].content
+    assert "sha256=" in matches[0].content
+    store.close()
+
+
 def test_append_allows_repeated_events_when_clock_collides(tmp_path: Path, monkeypatch) -> None:
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     monkeypatch.setattr(memory_module, "_now", lambda: "2026-09-02T00:00:00+00:00")

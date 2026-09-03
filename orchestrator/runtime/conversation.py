@@ -43,7 +43,7 @@ from orchestrator.prompts import (
     load_agent_instructions,
 )
 from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
-from orchestrator.security import InjectionDetector
+from orchestrator.security import InjectionDetector, redact_credential_text
 from orchestrator.skills.manager import SkillManager
 from orchestrator.todo.manager import Todo, TodoManager
 from orchestrator.workflows import (
@@ -1657,9 +1657,16 @@ class ConversationRunner:
         if self.layered_context is None or not session_id.strip() or not response.strip():
             return
         try:
+            original = response.strip()
+            excerpt = redact_credential_text(" ".join(original.split()))
+            if excerpt != " ".join(original.split()):
+                excerpt = "[sensitive response omitted]"
+            if len(excerpt) > 1_200:
+                excerpt = excerpt[:1_197].rstrip() + "..."
+            digest = self._digest_value(original)
             self.layered_context.reflect(
                 session_id,
-                f"Conversation outcome: completed at turn {turn}.",
+                f"Conversation outcome (turn {turn}, sha256={digest}): {excerpt}",
                 tags=("conversation", "outcome"),
             )
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
