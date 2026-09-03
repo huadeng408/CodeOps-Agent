@@ -243,6 +243,7 @@ class ConversationRunner:
         total_cached_tokens = 0
         total_cost = 0.0
         consecutive_errors = 0
+        consecutive_empty_responses = 0
         plan_mode_active = False
         tool_cache: dict[str, CachedToolResult] = {}
 
@@ -342,6 +343,34 @@ class ConversationRunner:
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._finish(session_id, False, "budget_exceeded", turn=turn)
                 return
+            if not response.text.strip() and not response.tool_calls:
+                consecutive_empty_responses += 1
+                if consecutive_empty_responses == 1:
+                    messages.append(
+                        ChatMessage(
+                            role="system",
+                            content=(
+                                "The provider returned no assistant text or tool calls. "
+                                "Continue the task from the existing context."
+                            ),
+                        )
+                    )
+                    continue
+                yield self._session_meta(
+                    turn,
+                    total_tokens_in,
+                    total_tokens_out,
+                    total_cost,
+                    total_cached_tokens,
+                )
+                yield self._finish(
+                    session_id,
+                    False,
+                    "empty_model_response",
+                    turn=turn,
+                )
+                return
+            consecutive_empty_responses = 0
             if not response.tool_calls:
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 self._persist_reflection(session_id, response.text, turn)
