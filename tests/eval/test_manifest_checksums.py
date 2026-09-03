@@ -142,6 +142,25 @@ def test_run_artifacts_rejects_run_ids_outside_one_run_directory(
         RunArtifacts(run_id, tmp_path)
 
 
+def test_run_artifacts_accepts_mixed_windows_resolve_prefixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r"""Concurrent Windows resolution may mix normal and ``\\?\`` prefixes."""
+    original_resolve = Path.resolve
+
+    def mixed_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        resolved = original_resolve(self, *args, **kwargs)
+        if self.name == "shared-run":
+            return Path("\\\\?\\" + str(resolved))
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", mixed_resolve)
+    artifacts = RunArtifacts("shared-run", tmp_path / "artifacts")
+
+    assert artifacts.root.name == "shared-run"
+    assert artifacts.root.is_dir()
+
+
 @pytest.mark.parametrize(
     ("writer", "name"),
     [

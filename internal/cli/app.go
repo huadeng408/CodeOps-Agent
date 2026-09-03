@@ -180,7 +180,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		renderer:       NewStreamRenderer(stdout),
 		status:         NewStatusLine(),
 		metrics:        metrics.NewCollector(),
-		session:        session.NewManager(session.NewSQLiteStore(cfg.SessionDBPath)),
+		session:        session.NewManager(session.NewSQLiteEventStore(cfg.SessionDBPath)),
 		memory:         memory.NewManager(cfg.MemoryDir),
 		todos:          todo.NewManager(),
 		permissions:    permission.NewControllerWithRules(levels, allowlist, denylist),
@@ -208,6 +208,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 }
 
 func (a *App) Run(ctx context.Context) error {
+	defer func() { _ = a.session.Close() }()
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	if a.orchestratorPM != nil {

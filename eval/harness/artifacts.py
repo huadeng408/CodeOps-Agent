@@ -43,7 +43,7 @@ class RunArtifacts:
         if len(run_path.parts) != 1:
             raise ValueError("run_id must name exactly one run directory")
         self.root = (base_root / run_path).resolve()
-        if not self.root.is_relative_to(base_root):
+        if not _is_within(self.root, base_root):
             raise ValueError("run_id must stay within the artifact root")
         self.root.mkdir(parents=True, exist_ok=True)
         self._append_lock = threading.Lock()
@@ -51,7 +51,7 @@ class RunArtifacts:
     def _artifact_path(self, name: str | Path) -> Path:
         relative = _validated_relative_path(name, label="artifact path")
         path = (self.root / relative).resolve()
-        if not path.is_relative_to(self.root):
+        if not _is_within(path, self.root):
             raise ValueError("artifact path must stay within the run root")
         return path
 
@@ -209,7 +209,7 @@ class RunArtifacts:
                 continue
             if fpath.relative_to(self.root).as_posix() == CHECKSUM_FILENAME:
                 continue
-            if not fpath.resolve().is_relative_to(self.root):
+            if not _is_within(fpath.resolve(), self.root):
                 raise ValueError(
                     f"artifact path must stay within the run root: {fpath}"
                 )
@@ -320,6 +320,22 @@ def _validated_relative_path(value: str | Path, *, label: str) -> Path:
     ):
         raise ValueError(f"{label} must be a safe relative path")
     return Path(*parts)
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    r"""Compare resolved paths despite Windows' alternate ``\\?\`` prefix."""
+    return _comparison_path(path).is_relative_to(_comparison_path(root))
+
+
+def _comparison_path(path: Path) -> Path:
+    """Return a platform-normalized path suitable for containment checks."""
+    value = os.path.normcase(str(path))
+    if os.name == "nt":
+        if value.startswith("\\\\?\\unc\\"):
+            value = "\\\\" + value[len("\\\\?\\unc\\") :]
+        elif value.startswith("\\\\?\\"):
+            value = value[len("\\\\?\\") :]
+    return Path(os.path.normpath(value))
 
 
 def _manifest_path_key(relative_path: str) -> str:

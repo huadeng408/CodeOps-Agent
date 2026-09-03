@@ -229,6 +229,11 @@ func cleanupIntegrationApp(t *testing.T, app *App) {
 	if app == nil {
 		return
 	}
+	if app.session != nil {
+		if err := app.session.Close(); err != nil {
+			t.Logf("session shutdown: %v", err)
+		}
+	}
 	if app.mcp != nil {
 		for _, server := range app.mcp.ListServers() {
 			_ = app.mcp.Stop(server.Name)

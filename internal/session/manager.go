@@ -128,6 +128,18 @@ type Manager struct {
 	current Session
 }
 
+// Close releases the underlying store when it owns an external resource such
+// as the SQLite event ledger. In-memory stores remain a no-op.
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	closer, ok := m.store.(interface{ Close() error })
+	if !ok {
+		return nil
+	}
+	return closer.Close()
+}
+
 func NewManager(store Store) *Manager {
 	if store == nil {
 		store = NewMemoryStore()
@@ -140,7 +152,7 @@ func (m *Manager) NewSession(workingDir string) Session {
 	defer m.mu.Unlock()
 
 	now := time.Now()
-	m.current = Session{
+	candidate := Session{
 		ID:         randomID(),
 		WorkingDir: workingDir,
 		CreatedAt:  now,
@@ -148,8 +160,11 @@ func (m *Manager) NewSession(workingDir string) Session {
 		Messages:   []Message{},
 		Metadata:   map[string]string{},
 	}
-	_ = m.store.Save(context.Background(), m.current)
-	return cloneSession(m.current)
+	if err := m.store.Save(context.Background(), candidate); err != nil {
+		return Session{}
+	}
+	m.current = candidate
+	return cloneSession(candidate)
 }
 
 func (m *Manager) Current() Session {
@@ -161,6 +176,7 @@ func (m *Manager) Current() Session {
 func (m *Manager) Append(role Role, content string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	if m.current.ID == "" {
 		m.current = Session{
@@ -178,8 +194,18 @@ func (m *Manager) Append(role Role, content string) Session {
 		CreatedAt: now,
 	})
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
+}
+
+func (m *Manager) commitLocked(ctx context.Context, previous Session) bool {
+	if err := m.store.Save(ctx, m.current); err != nil {
+		m.current = previous
+		return false
+	}
+	return true
 }
 
 func (m *Manager) SetMetadata(key, value string) Session {
@@ -189,6 +215,7 @@ func (m *Manager) SetMetadata(key, value string) Session {
 func (m *Manager) SetMode(mode string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
@@ -197,25 +224,31 @@ func (m *Manager) SetMode(mode string) Session {
 	m.current.Mode = mode
 	m.current.Metadata["mode"] = mode
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetWorkingDir(workingDir string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.WorkingDir = strings.TrimSpace(workingDir)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) AddLLMUsage(tokensIn, tokensOut int, cost float64) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
@@ -229,7 +262,9 @@ func (m *Manager) AddLLMUsage(tokensIn, tokensOut int, cost float64) Session {
 		m.current.Metrics.TotalCost += cost
 	}
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
@@ -240,30 +275,35 @@ func (m *Manager) AddCachedTokens(tokens int) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Metrics.TotalCachedTokens += tokens
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	_ = m.commitLocked(context.Background(), previous)
 }
 
 func (m *Manager) RecordToolCall(modifiedFiles ...string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Metrics.ToolCalls++
 	m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, modifiedFiles)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) AppendToolResult(record ToolResultRecord) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
@@ -275,37 +315,46 @@ func (m *Manager) AppendToolResult(record ToolResultRecord) Session {
 		CreatedAt: now,
 	})
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetTodos(items []TodoItem) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Todos = cloneTodos(items)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetPlan(plan PlanState) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Plan = clonePlan(plan)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) AppendAgentSpawn(record AgentSpawnRecord) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
@@ -322,31 +371,39 @@ func (m *Manager) AppendAgentSpawn(record AgentSpawnRecord) Session {
 		CreatedAt: now,
 	})
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetUndo(entries []UndoEntry) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Undo = cloneUndo(entries)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetApprovedTools(tools []string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.ApprovedTools = normalizeToolList(tools)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
@@ -354,30 +411,37 @@ func (m *Manager) SetApprovedTools(tools []string) Session {
 func (m *Manager) SetApprovalHistory(records []permission.ApprovalRecord) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.ApprovalHistory = cloneApprovalHistory(records)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) SetWorktrees(trees []WorktreeState) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Worktrees = cloneWorktrees(trees)
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) MergeMetadata(values map[string]string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	now := time.Now()
 	m.ensureCurrentLocked(now)
@@ -390,13 +454,16 @@ func (m *Manager) MergeMetadata(values map[string]string) Session {
 		m.current.Metadata[key] = value
 	}
 	m.current.UpdatedAt = now
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
 	return cloneSession(m.current)
 }
 
 func (m *Manager) Compact(keep int) (Session, int, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	if keep < 0 {
 		keep = 0
@@ -429,7 +496,9 @@ func (m *Manager) Compact(keep int) (Session, int, string) {
 	m.current.Metadata["last_compacted_at"] = now.Format(time.RFC3339)
 	m.current.Metadata["last_compacted_removed"] = fmt.Sprint(dropCount)
 	m.current.Metadata["last_compacted_keep"] = fmt.Sprint(keep)
-	_ = m.store.Save(context.Background(), m.current)
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous), 0, ""
+	}
 	return cloneSession(m.current), dropCount, summary
 }
 
@@ -463,6 +532,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (Session, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
 
 	loaded, err := m.store.Load(ctx, id)
 	if err != nil {
@@ -483,6 +553,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (Session, error) {
 	}
 	m.current.UpdatedAt = now
 	if err := m.store.Save(ctx, m.current); err != nil {
+		m.current = previous
 		return Session{}, err
 	}
 	return cloneSession(m.current), nil
