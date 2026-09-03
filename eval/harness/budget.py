@@ -7,8 +7,15 @@ accordingly (timeout, infra, budget).
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
+
+DEFAULT_INSTANCE_WALL_CLOCK_SECONDS = 900.0
+MAX_DEFAULT_SCORER_RESERVE_SECONDS = 240.0
+DEFAULT_SCORER_RESERVE_FRACTION = 0.25
 
 
 @dataclass(frozen=True)
@@ -18,6 +25,8 @@ class Budget:
     max_cost: float = 2.0
     max_output_bytes: int = 1_000_000
     max_processes: int = 4
+    instance_wall_clock_seconds: float | None = None
+    scorer_reserve_seconds: float = 0.0
 
 
 @dataclass
@@ -73,3 +82,68 @@ def check_budget(budget: Budget, usage: BudgetUsage) -> None:
         raise BudgetExceeded("cost", f"${usage.cost:.2f} > ${budget.max_cost}")
     if usage.output_bytes > budget.max_output_bytes:
         raise BudgetExceeded("output", f"{usage.output_bytes} bytes > {budget.max_output_bytes}")
+
+
+def build_run_budget(
+    instance_count: int,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Budget:
+    """Build the official-run budget from one consistent environment source."""
+    env = os.environ if environ is None else environ
+    count = max(1, int(instance_count))
+
+    def read(name: str, default: float) -> float:
+        raw = env.get(name)
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid budget {name}: {raw!r}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"invalid budget {name}: must be finite")
+        return value
+
+    def read_count(name: str, default: int) -> int:
+        value = read(name, float(default))
+        if value < 0 or not value.is_integer():
+            raise ValueError(f"invalid budget {name}: must be a non-negative integer")
+        return int(value)
+
+    total_wall_clock = read(
+        "EVAL_BUDGET_SECONDS",
+        DEFAULT_INSTANCE_WALL_CLOCK_SECONDS * count,
+    )
+    instance_wall_clock = read(
+        "EVAL_INSTANCE_BUDGET_SECONDS",
+        total_wall_clock / count,
+    )
+    default_scorer_reserve = min(
+        MAX_DEFAULT_SCORER_RESERVE_SECONDS,
+        instance_wall_clock * DEFAULT_SCORER_RESERVE_FRACTION,
+    )
+    scorer_reserve = read(
+        "EVAL_SCORER_RESERVE_SECONDS",
+        default_scorer_reserve,
+    )
+    if total_wall_clock <= 0 or instance_wall_clock <= 0:
+        raise ValueError("wall-clock budgets must be positive")
+    if scorer_reserve < 0 or scorer_reserve >= instance_wall_clock:
+        raise ValueError(
+            "scorer reserve must be non-negative and smaller than the "
+            "per-instance wall-clock budget"
+        )
+
+    max_cost = read("EVAL_BUDGET_COST", 2.0 * count)
+    if max_cost < 0:
+        raise ValueError("invalid budget EVAL_BUDGET_COST: must be non-negative")
+
+    return Budget(
+        wall_clock_seconds=total_wall_clock,
+        instance_wall_clock_seconds=instance_wall_clock,
+        scorer_reserve_seconds=scorer_reserve,
+        max_tokens=read_count("EVAL_BUDGET_TOKENS", 250_000 * count),
+        max_cost=max_cost,
+        max_output_bytes=read_count("EVAL_BUDGET_OUTPUT_BYTES", 5_000_000 * count),
+    )

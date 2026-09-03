@@ -7,6 +7,7 @@ the old InstanceRunner(dict) callable.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -434,6 +435,185 @@ def test_scorer_receives_remaining_run_wall_clock_budget(tmp_path: Path) -> None
     assert 0 < seen["timeout_s"] <= 6.0
 
 
+def test_agent_deadline_preserves_patch_and_reserved_scorer_time(
+    tmp_path: Path,
+) -> None:
+    artifacts = RunArtifacts("run-phase-deadline", tmp_path)
+    seen: dict[str, object] = {}
+
+    class DeadlineAdapter:
+        def solve_instance(
+            self, instance: EvalInstance, working_dir: str, **kwargs
+        ) -> EvalResult:
+            del working_dir
+            seen["agent_timeout_s"] = kwargs["timeout_s"]
+            cancel_event = kwargs["cancel_event"]
+            assert cancel_event.wait(timeout=0.5)
+            return EvalResult(
+                instance_id=instance.instance_id,
+                model_patch="diff --git a/source.py b/source.py\n",
+            )
+
+    def scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> dict:
+        del instance, workspace
+        seen["scorer_timeout_s"] = timeout_s
+        seen["model_patch"] = result.model_patch
+        return {"resolved": True}
+
+    harness = HarnessRun(
+        run_id="run-phase-deadline",
+        artifacts=artifacts,
+        budget=Budget(
+            wall_clock_seconds=1.0,
+            instance_wall_clock_seconds=0.3,
+            scorer_reserve_seconds=0.2,
+        ),
+        adapter=DeadlineAdapter(),
+        scorer=scorer,
+        config=_pinned_config(),
+    )
+
+    summary = harness.run(
+        [EvalInstance(instance_id="deadline-1", task_description="")]
+    )["summary"]
+
+    assert summary["completed"] == 1
+    assert 0 < float(seen["agent_timeout_s"]) <= 0.11
+    assert 0 < float(seen["scorer_timeout_s"]) <= 0.2
+    assert seen["model_patch"] == "diff --git a/source.py b/source.py\n"
+
+
+def test_non_cooperative_adapter_is_cut_off_at_instance_deadline(
+    tmp_path: Path,
+) -> None:
+    artifacts = RunArtifacts("run-hard-deadline", tmp_path)
+    calls: list[str] = []
+
+    class BlockingAdapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            del working_dir, kwargs
+            calls.append(instance.instance_id)
+            time.sleep(0.4)
+            return EvalResult(instance_id=instance.instance_id, answer="late")
+
+    harness = HarnessRun(
+        run_id="run-hard-deadline",
+        artifacts=artifacts,
+        budget=Budget(
+            wall_clock_seconds=1.0,
+            instance_wall_clock_seconds=0.05,
+        ),
+        adapter=BlockingAdapter(),
+        config=_pinned_config(),
+    )
+
+    started = time.perf_counter()
+    summary = harness.run(
+        [EvalInstance(instance_id="blocked", task_description="")]
+    )["summary"]
+
+    assert time.perf_counter() - started < 0.25
+    assert summary["completed"] == 0
+    assert summary["by_category"][ERROR_TIMEOUT] == 1
+    assert calls == ["blocked"]
+
+
+def test_workspace_setup_shares_agent_deadline(tmp_path: Path) -> None:
+    artifacts = RunArtifacts("run-setup-deadline", tmp_path)
+    adapter = FakeAgentAdapter()
+
+    def blocking_setup(instance: EvalInstance, working_dir: str) -> None:
+        del instance, working_dir
+        time.sleep(0.4)
+
+    harness = HarnessRun(
+        run_id="run-setup-deadline",
+        artifacts=artifacts,
+        budget=Budget(
+            wall_clock_seconds=1.0,
+            instance_wall_clock_seconds=0.05,
+        ),
+        adapter=adapter,
+        setup_workspace=blocking_setup,
+        config=_pinned_config(),
+    )
+
+    summary = harness.run(
+        [EvalInstance(instance_id="setup-blocked", task_description="")]
+    )["summary"]
+
+    assert summary["completed"] == 0
+    assert summary["by_category"][ERROR_TIMEOUT] == 1
+    assert adapter.calls == []
+
+
+def test_result_error_is_failure_and_never_scored_or_predicted(tmp_path: Path) -> None:
+    artifacts = RunArtifacts("run-result-error", tmp_path)
+    scored: list[str] = []
+
+    class ErrorAdapter:
+        def solve_instance(self, instance: EvalInstance, working_dir: str, **kwargs) -> EvalResult:
+            del working_dir, kwargs
+            return EvalResult(
+                instance_id=instance.instance_id,
+                model_patch="diff --git a/a b/a\n",
+                error="adapter reported an incomplete turn",
+            )
+
+    def scorer(*args, **kwargs) -> dict:
+        del args, kwargs
+        scored.append("called")
+        return {"resolved": True}
+
+    harness = HarnessRun(
+        run_id="run-result-error",
+        artifacts=artifacts,
+        adapter=ErrorAdapter(),
+        scorer=scorer,
+        config=_pinned_config(),
+    )
+
+    summary = harness.run(
+        [EvalInstance(instance_id="error-result", task_description="")]
+    )["summary"]
+
+    assert summary["completed"] == 0
+    assert summary["by_category"][ERROR_AGENT] == 1
+    assert scored == []
+    assert not (artifacts.root / "predictions.jsonl").exists()
+    failures = (artifacts.root / "failures.jsonl").read_text(encoding="utf-8")
+    assert "incomplete turn" in failures
+
+
+def test_resume_rejects_changed_budget_contract(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "contract.checkpoint"
+    first = HarnessRun(
+        run_id="run-contract",
+        artifacts=RunArtifacts("run-contract", tmp_path / "first"),
+        checkpoint_path=checkpoint,
+        budget=Budget(max_tokens=100),
+        adapter=FakeAgentAdapter(),
+        config=_pinned_config(model="model-a"),
+    )
+    first.run([EvalInstance(instance_id="done", task_description="")])
+
+    with pytest.raises(ValueError, match="checkpoint contract"):
+        HarnessRun(
+            run_id="run-contract",
+            artifacts=RunArtifacts("run-contract-resume", tmp_path / "second"),
+            checkpoint_path=checkpoint,
+            budget=Budget(max_tokens=101),
+            adapter=FakeAgentAdapter(),
+            config=_pinned_config(model="model-a"),
+        )
+
+
 def test_scorer_timeout_is_classified_as_timeout(tmp_path: Path) -> None:
     """Deadline expiry is a run timeout, not an official-scorer defect."""
     artifacts = RunArtifacts("run-scorer-timeout", tmp_path)
@@ -496,3 +676,35 @@ def test_scorer_cannot_complete_after_run_deadline(tmp_path: Path) -> None:
 
     assert summary["completed"] == 0
     assert summary["by_category"][ERROR_TIMEOUT] == 1
+
+
+def test_checkpoint_concurrent_initialization_is_serialized(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "shared.checkpoint"
+    errors: list[BaseException] = []
+
+    def initialize() -> None:
+        try:
+            HarnessRun(
+                run_id="shared-run",
+                artifacts=RunArtifacts("shared-run", tmp_path / "artifacts"),
+                checkpoint_path=checkpoint,
+                adapter=FakeAgentAdapter(),
+                config=_pinned_config(model="model-a"),
+            )
+        except BaseException as exc:  # noqa: BLE001 - assert no race failures
+            errors.append(exc)
+
+    threads = [threading.Thread(target=initialize) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    rows = [
+        json.loads(line)
+        for line in checkpoint.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "checkpoint-contract"
+    assert not checkpoint.with_name(checkpoint.name + ".lock").exists()

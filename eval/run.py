@@ -614,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         instances = benchmark_mod.load_instances(limit=limit)
 
     # ---- Create HarnessRun (the ONLY execution path) ----
-    from eval.harness import HarnessRun, Budget, RunArtifacts
+    from eval.harness import HarnessRun, RunArtifacts, build_run_budget
 
     artifacts = RunArtifacts(run_id=run_id, root=str(output_dir))
     instance_count = max(1, len(instances))
@@ -622,26 +622,12 @@ def main(argv: list[str] | None = None) -> int:
     # budget is to stop a runaway, and "runaway" is a property of one instance's
     # behaviour, not of how many instances were requested. An explicit
     # EVAL_BUDGET_* value is still honoured verbatim as a hard total.
-    budget = Budget(
-        wall_clock_seconds=float(
-            os.environ.get("EVAL_BUDGET_SECONDS")
-            or 900.0 * instance_count
-        ),
-        max_tokens=int(
-            os.environ.get("EVAL_BUDGET_TOKENS")
-            or 250_000 * instance_count
-        ),
-        max_cost=float(
-            os.environ.get("EVAL_BUDGET_COST") or 2.0 * instance_count
-        ),
-        max_output_bytes=int(
-            os.environ.get("EVAL_BUDGET_OUTPUT_BYTES")
-            or 5_000_000 * instance_count
-        ),
-    )
+    budget = build_run_budget(instance_count)
     print(
-        f"[eval] budget    : {instance_count} instance(s) × "
-        f"(250k tokens, 900s, $2.00) = {budget.max_tokens:,} tokens, "
+        f"[eval] budget    : {instance_count} instance(s), "
+        f"{budget.instance_wall_clock_seconds:.0f}s/instance including "
+        f"{budget.scorer_reserve_seconds:.0f}s scorer reserve; "
+        f"run totals {budget.max_tokens:,} tokens, "
         f"{budget.wall_clock_seconds:.0f}s, ${budget.max_cost:.2f}"
     )
     harness_adapter = (

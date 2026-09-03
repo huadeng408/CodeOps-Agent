@@ -21,18 +21,23 @@ the benchmark's Docker/container responsibility).
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol, Sequence
+from typing import Any, Protocol
 
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
 from eval.harness.budget import Budget, BudgetExceeded, BudgetUsage, check_budget
+from eval.harness.pin_contract import evaluate_pins, system_prompt_pin
 from eval.harness.redaction import redact_credential_text
 from eval.harness.trace_capture import TraceCapture
 from eval.harness.trace_contract import (
@@ -41,7 +46,6 @@ from eval.harness.trace_contract import (
     SPAN_SCORER_OFFICIAL,
     evaluate_trace_contract,
 )
-from eval.harness.pin_contract import evaluate_pins, system_prompt_pin
 from eval.harness.trace_join import eval_join_context
 
 # Error taxonomy — infra failures are never counted as model failures and are
@@ -94,6 +98,45 @@ class ScorerCallback(Protocol):
 # the working directory (e.g. clone a repo, checkout a commit).  Receives
 # the instance and the temp directory path the harness created.
 WorkspaceSetup = Callable[[EvalInstance, str], None]
+
+
+class AdapterResultError(RuntimeError):
+    """An adapter returned an explicit failure instead of raising it."""
+
+
+CHECKPOINT_CONTRACT_KIND = "checkpoint-contract"
+CHECKPOINT_COMPLETED_KIND = "completed"
+CHECKPOINT_VERSION = 1
+CHECKPOINT_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def _stable_json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@contextlib.contextmanager
+def _exclusive_checkpoint_lock(path: Path) -> Iterator[None]:
+    """Serialize checkpoint upgrades/appends across threads and processes."""
+    lock_path = path.with_name(path.name + ".lock")
+    deadline = time.monotonic() + CHECKPOINT_LOCK_TIMEOUT_SECONDS
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("checkpoint lock acquisition timed out")
+            time.sleep(0.01)
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii", errors="replace"))
+        yield
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def classify_error(exc: BaseException) -> str:
@@ -202,10 +245,12 @@ class HarnessRun:
         # Per-instance usage; rebound at the top of each instance so the
         # process-lifecycle hooks below always target the live budget.
         self._current_usage: BudgetUsage = BudgetUsage()
-        if self.checkpoint_path is not None and self.checkpoint_path.exists():
-            for line in self.checkpoint_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    self._completed.add(line.strip())
+        self._checkpoint_contract = self._checkpoint_contract_payload()
+        self._checkpoint_contract_sha256 = _stable_json_sha256(
+            self._checkpoint_contract
+        )
+        if self.checkpoint_path is not None:
+            self._load_or_initialize_checkpoint()
 
     # -- H4: process-lifecycle hooks -------------------------------------
     # max_processes is only a real constraint if something reports child
@@ -228,9 +273,138 @@ class HarnessRun:
     def _mark_completed(self, instance_id: str) -> None:
         self._completed.add(instance_id)
         if self.checkpoint_path is not None:
-            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.checkpoint_path.open("a", encoding="utf-8") as handle:
-                handle.write(instance_id + "\n")
+            self._append_checkpoint(
+                {"kind": CHECKPOINT_COMPLETED_KIND, "instance_id": instance_id}
+            )
+
+    def _checkpoint_contract_payload(self) -> dict[str, Any]:
+        budget = self.budget
+        return {
+            "version": CHECKPOINT_VERSION,
+            "run_id": self.run_id,
+            "budget": {
+                "wall_clock_seconds": budget.wall_clock_seconds,
+                "instance_wall_clock_seconds": getattr(
+                    budget, "instance_wall_clock_seconds", None
+                ),
+                "scorer_reserve_seconds": getattr(
+                    budget, "scorer_reserve_seconds", 0.0
+                ),
+                "max_tokens": budget.max_tokens,
+                "max_cost": budget.max_cost,
+                "max_output_bytes": budget.max_output_bytes,
+                "max_processes": budget.max_processes,
+            },
+            "pins": {
+                key: self.config.get(key, "")
+                for key in (
+                    "git_sha",
+                    "dirty_hash",
+                    "provider",
+                    "model",
+                    "model_revision",
+                    "prompt_hash",
+                    "benchmark",
+                    "dataset_pin",
+                    "evaluation_subset",
+                )
+            },
+        }
+
+    def _load_or_initialize_checkpoint(self) -> None:
+        assert self.checkpoint_path is not None
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with _exclusive_checkpoint_lock(self.checkpoint_path):
+            if not self.checkpoint_path.exists() or not self.checkpoint_path.read_bytes():
+                self._write_checkpoint_contract()
+                return
+
+            try:
+                rows = self._read_checkpoint_rows()
+            except ValueError:
+                rows = []
+            if rows and rows[0].get("kind") != CHECKPOINT_CONTRACT_KIND:
+                raise ValueError("checkpoint contract is missing or malformed")
+            if not rows:
+                # Pre-contract checkpoints contained one completed instance ID
+                # per line. Upgrade them once while holding the same lock used
+                # for all future writes.
+                legacy_ids = [
+                    line.strip()
+                    for line in self.checkpoint_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                if not all("{" not in value and "}" not in value for value in legacy_ids):
+                    raise ValueError("checkpoint contract is missing or malformed")
+                self._completed.update(legacy_ids)
+                self.checkpoint_path.unlink()
+                self._write_checkpoint_contract()
+                for instance_id in legacy_ids:
+                    self._append_checkpoint_unlocked(
+                        {"kind": CHECKPOINT_COMPLETED_KIND, "instance_id": instance_id}
+                    )
+                return
+            self._validate_checkpoint_rows(rows)
+
+    def _validate_checkpoint_rows(self, rows: list[dict[str, Any]]) -> None:
+        header = rows[0]
+        if (
+            header.get("version") != CHECKPOINT_VERSION
+            or header.get("sha256") != self._checkpoint_contract_sha256
+            or header.get("contract") != self._checkpoint_contract
+        ):
+            raise ValueError("checkpoint contract does not match this evaluation run")
+        for row in rows[1:]:
+            if set(row) != {"kind", "instance_id"} or row["kind"] != CHECKPOINT_COMPLETED_KIND:
+                raise ValueError("checkpoint contains an invalid completion record")
+            instance_id = row["instance_id"]
+            if not isinstance(instance_id, str) or not instance_id:
+                raise ValueError("checkpoint contains an invalid instance ID")
+            self._completed.add(instance_id)
+
+    def _read_checkpoint_rows(self) -> list[dict[str, Any]]:
+        assert self.checkpoint_path is not None
+        rows: list[dict[str, Any]] = []
+        for line in self.checkpoint_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError("checkpoint contract is missing or malformed") from exc
+            if not isinstance(row, dict):
+                raise ValueError("checkpoint contains a non-object record")
+            rows.append(row)
+        return rows
+
+    def _write_checkpoint_contract(self) -> None:
+        self._append_checkpoint_unlocked(
+            {
+                "kind": CHECKPOINT_CONTRACT_KIND,
+                "version": CHECKPOINT_VERSION,
+                "sha256": self._checkpoint_contract_sha256,
+                "contract": self._checkpoint_contract,
+            },
+            mode="x",
+        )
+
+    def _append_checkpoint(self, row: dict[str, Any], *, mode: str = "a") -> None:
+        assert self.checkpoint_path is not None
+        with _exclusive_checkpoint_lock(self.checkpoint_path):
+            self._append_checkpoint_unlocked(row, mode=mode)
+
+    def _append_checkpoint_unlocked(self, row: dict[str, Any], *, mode: str = "a") -> None:
+        assert self.checkpoint_path is not None
+        try:
+            with self.checkpoint_path.open(mode, encoding="utf-8") as handle:
+                handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError as exc:
+            # This method is only called while the exclusive lock is held.
+            # Re-entering checkpoint initialization here would wait on our own
+            # lock forever, so fail closed and let the caller retry explicitly.
+            raise ValueError("checkpoint contract was created concurrently") from exc
 
     def _remaining_wall_clock_seconds(self) -> float:
         """Return the unspent run deadline or fail before starting more work."""
@@ -242,6 +416,80 @@ class HarnessRun:
                 f"{self.budget.wall_clock_seconds}s",
             )
         return remaining
+
+    def _remaining_instance_wall_clock_seconds(
+        self,
+        usage: BudgetUsage,
+    ) -> float:
+        """Return the time left in both the run and current instance."""
+        run_remaining = self._remaining_wall_clock_seconds()
+        instance_limit = self.budget.instance_wall_clock_seconds
+        if instance_limit is None:
+            return run_remaining
+        instance_remaining = instance_limit - usage.wall_clock()
+        remaining = min(run_remaining, instance_remaining)
+        if remaining <= 0:
+            raise BudgetExceeded(
+                "wall-clock",
+                f"instance used {usage.wall_clock():.1f}s of "
+                f"{instance_limit}s",
+            )
+        return remaining
+
+    def _agent_phase_seconds(self, usage: BudgetUsage) -> float:
+        remaining = self._remaining_instance_wall_clock_seconds(usage)
+        reserve = self.budget.scorer_reserve_seconds if self.scorer else 0.0
+        agent_seconds = remaining - reserve
+        if agent_seconds <= 0:
+            raise BudgetExceeded(
+                "wall-clock",
+                f"{remaining:.1f}s remains but {reserve:.1f}s is reserved "
+                "for the official scorer",
+            )
+        return agent_seconds
+
+    def _scorer_phase_seconds(self, usage: BudgetUsage) -> float:
+        remaining = self._remaining_instance_wall_clock_seconds(usage)
+        reserve = self.budget.scorer_reserve_seconds
+        return min(remaining, reserve) if reserve > 0 else remaining
+
+    def _call_with_phase_deadline(
+        self,
+        call: Callable[[threading.Event, float], Any],
+        usage: BudgetUsage,
+        *,
+        reserve_scorer_time: bool,
+    ) -> Any:
+        timeout_s = (
+            self._agent_phase_seconds(usage)
+            if reserve_scorer_time
+            else self._scorer_phase_seconds(usage)
+        )
+        cancel_event = threading.Event()
+        done_event = threading.Event()
+        result: list[Any] = []
+        error: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                result.append(call(cancel_event, timeout_s))
+            except BaseException as exc:  # noqa: BLE001 - reported by owner
+                error.append(exc)
+            finally:
+                done_event.set()
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        if not done_event.wait(timeout_s):
+            cancel_event.set()
+            # Give cooperative adapters a short cancellation window to return
+            # their partial result. A non-cooperative call is still detached
+            # from the harness after this bounded grace period.
+            if not done_event.wait(min(0.05, max(timeout_s * 0.25, 0.001))):
+                raise TimeoutError(f"phase exceeded {timeout_s:.3f}s deadline")
+        if error:
+            raise error[0]
+        return result[0]
 
     def run(self, instances: list[EvalInstance]) -> dict[str, Any]:
         """Run all *instances* through the adapter, recording artifacts.
@@ -438,9 +686,17 @@ class HarnessRun:
     ) -> None:
         """Solve and score one instance; raises on failure for the caller to
         classify.  Extracted so the instance span can wrap it as a unit."""
-        # Populate workspace (e.g. clone repo) before the agent runs
+        # Populate workspace (e.g. clone repo) before the agent runs. Setup is
+        # part of the same per-instance agent phase and cannot consume scorer
+        # reserve or run past the deadline.
         if self.setup_workspace is not None:
-            self.setup_workspace(instance, str(workspace))
+            self._call_with_phase_deadline(
+                lambda _cancel_event, _timeout_s: self.setup_workspace(
+                    instance, str(workspace)
+                ),
+                usage,
+                reserve_scorer_time=True,
+            )
 
         if not self.network_allowed:
             _block_network(workspace, self.network_allowlist)
@@ -452,7 +708,16 @@ class HarnessRun:
         # eval/harness/trace_join.py for what this does and does not prove.
         if self.adapter is not None:
             with eval_join_context(self.run_id, instance_id):
-                result = self.adapter.solve_instance(instance, str(workspace))
+                result = self._call_with_phase_deadline(
+                    lambda cancel_event, timeout_s: self.adapter.solve_instance(
+                        instance,
+                        str(workspace),
+                        cancel_event=cancel_event,
+                        timeout_s=timeout_s,
+                    ),
+                    usage,
+                    reserve_scorer_time=True,
+                )
             # H4: enforce the process cap on whatever the adapter
             # reported while it was running (fail closed, never
             # silently over-subscribe the machine).
@@ -470,9 +735,16 @@ class HarnessRun:
 
         # Post-solve budget check
         check_budget(self.budget, usage)
+        self._remaining_instance_wall_clock_seconds(usage)
         # Update global usage for pre-start checks on next instances
         self._global_usage.record_tokens(usage.tokens)
         self._global_usage.record_cost(usage.cost)
+
+        # An adapter error is a failed attempt even if it also returned a
+        # patch/answer. Never let the scorer or predictions turn an explicit
+        # failure into a completed denominator row.
+        if result.error:
+            raise AdapterResultError(result.error)
 
         # Record instance
         self.artifacts.record_instance({
@@ -510,13 +782,18 @@ class HarnessRun:
             ) as scorer_span:
                 try:
                     check_budget(self.budget, self._global_usage)
-                    scorer_result = self.scorer(
-                        result,
-                        instance,
-                        workspace,
-                        timeout_s=self._remaining_wall_clock_seconds(),
+                    scorer_result = self._call_with_phase_deadline(
+                        lambda _cancel_event, timeout_s: self.scorer(
+                            result,
+                            instance,
+                            workspace,
+                            timeout_s=timeout_s,
+                        ),
+                        usage,
+                        reserve_scorer_time=False,
                     )
                     check_budget(self.budget, self._global_usage)
+                    self._remaining_instance_wall_clock_seconds(usage)
                 except (BudgetExceeded, TimeoutError, subprocess.TimeoutExpired):
                     raise
                 except Exception as scorer_exc:
@@ -797,6 +1074,12 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         "evaluation_subset": config.get("evaluation_subset", {}),
         "budgets": {
             "wall_clock_seconds": harness.budget.wall_clock_seconds,
+            "instance_wall_clock_seconds": (
+                getattr(harness.budget, "instance_wall_clock_seconds", None)
+            ),
+            "scorer_reserve_seconds": getattr(
+                harness.budget, "scorer_reserve_seconds", 0.0
+            ),
             "max_tokens": harness.budget.max_tokens,
             "max_cost": harness.budget.max_cost,
             "max_output_bytes": harness.budget.max_output_bytes,

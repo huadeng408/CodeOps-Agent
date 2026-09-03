@@ -645,8 +645,8 @@ def test_driver_rejects_unknown_provider() -> None:
 
 def test_evalplus_through_harness_run(tmp_path: Path) -> None:
     """evalplus benchmark routed through HarnessRun produces full artifact tree."""
-    from eval.harness import HarnessRun, Budget, RunArtifacts
     from eval.adapter import EvalInstance, EvalResult
+    from eval.harness import Budget, HarnessRun, RunArtifacts
 
     run_id = "test-harness-001"
     root = tmp_path / "eval_results" / run_id
@@ -669,7 +669,12 @@ def test_evalplus_through_harness_run(tmp_path: Path) -> None:
     harness = HarnessRun(
         run_id=run_id,
         artifacts=artifacts,
-        budget=Budget(wall_clock_seconds=60, max_tokens=10_000),
+        budget=Budget(
+            wall_clock_seconds=60,
+            instance_wall_clock_seconds=45,
+            scorer_reserve_seconds=15,
+            max_tokens=10_000,
+        ),
         adapter=adapter,
         config=_pinned_config(provider="anthropic"),
     )
@@ -710,6 +715,8 @@ def test_evalplus_through_harness_run(tmp_path: Path) -> None:
     assert "synthetic" in manifest
     assert "budgets" in manifest
     assert manifest["budgets"]["wall_clock_seconds"] == 60
+    assert manifest["budgets"]["instance_wall_clock_seconds"] == 45
+    assert manifest["budgets"]["scorer_reserve_seconds"] == 15
     assert manifest["budgets"]["max_tokens"] == 10_000
     assert manifest["network_policy"] == "disabled"
 

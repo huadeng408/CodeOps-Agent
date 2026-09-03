@@ -17,7 +17,13 @@ from __future__ import annotations
 
 import pytest
 
-from eval.harness.budget import Budget, BudgetExceeded, BudgetUsage, check_budget
+from eval.harness.budget import (
+    Budget,
+    BudgetExceeded,
+    BudgetUsage,
+    build_run_budget,
+    check_budget,
+)
 from eval.harness.runner import (
     ERROR_AGENT,
     ERROR_BUDGET,
@@ -25,7 +31,6 @@ from eval.harness.runner import (
     ERROR_TIMEOUT,
     classify_error,
 )
-
 
 # ------------------------------------------------------------------ attribution
 
@@ -61,9 +66,9 @@ def test_budget_category_is_distinct_from_every_other():
 
 def test_summary_initialises_the_budget_counter():
     """A category missing from by_category would KeyError mid-run."""
-    from eval.harness.runner import HarnessRun
-
     import inspect
+
+    from eval.harness.runner import HarnessRun
 
     source = inspect.getsource(HarnessRun.run)
     assert "ERROR_BUDGET: 0" in source
@@ -73,22 +78,8 @@ def test_summary_initialises_the_budget_counter():
 
 
 def _sized_budget(instance_count: int, env: dict[str, str] | None = None) -> Budget:
-    """Rebuild eval.run's sizing rule for *instance_count* instances."""
-    import os
-
-    overrides = env or {}
-
-    def read(name: str, default: float) -> float:
-        raw = overrides.get(name) or os.environ.get(name)
-        return float(raw) if raw else default
-
-    count = max(1, instance_count)
-    return Budget(
-        wall_clock_seconds=read("EVAL_BUDGET_SECONDS", 900.0 * count),
-        max_tokens=int(read("EVAL_BUDGET_TOKENS", 250_000 * count)),
-        max_cost=read("EVAL_BUDGET_COST", 2.0 * count),
-        max_output_bytes=int(read("EVAL_BUDGET_OUTPUT_BYTES", 5_000_000 * count)),
-    )
+    """Use the same sizing module as eval.run for *instance_count* instances."""
+    return build_run_budget(instance_count, environ=env)
 
 
 def test_twenty_instances_get_twenty_instances_worth_of_tokens():
@@ -105,6 +96,47 @@ def test_budget_scales_linearly_with_instance_count():
     assert ten.max_tokens == one.max_tokens * 10
     assert ten.wall_clock_seconds == one.wall_clock_seconds * 10
     assert ten.max_cost == pytest.approx(one.max_cost * 10)
+
+
+def test_default_budget_reserves_a_bounded_scorer_phase_per_instance():
+    one = _sized_budget(1, {})
+    twenty = _sized_budget(20, {})
+
+    assert one.instance_wall_clock_seconds == 900.0
+    assert twenty.instance_wall_clock_seconds == 900.0
+    assert one.scorer_reserve_seconds == 225.0
+    assert twenty.scorer_reserve_seconds == 225.0
+
+
+def test_explicit_instance_and_scorer_phase_budgets_are_honoured():
+    budget = _sized_budget(
+        20,
+        {
+            "EVAL_BUDGET_SECONDS": "36000",
+            "EVAL_INSTANCE_BUDGET_SECONDS": "1800",
+            "EVAL_SCORER_RESERVE_SECONDS": "240",
+        },
+    )
+
+    assert budget.wall_clock_seconds == 36000.0
+    assert budget.instance_wall_clock_seconds == 1800.0
+    assert budget.scorer_reserve_seconds == 240.0
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("EVAL_BUDGET_TOKENS", "nan"),
+        ("EVAL_BUDGET_TOKENS", "-1"),
+        ("EVAL_BUDGET_COST", "inf"),
+        ("EVAL_BUDGET_COST", "-0.1"),
+        ("EVAL_BUDGET_OUTPUT_BYTES", "-1"),
+        ("EVAL_BUDGET_OUTPUT_BYTES", "infinity"),
+    ],
+)
+def test_invalid_resource_budget_values_fail_closed(name: str, value: str):
+    with pytest.raises(ValueError, match="invalid budget"):
+        _sized_budget(1, {name: value})
 
 
 def test_zero_instances_does_not_produce_a_zero_budget():
