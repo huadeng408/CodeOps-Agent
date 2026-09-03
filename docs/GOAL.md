@@ -1,4 +1,4 @@
-# Localcode Goal
+# CodeOps-Agent Goal
 
 执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-02 快照）
 
@@ -7,7 +7,7 @@
 
 ## 目标
 
-把 `localcode` 持续改造成面向代码仓库的多智能体开发协作工具：
+把 `CodeOps-Agent` 持续改造成面向代码仓库的多智能体开发协作工具：
 
 - Go Harness 负责鉴权、受约束的 Shell/Git/文件系统/MCP 工具调用和会话持久化。
 - Python/LangGraph 编排层负责上下文、计划、记忆、子 Agent 与 Worker 编排。
@@ -64,7 +64,7 @@ mock、合成 receipt 和开发 smoke 只能标为相应范围，不能替代真
 
 ## DeepSeek Harness 迁移原则
 
-`localcode` 是唯一改造目标仓库。保留 Go Harness 与 Python Orchestrator 的
+`CodeOps-Agent` 是唯一改造目标仓库。保留 Go Harness 与 Python Orchestrator 的
 职责划分，把 DeepSeek Harness 作为可执行行为规范和测试参考；不复制其
 TypeScript package 拓扑，也不以整体语言翻译替代模块设计。本路线覆盖既定
 46 项能力清单中除第 23、45、46 项外的 43 项。

@@ -1,5 +1,20 @@
 # Project Instructions
 
+## Project identity and README
+
+- The public project name is `CodeOps-Agent`. Use that spelling in the README
+  and other user-facing prose; keep `code-agent` only where an existing module,
+  binary, package or environment-variable identifier requires it.
+- Treat `README.md` as the product page. Keep it focused on stable implemented
+  capabilities, architecture, installation, configuration and normal usage.
+- Keep run IDs, commit-specific results, receipts, intermediate status,
+  unmet targets, defects, limitations, migration progress, scorer internals and
+  temporary workarounds in `docs/GOAL.md`, evaluation artifacts, tests or
+  focused developer documentation. Do not publish them in the README.
+- Before committing a README change, scan it for `BLOCKED`, `VERIFIED`,
+  `SMOKE_PASS`, run IDs, receipt paths and language that calls the project a
+  prototype or unfinished work.
+
 ## Source of truth
 
 - The active conversation goal and [`docs/GOAL.md`](docs/GOAL.md) are the only
@@ -19,8 +34,9 @@
   dependency only when an existing module boundary requires it.
 - Before editing, inspect `git status`, the relevant source and tests, and the
   active goal. For multi-file work, write a short plan before implementation.
-- Classify claims as `DESIGNED`, `IMPLEMENTED`, `VERIFIED` or `BLOCKED` based on
-  fresh evidence. Code, a fixture, or a test alone is not runtime verification.
+- In Goal and evaluation records, classify claims as `DESIGNED`, `IMPLEMENTED`,
+  `VERIFIED` or `BLOCKED` based on fresh evidence. Code, a fixture, or a test
+  alone is not runtime verification.
 
 ## Security and honest evaluation
 
@@ -66,7 +82,8 @@
 - Evaluation inputs and prompts must not contain answers, gold IDs, qrels,
   patches or repair hints. Preserve every failure and its denominator.
 - Missing trust roots, pins, credentials or external services fail closed on
-  release paths and remain clearly reported as `BLOCKED`.
+  release paths and remain clearly reported as `BLOCKED` in internal evaluation
+  records.
 
 ## Local operations
 

@@ -1,6 +1,6 @@
-# code-agent
+# CodeOps-Agent
 
-`code-agent` 是一个本地运行的 CLI 代码代理原型。项目采用 Go Harness + Python Orchestrator 的双层架构：Go 侧负责终端交互、权限控制、工具执行和本地状态管理，Python 侧负责 LLM 调用、上下文组装、计划管理、记忆检索、子 Agent 编排和错误恢复。
+`CodeOps-Agent` 是一个本地运行的 CLI 代码开发协作工具。项目采用 Go Harness + Python Orchestrator 的双层架构：Go 侧负责终端交互、权限控制、工具执行和本地状态管理，Python 侧负责 LLM 调用、上下文组装、计划管理、记忆检索、子 Agent 编排和错误恢复。
 
 目标是把“模型决策”和“本地执行”隔离开来：LLM 可以提出工具调用请求，但真正的文件、命令、网络、Git 和 MCP 操作都由 Go Harness 校验后执行。
 
@@ -297,142 +297,6 @@ go test ./...
 pytest -q
 ```
 
-运行可审计的真实进程故障恢复验收（默认 8 Worker、200 个任务、30 次进程终止）：
-
-```powershell
-python -m eval.harness.fault_injection `
-  --run-id fault-<timestamp> `
-  --artifact-root .tmp/fault-injection
-```
-
-runner 会启动真实 Python 子进程，复用 `WorkflowEngine` 和 SQLite checkpoint，
-按固定间隔终止正在执行的 worker 并重启其 assignment。receipt、任务清单、
-进程退出码、故障事件、SQLite 事件摘要和 `checksums.sha256` 写入
-`.tmp/fault-injection/<run_id>/`；运行目录被 `.gitignore` 排除，不应提交。
-只有故障次数、任务分母、最终状态和 checksum 全部满足约束时才会输出
-`VERIFIED`，夹具或 mock 不会被计为该验收证据。
-
-最新 canonical 批次 `fault-20260903-canonical-2` 在 clean commit `e7bd98ae`
-上以 8 Worker 执行 200 个 deterministic 80ms 任务，向 30 个不同进程注入
-30 次真实进程终止，最终恢复 `200/200`（100%），SQLite integrity 与 artifact
-checksum 均通过，精简 receipt 位于
-`data/eval/workflow/receipts/fault-20260903-canonical-2.json`。该 receipt 只验证
-固定进程故障恢复 lane；由于任务不调用外部模型，不能外推为真实模型长任务的端到端
-成功率。
-
-运行 Context/Memory 的固定双臂输入 Token 验收：
-
-```powershell
-# OpenAI-compatible provider
-$env:LLM_PROVIDER = 'openai'
-$env:OPENAI_API_KEY = '<从安全存储加载>'
-$env:OPENAI_BASE_URL = '<OpenAI-compatible HTTPS endpoint>'
-$env:OPENAI_MODEL = '<locked model>'
-python -m eval.harness.context_token_eval `
-  --task data/eval/context-token/tasks/workflow-provider-contract-v1.json `
-  --project-root . `
-  --artifact-root eval_results `
-  --run-id context-token-<timestamp> `
-  --model $env:OPENAI_MODEL `
-  --max-output-tokens 512 `
-  --minimum-reduction 0.60
-```
-
-也可以使用 Anthropic Messages provider。`AnthropicClient` 优先读取
-`ANTHROPIC_API_KEY`，未设置或仍为占位符时回退到 `ANTHROPIC_AUTH_TOKEN`；两者
-都只应从安全存储临时注入环境，不要写入仓库：
-
-```powershell
-$env:LLM_PROVIDER = 'anthropic'
-$env:ANTHROPIC_AUTH_TOKEN = '<从安全存储加载>'
-$env:ANTHROPIC_BASE_URL = '<Anthropic Messages HTTPS endpoint>'
-$env:ANTHROPIC_MODEL = '<locked model>'
-python -m eval.harness.context_token_eval `
-  --task data/eval/context-token/tasks/workflow-provider-contract-v1.json `
-  --project-root . `
-  --artifact-root eval_results `
-  --run-id context-token-<timestamp> `
-  --model $env:ANTHROPIC_MODEL `
-  --max-output-tokens 512 `
-  --minimum-reduction 0.60
-```
-
-runner 对同一锁定任务、模型和预算分别发送完整语料 baseline 与生产
-`LayeredContext` 生成的 P0/P1/P3 上下文。正式降幅只读取 provider 返回的
-`usage.input_tokens`；两臂任一结果回退、usage 缺失、模型身份不一致或降幅低于
-60% 都会输出 `BLOCKED`。回环地址只产生 `SMOKE_PASS`，远端 HTTPS provider
-才可产生该单项验收的 `VERIFIED`。这条 lane 验证 Context A/B，不代表完整产品
-E2E。原始回答和运行数据库只保留在已忽略的 `eval_results/<run_id>/`，精简
-receipt 不含 gold、prompt 正文或回答正文。任务文件预先 pin 住 P3 路径，因此该
-lane 不评测自动上下文选择准确率。
-
-运行 Skill 自主选型的固定 1,000 案例验收：
-
-```powershell
-go run ./cmd/skills-manifest `
-  --output .agent/skills.json `
-  --project-dir .agent/skills
-$env:OPENAI_API_KEY = '<从安全存储加载>'
-$env:OPENAI_BASE_URL = '<OpenAI-compatible HTTPS endpoint>'
-$env:OPENAI_MODEL = '<locked model>'
-python -m eval.harness.skill_selection_eval `
-  --manifest .agent/skills.json `
-  --dataset data/eval/skills/skill-selection-v1.json `
-  --artifact-root eval_results `
-  --run-id skill-selection-<timestamp> `
-  --model $env:OPENAI_MODEL `
-  --max-output-tokens 64 `
-  --max-concurrency 10 `
-  --minimum-accuracy 0.948 `
-  --required-case-count 1000
-```
-
-进程中断后使用完全相同的命令并追加 `--resume`。runner 以
-`checkpoint.sqlite3` 在每个案例完成时独立事务提交结果，只调度 checkpoint 中缺失
-的 case，并按锁定数据集顺序原子重建 `selections.jsonl`。恢复契约同时 pin 源码、
-数据集、catalog、模型、去凭据 endpoint、prompt schema 与全部预算；任一 pin 变化
-都会在 provider 调用前 fail-closed。未指定 `--resume` 时仍拒绝覆盖非空 run 目录。
-checkpoint 不保存 prompt、`expected_skill`、gold/qrels 或凭据；provider 错误详情仅
-保留去敏内容摘要。运行期间 SQLite 使用 WAL 与 `synchronous=FULL`，最终发布前回写
-主库并移除瞬态 journal sidecar，使 checksums 可重复验证。
-
-manifest 由 Go Harness 的真实 Skill registry 导出，只含名称、描述和工具元数据，
-不加载 Skill 正文。runner 对每个案例发起一次独立 `Skill` tool-call，gold 标签不进
-模型输入、运行结果或精简 receipt；少于 1,000 个案例、catalog 不完全覆盖、数据
-sidecar 不匹配、并发超过 10、provider usage 缺失或超预算、模型名/fingerprint
-无法锁定，或低于 `948/1000` 都 fail-closed。回环 provider 仍只产生
-`SMOKE_PASS`。`skill-selection-v1` 是明确标为
-CC0-1.0 的仓库原创 catalog-routing 数据，不代表外部真实任务的泛化准确率。
-
-最新真实 provider 批次 `skill-selection-20260902-sol-1` 在 clean commit
-`9447e390` 上以 `gpt-5.6-sol`、10 并发和单例 256 output-token 预算完成
-`960/1000`（96.0%），无传输、usage、预算或 tool-call 完整性失败。BeeAPI 未返回
-`system_fingerprint`，因此精简 receipt 保持 `BLOCKED`，该结果证明锁定数据集上的
-选型准确率，不构成不可变模型 revision 已验证的正式发布结论。
-
-断点恢复批次 `skill-selection-recovery-20260902-canonical-1` 在 clean commit
-`8237de50` 上使用本地确定性 provider：独立评测进程在 4/20 条 SQLite 结果提交后
-被真实终止，`--resume` 复用 4 条且只调用剩余 16 条，最终按固定顺序完成 20/20，
-已提交 case 重复调用数为 0，最终主库和 checksums 校验通过。该 receipt 的
-`VERIFIED` 仅适用于恢复机制，不替代上面的 1,000 案例远端选型准确率证据。
-
-### Phoenix 跨语言 Trace 显式集成测试
-
-该测试会启动 Docker Phoenix，调用真实 DeepSeek OpenAI 兼容接口，并运行真实 Go agent 与 Python orchestrator。它不会被 `go test ./...` 或默认 `pytest` 自动执行。
-
-先安装该显式测试所需的 gRPC 与 OpenTelemetry 依赖：
-
-```powershell
-python -m pip install -e ".[trace-e2e]"
-```
-
-```powershell
-$env:OPENAI_API_KEY = '<从安全存储加载>'
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-trace-e2e.ps1 -Model deepseek-v4-pro
-```
-
-凭据必须由外部 secret manager 加载到当前进程的 `OPENAI_API_KEY`；仓库文档和脚本调用示例不依赖 Markdown 密钥文件。测试不会输出 API key，也不会把它写入仓库、临时文件或 Phoenix span。
-
 格式化和基础编译检查：
 
 ```bash
@@ -445,7 +309,7 @@ make fmt
 docker compose up -d
 ```
 
-当前仓库主要使用 SQLite 保存会话；`docker-compose.yml` 中的 PostgreSQL 服务用于后续 checkpointer 或外部存储集成。
+`docker-compose.yml` 提供本地 PostgreSQL 依赖。
 
 ## Protobuf 生成
 
@@ -466,79 +330,8 @@ mv proto/codeagent/orchestrator_grpc.pb.go gen/codeagentpb/orchestrator_grpc.pb.
 python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/codeagent/orchestrator.proto
 ```
 
-Windows 环境也可以使用：
+Windows 环境可以使用：
 
 ```powershell
 .\scripts\generate-proto.ps1
 ```
-
-## 当前状态
-
-本项目按 [Goal](docs/GOAL.md) 持续改造中。现有仓库已经提供 Go Harness +
-Python Orchestrator 的可运行原型，但目标描述中的每项能力都必须以当前
-代码、测试和真实 runtime receipt 重新验收；历史文档中的完成度或旧指标不
-自动构成发布结论。
-
-### 已有代码边界
-
-- **LLM 推理**：Extended Thinking / 深度思考（Anthropic thinking block + OpenAI reasoning_effort 模型门控）——复杂任务、多轮、计划模式自动触发。
-- **Prompt 缓存感知**：Anthropic 显式 ephemeral 缓存标记（cacheable 段：identity/capabilities/tools/project），缓存命中率在状态栏实时可见。
-- **多模型路由**：基于任务复杂度的 fast↔main 自动选举，带中段升级（错误累积 / plan_mode 二阶段回归主模型）。
-- **增量流式输出**：Anthropic/OpenAI SSE 流式解析——LLM 文本逐块渲染（Go harness `OnTextDelta`→`AppendAssistantText`），而非等整段完成。工具调用结果统一后在文本后发出。
-- **用户中断**：Ctrl+C 全链路传播（Go `turnCtx`→gRPC `context.add_callback`→Python `threading.Event`→`http_call_with_retry` 可中断）+ idle 提示符 3 次快速 Ctrl+C 强退。
-- **进程崩溃恢复**：Go `ProcessManager.Monitor` 监督协程，编排器意外退出时自动重启（CAS 守护、指数退避），在途对话重放一次、会话不丢失。
-- **并行工具调用**：`ToolRequestBatch`→Go `sync.WaitGroup` 扇出，gRPC 批量协议支持。
-- **输出截断合规**：行数优先（250 行）+ 字节上限（50KB），信息性提示（`[Output truncated: N lines total, showing first M]`），`.truncated` 结构标志传递到 LLM。
-- **多模态**：图片二进制经 protobuf 内容块传递，不受文本输出 50KB 上限截断；PDF 由 MinerU OCR 提取 Markdown 与图像资产，再转换为 Anthropic 原生 `image` / OpenAI `image_url` 内容。该链路不使用 Tika 或 `pdftotext`。
-- **NotebookEdit**：Jupyter `.ipynb` cell 级增/删/改；`.ipynb` 读取渲染 cell 摘要而非原始 JSON。
-- **自动提交建议**：`/commit` 斜杠命令，流式生成 conventional-commit 建议（不回退自动化）。
-- **Allowlist 学习**：批准历史记录 + 规则建议器（重复匹配的命令/文件模式→候选 `AllowRule`），持久化跨会话。
-- **工具安全加固**：符号链接路径穿越防护；关闭所有 8 个工具中的硬编码输出限制。
-
-### 基础设施
-
-- **可观测性**：SessionMeta 随每轮上报 token/成本/缓存命中/模型；Go metrics `Collector` + session 持久化（SQLite）+ 状态栏实时渲染。
-- **会话持久化**：SQLite store + 确定性时间戳排序（`Résumé` 后强制单调递增，Windows 时钟分辨率健壮）。
-
-### 验收边界
-
-以下门槛是发布前必须由新鲜、可复现证据满足的最低值：
-
-- 故障恢复 `>=98.5%`（恢复任务数 / 全部任务数）。
-- 固定任务的输入 Token 降幅 `>=60%`，且任务结果不回退。
-- 锁定 1,000 个案例的 Skill 选型准确率 `>=948/1000`。
-- 固定预算和官方 scorer 下的 SWE 子集 `>=18/20`。
-
-Windows 上的 SWE 官方 scorer 默认使用 WSL2 `Ubuntu-24.04`，并在实际评分前用同一
-distro 做 Docker/Python 能力探测。若主机安装了其他健康的 Linux distro，可设置
-`SWEBENCH_WSL_DISTRO` 覆盖默认值；探测或评分超时会保持 `BLOCKED`，不会降级为
-合成或非官方 verdict。
-
-如果 WSL 发行版不可用但 Docker Desktop 和 Windows Python 已安装，可显式选择原生
-Windows scorer：
-
-```powershell
-$env:SWEBENCH_WINDOWS_BACKEND = 'native'
-```
-
-原生 scorer 运行时，Harness 仍会把 Agent 的 HTTP(S) 流量锁到 dead proxy。
-官方 SWE-bench scorer 需要从 `raw.githubusercontent.com` 读取环境文件，因此必须
-另外显式授予一个仅对子进程生效的代理：
-
-```powershell
-$env:SWEBENCH_SCORER_PROXY = 'http://127.0.0.1:7890'
-```
-
-该代理不会回写父进程；native scorer 内的 `requests` guard 只允许
-`raw.githubusercontent.com`，Docker Desktop 的 `http+docker` 本地通道保持直连，
-未配置代理或访问其他远端主机会 fail-closed。代理地址不得包含凭据、路径、查询或
-片段。WSL 路径继续使用显式的 `SWEBENCH_WSL_PROXY`。
-
-该路径在子进程中注入仅用于兼容官方包的 `resource` 限制空实现，并固定
-`PYTHONUTF8=1` 读取 UTF-8 predictions；仍调用同一个 `swebench.harness.run_evaluation`
-官方 scorer，超时通过 `taskkill /T /F` 回收整个进程树。默认值仍为 `wsl`，两种路径
-都要求 Docker 可用并在不可用时保持 `BLOCKED`。
-
-`go test ./...`、`pytest -q`、集成测试和真实 E2E 是不同门禁；夹具、mock、
-合成 receipt 或开发 smoke 不得替代真实 E2E。当前未满足的门槛保持
-`BLOCKED`，不会用文档措辞升级为 `VERIFIED`。
