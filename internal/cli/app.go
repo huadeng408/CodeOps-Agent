@@ -500,8 +500,12 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 				ExitCode:   1,
 			}
 		}
+		// Keep an auditable, parameter-generalized record for every explicit
+		// user approval. AlwaysAsk tools remain one-shot because the permission
+		// controller deliberately ignores sessionApproved for that level.
+		a.permissions.RecordApproval(call.Name, params)
+		a.session.SetApprovalHistory(a.permissions.ApprovalHistory())
 		if a.permissions.Level(call.Name) == permission.AskSession {
-			a.permissions.ApproveSession(call.Name)
 			a.session.SetApprovedTools(a.permissions.ApprovedTools())
 		}
 	}
@@ -1437,6 +1441,7 @@ func (a *App) restoreUndo(restored session.Session) {
 
 func (a *App) restorePermissions(restored session.Session) {
 	a.permissions.RestoreApprovedTools(restored.ApprovedTools)
+	a.permissions.RestoreApprovalHistory(restored.ApprovalHistory)
 }
 
 func (a *App) restoreWorktrees(restored session.Session) {

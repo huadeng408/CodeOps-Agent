@@ -52,6 +52,53 @@ func TestHandleToolCallPromptsAndApprovesAskSessionTool(t *testing.T) {
 	}
 }
 
+func TestHandleToolCallPersistsApprovalAuditRecord(t *testing.T) {
+	root := t.TempDir()
+	app, _ := newPermissionTestApp(root, "y\n")
+
+	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		Name:               "Write",
+		RequiredPermission: 2,
+		ParametersJSON:     `{"path":"docs/audit.txt","content":"recorded"}`,
+	})
+	if result.ExitCode != 0 {
+		t.Fatalf("approved write failed: %+v", result)
+	}
+
+	history := app.permissions.ApprovalHistory()
+	if len(history) != 1 {
+		t.Fatalf("approval history length = %d, want 1", len(history))
+	}
+	if history[0].Tool != "Write" || history[0].Signature == "" || history[0].Sample == "" {
+		t.Fatalf("approval audit record is incomplete: %+v", history[0])
+	}
+	current := app.session.Current()
+	if len(current.ApprovalHistory) != 1 || current.ApprovalHistory[0].Tool != "Write" {
+		t.Fatalf("session did not persist approval history: %+v", current.ApprovalHistory)
+	}
+}
+
+func TestRestorePermissionsRestoresApprovalAuditHistory(t *testing.T) {
+	root := t.TempDir()
+	app, _ := newPermissionTestApp(root, "")
+	record := permission.ApprovalRecord{
+		Tool:      "Write",
+		Signature: "path:docs",
+		Sample:    "docs/README.md",
+		Timestamp: time.Unix(123, 0).UTC(),
+	}
+
+	app.restorePermissions(session.Session{
+		ApprovedTools:   []string{"Write"},
+		ApprovalHistory: []permission.ApprovalRecord{record},
+	})
+
+	history := app.permissions.ApprovalHistory()
+	if len(history) != 1 || history[0] != record {
+		t.Fatalf("approval audit history was not restored: %+v", history)
+	}
+}
+
 func TestApprovalAnswerOnlyAcceptsExplicitY(t *testing.T) {
 	for _, answer := range []string{"y", "Y"} {
 		if !isApprovalAnswer(answer) {
