@@ -475,6 +475,42 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="SessionFork",
+                description=(
+                    "Fork the current durable session at an event sequence and switch to the new session. "
+                    "The operation is versioned and leaves the source history unchanged."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "api_version": {"type": "string", "enum": ["v1"]},
+                        "operation": {"type": "string", "enum": ["fork"]},
+                        "target_session_id": {"type": "string", "minLength": 1},
+                        "target_seq": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["api_version", "operation", "target_session_id", "target_seq"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="SessionRewind",
+                description=(
+                    "Rewind the current durable session to an event sequence while retaining the raw audit history."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "api_version": {"type": "string", "enum": ["v1"]},
+                        "operation": {"type": "string", "enum": ["rewind"]},
+                        "target_seq": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["api_version", "operation", "target_seq"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
                 name="TodoWrite",
                 description="Update the task list for the current conversation.",
                 permission=orchestrator_pb2.AUTO_ALLOW,

@@ -69,6 +69,8 @@ var DefaultPermissions = map[string]Level{
 	"job_kill":        AskSession,
 	"job_write":       AskSession,
 	"job_wait":        AutoAllow,
+	"SessionFork":     AskSession,
+	"SessionRewind":   AskSession,
 }
 
 func NewController(levels map[string]Level, allowlist []AllowRule) *Controller {

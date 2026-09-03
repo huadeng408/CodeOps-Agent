@@ -118,6 +118,25 @@ def test_background_job_schemas_expose_lifecycle_controls() -> None:
     assert specs["JobWrite"].parameters["required"] == ["job_id", "input"]
 
 
+def test_session_control_schemas_are_versioned_and_fail_closed() -> None:
+    registry = ToolRegistry()
+    specs = {tool.name: tool for tool in registry.list()}
+
+    fork = specs["SessionFork"]
+    assert fork.permission == orchestrator_pb2.ASK_SESSION
+    assert fork.parameters["required"] == ["api_version", "operation", "target_session_id", "target_seq"]
+    assert fork.parameters["properties"]["api_version"]["enum"] == ["v1"]
+    assert fork.parameters["properties"]["operation"]["enum"] == ["fork"]
+    assert fork.parameters["properties"]["target_seq"]["minimum"] == 0
+
+    rewind = specs["SessionRewind"]
+    assert rewind.permission == orchestrator_pb2.ASK_SESSION
+    assert rewind.parameters["required"] == ["api_version", "operation", "target_seq"]
+    assert rewind.parameters["properties"]["api_version"]["enum"] == ["v1"]
+    assert rewind.parameters["properties"]["operation"]["enum"] == ["rewind"]
+    assert rewind.parameters["properties"]["target_seq"]["minimum"] == 0
+
+
 def test_registry_allowlist_hides_other_tools_and_mcp_entries(tmp_path) -> None:
     (tmp_path / ".agent").mkdir()
     (tmp_path / ".agent" / "mcp-tools.json").write_text(

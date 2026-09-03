@@ -555,13 +555,21 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		}
 	}
 
-	result, err := a.executor.Execute(ctx, tools.ToolRequest{
-		Name:           call.Name,
-		Arguments:      params,
-		OwnerSessionID: current.ID,
-	})
+	var result tools.ToolResult
+	if call.Name == "SessionFork" || call.Name == "SessionRewind" {
+		result = a.executeSessionControl(ctx, call.Name, params)
+	} else {
+		result, err = a.executor.Execute(ctx, tools.ToolRequest{
+			Name:           call.Name,
+			Arguments:      params,
+			OwnerSessionID: current.ID,
+		})
+	}
 	a.metrics.RecordToolCall()
 	postCtx := hookCtx
+	if active := a.session.Current(); active.ID != "" {
+		postCtx.SessionID = active.ID
+	}
 	postCtx.Metadata = map[string]string{
 		"phase":      "post_tool",
 		"exit_code":  fmt.Sprint(result.ExitCode),
