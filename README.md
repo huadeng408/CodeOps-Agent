@@ -521,6 +521,19 @@ Windows scorer：
 $env:SWEBENCH_WINDOWS_BACKEND = 'native'
 ```
 
+原生 scorer 运行时，Harness 仍会把 Agent 的 HTTP(S) 流量锁到 dead proxy。
+官方 SWE-bench scorer 需要从 `raw.githubusercontent.com` 读取环境文件，因此必须
+另外显式授予一个仅对子进程生效的代理：
+
+```powershell
+$env:SWEBENCH_SCORER_PROXY = 'http://127.0.0.1:7890'
+```
+
+该代理不会回写父进程；native scorer 内的 `requests` guard 只允许
+`raw.githubusercontent.com`，Docker Desktop 的 `http+docker` 本地通道保持直连，
+未配置代理或访问其他远端主机会 fail-closed。代理地址不得包含凭据、路径、查询或
+片段。WSL 路径继续使用显式的 `SWEBENCH_WSL_PROXY`。
+
 该路径在子进程中注入仅用于兼容官方包的 `resource` 限制空实现，并固定
 `PYTHONUTF8=1` 读取 UTF-8 predictions；仍调用同一个 `swebench.harness.run_evaluation`
 官方 scorer，超时通过 `taskkill /T /F` 回收整个进程树。默认值仍为 `wsl`，两种路径

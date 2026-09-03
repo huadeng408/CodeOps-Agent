@@ -1370,6 +1370,98 @@ def _windows_resource_shim() -> str:
     )
 
 
+_SCORER_NETWORK_HOSTS = frozenset({"raw.githubusercontent.com"})
+
+
+def _scorer_proxy_url() -> str | None:
+    """Resolve and validate the explicitly granted official-scorer proxy.
+
+    The Harness deliberately pins child HTTP(S) traffic to a dead proxy while
+    the agent runs. The official scorer is a separate trusted operation and
+    needs one narrowly scoped exception to fetch SWE-bench environment files.
+    Keeping the exception opt-in prevents a scorer from silently inheriting a
+    host-wide proxy and makes the network grant visible in the run command.
+    """
+    raw = os.environ.get("SWEBENCH_SCORER_PROXY", "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "SWEBENCH_SCORER_PROXY must be an absolute http(s) URL without "
+            "credentials, path, query, or fragment"
+        )
+    return raw
+
+
+def _native_scorer_env() -> dict[str, str]:
+    """Build the native scorer environment without weakening agent isolation."""
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    proxy = _scorer_proxy_url()
+    if proxy:
+        # The proxy is granted only to the scorer child. The parent remains
+        # pinned to the dead proxy by HarnessRun._block_network().
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            env[name] = proxy
+        # raw.githubusercontent.com must go through the explicit proxy; only
+        # loopback is exempt for Docker Desktop and local services.
+        for name in ("NO_PROXY", "no_proxy"):
+            env[name] = "127.0.0.1,localhost,::1"
+    return env
+
+
+def _native_scorer_network_shim() -> str:
+    """Return a requests guard that enforces the scorer host allowlist.
+
+    SWE-bench's official Python code fetches environment/requirements files via
+    ``requests``. A proxy alone would make every destination reachable, so the
+    child patches the requests boundary and rejects any host other than the one
+    required by the pinned scorer path. No proxy means no external request is
+    permitted.
+    """
+    allowed = ", ".join(repr(host) for host in sorted(_SCORER_NETWORK_HOSTS))
+    return f"""
+import os
+import urllib.parse
+import requests
+
+_SCORER_PROXY = os.environ.get("SWEBENCH_SCORER_PROXY", "").strip()
+_SCORER_ALLOWED_HOSTS = frozenset(({allowed},))
+_SCORER_LOCAL_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
+_scorer_request = requests.sessions.Session.request
+
+def _guarded_scorer_request(self, method, url, **kwargs):
+    parsed = urllib.parse.urlparse(str(url))
+    host = (parsed.hostname or "").lower().rstrip(".")
+    # Docker SDK uses an http+docker adapter over a local named pipe/socket;
+    # it has no external network destination even when the parsed host is
+    # empty on Windows.
+    if parsed.scheme == "http+docker" or host in _SCORER_LOCAL_HOSTS:
+        return _scorer_request(self, method, url, **kwargs)
+    if not _SCORER_PROXY or host not in _SCORER_ALLOWED_HOSTS:
+        raise RuntimeError(
+            "official scorer network denied: host is outside the explicit "
+            "SWEBENCH scorer allowlist"
+        )
+    kwargs["proxies"] = {{"http": _SCORER_PROXY, "https": _SCORER_PROXY}}
+    return _scorer_request(self, method, url, **kwargs)
+
+requests.sessions.Session.request = _guarded_scorer_request
+"""
+
+
 def _can_score_official() -> tuple[bool, str]:
     """Check whether the official swebench scorer can run in this environment.
 
@@ -1620,7 +1712,22 @@ def _terminate_local_scorer_tree(
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        process.communicate()
+        # The group leader may have exited while descendants still hold the
+        # pipes. A blocking communicate() here can hang the Harness forever;
+        # keep the same bounded reap/kill contract as the normal path.
+        try:
+            process.communicate(timeout=max(0.01, grace_s))
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            process.communicate()
+        except Exception:
+            pass
         return
     try:
         process.communicate(timeout=max(0.01, grace_s))
@@ -1673,13 +1780,13 @@ def _run_official_scoring_windows_native(
         sys.executable,
         "-c",
         _windows_resource_shim()
+        + _native_scorer_network_shim()
         + "import json,sys; "
         + "from swebench.harness.run_evaluation import main; "
         + "main(**json.loads(sys.argv[1]))",
         json.dumps(scorer_args, separators=(",", ":")),
     ]
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
+    env = _native_scorer_env()
     try:
         process = subprocess.Popen(
             command,

@@ -450,6 +450,53 @@ class TestWindowsNativeScorer:
         assert "from swebench.harness.run_evaluation import main" in command
         assert 0 < float(captured["communicate_timeout"]) < 0.5
 
+    def test_native_scorer_proxy_is_explicit_and_host_allowlisted(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        class Process:
+            pid = 6791
+            returncode = 0
+
+            def communicate(self, *, timeout):
+                captured["communicate_timeout"] = timeout
+                return "Instances resolved: 1", ""
+
+        def fake_popen(argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Process()
+
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+        monkeypatch.setenv("SWEBENCH_SCORER_PROXY", "http://127.0.0.1:7890")
+        monkeypatch.setattr(sb.subprocess, "Popen", fake_popen)
+
+        ok, _ = sb._run_official_scoring_windows_native(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 0.5, "swebench"
+        )
+
+        assert ok is True
+        env = captured["env"]
+        assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+        assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+        assert env["NO_PROXY"] == "127.0.0.1,localhost,::1"
+        command = captured["argv"][2]
+        assert "raw.githubusercontent.com" in command
+        compile(command, "<native-scorer>", "exec")
+
+    @pytest.mark.parametrize(
+        "proxy",
+        [
+            "http://user:password@127.0.0.1:7890",
+            "http://127.0.0.1:7890/path",
+            "ftp://127.0.0.1:7890",
+        ],
+    )
+    def test_native_scorer_rejects_unsafe_proxy(self, monkeypatch, proxy: str) -> None:
+        monkeypatch.setenv("SWEBENCH_SCORER_PROXY", proxy)
+        with pytest.raises(ValueError, match="SWEBENCH_SCORER_PROXY"):
+            sb._native_scorer_env()
+
     def test_native_scorer_timeout_reaps_windows_process_tree(self, monkeypatch) -> None:
         class Process:
             pid = 6790
@@ -473,6 +520,37 @@ class TestWindowsNativeScorer:
             )
 
         assert terminated == [6790]
+
+
+def test_local_scorer_group_exit_still_has_bounded_reap(monkeypatch) -> None:
+    class Process:
+        pid = 9877
+
+        def __init__(self) -> None:
+            self.communicate_calls = 0
+            self.killed = False
+
+        def communicate(self, **kwargs):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired(["python"], kwargs["timeout"])
+            return "", ""
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+    monkeypatch.setattr(
+        sb.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(ProcessLookupError()),
+        raising=False,
+    )
+
+    sb._terminate_local_scorer_tree(process, 0.1)
+
+    assert process.killed is True
+    assert process.communicate_calls == 2
 
 
 def test_wsl_availability_probe_reaps_hung_process_tree(monkeypatch) -> None:
