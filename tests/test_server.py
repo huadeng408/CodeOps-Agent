@@ -980,6 +980,20 @@ def test_server_exposes_configured_provider_to_workflows(monkeypatch, tmp_path) 
     assert app.provider_clients["local"] is app.llm
 
 
+def test_server_routes_default_client_through_its_concrete_provider(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    route = app.provider_router.route_for_client(app.llm)
+
+    assert route is not None
+    assert route.provider == "openai"
+    assert app.provider_clients["openai"] is app.llm
+
+
 def test_session_meta_reports_llm_cost(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))

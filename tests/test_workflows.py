@@ -17,6 +17,7 @@ from orchestrator.workflows import (
     WorkflowSpec,
 )
 from orchestrator.llm.client import ChatResponse
+from orchestrator.llm.router import ModelInfo, ProviderRouter
 from orchestrator.context import TokenBudget
 from orchestrator.graph.main_graph import build_graph
 from orchestrator.memory.manager import MemoryManager
@@ -82,6 +83,43 @@ def test_provider_worker_executor_selects_the_named_llm_client() -> None:
     assert result.output == "anthropic response"
     assert len(openai.requests) == 0
     assert len(anthropic.requests) == 1
+
+
+def test_provider_worker_executor_uses_router_model_selection() -> None:
+    class FakeProvider:
+        model = "wire-default"
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def chat(self, request):
+            self.requests.append(request)
+            return ChatResponse(text="routed")
+
+    provider = FakeProvider()
+    router = ProviderRouter()
+    router.register(
+        "relay",
+        provider,
+        models=[ModelInfo(provider="relay", id="pinned-model")],
+    )
+    executor = ProviderWorkerExecutor(router)
+
+    result = asyncio.run(
+        executor(
+            WorkerSpec(
+                id="review",
+                title="Review",
+                objective="review",
+                provider="relay",
+                context={"model": "pinned-model"},
+            ),
+            {},
+        )
+    )
+
+    assert result.output == "routed"
+    assert provider.requests[0].model == "pinned-model"
 
 
 def test_runs_pipeline_after_dependency_output_is_checkpointed(tmp_path: Path) -> None:

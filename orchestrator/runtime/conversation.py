@@ -36,6 +36,7 @@ from orchestrator.llm.client import (
     message_content_text,
 )
 from orchestrator.llm.providers.anthropic import AnthropicClient
+from orchestrator.llm.router import PreparedRoute, ProviderRouter
 from orchestrator.memory.manager import Memory, MemoryManager
 from orchestrator.prompts import (
     build_system_prompt,
@@ -198,11 +199,13 @@ class ConversationRunner:
     context_window: int | None = None
     max_overflow_retries: int = 2
     loop_plugins: AgentLoopPluginRegistry | None = None
+    provider_router: ProviderRouter | None = None
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _loop_last_turn: int = field(default=0, init=False, repr=False)
+    _active_route: PreparedRoute | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -222,6 +225,13 @@ class ConversationRunner:
             self.provider_clients.setdefault("default", self.llm)
         if self.main_llm is None:
             object.__setattr__(self, "main_llm", self.llm)
+        if self.provider_router is None:
+            object.__setattr__(
+                self,
+                "provider_router",
+                ProviderRouter.from_clients(self.provider_clients),
+            )
+        self._active_route = self.provider_router.route_for_client(self.llm)
 
     @property
     def loop_plugin_errors(self) -> tuple[dict[str, str], ...]:
@@ -362,6 +372,7 @@ class ConversationRunner:
                     session_id=session_id,
                     turn=turn,
                     metadata={
+                        **self._route_metadata(),
                         "message_count": len(request_messages),
                         "allow_tools": True,
                     },
@@ -404,6 +415,7 @@ class ConversationRunner:
                 session_id=session_id,
                 turn=turn,
                 metadata={
+                    **self._route_metadata(),
                     "text_length": len(response.text),
                     "tool_call_count": len(response.tool_calls),
                 },
@@ -907,6 +919,7 @@ class ConversationRunner:
                 session_id=session_id,
                 turn=final_turn,
                 metadata={
+                    **self._route_metadata(),
                     "message_count": len(request_messages),
                     "allow_tools": False,
                 },
@@ -932,6 +945,7 @@ class ConversationRunner:
             session_id=session_id,
             turn=final_turn,
             metadata={
+                **self._route_metadata(),
                 "text_length": len(response.text),
                 "tool_call_count": len(response.tool_calls),
             },
@@ -1048,6 +1062,8 @@ class ConversationRunner:
         return messages
 
     def _detect_provider(self) -> str:
+        if self._active_route is not None and self._active_route.client is self.llm:
+            return self._active_route.provider
         if isinstance(self.llm, AnthropicClient):
             return "anthropic"
         model = str(getattr(self.llm, "model", "")).lower()
@@ -1056,6 +1072,24 @@ class ConversationRunner:
         if model and "gpt" in model:
             return "openai"
         return ""
+
+    def _route_metadata(self) -> dict[str, Any]:
+        """Return credential-free identity for the active model route."""
+        route = (
+            self._active_route
+            if self._active_route is not None and self._active_route.client is self.llm
+            else None
+        )
+        if route is not None:
+            return {
+                "provider": route.provider,
+                "model": route.model,
+                "generation": route.generation,
+            }
+        return {
+            "provider": self._detect_provider(),
+            "model": str(getattr(self.llm, "model", "")),
+        }
 
     def _chat(
         self,
@@ -1076,10 +1110,18 @@ class ConversationRunner:
             except Exception:
                 pass
         try:
+            route = (
+                self._active_route
+                if self._active_route is not None and self._active_route.client is self.llm
+                else None
+            )
+            client = route.client if route is not None else self.llm
+            if client is None:
+                raise RuntimeError("no LLM client is configured")
             response = asyncio.run(
-                self.llm.chat(
+                client.chat(
                     ChatRequest(
-                        model=getattr(self.llm, "model", ""),
+                        model=route.model if route is not None else getattr(client, "model", ""),
                         messages=messages,
                         tools=tools,
                         thinking_enabled=thinking_enabled,
@@ -1130,7 +1172,15 @@ class ConversationRunner:
         inside ``stream`` on their own between-chunk check. Either way the
         exception propagates to :meth:`run`'s handler.
         """
-        stream_fn = getattr(self.llm, "stream", None)
+        route = (
+            self._active_route
+            if self._active_route is not None and self._active_route.client is self.llm
+            else None
+        )
+        client = route.client if route is not None else self.llm
+        if client is None:
+            raise RuntimeError("no LLM client is configured")
+        stream_fn = getattr(client, "stream", None)
         if stream_fn is None:
             response = self._chat(
                 messages,
@@ -1164,7 +1214,7 @@ class ConversationRunner:
         try:
             tools = self.tool_registry.openai_schemas() if allow_tools else []
             request = ChatRequest(
-                model=getattr(self.llm, "model", ""),
+                model=route.model if route is not None else getattr(client, "model", ""),
                 messages=messages,
                 tools=tools,
                 thinking_enabled=thinking_enabled,
@@ -1317,6 +1367,11 @@ class ConversationRunner:
         )
 
         elected = fast if use_fast else main
+        self._active_route = (
+            self.provider_router.route_for_client(elected)
+            if self.provider_router is not None
+            else None
+        )
         if elected is not self.llm:
             prev = getattr(self.llm, "model", "unknown") if self.llm else "none"
             nxt = getattr(elected, "model", "unknown")
@@ -1418,7 +1473,11 @@ class ConversationRunner:
         cost: float,
         cached_tokens: int = 0,
     ) -> orchestrator_pb2.OrchestratorMessage:
-        model = getattr(self.llm, "model", "") or "fallback"
+        model = (
+            self._active_route.model
+            if self._active_route is not None and self._active_route.client is self.llm
+            else getattr(self.llm, "model", "")
+        ) or "fallback"
         return orchestrator_pb2.OrchestratorMessage(
             session_meta=orchestrator_pb2.SessionMeta(
                 turn=turn,
@@ -2312,7 +2371,9 @@ class ConversationRunner:
     def _run_workflow(self, workflow: WorkflowSpec) -> dict[str, object]:
         store = SQLiteWorkflowStore(Path(self.project_root) / ".agent" / "workflows.sqlite")
         try:
-            executor = ProviderWorkerExecutor(self.provider_clients or {})
+            executor = ProviderWorkerExecutor(
+                self.provider_router if self.provider_router is not None else (self.provider_clients or {})
+            )
             result = asyncio.run(
                 WorkflowEngine(
                     store,

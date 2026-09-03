@@ -1,6 +1,10 @@
 """Provider adapters."""
 
+from collections.abc import Mapping
+
 from orchestrator.config import get_model_fast, read_env
+from orchestrator.llm.client import LLMClient
+from orchestrator.llm.router import ProviderRouter
 
 from .anthropic import AnthropicClient
 from .local import LocalClient
@@ -61,10 +65,24 @@ def build_fast_client():
     return None
 
 
+def build_provider_router(clients: Mapping[str, LLMClient] | None = None) -> ProviderRouter:
+    """Build the provider/model registry from already-created client adapters.
+
+    Keeping construction separate from client factories makes credential
+    handling stay inside the adapters while the router owns only public route
+    identity and model selection.
+    """
+    if clients is None:
+        default = build_default_client()
+        clients = {"default": default} if default is not None else {}
+    return ProviderRouter.from_clients(clients)
+
+
 __all__ = [
     "AnthropicClient",
     "LocalClient",
     "OpenAIClient",
     "build_default_client",
     "build_fast_client",
+    "build_provider_router",
 ]

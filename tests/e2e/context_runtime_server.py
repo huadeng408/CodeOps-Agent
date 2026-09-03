@@ -156,10 +156,32 @@ def main() -> None:
                 handle.write(event.phase + "\n")
 
         app.loop_plugins.register("e2e-phase-recorder", record_loop_phase)
+    route_receipt = os.environ.get("CODE_AGENT_PROVIDER_ROUTE_E2E_RECEIPT", "").strip()
+    if route_receipt:
+        route_path = Path(route_receipt).resolve()
+
+        def record_route(event) -> None:
+            if event.phase != "model_before" or route_path.exists():
+                return
+            route_path.write_text(
+                json.dumps(
+                    {"phase": event.phase, **event.metadata},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        app.loop_plugins.register("e2e-route-recorder", record_route)
     deterministic = DeterministicContextLLM()
     app.llm = deterministic
     app.fast_llm = deterministic
-    app.provider_clients = {"default": deterministic}
+    app.provider_clients = (
+        {"route-e2e": deterministic}
+        if route_receipt
+        else {"default": deterministic}
+    )
     app.serve()
 
 

@@ -9,6 +9,7 @@ from .client import (
     Usage,
     is_context_window_exceeded,
 )
+from .router import ModelInfo, PreparedRoute, ProviderRouteError, ProviderRouter
 
 __all__ = [
     "ChatMessage",
@@ -18,4 +19,8 @@ __all__ = [
     "ToolCall",
     "Usage",
     "is_context_window_exceeded",
+    "ModelInfo",
+    "PreparedRoute",
+    "ProviderRouteError",
+    "ProviderRouter",
 ]

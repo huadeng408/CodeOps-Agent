@@ -19,6 +19,7 @@ from .llm.providers import (
     OpenAIClient,
     build_default_client,
     build_fast_client,
+    build_provider_router,
 )
 from .memory.manager import MemoryManager
 from .runtime import AgentLoopPluginRegistry, ConversationRunner, ToolRegistry
@@ -50,6 +51,7 @@ class OrchestratorServer:
         self.graph = build_graph()
         self.llm = build_default_client()
         self.provider_clients = _build_provider_clients(self.llm)
+        self.provider_router = build_provider_router(self.provider_clients)
         self.loop_plugins = AgentLoopPluginRegistry()
         self.fast_llm = build_fast_client()
         self.tools = ToolRegistry(self.project_root)
@@ -118,6 +120,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             layered_context=self.app.layered_context,
             context_window=self.app.config.context_window,
             loop_plugins=self.app.loop_plugins,
+            provider_router=self._provider_router_for_request(),
         )
 
     def Compact(self, request, context):
@@ -217,14 +220,19 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 clients[configured] = self.app.llm
         return clients
 
+    def _provider_router_for_request(self):
+        """Snapshot current clients into one request-scoped route directory."""
+        return build_provider_router(self._provider_clients_for_request())
+
 
 def _build_provider_clients(default_client):
     clients = {}
     configured = read_env("LLM_PROVIDER").lower()
     if default_client is not None:
         clients["default"] = default_client
-        if configured in {"openai", "anthropic", "local"}:
-            clients[configured] = default_client
+        provider_alias = configured if configured in {"openai", "anthropic", "local"} else _infer_provider_alias(default_client)
+        if provider_alias:
+            clients[provider_alias] = default_client
     for name, factory in (
         ("openai", OpenAIClient.from_env),
         ("anthropic", AnthropicClient.from_env),
@@ -234,6 +242,17 @@ def _build_provider_clients(default_client):
         if client is not None:
             clients.setdefault(name, client)
     return clients
+
+
+def _infer_provider_alias(client) -> str:
+    """Map a concrete adapter to its canonical provider route name."""
+    if isinstance(client, LocalClient):
+        return "local"
+    if isinstance(client, AnthropicClient):
+        return "anthropic"
+    if isinstance(client, OpenAIClient):
+        return "openai"
+    return ""
 
 
 class _ManagedGrpcServer:
