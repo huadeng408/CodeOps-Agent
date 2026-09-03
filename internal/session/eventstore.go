@@ -136,6 +136,111 @@ func (s *SQLiteEventStore) List(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
+// Fork copies a trusted event prefix into a new session and returns the
+// resulting projected state. The source remains untouched.
+func (s *SQLiteEventStore) Fork(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64) (*Session, error) {
+	log, err := s.eventLog()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.Load(ctx, sourceSessionID); err != nil {
+		return nil, err
+	}
+	sourceEvents, err := log.Events(ctx, sourceSessionID)
+	if err != nil {
+		return nil, err
+	}
+	child, err := replaySessionState(sourceEvents, targetSeq)
+	if err != nil {
+		return nil, err
+	}
+	child.ID = strings.TrimSpace(targetSessionID)
+	if err := log.ForkWithState(ctx, sourceSessionID, child.ID, targetSeq, *child); err != nil {
+		return nil, err
+	}
+	child, err = s.Load(ctx, child.ID)
+	if err != nil {
+		return nil, err
+	}
+	if child == nil {
+		return nil, ErrNotFound
+	}
+	return child, nil
+}
+
+// Rewind appends an auditable marker and then records the state that was
+// active at the requested sequence as a new state event. Raw history remains
+// intact while subsequent loads observe the rewound projection.
+func (s *SQLiteEventStore) Rewind(ctx context.Context, sessionID string, targetSeq int64) (*Session, error) {
+	log, err := s.eventLog()
+	if err != nil {
+		return nil, err
+	}
+	events, err := log.Events(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if targetSeq < 0 || targetSeq >= int64(len(events)) {
+		return nil, fmt.Errorf("%w: target seq %d exceeds history", ErrRewindTargetInvalid, targetSeq)
+	}
+	restored, err := replaySessionState(events, targetSeq)
+	if err != nil {
+		return nil, err
+	}
+	restored.ID = sessionID
+	if _, _, err := log.RewindWithState(ctx, sessionID, targetSeq, *restored); err != nil {
+		return nil, err
+	}
+	return restored, nil
+}
+
+// replaySessionState derives the state projection at an event sequence. A
+// rewind marker points at the already-derived projection at its target, so
+// repeated rewinds remain deterministic instead of selecting a stale snapshot.
+func replaySessionState(events []Event, targetSeq int64) (*Session, error) {
+	if targetSeq < 0 || targetSeq >= int64(len(events)) {
+		return nil, fmt.Errorf("%w: target seq %d exceeds history", ErrRewindTargetInvalid, targetSeq)
+	}
+	projections := make([]*Session, len(events))
+	var current *Session
+	for index := 0; index <= int(targetSeq); index++ {
+		event := events[index]
+		switch event.Type {
+		case sessionStateEventType:
+			candidate, err := decodeSessionState(event.Payload)
+			if err != nil {
+				return nil, err
+			}
+			current = candidate
+		case "legacy/import", "session/fork/import":
+			candidate, err := decodeLegacyImportSession(event.Payload)
+			if err != nil {
+				return nil, err
+			}
+			current = candidate
+		case "session/rewind":
+			var marker rewindPayload
+			if err := json.Unmarshal(event.Payload, &marker); err != nil || marker.TargetSeq < 0 || marker.TargetSeq >= int64(index) {
+				return nil, fmt.Errorf("%w: invalid rewind marker at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			base := projections[marker.TargetSeq]
+			if base == nil {
+				return nil, fmt.Errorf("%w: rewind target %d has no session projection", ErrRewindTargetInvalid, marker.TargetSeq)
+			}
+			copy := cloneSession(*base)
+			current = &copy
+		}
+		if current != nil {
+			copy := cloneSession(*current)
+			projections[index] = &copy
+		}
+	}
+	if current == nil {
+		return nil, fmt.Errorf("%w: no session state at or before seq %d", ErrRewindTargetInvalid, targetSeq)
+	}
+	return current, nil
+}
+
 func (s *SQLiteEventStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -614,3 +614,218 @@ func TestSQLiteEventLogRewindRebuildsSurfaceWithoutDeletingHistory(t *testing.T)
 		t.Fatalf("verify rewind chain: %v", err)
 	}
 }
+
+func TestSQLiteEventStoreRewindReplaysEarlierRewindMarkers(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.sqlite")
+	store := session.NewSQLiteEventStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+	manager := session.NewManager(store)
+	created := manager.NewSession("workspace")
+	manager.Append(session.RoleUser, "first")
+	manager.Append(session.RoleAssistant, "second")
+
+	events, err := sessionEvents(ctx, path, created.ID)
+	if err != nil {
+		t.Fatalf("read initial session events: %v", err)
+	}
+	firstStateSeq := stateSeqWithMessageCount(t, events, 1)
+	if _, err := store.Rewind(ctx, created.ID, firstStateSeq); err != nil {
+		t.Fatalf("first rewind: %v", err)
+	}
+	afterFirst, err := sessionEvents(ctx, path, created.ID)
+	if err != nil {
+		t.Fatalf("read events after first rewind: %v", err)
+	}
+	firstMarkerSeq := int64(len(afterFirst) - 2)
+
+	rewound, err := store.Rewind(ctx, created.ID, firstMarkerSeq)
+	if err != nil {
+		t.Fatalf("rewind to earlier marker: %v", err)
+	}
+	if len(rewound.Messages) != 1 || rewound.Messages[0].Content != "first" {
+		t.Fatalf("rewind replay = %+v, want the first-message projection", rewound)
+	}
+}
+
+func TestSQLiteEventStoreRewindRollsBackMarkerWhenStateWriteFails(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.sqlite")
+	store := session.NewSQLiteEventStore(path)
+	manager := session.NewManager(store)
+	created := manager.NewSession("workspace")
+	manager.Append(session.RoleUser, "first")
+	manager.Append(session.RoleAssistant, "second")
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close event store before failure injection: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open session database: %v", err)
+	}
+	_, err = db.Exec("CREATE TRIGGER fail_rewind_state BEFORE INSERT ON session_events\n" +
+		"WHEN NEW.session_id = '" + created.ID + "' AND NEW.type = 'session/state'\n" +
+		"BEGIN SELECT RAISE(ABORT, 'injected rewind state failure'); END;")
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("install rewind failure trigger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close session database: %v", err)
+	}
+
+	store = session.NewSQLiteEventStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+	loaded, err := store.Load(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("load session for rewind failure: %v", err)
+	}
+	stateSeq := stateSeqWithMessageCount(t, mustSessionEvents(t, path, created.ID), 1)
+	if _, err := store.Rewind(ctx, loaded.ID, stateSeq); err == nil {
+		t.Fatal("rewind succeeded despite injected state failure")
+	}
+
+	events, err := sessionEvents(ctx, path, created.ID)
+	if err != nil {
+		t.Fatalf("read events after failed rewind: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "session/rewind" {
+			t.Fatalf("failed rewind left marker at seq %d", event.Seq)
+		}
+	}
+}
+
+func TestSQLiteEventLogForkRollsBackPartialTargetOnInsertFailure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "events.sqlite")
+	log, err := session.OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer log.Close()
+	for seq := int64(0); seq < 3; seq++ {
+		if _, err := log.Append(ctx, "parent", seq, "user/message", map[string]int{"seq": int(seq)}); err != nil {
+			t.Fatalf("append parent event %d: %v", seq, err)
+		}
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fork database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_fork_insert BEFORE INSERT ON session_events
+WHEN NEW.session_id = 'child' AND NEW.seq = 1
+BEGIN SELECT RAISE(ABORT, 'injected fork failure'); END;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("install fork failure trigger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fork database: %v", err)
+	}
+
+	if err := log.Fork(ctx, "parent", "child", 2); err == nil {
+		t.Fatal("fork succeeded despite injected insert failure")
+	}
+	child, err := log.Events(ctx, "child")
+	if err != nil {
+		t.Fatalf("read child events after failed fork: %v", err)
+	}
+	if len(child) != 0 {
+		t.Fatalf("failed fork left partial child history: %+v", child)
+	}
+}
+
+func TestSQLiteEventStoreForkMaterializesLegacySnapshotIndependently(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.sqlite")
+	legacyStore := session.NewSQLiteStore(path)
+	legacy := session.Session{
+		ID:         "legacy-parent",
+		WorkingDir: "workspace",
+		Messages: []session.Message{{
+			Role:    session.RoleUser,
+			Content: "legacy message",
+		}},
+	}
+	if err := legacyStore.Save(ctx, legacy); err != nil {
+		t.Fatalf("save legacy source: %v", err)
+	}
+	if err := legacyStore.Close(); err != nil {
+		t.Fatalf("close legacy source: %v", err)
+	}
+
+	store := session.NewSQLiteEventStore(path)
+	manager := session.NewManager(store)
+	loaded, err := manager.Load(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("import legacy source: %v", err)
+	}
+	manager.Append(session.RoleAssistant, "new message")
+	events := mustSessionEvents(t, path, legacy.ID)
+	targetSeq := stateSeqWithMessageCount(t, events, len(loaded.Messages)+1)
+	if _, err := store.Fork(ctx, legacy.ID, "legacy-child", targetSeq); err != nil {
+		t.Fatalf("fork imported legacy source: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close event store: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy database for mutation: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE sessions SET payload = ? WHERE id = ?`, `{"id":"legacy-parent","working_dir":"changed"}`, legacy.ID); err != nil {
+		_ = db.Close()
+		t.Fatalf("mutate source legacy snapshot: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close mutated legacy database: %v", err)
+	}
+
+	childStore := session.NewSQLiteEventStore(path)
+	defer childStore.Close()
+	child, err := childStore.Load(ctx, "legacy-child")
+	if err != nil {
+		t.Fatalf("load fork after source mutation: %v", err)
+	}
+	if len(child.Messages) != 2 || child.Messages[0].Content != "legacy message" || child.Messages[1].Content != "new message" {
+		t.Fatalf("forked legacy state = %+v, want two preserved messages", child.Messages)
+	}
+}
+
+func sessionEvents(ctx context.Context, path, sessionID string) ([]session.Event, error) {
+	log, err := session.OpenSQLiteEventLog(path)
+	if err != nil {
+		return nil, err
+	}
+	defer log.Close()
+	return log.Events(ctx, sessionID)
+}
+
+func mustSessionEvents(t *testing.T, path, sessionID string) []session.Event {
+	t.Helper()
+	events, err := sessionEvents(context.Background(), path, sessionID)
+	if err != nil {
+		t.Fatalf("read session events: %v", err)
+	}
+	return events
+}
+
+func stateSeqWithMessageCount(t *testing.T, events []session.Event, want int) int64 {
+	t.Helper()
+	for _, event := range events {
+		if event.Type != "session/state" {
+			continue
+		}
+		var state session.Session
+		if err := json.Unmarshal(event.Payload, &state); err != nil {
+			t.Fatalf("decode state at seq %d: %v", event.Seq, err)
+		}
+		if len(state.Messages) == want {
+			return event.Seq
+		}
+	}
+	t.Fatalf("no session state with %d messages", want)
+	return -1
+}

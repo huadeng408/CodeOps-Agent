@@ -3,8 +3,10 @@ package codeagent_test
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"code-agent/internal/session"
 )
@@ -202,6 +204,59 @@ func TestManagerResumeByIDAndListRecent(t *testing.T) {
 	if recent[0].Mode != "plan" || recent[0].AgentCount != 1 {
 		t.Fatalf("unexpected session summary state: %+v", recent[0])
 	}
+}
+
+func TestManagerResumeMakesResumedSessionMostRecentWhenClockLagsCurrent(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	first := session.Session{ID: "first", WorkingDir: "first", CreatedAt: base, UpdatedAt: base}
+	second := session.Session{ID: "second", WorkingDir: "second", CreatedAt: base, UpdatedAt: base.Add(time.Hour)}
+	store := &fixedSessionStore{sessions: map[string]session.Session{
+		first.ID:  first,
+		second.ID: second,
+	}}
+	manager := session.NewManager(store)
+	if _, err := manager.Load(ctx, second.ID); err != nil {
+		t.Fatalf("load current session: %v", err)
+	}
+	if _, err := manager.Resume(ctx, first.ID); err != nil {
+		t.Fatalf("resume older session: %v", err)
+	}
+	recent, err := manager.ListRecent(ctx, 2)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(recent) != 2 || recent[0].ID != first.ID {
+		t.Fatalf("resumed session ordering = %+v, want first before second", recent)
+	}
+}
+
+type fixedSessionStore struct {
+	sessions map[string]session.Session
+}
+
+func (s *fixedSessionStore) Save(_ context.Context, current session.Session) error {
+	s.sessions[current.ID] = current
+	return nil
+}
+
+func (s *fixedSessionStore) Load(_ context.Context, id string) (*session.Session, error) {
+	current, ok := s.sessions[id]
+	if !ok {
+		return nil, session.ErrNotFound
+	}
+	return &current, nil
+}
+
+func (s *fixedSessionStore) List(_ context.Context) ([]session.Session, error) {
+	out := make([]session.Session, 0, len(s.sessions))
+	for _, current := range s.sessions {
+		out = append(out, current)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
 }
 
 func TestSessionModeNormalizesAndPersistsInMetadata(t *testing.T) {

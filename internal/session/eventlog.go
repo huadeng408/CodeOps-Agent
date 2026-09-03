@@ -74,6 +74,12 @@ type rewindPayload struct {
 	TargetSeq int64 `json:"target_seq"`
 }
 
+type pendingEvent struct {
+	eventType string
+	payload   json.RawMessage
+	surfaceOp *SurfaceOperation
+}
+
 // EventLog is the durable seam used by the Harness for append-only session
 // events. Implementations must reject stale expected sequences atomically.
 type EventLog interface {
@@ -157,24 +163,59 @@ func (l *SQLiteEventLog) appendUnlocked(
 	payload any,
 	surfaceOp *SurfaceOperation,
 ) (Event, error) {
-
-	if err := validateEventInput(sessionID, expectedSeq, eventType); err != nil {
-		return Event{}, err
-	}
-	if err := l.ensure(ctx); err != nil {
-		return Event{}, err
-	}
-	if err := l.Verify(ctx, sessionID); err != nil {
-		return Event{}, err
-	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return Event{}, fmt.Errorf("marshal session event payload: %w", err)
 	}
+	appended, err := l.appendBatchUnlocked(ctx, sessionID, expectedSeq, []pendingEvent{{
+		eventType: eventType,
+		payload:   payloadJSON,
+		surfaceOp: surfaceOp,
+	}})
+	if err != nil {
+		return Event{}, err
+	}
+	return appended[0], nil
+}
+
+// appendBatchUnlocked commits a sequence of events in one SQLite transaction.
+// The caller must hold appendMu; every event is still validated against the
+// current hash chain before the transaction is committed.
+func (l *SQLiteEventLog) appendBatchUnlocked(
+	ctx context.Context,
+	sessionID string,
+	expectedSeq int64,
+	pending []pendingEvent,
+) ([]Event, error) {
+	if err := validateEventInput(sessionID, expectedSeq, "batch"); err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 {
+		return nil, errors.New("session event batch must not be empty")
+	}
+	for _, item := range pending {
+		if strings.TrimSpace(item.eventType) == "" {
+			return nil, errors.New("session event type is required")
+		}
+		if !json.Valid(item.payload) {
+			return nil, errors.New("session event payload must be valid JSON")
+		}
+		if item.surfaceOp != nil {
+			if err := validateSurfaceOperation(item.eventType, *item.surfaceOp); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := l.ensure(ctx); err != nil {
+		return nil, err
+	}
+	if err := l.Verify(ctx, sessionID); err != nil {
+		return nil, err
+	}
 
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return Event{}, fmt.Errorf("open session event connection: %w", err)
+		return nil, fmt.Errorf("open session event connection: %w", err)
 	}
 	defer conn.Close()
 	// BEGIN IMMEDIATE takes the SQLite write reservation before reading the
@@ -182,7 +223,7 @@ func (l *SQLiteEventLog) appendUnlocked(
 	// two processes both read the same sequence and one receives SQLITE_BUSY
 	// instead of the documented sequence conflict.
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Event{}, fmt.Errorf("begin session event transaction: %w", err)
+		return nil, fmt.Errorf("begin session event transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -198,31 +239,45 @@ SELECT COALESCE(MAX(seq) + 1, 0), COALESCE((
   SELECT checksum FROM session_events
   WHERE session_id = ? ORDER BY seq DESC LIMIT 1
 ), '')
-FROM session_events WHERE session_id = ?`, sessionID, sessionID).Scan(&nextSeq, &previousChecksum); err != nil {
-		return Event{}, fmt.Errorf("read session event sequence: %w", err)
+	FROM session_events WHERE session_id = ?`, sessionID, sessionID).Scan(&nextSeq, &previousChecksum); err != nil {
+		return nil, fmt.Errorf("read session event sequence: %w", err)
 	}
 	if nextSeq != expectedSeq {
-		return Event{}, fmt.Errorf("%w: session=%s expected=%d actual=%d", ErrSequenceConflict, sessionID, expectedSeq, nextSeq)
+		return nil, fmt.Errorf("%w: session=%s expected=%d actual=%d", ErrSequenceConflict, sessionID, expectedSeq, nextSeq)
 	}
 
-	eventID, err := newEventID()
-	if err != nil {
-		return Event{}, err
+	appended := make([]Event, 0, len(pending))
+	for index, item := range pending {
+		eventID, err := newEventID()
+		if err != nil {
+			return nil, err
+		}
+		event := Event{
+			SessionID:    sessionID,
+			Seq:          expectedSeq + int64(index),
+			EventID:      eventID,
+			Version:      eventSchemaVersion,
+			Type:         item.eventType,
+			CreatedAt:    time.Now().UTC(),
+			Payload:      append(json.RawMessage(nil), item.payload...),
+			SurfaceOp:    cloneSurfaceOperation(item.surfaceOp),
+			PrevChecksum: previousChecksum,
+		}
+		event.Checksum = checksumEvent(event)
+		if err := insertEvent(ctx, conn, event); err != nil {
+			return nil, err
+		}
+		appended = append(appended, event)
+		previousChecksum = event.Checksum
 	}
-	now := time.Now().UTC()
-	event := Event{
-		SessionID:    sessionID,
-		Seq:          expectedSeq,
-		EventID:      eventID,
-		Version:      eventSchemaVersion,
-		Type:         eventType,
-		CreatedAt:    now,
-		Payload:      append(json.RawMessage(nil), payloadJSON...),
-		SurfaceOp:    cloneSurfaceOperation(surfaceOp),
-		PrevChecksum: previousChecksum,
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit session event: %w", err)
 	}
-	event.Checksum = checksumEvent(event)
+	committed = true
+	return appended, nil
+}
 
+func insertEvent(ctx context.Context, conn *sql.Conn, event Event) error {
 	if _, err := conn.ExecContext(ctx, `
 INSERT INTO session_events
 		(session_id, seq, event_id, version, type, created_at, payload, surface_op, prev_checksum, checksum)
@@ -230,13 +285,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.SessionID, event.Seq, event.EventID, event.Version, event.Type,
 		event.CreatedAt.Format(eventTimeFormat), string(event.Payload), surfaceOperationJSON(event.SurfaceOp), event.PrevChecksum, event.Checksum,
 	); err != nil {
-		return Event{}, fmt.Errorf("append session event: %w", err)
+		return fmt.Errorf("append session event: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Event{}, fmt.Errorf("commit session event: %w", err)
-	}
-	committed = true
-	return event, nil
+	return nil
 }
 
 // ImportLegacySnapshot creates one idempotent log-only import event from the
@@ -295,6 +346,23 @@ func (l *SQLiteEventLog) ImportLegacySnapshot(ctx context.Context, sessionID str
 // Fork copies a trusted event prefix into a new session with freshly derived
 // event IDs and checksums. The source and target histories remain independent.
 func (l *SQLiteEventLog) Fork(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64) error {
+	return l.fork(ctx, sourceSessionID, targetSessionID, targetSeq, nil, true)
+}
+
+// ForkWithState atomically copies a trusted prefix and appends a normalized
+// state snapshot for the child. Legacy import markers are detached so the
+// child never depends on the mutable source snapshot table.
+func (l *SQLiteEventLog) ForkWithState(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64, state Session) error {
+	return l.fork(ctx, sourceSessionID, targetSessionID, targetSeq, &state, true)
+}
+
+func (l *SQLiteEventLog) fork(
+	ctx context.Context,
+	sourceSessionID, targetSessionID string,
+	targetSeq int64,
+	state *Session,
+	detachLegacyImport bool,
+) error {
 	if strings.TrimSpace(sourceSessionID) == "" || strings.TrimSpace(targetSessionID) == "" || sourceSessionID == targetSessionID || targetSeq < 0 {
 		return ErrForkTargetInvalid
 	}
@@ -313,19 +381,85 @@ func (l *SQLiteEventLog) Fork(ctx context.Context, sourceSessionID, targetSessio
 	if targetSeq >= int64(len(source)) {
 		return fmt.Errorf("%w: target seq %d exceeds source history", ErrForkTargetInvalid, targetSeq)
 	}
-	target, err := l.Events(ctx, targetSessionID)
+
+	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("open fork transaction connection: %w", err)
 	}
-	if len(target) != 0 {
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin fork transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	var targetCount int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_events WHERE session_id = ?`, targetSessionID).Scan(&targetCount); err != nil {
+		return fmt.Errorf("check fork target history: %w", err)
+	}
+	if targetCount != 0 {
 		return fmt.Errorf("%w: target session %s", ErrSessionExists, targetSessionID)
 	}
-	for _, event := range source[:targetSeq+1] {
-		if _, err := l.appendUnlocked(ctx, targetSessionID, int64(len(target)), event.Type, event.Payload, event.SurfaceOp); err != nil {
+
+	previousChecksum := ""
+	for index, sourceEvent := range source[:targetSeq+1] {
+		eventType := sourceEvent.Type
+		if detachLegacyImport && eventType == "legacy/import" {
+			eventType = "session/fork/import"
+		}
+		eventID, err := newEventID()
+		if err != nil {
 			return err
 		}
-		target = append(target, Event{})
+		event := Event{
+			SessionID:    targetSessionID,
+			Seq:          int64(index),
+			EventID:      eventID,
+			Version:      eventSchemaVersion,
+			Type:         eventType,
+			CreatedAt:    time.Now().UTC(),
+			Payload:      append(json.RawMessage(nil), sourceEvent.Payload...),
+			SurfaceOp:    cloneSurfaceOperation(sourceEvent.SurfaceOp),
+			PrevChecksum: previousChecksum,
+		}
+		event.Checksum = checksumEvent(event)
+		if err := insertEvent(ctx, conn, event); err != nil {
+			return err
+		}
+		previousChecksum = event.Checksum
 	}
+	if state != nil {
+		payload, err := json.Marshal(*state)
+		if err != nil {
+			return fmt.Errorf("marshal forked session state: %w", err)
+		}
+		eventID, err := newEventID()
+		if err != nil {
+			return err
+		}
+		event := Event{
+			SessionID:    targetSessionID,
+			Seq:          targetSeq + 1,
+			EventID:      eventID,
+			Version:      eventSchemaVersion,
+			Type:         sessionStateEventType,
+			CreatedAt:    time.Now().UTC(),
+			Payload:      payload,
+			PrevChecksum: previousChecksum,
+		}
+		event.Checksum = checksumEvent(event)
+		if err := insertEvent(ctx, conn, event); err != nil {
+			return err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit fork transaction: %w", err)
+	}
+	committed = true
 	return nil
 }
 
@@ -335,6 +469,8 @@ func (l *SQLiteEventLog) Rewind(ctx context.Context, sessionID string, targetSeq
 	if strings.TrimSpace(sessionID) == "" || targetSeq < 0 {
 		return Event{}, ErrRewindTargetInvalid
 	}
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
 	events, err := l.Events(ctx, sessionID)
 	if err != nil {
 		return Event{}, err
@@ -342,7 +478,51 @@ func (l *SQLiteEventLog) Rewind(ctx context.Context, sessionID string, targetSeq
 	if targetSeq >= int64(len(events)) {
 		return Event{}, fmt.Errorf("%w: target seq %d exceeds history", ErrRewindTargetInvalid, targetSeq)
 	}
-	return l.append(ctx, sessionID, int64(len(events)), "session/rewind", rewindPayload{TargetSeq: targetSeq}, nil)
+	payload, err := json.Marshal(rewindPayload{TargetSeq: targetSeq})
+	if err != nil {
+		return Event{}, fmt.Errorf("marshal rewind marker: %w", err)
+	}
+	appended, err := l.appendBatchUnlocked(ctx, sessionID, int64(len(events)), []pendingEvent{{
+		eventType: "session/rewind",
+		payload:   payload,
+	}})
+	if err != nil {
+		return Event{}, err
+	}
+	return appended[0], nil
+}
+
+// RewindWithState atomically appends a rewind marker and the projected state
+// selected by the caller. A failed state insert rolls back the marker too.
+func (l *SQLiteEventLog) RewindWithState(ctx context.Context, sessionID string, targetSeq int64, state Session) (Event, Event, error) {
+	if strings.TrimSpace(sessionID) == "" || targetSeq < 0 {
+		return Event{}, Event{}, ErrRewindTargetInvalid
+	}
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
+	events, err := l.Events(ctx, sessionID)
+	if err != nil {
+		return Event{}, Event{}, err
+	}
+	if targetSeq >= int64(len(events)) {
+		return Event{}, Event{}, fmt.Errorf("%w: target seq %d exceeds history", ErrRewindTargetInvalid, targetSeq)
+	}
+	markerPayload, err := json.Marshal(rewindPayload{TargetSeq: targetSeq})
+	if err != nil {
+		return Event{}, Event{}, fmt.Errorf("marshal rewind marker: %w", err)
+	}
+	statePayload, err := json.Marshal(state)
+	if err != nil {
+		return Event{}, Event{}, fmt.Errorf("marshal rewound session state: %w", err)
+	}
+	appended, err := l.appendBatchUnlocked(ctx, sessionID, int64(len(events)), []pendingEvent{
+		{eventType: "session/rewind", payload: markerPayload},
+		{eventType: sessionStateEventType, payload: statePayload},
+	})
+	if err != nil {
+		return Event{}, Event{}, err
+	}
+	return appended[0], appended[1], nil
 }
 
 // Surface replays only surface-marked events. Log-only events remain durable

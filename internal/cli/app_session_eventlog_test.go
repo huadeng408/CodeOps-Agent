@@ -8,7 +8,13 @@ import (
 	"testing"
 
 	"code-agent/internal/config"
+	"code-agent/internal/metrics"
+	"code-agent/internal/permission"
 	"code-agent/internal/session"
+	"code-agent/internal/todo"
+	"code-agent/internal/tools"
+	"code-agent/internal/undo"
+	"code-agent/internal/worktree"
 	_ "modernc.org/sqlite"
 )
 
@@ -54,5 +60,98 @@ func TestNewAppPersistsSessionInEventLedger(t *testing.T) {
 	}
 	if messageCount < 2 {
 		t.Fatalf("state event count = %d, want at least 2", messageCount)
+	}
+}
+
+func TestForkAndRewindCommandsUseDurableSessionHistory(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := session.NewSQLiteEventStore(filepath.Join(root, "sessions.sqlite"))
+	manager := session.NewManager(store)
+	source := manager.NewSession(root)
+	manager.Append(session.RoleUser, "first")
+	manager.Append(session.RoleAssistant, "second")
+
+	out := &strings.Builder{}
+	app := &App{
+		cfg:         config.Config{ProjectRoot: root, WorkingDir: root},
+		renderer:    NewStreamRenderer(out),
+		session:     manager,
+		executor:    tools.NewExecutor(root),
+		permissions: permission.NewController(nil, nil),
+		undo:        undo.NewManager(),
+		worktree:    worktree.NewManager(root, "HEAD"),
+		todos:       todo.NewManager(),
+		metrics:     metrics.NewCollector(),
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	if !app.handleSlashCommand(ctx, "/fork child-session 2") {
+		t.Fatal("/fork should be handled")
+	}
+	child := manager.Current()
+	if child.ID != "child-session" || len(child.Messages) != 2 {
+		t.Fatalf("fork current session = %+v, want child with two messages", child)
+	}
+	if !strings.Contains(out.String(), "forked session child-session") {
+		t.Fatalf("fork output = %q", out.String())
+	}
+
+	if !app.handleSlashCommand(ctx, "/rewind 1") {
+		t.Fatal("/rewind should be handled")
+	}
+	rewound := manager.Current()
+	if rewound.ID != "child-session" || len(rewound.Messages) != 1 || rewound.Messages[0].Content != "first" {
+		t.Fatalf("rewound session = %+v, want only first message", rewound)
+	}
+
+	reloadedSource, err := store.Load(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("load source after child rewind: %v", err)
+	}
+	if reloadedSource == nil || len(reloadedSource.Messages) != 2 {
+		t.Fatalf("source changed after child rewind: %+v", reloadedSource)
+	}
+	if !strings.Contains(out.String(), "rewound session child-session") {
+		t.Fatalf("rewind output = %q", out.String())
+	}
+}
+
+func TestForkAndRewindCommandsFailClosedForInvalidTargets(t *testing.T) {
+	root := t.TempDir()
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession(root)
+	out := &strings.Builder{}
+	app := &App{
+		cfg:         config.Config{ProjectRoot: root, WorkingDir: root},
+		renderer:    NewStreamRenderer(out),
+		session:     manager,
+		executor:    tools.NewExecutor(root),
+		permissions: permission.NewController(nil, nil),
+		undo:        undo.NewManager(),
+		worktree:    worktree.NewManager(root, "HEAD"),
+		todos:       todo.NewManager(),
+		metrics:     metrics.NewCollector(),
+	}
+
+	if !app.handleSlashCommand(context.Background(), "/fork child -1") {
+		t.Fatal("invalid /fork should be handled")
+	}
+	if !strings.Contains(out.String(), "event-seq must be a non-negative integer") {
+		t.Fatalf("invalid fork output = %q", out.String())
+	}
+	out.Reset()
+	if !app.handleSlashCommand(context.Background(), "/rewind") {
+		t.Fatal("missing /rewind argument should be handled")
+	}
+	if !strings.Contains(out.String(), "usage: /rewind <event-seq>") {
+		t.Fatalf("missing rewind output = %q", out.String())
+	}
+	out.Reset()
+	if !app.handleSlashCommand(context.Background(), "/fork child 0") {
+		t.Fatal("unsupported /fork should be handled")
+	}
+	if !strings.Contains(out.String(), "session history operations unsupported") {
+		t.Fatalf("unsupported fork output = %q", out.String())
 	}
 }

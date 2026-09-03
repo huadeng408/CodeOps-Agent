@@ -15,11 +15,20 @@ import (
 )
 
 var ErrNotFound = errors.New("session not found")
+var ErrHistoryUnsupported = errors.New("session history operations unsupported")
 
 type Store interface {
 	Save(ctx context.Context, session Session) error
 	Load(ctx context.Context, id string) (*Session, error)
 	List(ctx context.Context) ([]Session, error)
+}
+
+// HistoryStore exposes durable fork and rewind operations without widening the
+// basic Store contract used by in-memory and legacy adapters.
+type HistoryStore interface {
+	Store
+	Fork(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64) (*Session, error)
+	Rewind(ctx context.Context, sessionID string, targetSeq int64) (*Session, error)
 }
 
 type MemoryStore struct {

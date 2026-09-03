@@ -593,11 +593,66 @@ func (m *Manager) Resume(ctx context.Context, id string) (Session, error) {
 	if !now.After(loaded.UpdatedAt) {
 		now = loaded.UpdatedAt.Add(time.Nanosecond)
 	}
+	// The active session may have been updated after the target session while
+	// the wall clock resolution is coarse. A resumed session must still sort
+	// ahead of that prior active session, otherwise /sessions and ResumeLatest
+	// can immediately select the wrong conversation.
+	if !previous.UpdatedAt.IsZero() && !now.After(previous.UpdatedAt) {
+		now = previous.UpdatedAt.Add(time.Nanosecond)
+	}
 	m.current.UpdatedAt = now
 	if err := m.store.Save(ctx, m.current); err != nil {
 		m.current = previous
 		return Session{}, err
 	}
+	return cloneSession(m.current), nil
+}
+
+// Fork copies the current session's durable event prefix into targetID and
+// switches the manager to the independent child session.
+func (m *Manager) Fork(ctx context.Context, targetID string, targetSeq int64) (Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.current.ID == "" {
+		return Session{}, ErrNotFound
+	}
+	history, ok := m.store.(HistoryStore)
+	if !ok {
+		return Session{}, ErrHistoryUnsupported
+	}
+	child, err := history.Fork(ctx, m.current.ID, strings.TrimSpace(targetID), targetSeq)
+	if err != nil {
+		return Session{}, err
+	}
+	if child == nil {
+		return Session{}, ErrNotFound
+	}
+	m.current = cloneSession(*child)
+	return cloneSession(m.current), nil
+}
+
+// Rewind appends a durable rewind marker and switches the manager to the
+// state snapshot selected by the target event sequence.
+func (m *Manager) Rewind(ctx context.Context, targetSeq int64) (Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.current.ID == "" {
+		return Session{}, ErrNotFound
+	}
+	history, ok := m.store.(HistoryStore)
+	if !ok {
+		return Session{}, ErrHistoryUnsupported
+	}
+	rewound, err := history.Rewind(ctx, m.current.ID, targetSeq)
+	if err != nil {
+		return Session{}, err
+	}
+	if rewound == nil {
+		return Session{}, ErrNotFound
+	}
+	m.current = cloneSession(*rewound)
 	return cloneSession(m.current), nil
 }
 

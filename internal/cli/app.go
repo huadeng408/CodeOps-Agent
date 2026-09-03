@@ -786,6 +786,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/diff show the current session diff summary",
 			"/worktree manage worktree state (list/create/switch/cleanup)",
 			"/resume [session-id] resume a saved session",
+			"/fork <session-id> <event-seq> fork the current session history",
+			"/rewind <event-seq> rewind the current session to an event",
 			"/skills list available skills",
 			"/skill <name> [args] run a named skill",
 			"/init [instructions] run the init skill",
@@ -919,6 +921,54 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.restoreTodos(resumed)
 		a.restorePlan(resumed)
 		a.renderer.PrintLine(fmt.Sprintf("resumed session %s with %d messages", resumed.ID, len(resumed.Messages)))
+	case "/fork":
+		if len(fields) < 3 {
+			a.renderer.PrintLine("usage: /fork <session-id> <event-seq>")
+			return true
+		}
+		targetSeq, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || targetSeq < 0 {
+			a.renderer.PrintLine("fork failed: event-seq must be a non-negative integer")
+			return true
+		}
+		forked, err := a.session.Fork(ctx, fields[1], targetSeq)
+		if err != nil {
+			a.renderer.PrintLine("fork failed: " + err.Error())
+			return true
+		}
+		a.restoreWorkingDir(forked)
+		a.restoreMetrics(forked)
+		a.restoreMode(forked)
+		a.restorePermissions(forked)
+		a.restoreUndo(forked)
+		a.restoreWorktrees(forked)
+		a.restoreTodos(forked)
+		a.restorePlan(forked)
+		a.renderer.PrintLine(fmt.Sprintf("forked session %s from event %d", forked.ID, targetSeq))
+	case "/rewind":
+		if len(fields) < 2 {
+			a.renderer.PrintLine("usage: /rewind <event-seq>")
+			return true
+		}
+		targetSeq, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || targetSeq < 0 {
+			a.renderer.PrintLine("rewind failed: event-seq must be a non-negative integer")
+			return true
+		}
+		rewound, err := a.session.Rewind(ctx, targetSeq)
+		if err != nil {
+			a.renderer.PrintLine("rewind failed: " + err.Error())
+			return true
+		}
+		a.restoreWorkingDir(rewound)
+		a.restoreMetrics(rewound)
+		a.restoreMode(rewound)
+		a.restorePermissions(rewound)
+		a.restoreUndo(rewound)
+		a.restoreWorktrees(rewound)
+		a.restoreTodos(rewound)
+		a.restorePlan(rewound)
+		a.renderer.PrintLine(fmt.Sprintf("rewound session %s to event %d", rewound.ID, targetSeq))
 	case "/skills":
 		a.renderer.PrintBlock("skills", a.skillLines())
 	case "/skill":
