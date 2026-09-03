@@ -62,6 +62,67 @@ mock、合成 receipt 和开发 smoke 只能标为相应范围，不能替代真
 - 评测 prompt、输入和 receipt 不得泄露答案、gold/qrels、patch 或修复提示；
   失败案例和分母始终保留。
 
+## DeepSeek Harness 迁移原则
+
+`localcode` 是唯一改造目标仓库。保留 Go Harness 与 Python Orchestrator 的
+职责划分，把 DeepSeek Harness 作为可执行行为规范和测试参考；不复制其
+TypeScript package 拓扑，也不以整体语言翻译替代模块设计。本路线覆盖既定
+46 项能力清单中除第 23、45、46 项外的 43 项。
+
+迁移以深层模块的稳定接口为边界：
+
+- Go Harness 独占鉴权、权限判定、Session 事件持久化、surface projection、
+  Shell/Git/文件系统/MCP 调用、沙箱、进程与 PTY 生命周期以及根 Trace。
+- Python Orchestrator 独占 LangGraph Agent Loop、上下文策略、计划、长期记忆、
+  子 Agent、Worker/Workflow 和评测编排。
+- Go/Python 之间只通过版本化 protobuf/gRPC、事件 schema 和 TraceContext 交互；
+  Python 不旁路 Harness 写 Session 主账本，Go 不承载模型编排策略。
+
+每个阶段都采用同一替换协议：
+
+1. 先冻结旧路径的可观察行为并写失败的契约测试。
+2. 在新接口后实现深层模块，旧调用方只通过单向兼容 Adapter 进入新路径。
+3. 新数据只写新实现；禁止新旧双写和两个可变事实来源。
+4. 运行定向测试、完整 Go/Python 测试和真实跨进程 E2E，并生成可审计 receipt。
+5. 对比上一份已验证基线；任何数据、正确率、恢复率或安全属性下降都阻止切换。
+6. E2E 证明新路径覆盖全部旧调用方且具备失败恢复后，才删除该阶段旧实现；
+   兼容 Adapter 仅保留到其调用方完成迁移，不得继续承载独立业务逻辑。
+
+Session 存储采用一次性并行迁移，而不是双写：新会话只写 append-only 事件日志；
+旧 SQLite Session snapshot 保持只读。首次恢复旧会话时写入带规范化快照 SHA-256
+的单个 `legacy/import` 事件，后续状态只从事件日志演进。导入必须逐字保留旧消息，
+不得推测或伪造旧 assistant tool-call；重复恢复必须幂等且校验源 snapshot 未变化。
+事件日志是 surface、checkpoint、fork、rewind 和 compaction 的唯一事实来源。
+
+## 分阶段改造计划
+
+| 阶段 | 新深层模块 | 本阶段删除门槛 |
+| --- | --- | --- |
+| 1 | Go Session Event Log、hash chain、surface projection、旧 snapshot 只读导入 | 新会话和已导入会话均只从事件日志恢复；跨进程重启 E2E 通过后删除 snapshot 写路径 |
+| 2 | 插件化 Agent Loop、生命周期事件、正式 LangGraph 图 | 所有模型轮次和工具轮次经新循环及 checkpoint E2E 后删除旧 ReAct 主循环 |
+| 3 | Token 感知事务压缩、工具结果预修剪、溢出恢复、手动 `/compact` | 正常压力与强制溢出 E2E 均保持 tool-call/result 配对后删除字符截断式压缩 |
+| 4 | Worker/Subagent 调度、SQLite checkpoint、并行/流水线、故障隔离 | 8 Worker、200 长任务、30 次真实进程故障达到 `>=98.5%` 后删除旧调度路径 |
+| 5 | Hooks、命令、Skills、插件包和 MCP 生命周期扩展点 | 兼容命令及 MCP 会话 E2E 通过、Skill 选型不下降后删除散落注册路径 |
+| 6 | P0/P1/P3 Context、语义摘要、反思、检索和可演化长期记忆 | 同任务同模型输入 Token 降幅 `>=60%` 且质量不下降后删除旧上下文拼接与记忆路径 |
+| 7 | 统一权限/沙箱、后台 PTY/Job、取消、输出 spill 与审计 | Windows、WSL2、Docker 的真实进程与拒绝路径 E2E 通过后删除旁路执行器 |
+| 8 | Session fork/rewind、统一 Trace、评测和发布门禁 | 43 项能力全部有新鲜 E2E receipt 且最终指标达标后删除剩余兼容 Adapter |
+
+### 阶段 1 验收契约
+
+- 每个事件包含不可变 `session_id`、连续 `seq`、唯一 `event_id`、版本、类型、时间、
+  JSON payload、前序 checksum 和自身 checksum；SQLite 事务以期望 `seq` 做并发保护。
+- surface 由事件日志纯投影得到，支持追加与范围替换；日志型事件不可进入模型历史，
+  被替换节点仍保留在原始日志中，重放结果必须确定。
+- 现有 `session.Manager` 公共调用形状作为兼容 Adapter 保留，但状态写入必须进入事件
+  接口；持久化失败时内存 projection 不得先行推进。
+- 旧 `sessions` 表在导入前后逐字节保持不变。相同 snapshot 只产生一次
+  `legacy/import`；checksum 不一致时 fail closed，不能静默重新导入。
+- 真实 E2E 必须启动生产 Go 入口写入新会话、终止进程、再启动独立进程恢复，核对
+  连续序号、hash chain、surface、计划、权限、undo 和 worktree 状态；另一路从旧
+  snapshot 恢复并证明只读导入、幂等以及后续事件可继续追加。
+- 阶段 1 的 receipt 必须记录 Git SHA、数据库 schema/version、测试命令、进程退出码、
+  两次进程 ID、Session ID、事件数、最终 checksum 和产物 SHA-256，且不得包含密钥。
+
 ## 迭代循环
 
 1. 记录当前基线和数据分母。
