@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Orchestrator_Converse_FullMethodName = "/codeagent.v1.Orchestrator/Converse"
+	Orchestrator_Compact_FullMethodName  = "/codeagent.v1.Orchestrator/Compact"
 	Orchestrator_Health_FullMethodName   = "/codeagent.v1.Orchestrator/Health"
 )
 
@@ -28,6 +29,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type OrchestratorClient interface {
 	Converse(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HarnessMessage, OrchestratorMessage], error)
+	Compact(ctx context.Context, in *CompactRequest, opts ...grpc.CallOption) (*CompactionUpdate, error)
 	Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthResponse, error)
 }
 
@@ -52,6 +54,16 @@ func (c *orchestratorClient) Converse(ctx context.Context, opts ...grpc.CallOpti
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Orchestrator_ConverseClient = grpc.BidiStreamingClient[HarnessMessage, OrchestratorMessage]
 
+func (c *orchestratorClient) Compact(ctx context.Context, in *CompactRequest, opts ...grpc.CallOption) (*CompactionUpdate, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompactionUpdate)
+	err := c.cc.Invoke(ctx, Orchestrator_Compact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestratorClient) Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
@@ -67,6 +79,7 @@ func (c *orchestratorClient) Health(ctx context.Context, in *Empty, opts ...grpc
 // for forward compatibility.
 type OrchestratorServer interface {
 	Converse(grpc.BidiStreamingServer[HarnessMessage, OrchestratorMessage]) error
+	Compact(context.Context, *CompactRequest) (*CompactionUpdate, error)
 	Health(context.Context, *Empty) (*HealthResponse, error)
 	mustEmbedUnimplementedOrchestratorServer()
 }
@@ -80,6 +93,9 @@ type UnimplementedOrchestratorServer struct{}
 
 func (UnimplementedOrchestratorServer) Converse(grpc.BidiStreamingServer[HarnessMessage, OrchestratorMessage]) error {
 	return status.Errorf(codes.Unimplemented, "method Converse not implemented")
+}
+func (UnimplementedOrchestratorServer) Compact(context.Context, *CompactRequest) (*CompactionUpdate, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Compact not implemented")
 }
 func (UnimplementedOrchestratorServer) Health(context.Context, *Empty) (*HealthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Health not implemented")
@@ -112,6 +128,24 @@ func _Orchestrator_Converse_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Orchestrator_ConverseServer = grpc.BidiStreamingServer[HarnessMessage, OrchestratorMessage]
 
+func _Orchestrator_Compact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestratorServer).Compact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Orchestrator_Compact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestratorServer).Compact(ctx, req.(*CompactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Orchestrator_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -137,6 +171,10 @@ var Orchestrator_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "codeagent.v1.Orchestrator",
 	HandlerType: (*OrchestratorServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Compact",
+			Handler:    _Orchestrator_Compact_Handler,
+		},
 		{
 			MethodName: "Health",
 			Handler:    _Orchestrator_Health_Handler,

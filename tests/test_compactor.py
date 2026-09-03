@@ -95,6 +95,26 @@ def test_select_compaction_range_keeps_latest_sixteen_percent_and_tool_pair() ->
     assert end == 0
 
 
+def test_forced_compaction_honors_explicit_retain_ratio() -> None:
+    compactor = Compactor(context_window=1_000, retain_ratio=0.16)
+    messages = [
+        {"role": "user", "content": f"message-{index} " + "x" * 400}
+        for index in range(8)
+    ]
+
+    selection = compactor.select_compaction_range(
+        messages,
+        history_start=0,
+        force=True,
+        retain_ratio=0.5,
+    )
+
+    assert selection is not None
+    start, end = selection
+    assert start == 0
+    assert len(messages) - end - 1 >= 3
+
+
 def test_compaction_events_are_persisted_but_hidden_from_layered_prompt(tmp_path) -> None:
     from orchestrator.context import LayeredContext, SQLiteContextStore
 
@@ -172,3 +192,29 @@ def test_context_overflow_error_is_retryable_only_after_forced_progress() -> Non
     assert is_context_window_exceeded(RuntimeError("CONTEXT_WINDOW_EXCEEDED")) is True
     assert is_context_window_exceeded(RuntimeError("context_length_exceeded")) is True
     assert is_context_window_exceeded(RuntimeError("provider unavailable")) is False
+
+
+def test_manual_compaction_returns_update_without_model_turn(tmp_path) -> None:
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=None,
+        tool_registry=ToolRegistry(),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        compactor=Compactor(max_chars=2_000, max_messages=4),
+    )
+    history = [
+        {"role": "user", "content": f"history-{index} " + "x" * 120}
+        for index in range(8)
+    ]
+
+    update = runner.compact_now(session_id="manual-session", history=history)
+
+    assert update is not None
+    assert "[Compacted conversation history]" in update.summary
+    assert update.trigger == "manual"
+    assert update.removed_messages > 0
+    assert update.keep_recent_messages > 0

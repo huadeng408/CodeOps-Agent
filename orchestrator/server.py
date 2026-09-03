@@ -100,6 +100,46 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             version="0.1.0",
         )
 
+    def _new_runner(self) -> ConversationRunner:
+        return ConversationRunner(
+            graph=self.app.graph,
+            llm=self.app.llm,
+            tool_registry=self.app.tools,
+            todo_manager=self.app.todos,
+            memory_manager=self.app.memory,
+            skills=self.app.skills,
+            project_root=self.app.project_root,
+            working_dir=self.app.working_dir,
+            token_budget=self.app.token_budget,
+            fast_llm=self.app.fast_llm,
+            main_llm=self.app.llm,
+            provider_clients=self._provider_clients_for_request(),
+            layered_context=self.app.layered_context,
+            context_window=self.app.config.context_window,
+        )
+
+    def Compact(self, request, context):
+        runner = self._new_runner()
+        history = [
+            {
+                "role": item.role,
+                "content": item.content,
+                "created_at": item.created_at,
+            }
+            for item in request.history
+        ]
+        try:
+            update = runner.compact_now(
+                session_id=request.session_id,
+                history=history,
+            )
+        except Exception as exc:
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"compaction failed: {type(exc).__name__}",
+            )
+        return update or orchestrator_pb2.CompactionUpdate()
+
     def Converse(self, request_iterator, context):
         user_text = ""
         session_id = ""
@@ -147,22 +187,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         cancel_event = threading.Event()
         context.add_callback(cancel_event.set)
 
-        runner = ConversationRunner(
-            graph=self.app.graph,
-            llm=self.app.llm,
-            tool_registry=self.app.tools,
-            todo_manager=self.app.todos,
-            memory_manager=self.app.memory,
-            skills=self.app.skills,
-            project_root=self.app.project_root,
-            working_dir=self.app.working_dir,
-            token_budget=self.app.token_budget,
-            fast_llm=self.app.fast_llm,
-            main_llm=self.app.llm,
-            provider_clients=self._provider_clients_for_request(),
-            layered_context=self.app.layered_context,
-            context_window=self.app.config.context_window,
-        )
+        runner = self._new_runner()
         try:
             yield from runner.run(
                 user_text,

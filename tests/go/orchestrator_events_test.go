@@ -122,6 +122,15 @@ func (s *compactionEventServer) Health(context.Context, *codeagentpb.Empty) (*co
 	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
 }
 
+func (s *compactionEventServer) Compact(context.Context, *codeagentpb.CompactRequest) (*codeagentpb.CompactionUpdate, error) {
+	return &codeagentpb.CompactionUpdate{
+		Summary:            "manual checkpoint",
+		RemovedMessages:    6,
+		KeepRecentMessages: 2,
+		Trigger:            "manual",
+	}, nil
+}
+
 func (s *compactionEventServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
 	if _, err := stream.Recv(); err != nil {
 		return err
@@ -195,6 +204,42 @@ func TestClientPropagatesCompactionPersistenceFailure(t *testing.T) {
 	}
 	if _, err := client.Converse(context.Background(), "compact"); err == nil || !strings.Contains(err.Error(), "session persistence failed") {
 		t.Fatalf("expected compaction persistence error, got %v", err)
+	}
+}
+
+func TestClientManualCompactionInvokesDurableCallback(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &compactionEventServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var callbackUpdate *codeagentpb.CompactionUpdate
+	client.OnCompaction = func(update *codeagentpb.CompactionUpdate) error {
+		callbackUpdate = update
+		return nil
+	}
+	update, err := client.Compact(context.Background(), "manual-session", []orchestrator.ConversationMessage{{
+		Role:    "user",
+		Content: "old context",
+	}})
+	if err != nil {
+		t.Fatalf("manual compact failed: %v", err)
+	}
+	if update == nil || update.GetTrigger() != "manual" || update.GetRemovedMessages() != 6 {
+		t.Fatalf("unexpected manual update: %+v", update)
+	}
+	if callbackUpdate == nil || callbackUpdate.GetSummary() != "manual checkpoint" {
+		t.Fatalf("durable callback was not invoked: %+v", callbackUpdate)
 	}
 }
 

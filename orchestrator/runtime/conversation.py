@@ -1767,6 +1767,32 @@ class ConversationRunner:
             f"${self.token_budget.max_cost:.6f}"
         )
 
+    def compact_now(
+        self,
+        *,
+        session_id: str = "",
+        history: list[dict[str, str]] | None = None,
+    ) -> orchestrator_pb2.CompactionUpdate | None:
+        """Compact persisted history without consuming a model turn."""
+        self._pending_compaction_updates.clear()
+        messages = self._initial_messages(
+            "", turn=0, session_id=session_id, history=history or []
+        )
+        if messages and messages[-1].role == "user" and not message_content_text(messages[-1].content).strip():
+            messages.pop()
+        self._compact_messages(
+            messages,
+            session_id=session_id,
+            trigger="manual",
+            force=True,
+            retain_ratio=getattr(self.compactor, "retain_ratio", 0.16),
+        )
+        if not self._pending_compaction_updates:
+            return None
+        update = self._pending_compaction_updates[-1]
+        self._pending_compaction_updates.clear()
+        return orchestrator_pb2.CompactionUpdate(**update)
+
     def _compact_messages(
         self,
         messages: list[ChatMessage],
@@ -1774,6 +1800,7 @@ class ConversationRunner:
         session_id: str = "",
         trigger: str = "pressure",
         force: bool = False,
+        retain_ratio: float | None = None,
     ) -> list[ChatMessage]:
         if self.compactor is None:
             return messages
@@ -1828,13 +1855,15 @@ class ConversationRunner:
             current = list(messages)
             max_attempts = 1 if force else self.compactor.compaction_retries + 1
             for attempt in range(max_attempts):
-                selected = select_range(
-                    current,
-                    history_start=1,
-                    model=model,
-                    context_window=getattr(self, "context_window", None),
-                    force=force,
-                )
+                select_kwargs = {
+                    "history_start": 1,
+                    "model": model,
+                    "context_window": getattr(self, "context_window", None),
+                    "force": force,
+                }
+                if retain_ratio is not None:
+                    select_kwargs["retain_ratio"] = retain_ratio
+                selected = select_range(current, **select_kwargs)
                 if selected is None:
                     return current
                 selected_start, selected_end = selected

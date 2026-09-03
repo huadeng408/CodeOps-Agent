@@ -275,6 +275,40 @@ func (c *Client) Converse(ctx context.Context, input string, handlers ...ToolHan
 	return c.ConverseWithEvents(ctx, input, nil, handlers...)
 }
 
+// Compact asks the Python orchestrator to compact persisted history without
+// starting a model conversation. A non-empty update is forwarded through the
+// same durable Harness callback used by automatic compaction.
+func (c *Client) Compact(ctx context.Context, sessionID string, history []ConversationMessage) (*codeagentpb.CompactionUpdate, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("orchestrator client is nil")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.ConversationTimeout())
+	defer cancel()
+	ctx = c.injectTraceMetadata(ctx)
+
+	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
+	for _, item := range trimConversationHistory(history) {
+		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
+			Role:      item.Role,
+			Content:   item.Content,
+			CreatedAt: item.CreatedAt,
+		})
+	}
+	update, err := c.client.Compact(ctx, &codeagentpb.CompactRequest{
+		SessionId: strings.TrimSpace(sessionID),
+		History:   historyPayload,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compact orchestrator history: %w", err)
+	}
+	if update != nil && strings.TrimSpace(update.GetSummary()) != "" && c.OnCompaction != nil {
+		if err := c.OnCompaction(update); err != nil {
+			return nil, fmt.Errorf("persist compaction update: %w", err)
+		}
+	}
+	return update, nil
+}
+
 func (c *Client) ConverseWithHistory(ctx context.Context, input string, sessionID string, history []ConversationMessage, handlers ...ToolHandler) (string, error) {
 	return c.ConverseWithHistoryAndPrompts(ctx, input, sessionID, history, nil, nil, handlers...)
 }

@@ -337,6 +337,125 @@ func TestContextCompactionPersistsIntoGoSessionAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
+	}
+
+	repositoryRoot := contextE2ERepositoryRoot(t)
+	python := contextE2EPython(t)
+	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
+	projectRoot := t.TempDir()
+	address := contextE2EAddress(t)
+	pythonPath := repositoryRoot
+	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
+		pythonPath += string(os.PathListSeparator) + inherited
+	}
+	t.Setenv("PYTHONPATH", pythonPath)
+
+	processManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
+		Address:             address,
+		AutoStart:           true,
+		Command:             python,
+		Args:                []string{fixture, "--context-window", "512"},
+		ProjectRoot:         projectRoot,
+		WorkingDir:          projectRoot,
+		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
+		StartupTimeout:      15 * time.Second,
+		ConversationTimeout: 30 * time.Second,
+	})
+	t.Cleanup(processManager.Stop)
+
+	sessionManager := session.NewManager(
+		session.NewSQLiteEventStore(filepath.Join(projectRoot, ".agent", "session.sqlite")),
+	)
+	t.Cleanup(func() { _ = sessionManager.Close() })
+	sessionManager.NewSession(projectRoot)
+	for index := 0; index < 24; index++ {
+		sessionManager.Append(
+			session.RoleUser,
+			fmt.Sprintf("manual history %02d %s", index, strings.Repeat("m", 160)),
+		)
+	}
+
+	client, err := processManager.Client(context.Background())
+	if err != nil {
+		t.Fatalf("start real Python orchestrator: %v", err)
+	}
+	persist := func(update *codeagentpb.CompactionUpdate) error {
+		if update == nil {
+			return errors.New("nil compaction update")
+		}
+		_, _, ok := sessionManager.ReplaceMessages(
+			update.GetSummary(),
+			int(update.GetKeepRecentMessages()),
+		)
+		if !ok {
+			return errors.New("Go session manual compaction commit failed")
+		}
+		return nil
+	}
+	client.OnCompaction = persist
+
+	current := sessionManager.Current()
+	update, err := client.Compact(
+		context.Background(),
+		current.ID,
+		sessionConversationHistory(current.Messages),
+	)
+	if err != nil {
+		t.Fatalf("manual compact conversation: %v", err)
+	}
+	if update == nil || update.GetTrigger() != "manual" || update.GetRemovedMessages() == 0 {
+		t.Fatalf("unexpected manual compaction update: %+v", update)
+	}
+	compacted := sessionManager.Current()
+	if !hasSessionSummary(compacted) {
+		t.Fatalf("Go session did not persist manual compaction summary: %#v", compacted.Messages)
+	}
+
+	t.Setenv("CODE_AGENT_CONTEXT_E2E_WINDOW", "4096")
+	restartedClient, err := processManager.Restart(context.Background())
+	if err != nil {
+		t.Fatalf("restart real Python orchestrator: %v", err)
+	}
+	restartedClient.OnCompaction = persist
+	sessionManager.Append(session.RoleUser, "COMPACTION_RECOVER")
+	recoveredSession := sessionManager.Current()
+	recovered, err := restartedClient.ConverseWithHistory(
+		context.Background(),
+		"COMPACTION_RECOVER",
+		recoveredSession.ID,
+		sessionConversationHistory(recoveredSession.Messages[:len(recoveredSession.Messages)-1]),
+	)
+	if err != nil {
+		t.Fatalf("manual compaction recovery conversation: %v", err)
+	}
+	if !strings.HasPrefix(recovered, "COMPACTION_RECOVERED:") {
+		t.Fatalf("manual compaction recovery response = %q", recovered)
+	}
+
+	receipt := map[string]any{
+		"status":                 "VERIFIED",
+		"git_sha":                contextE2EGitSHA(t, repositoryRoot),
+		"session_id":             recoveredSession.ID,
+		"manual_compaction":      true,
+		"go_session_summary":     true,
+		"recovery_after_restart": true,
+	}
+	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("encode manual compaction receipt: %v", err)
+	}
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-manual-compaction-process-recovery.json")
+	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
+		t.Fatalf("create manual compaction receipt directory: %v", err)
+	}
+	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatalf("write manual compaction receipt: %v", err)
+	}
+}
+
 func sessionConversationHistory(messages []session.Message) []orchestrator.ConversationMessage {
 	history := make([]orchestrator.ConversationMessage, 0, len(messages))
 	for _, message := range messages {

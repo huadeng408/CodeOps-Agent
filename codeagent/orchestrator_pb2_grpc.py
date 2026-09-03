@@ -39,6 +39,11 @@ class OrchestratorStub(object):
                 request_serializer=codeagent_dot_orchestrator__pb2.HarnessMessage.SerializeToString,
                 response_deserializer=codeagent_dot_orchestrator__pb2.OrchestratorMessage.FromString,
                 _registered_method=True)
+        self.Compact = channel.unary_unary(
+                '/codeagent.v1.Orchestrator/Compact',
+                request_serializer=codeagent_dot_orchestrator__pb2.CompactRequest.SerializeToString,
+                response_deserializer=codeagent_dot_orchestrator__pb2.CompactionUpdate.FromString,
+                _registered_method=True)
         self.Health = channel.unary_unary(
                 '/codeagent.v1.Orchestrator/Health',
                 request_serializer=codeagent_dot_orchestrator__pb2.Empty.SerializeToString,
@@ -50,6 +55,12 @@ class OrchestratorServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Converse(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Compact(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -68,6 +79,11 @@ def add_OrchestratorServicer_to_server(servicer, server):
                     servicer.Converse,
                     request_deserializer=codeagent_dot_orchestrator__pb2.HarnessMessage.FromString,
                     response_serializer=codeagent_dot_orchestrator__pb2.OrchestratorMessage.SerializeToString,
+            ),
+            'Compact': grpc.unary_unary_rpc_method_handler(
+                    servicer.Compact,
+                    request_deserializer=codeagent_dot_orchestrator__pb2.CompactRequest.FromString,
+                    response_serializer=codeagent_dot_orchestrator__pb2.CompactionUpdate.SerializeToString,
             ),
             'Health': grpc.unary_unary_rpc_method_handler(
                     servicer.Health,
@@ -102,6 +118,33 @@ class Orchestrator(object):
             '/codeagent.v1.Orchestrator/Converse',
             codeagent_dot_orchestrator__pb2.HarnessMessage.SerializeToString,
             codeagent_dot_orchestrator__pb2.OrchestratorMessage.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Compact(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/codeagent.v1.Orchestrator/Compact',
+            codeagent_dot_orchestrator__pb2.CompactRequest.SerializeToString,
+            codeagent_dot_orchestrator__pb2.CompactionUpdate.FromString,
             options,
             channel_credentials,
             insecure,

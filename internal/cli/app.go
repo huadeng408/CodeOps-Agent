@@ -803,15 +803,30 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.session.SetMode(map[bool]string{true: "plan", false: "chat"}[a.planMode])
 		a.renderer.PrintLine("planning mode " + mode)
 	case "/compact":
-		compacted, removed, summary := a.session.Compact(12)
-		if removed == 0 {
+		if a.orchestrator == nil {
+			a.renderer.PrintLine("[compaction error] orchestrator unavailable")
+			return true
+		}
+		current := a.session.Current()
+		update, err := a.orchestrator.Compact(
+			ctx,
+			current.ID,
+			orchestratorHistory(current.Messages, ""),
+		)
+		if err != nil {
+			a.renderer.PrintLine("[compaction error] " + err.Error())
+			return true
+		}
+		if update == nil || strings.TrimSpace(update.GetSummary()) == "" {
 			a.renderer.PrintLine("nothing to compact")
 			return true
 		}
-		a.renderer.PrintLine(fmt.Sprintf("compacted session %s, removed %d messages", compacted.ID, removed))
-		if strings.TrimSpace(summary) != "" {
-			a.renderer.PrintBlock("summary", strings.Split(summary, "\n"))
-		}
+		a.renderer.PrintLine(fmt.Sprintf(
+			"compacted session %s, removed %d messages",
+			current.ID,
+			update.GetRemovedMessages(),
+		))
+		a.renderer.PrintBlock("summary", strings.Split(update.GetSummary(), "\n"))
 	case "/clear":
 		a.session.Reset()
 		a.renderer.PrintLine("session cleared")

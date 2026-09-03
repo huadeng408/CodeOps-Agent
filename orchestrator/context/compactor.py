@@ -149,7 +149,10 @@ class Compactor:
         start = max(0, int(history_start))
         if len(messages) - start <= 1:
             return None
-        ratio = 0.0 if force else (self.retain_ratio if retain_ratio is None else min(max(float(retain_ratio), 0.0), 0.95))
+        if force and retain_ratio is None:
+            ratio = 0.0
+        else:
+            ratio = self.retain_ratio if retain_ratio is None else min(max(float(retain_ratio), 0.0), 0.95)
         total_tokens = self.estimate_tokens(messages[start:])
         # Even forced overflow recovery keeps the newest request message so a
         # retry still contains the active user instruction.

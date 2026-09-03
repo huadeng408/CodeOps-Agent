@@ -6,6 +6,7 @@ option go_package = "code-agent/gen/codeagentpb;codeagentpb";
 
 service Orchestrator {
   rpc Converse(stream HarnessMessage) returns (stream OrchestratorMessage);
+  rpc Compact(CompactRequest) returns (CompactionUpdate);
   rpc Health(Empty) returns (HealthResponse);
 }
 
@@ -50,6 +51,11 @@ message ConversationMessage {
   string role = 1;
   string content = 2;
   string created_at = 3;
+}
+
+message CompactRequest {
+  string session_id = 1;
+  repeated ConversationMessage history = 2;
 }
 
 message ToolResult {
