@@ -213,6 +213,11 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 func (a *App) Run(ctx context.Context) error {
 	defer func() { _ = a.session.Close() }()
+	defer func() {
+		if a.executor != nil {
+			_ = a.executor.Close()
+		}
+	}()
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	if a.orchestratorPM != nil {
@@ -551,8 +556,9 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	}
 
 	result, err := a.executor.Execute(ctx, tools.ToolRequest{
-		Name:      call.Name,
-		Arguments: params,
+		Name:           call.Name,
+		Arguments:      params,
+		OwnerSessionID: current.ID,
 	})
 	a.metrics.RecordToolCall()
 	postCtx := hookCtx

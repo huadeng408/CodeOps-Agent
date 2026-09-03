@@ -105,6 +105,19 @@ def test_search_knowledge_schema_is_bounded_and_auto_allowed() -> None:
     assert props["disable_rerank"]["type"] == "boolean"
 
 
+def test_background_job_schemas_expose_lifecycle_controls() -> None:
+    registry = ToolRegistry()
+    specs = {tool.name: tool for tool in registry.list()}
+
+    assert specs["JobStart"].permission == orchestrator_pb2.ASK_SESSION
+    assert specs["JobStart"].parameters["required"] == ["command"]
+    assert specs["JobStart"].parameters["properties"]["interactive"]["type"] == "boolean"
+    assert specs["JobOutput"].permission == orchestrator_pb2.AUTO_ALLOW
+    assert specs["JobOutput"].parameters["properties"]["timeout_ms"]["maximum"] == 600000
+    assert specs["JobKill"].permission == orchestrator_pb2.ASK_SESSION
+    assert specs["JobWrite"].parameters["required"] == ["job_id", "input"]
+
+
 def test_registry_allowlist_hides_other_tools_and_mcp_entries(tmp_path) -> None:
     (tmp_path / ".agent").mkdir()
     (tmp_path / ".agent" / "mcp-tools.json").write_text(

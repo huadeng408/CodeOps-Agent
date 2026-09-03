@@ -82,6 +82,12 @@ Python Orchestrator
 | `Write` | 会话确认 | 创建或覆盖工作区文件，并记录 undo |
 | `Edit` | 会话确认 | 精确替换文本，支持唯一性校验和变更记录 |
 | `Bash` | 每次确认 | 执行 shell 命令，支持超时和持久工作目录 |
+| `JobStart` | 会话确认 | 启动受 Harness 管理的后台进程，支持超时、有界输出和交互输入 |
+| `JobOutput` | 自动允许 | 增量读取后台进程输出与生命周期状态，可选择有界等待 |
+| `JobWait` | 自动允许 | 等待后台进程结束并返回确定性状态 |
+| `JobList` | 自动允许 | 列出当前会话可见的后台任务 |
+| `JobKill` | 会话确认 | 取消后台进程并回收其进程树，重复调用幂等 |
+| `JobWrite` | 会话确认 | 向交互式后台进程写入 stdin |
 | `Git` | 会话确认 | 执行受控 Git 子命令，并阻止危险参数 |
 | `WebFetch` | 会话确认 | 拉取 URL 内容，带输出限制 |
 | `WebSearch` | 会话确认 | 通过 DuckDuckGo-compatible JSON 接口搜索网页 |

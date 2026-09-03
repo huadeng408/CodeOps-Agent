@@ -392,6 +392,89 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="JobStart",
+                description=(
+                    "Start a long-running shell command in the Go Harness. Returns a job id; "
+                    "continue independent work and use JobOutput or JobWait before finalizing."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to run."},
+                        "kind": {"type": "string", "description": "Short job category."},
+                        "label": {"type": "string", "description": "Human-readable job label."},
+                        "cwd": {"type": "string", "description": "Workspace-relative working directory."},
+                        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 3600},
+                        "output_limit_bytes": {"type": "integer", "minimum": 256, "maximum": 1048576},
+                        "interactive": {"type": "boolean", "description": "Keep stdin open for JobWrite."},
+                    },
+                    "required": ["command"],
+                },
+            ),
+            ToolSpec(
+                name="JobOutput",
+                description=(
+                    "Read incremental output and status from a background job. Set wait=true only "
+                    "when blocked on that job; bounded waits return the current running state."
+                ),
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "Job id returned by JobStart."},
+                        "wait": {"type": "boolean"},
+                        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000},
+                    },
+                    "required": ["job_id"],
+                },
+            ),
+            ToolSpec(
+                name="JobWait",
+                description="Wait for a background job to settle, returning its current status.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "Job id returned by JobStart."},
+                        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000},
+                    },
+                    "required": ["job_id"],
+                },
+            ),
+            ToolSpec(
+                name="JobList",
+                description="List background jobs visible to the current session.",
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={"type": "object", "properties": {}},
+            ),
+            ToolSpec(
+                name="JobKill",
+                description="Request cancellation of a running background job by id.",
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "Job id returned by JobStart."},
+                        "reason": {"type": "string", "description": "Short cancellation reason."},
+                    },
+                    "required": ["job_id"],
+                },
+            ),
+            ToolSpec(
+                name="JobWrite",
+                description="Write input to an interactive background job's stdin.",
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "Interactive job id."},
+                        "input": {"type": "string", "description": "Bytes to send to stdin."},
+                    },
+                    "required": ["job_id", "input"],
+                },
+            ),
+            ToolSpec(
                 name="TodoWrite",
                 description="Update the task list for the current conversation.",
                 permission=orchestrator_pb2.AUTO_ALLOW,

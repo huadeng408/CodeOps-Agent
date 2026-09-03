@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"code-agent/internal/jobs"
 	"code-agent/internal/mcp"
 	"code-agent/internal/rag"
 	"code-agent/internal/sandbox"
@@ -19,8 +20,9 @@ import (
 const maxMultimodalBytes = 20 << 20
 
 type ToolRequest struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments,omitempty"`
+	Name           string         `json:"name"`
+	Arguments      map[string]any `json:"arguments,omitempty"`
+	OwnerSessionID string         `json:"owner_session_id,omitempty"`
 }
 
 type ToolResult struct {
@@ -63,6 +65,7 @@ type Executor struct {
 	// Intended only for tests and trusted local providers; production MUST stay false.
 	httpAllowPrivate bool
 	tracer           genai.Tracer
+	jobs             *jobs.Registry
 }
 
 func NewExecutor(root string) *Executor {
@@ -72,7 +75,36 @@ func NewExecutor(root string) *Executor {
 		MaxOutputBytes: 50_000,
 		MaxOutputLines: 250,
 		spill:          spill,
+		jobs:           jobs.NewRegistry(root, jobs.Config{}),
 	}
+}
+
+// SetJobsRegistry replaces the process lifecycle registry. It is intended for
+// integration tests and Harness composition; production executors get one from
+// NewExecutor and keep it as the sole job state owner.
+func (e *Executor) SetJobsRegistry(registry *jobs.Registry) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.jobs = registry
+}
+
+// Jobs returns the configured background-job registry for lifecycle-aware
+// callers such as the CLI shutdown path.
+func (e *Executor) Jobs() *jobs.Registry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.jobs
+}
+
+// Close releases background process resources owned by this executor.
+func (e *Executor) Close() error {
+	e.mu.Lock()
+	registry := e.jobs
+	e.mu.Unlock()
+	if registry == nil {
+		return nil
+	}
+	return registry.Close()
 }
 
 func (e *Executor) SetMCPManager(manager *mcp.Manager) {
@@ -163,6 +195,18 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 		result, err = e.executeWrite(ctx, req.Arguments)
 	case "Bash":
 		result, err = e.executeBash(ctx, req.Arguments)
+	case "JobStart", "job_start":
+		result, err = e.executeJobStart(ctx, req)
+	case "JobOutput", "job_output":
+		result, err = e.executeJobOutput(ctx, req)
+	case "JobList", "job_list":
+		result, err = e.executeJobList(ctx, req)
+	case "JobKill", "job_kill":
+		result, err = e.executeJobKill(ctx, req)
+	case "JobWrite", "job_write":
+		result, err = e.executeJobWrite(ctx, req)
+	case "JobWait", "job_wait":
+		result, err = e.executeJobWait(ctx, req)
 	case "Glob":
 		result, err = e.executeGlob(ctx, req.Arguments)
 	case "Grep":

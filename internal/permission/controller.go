@@ -57,6 +57,18 @@ var DefaultPermissions = map[string]Level{
 	"Git":             AskSession,
 	"WebFetch":        AskSession,
 	"WebSearch":       AskSession,
+	"JobStart":        AskSession,
+	"JobOutput":       AutoAllow,
+	"JobList":         AutoAllow,
+	"JobKill":         AskSession,
+	"JobWrite":        AskSession,
+	"JobWait":         AutoAllow,
+	"job_start":       AskSession,
+	"job_output":      AutoAllow,
+	"job_list":        AutoAllow,
+	"job_kill":        AskSession,
+	"job_write":       AskSession,
+	"job_wait":        AutoAllow,
 }
 
 func NewController(levels map[string]Level, allowlist []AllowRule) *Controller {
