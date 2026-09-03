@@ -1459,6 +1459,46 @@ def _guarded_scorer_request(self, method, url, **kwargs):
     return _scorer_request(self, method, url, **kwargs)
 
 requests.sessions.Session.request = _guarded_scorer_request
+
+# Dataset metadata and fetched environment files can carry CRLF on Windows.
+# The official harness writes those strings directly into bash scripts, where
+# a trailing carriage return changes command names and paths. Normalize the
+# mutable TestSpec lists before run_evaluation starts any Docker worker.
+from swebench.harness.test_spec import test_spec as _swe_test_spec
+_swe_make_test_spec = _swe_test_spec.make_test_spec
+
+def _normalized_make_test_spec(*args, **kwargs):
+    spec = _swe_make_test_spec(*args, **kwargs)
+    for _field in ("repo_script_list", "env_script_list", "eval_script_list"):
+        _lines = getattr(spec, _field, None)
+        if _lines is not None:
+            setattr(
+                spec,
+                _field,
+                [str(_line).replace("\\r\\n", "\\n").replace("\\r", "\\n") for _line in _lines],
+            )
+    return spec
+
+_swe_test_spec.make_test_spec = _normalized_make_test_spec
+import swebench.harness.run_evaluation as _swe_run_evaluation
+_swe_run_evaluation.make_test_spec = _normalized_make_test_spec
+
+# ``Path.write_text`` translates ``\\n`` to CRLF on native Windows by default.
+# The official harness writes bash scripts with that API, so force LF for all
+# scorer-child text writes (reports and logs are newline-insensitive).
+from pathlib import Path as _swe_path_class
+_swe_original_write_text = _swe_path_class.write_text
+
+def _write_text_lf(self, data, encoding=None, errors=None, newline=None):
+    return _swe_original_write_text(
+        self,
+        data,
+        encoding=encoding,
+        errors=errors,
+        newline="" if newline is None else newline,
+    )
+
+_swe_path_class.write_text = _write_text_lf
 """
 
 
@@ -1660,6 +1700,8 @@ def _run_official_scoring_local(
         "clean": False,
         "open_file_limit": 4096,
         "run_id": run_id,
+        # The parent process enforces the precise remaining deadline below;
+        # the child timeout is an integer fallback required by swebench's API.
         "timeout": max(1, int(process_timeout)),
         "namespace": namespace,
         "rewrite_reports": False,
@@ -1754,11 +1796,6 @@ def _run_official_scoring_windows_native(
     """Run the official scorer in a native Windows process with Docker Desktop."""
     if timeout <= 0:
         raise TimeoutError("official scorer deadline exhausted before native start")
-    kill_margin = min(1.0, timeout / 4)
-    launch_margin = min(0.05, timeout / 4)
-    process_timeout = timeout - kill_margin - launch_margin
-    if process_timeout <= 0:
-        raise TimeoutError("official scorer deadline exhausted before native start")
     scorer_args = {
         "dataset_name": dataset_name,
         "split": split,
@@ -1770,7 +1807,7 @@ def _run_official_scoring_windows_native(
         "clean": False,
         "open_file_limit": 4096,
         "run_id": run_id,
-        "timeout": max(1, int(process_timeout)),
+        "timeout": max(1, int(timeout)),
         "namespace": namespace,
         "rewrite_reports": False,
         "modal": False,
@@ -1786,36 +1823,151 @@ def _run_official_scoring_windows_native(
         + "main(**json.loads(sys.argv[1]))",
         json.dumps(scorer_args, separators=(",", ":")),
     ]
-    env = _native_scorer_env()
+    deadline = time.monotonic() + timeout
+    attempts = 2  # one retry for transport faults before any test can run
+    for attempt in range(1, attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "Native Windows official scorer exceeded the Harness deadline"
+            )
+        kill_margin = min(1.0, remaining / 4)
+        launch_margin = min(0.05, remaining / 4)
+        process_timeout = remaining - kill_margin - launch_margin
+        if process_timeout <= 0:
+            raise TimeoutError(
+                "official scorer deadline exhausted before native start"
+            )
+        env = _native_scorer_env()
+        process = None
+        attempt_started = time.time()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(_REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+            stdout, stderr = process.communicate(timeout=process_timeout)
+        except subprocess.TimeoutExpired as exc:
+            if process is not None:
+                _terminate_windows_process_tree(process)
+            raise TimeoutError(
+                f"Native Windows official scorer exceeded the {timeout:.3f}s Harness deadline"
+            ) from exc
+        except Exception as exc:
+            return False, f"native Windows scoring failed: {exc}"
+        if process.returncode == 0:
+            return True, (
+                "native Windows official scoring completed: "
+                + _summarise_official_stdout(stdout)
+            )
+        combined = f"{stderr}\n{stdout}".strip()
+        if attempt < attempts and _is_transient_network(combined):
+            if _native_scorer_reports_complete(
+                run_id, predictions_path, not_before=attempt_started
+            ):
+                return True, (
+                    "native Windows official scoring completed with a "
+                    "post-run transport warning: "
+                    + _summarise_official_stdout(stdout)
+                )
+            if not _quarantine_native_scorer_run(run_id, attempt):
+                return False, (
+                    "native Windows scoring encountered a transient network "
+                    "failure but could not isolate its partial artifacts"
+                )
+            print(
+                f"[scorer] transient network failure, retrying once: "
+                f"{_first_network_signature(combined)}"
+            )
+            continue
+        return False, (
+            f"native Windows scoring failed (exit {process.returncode}): "
+            f"{combined[-500:]}"
+        )
+    return False, "native Windows scoring produced no result"
+
+
+def _native_scorer_reports_complete(
+    run_id: str, predictions_path: str, not_before: float | None = None
+) -> bool:
+    """Check that every non-empty prediction has fresh official evidence."""
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(_REPO_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-        )
-        stdout, stderr = process.communicate(timeout=process_timeout)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_windows_process_tree(process)
-        raise TimeoutError(
-            f"Native Windows official scorer exceeded the {timeout:.3f}s Harness deadline"
-        ) from exc
-    except Exception as exc:
-        return False, f"native Windows scoring failed: {exc}"
-    if process.returncode == 0:
-        return True, (
-            "native Windows official scoring completed: "
-            + _summarise_official_stdout(stdout)
-        )
-    combined = f"{stderr}\n{stdout}".strip()
-    return False, (
-        f"native Windows scoring failed (exit {process.returncode}): {combined[-500:]}"
-    )
+        prediction_file = Path(predictions_path)
+        if not prediction_file.is_absolute():
+            prediction_file = _REPO_ROOT / prediction_file
+        expected: set[str] = set()
+        for line in prediction_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            prediction = json.loads(line)
+            if prediction.get("model_patch"):
+                instance_id = prediction.get("instance_id")
+                if isinstance(instance_id, str) and instance_id:
+                    expected.add(instance_id)
+        if not expected:
+            return False
+        report_root = _REPO_ROOT / "logs" / "run_evaluation" / run_id
+        found: set[str] = set()
+        for report_path in report_root.rglob("report.json"):
+            if not report_path.is_file():
+                continue
+            if not_before is not None:
+                try:
+                    if report_path.stat().st_mtime < not_before - 2.0:
+                        continue
+                except OSError:
+                    continue
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for instance_id, entry in report.items():
+                if not isinstance(entry, dict):
+                    continue
+                if (
+                    entry.get("patch_exists") is True
+                    and entry.get("patch_successfully_applied") is True
+                    and "resolved" in entry
+                    and isinstance(entry.get("tests_status"), dict)
+                    and report_path.parent.joinpath("test_output.txt").is_file()
+                ):
+                    found.add(instance_id)
+        return expected.issubset(found)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+
+
+def _quarantine_native_scorer_run(run_id: str, attempt: int) -> bool:
+    """Move partial official-scorer logs aside before retrying the same run ID.
+
+    ``run_evaluation`` skips any instance whose report already exists under the
+    requested run ID. A transport failure can leave such a report behind even
+    while returning a non-zero exit code, so a retry would otherwise run zero
+    instances. Renaming the run directory preserves the first attempt's raw
+    evidence and frees the original ID for a clean retry.
+    """
+    root = _REPO_ROOT / "logs" / "run_evaluation"
+    source = root / run_id
+    if not source.exists():
+        return True
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"{run_id}.retry-{attempt}"
+    counter = 0
+    while destination.exists():
+        counter += 1
+        destination = root / f"{run_id}.retry-{attempt}-{counter}"
+    try:
+        source.rename(destination)
+    except OSError:
+        return False
+    return True
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

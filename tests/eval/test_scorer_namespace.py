@@ -482,6 +482,10 @@ class TestWindowsNativeScorer:
         assert env["NO_PROXY"] == "127.0.0.1,localhost,::1"
         command = captured["argv"][2]
         assert "raw.githubusercontent.com" in command
+        assert "_normalized_make_test_spec" in command
+        assert "replace(\"\\r\\n\", \"\\n\")" in command
+        assert "_swe_run_evaluation.make_test_spec" in command
+        assert "_swe_path_class.write_text" in command
         compile(command, "<native-scorer>", "exec")
 
     @pytest.mark.parametrize(
@@ -496,6 +500,71 @@ class TestWindowsNativeScorer:
         monkeypatch.setenv("SWEBENCH_SCORER_PROXY", proxy)
         with pytest.raises(ValueError, match="SWEBENCH_SCORER_PROXY"):
             sb._native_scorer_env()
+
+    def test_native_scorer_retries_transient_proxy_failure_with_shared_deadline(
+        self, monkeypatch
+    ) -> None:
+        calls: list[float] = []
+
+        class Process:
+            def __init__(self, returncode: int, stderr: str) -> None:
+                self.pid = 6792
+                self.returncode = returncode
+                self.stderr = stderr
+
+            def communicate(self, *, timeout):
+                calls.append(float(timeout))
+                return "Instances resolved: 1" if self.returncode == 0 else "", self.stderr
+
+        processes = iter(
+            [
+                Process(1, "ProxyError RemoteDisconnected"),
+                Process(0, ""),
+            ]
+        )
+        monkeypatch.setenv("SWEBENCH_SCORER_PROXY", "http://127.0.0.1:7890")
+        monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: next(processes))
+
+        ok, detail = sb._run_official_scoring_windows_native(
+            "preds.jsonl", "out", "ds", "test", 1, "rid", 1.0, "swebench"
+        )
+
+        assert ok is True
+        assert "Instances resolved: 1" in detail
+        assert len(calls) == 2
+        assert 0 < calls[1] <= calls[0] <= 1.0
+
+    def test_native_retry_quarantines_partial_run_logs(self, monkeypatch, tmp_path) -> None:
+        run_root = tmp_path / "logs" / "run_evaluation" / "rid"
+        run_root.mkdir(parents=True)
+        (run_root / "report.json").write_text("partial", encoding="utf-8")
+        monkeypatch.setattr(sb, "_REPO_ROOT", tmp_path)
+
+        assert sb._quarantine_native_scorer_run("rid", 1) is True
+        assert not run_root.exists()
+        backups = list((tmp_path / "logs" / "run_evaluation").glob("rid.retry-1*"))
+        assert len(backups) == 1
+        assert (backups[0] / "report.json").read_text(encoding="utf-8") == "partial"
+
+    def test_native_scorer_accepts_fresh_complete_report_after_transport_tail(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(sb, "_REPO_ROOT", tmp_path)
+        prediction_path = tmp_path / "predictions.jsonl"
+        prediction_path.write_text(
+            '{"instance_id":"inst-1","model_patch":"diff --git a/a b/a\\n"}\n',
+            encoding="utf-8",
+        )
+        report_dir = tmp_path / "logs" / "run_evaluation" / "rid" / "model" / "inst-1"
+        report_dir.mkdir(parents=True)
+        (report_dir / "report.json").write_text(
+            '{"inst-1":{"patch_exists":true,"patch_successfully_applied":true,'
+            '"resolved":false,"tests_status":{}}}',
+            encoding="utf-8",
+        )
+        (report_dir / "test_output.txt").write_text("pytest output", encoding="utf-8")
+
+        assert sb._native_scorer_reports_complete("rid", str(prediction_path)) is True
 
     def test_native_scorer_timeout_reaps_windows_process_tree(self, monkeypatch) -> None:
         class Process:
