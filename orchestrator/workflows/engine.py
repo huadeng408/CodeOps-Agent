@@ -17,11 +17,15 @@ class WorkflowEngine:
         self._store = store
         self._execute_worker = execute_worker
         self._max_concurrency = max_concurrency
+        self._recovered_worker_ids: list[str] = []
 
     async def run(self, spec: WorkflowSpec) -> WorkflowRun:
         workers = self._validate(spec)
-        run = self._resume_or_create(spec)
-        self._store.save(run, detail="workflow resumed" if self._store.load(spec.id) else "workflow started")
+        checkpoint = self._store.load(spec.id)
+        run = self._resume_or_create(spec, checkpoint)
+        self._store.save(run, detail="workflow resumed" if checkpoint else "workflow started")
+        for worker_id in self._recovered_worker_ids:
+            self._store.save(run, worker_id, "worker recovered from previous process")
 
         while True:
             self._block_workers_with_failed_dependencies(run, workers)
@@ -50,10 +54,29 @@ class WorkflowEngine:
                 )
                 for worker in batch
             }
+            checkpointed: set[str] = set()
+
+            def checkpoint_completed(worker: WorkerSpec, task: asyncio.Task[WorkerResult]) -> None:
+                if task.cancelled() or task.exception() is not None:
+                    return
+                outcome = task.result()
+                if outcome.state is not WorkerState.COMPLETED:
+                    return
+                prior = run.workers[worker.id]
+                run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
+                self._store.save(run, worker.id, "worker completed")
+                checkpointed.add(worker.id)
+
+            for worker in batch:
+                tasks[worker.id].add_done_callback(
+                    lambda task, current=worker: checkpoint_completed(current, task)
+                )
             try:
                 outcomes = await asyncio.gather(*tasks.values(), return_exceptions=True)
             except asyncio.CancelledError:
                 for worker_id, task in tasks.items():
+                    if worker_id in checkpointed:
+                        continue
                     if task.done() and not task.cancelled() and task.exception() is None:
                         run.workers[worker_id] = self._completed_result(
                             workers[worker_id], task.result(), run.workers[worker_id].attempts
@@ -65,20 +88,38 @@ class WorkflowEngine:
                 raise
 
             for worker, outcome in zip(batch, outcomes, strict=True):
+                if worker.id in checkpointed:
+                    continue
                 prior = run.workers[worker.id]
                 if isinstance(outcome, BaseException):
                     if isinstance(outcome, asyncio.CancelledError):
                         run.workers[worker.id] = replace(prior, state=WorkerState.PENDING)
                         self._store.save(run, worker.id, "worker interrupted")
                         raise outcome
-                    run.workers[worker.id] = WorkerResult.failed(worker.id, worker.provider, str(outcome), prior.attempts)
-                    self._store.save(run, worker.id, "worker failed")
+                    if prior.attempts < worker.max_attempts:
+                        run.workers[worker.id] = replace(
+                            prior,
+                            state=WorkerState.PENDING,
+                            error=str(outcome),
+                        )
+                        self._store.save(run, worker.id, "worker retry scheduled")
+                    else:
+                        run.workers[worker.id] = WorkerResult.failed(worker.id, worker.provider, str(outcome), prior.attempts)
+                        self._store.save(run, worker.id, "worker failed")
                     continue
-                run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
-                self._store.save(run, worker.id, "worker completed")
+                if outcome.state is WorkerState.FAILED and prior.attempts < worker.max_attempts:
+                    run.workers[worker.id] = replace(
+                        prior,
+                        state=WorkerState.PENDING,
+                        error=outcome.error,
+                    )
+                    self._store.save(run, worker.id, "worker retry scheduled")
+                else:
+                    run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
+                    self._store.save(run, worker.id, "worker completed" if outcome.state is WorkerState.COMPLETED else "worker failed")
 
-    def _resume_or_create(self, spec: WorkflowSpec) -> WorkflowRun:
-        checkpoint = self._store.load(spec.id)
+    def _resume_or_create(self, spec: WorkflowSpec, checkpoint: WorkflowRun | None = None) -> WorkflowRun:
+        self._recovered_worker_ids = []
         if checkpoint is None:
             return WorkflowRun(
                 id=spec.id,
@@ -89,6 +130,9 @@ class WorkflowEngine:
             if existing is None or existing.provider != worker.provider:
                 checkpoint.workers[worker.id] = WorkerResult(id=worker.id, provider=worker.provider)
             elif existing.state is WorkerState.RUNNING:
+                checkpoint.workers[worker.id] = replace(existing, state=WorkerState.PENDING)
+                self._recovered_worker_ids.append(worker.id)
+            elif existing.state is WorkerState.FAILED and existing.attempts < worker.max_attempts:
                 checkpoint.workers[worker.id] = replace(existing, state=WorkerState.PENDING)
         return checkpoint
 

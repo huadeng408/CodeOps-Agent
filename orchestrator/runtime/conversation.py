@@ -2210,6 +2210,10 @@ class ConversationRunner:
             context = raw.get("context", {})
             if not isinstance(context, dict):
                 raise ValueError("worker context must be an object")
+            try:
+                max_attempts = int(raw.get("max_attempts", 1))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("worker max_attempts must be an integer") from exc
             workers.append(
                 WorkerSpec(
                     id=worker_id,
@@ -2218,6 +2222,7 @@ class ConversationRunner:
                     provider=provider,
                     depends_on=tuple(item.strip() for item in raw_dependencies if item.strip()),
                     context=context,
+                    max_attempts=max_attempts,
                 )
             )
         return WorkflowSpec(id=workflow_id, workers=workers)

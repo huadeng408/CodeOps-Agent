@@ -21,6 +21,13 @@ class WorkerSpec:
     provider: str = "default"
     depends_on: tuple[str, ...] = ()
     context: dict[str, Any] = field(default_factory=dict)
+    max_attempts: int = 1
+
+    def __post_init__(self) -> None:
+        attempts = int(self.max_attempts)
+        if attempts < 1:
+            raise ValueError("worker max_attempts must be positive")
+        object.__setattr__(self, "max_attempts", attempts)
 
 
 @dataclass(frozen=True, slots=True)

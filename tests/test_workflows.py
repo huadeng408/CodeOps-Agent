@@ -12,6 +12,7 @@ from orchestrator.workflows import (
     WorkerResult,
     WorkerSpec,
     WorkerState,
+    WorkflowRun,
     WorkflowEngine,
     WorkflowSpec,
 )
@@ -149,6 +150,43 @@ def test_resumes_from_checkpoint_without_repeating_completed_workers(tmp_path: P
     assert result.workers["second"].state is WorkerState.COMPLETED
 
 
+def test_records_running_worker_recovery_before_resuming(tmp_path: Path) -> None:
+    calls: list[str] = []
+    store = SQLiteWorkflowStore(tmp_path / "workflows.sqlite")
+    spec = WorkflowSpec(
+        id="running-recovery",
+        workers=[WorkerSpec(id="worker", title="Worker", objective="resume")],
+    )
+    store.save(
+        WorkflowRun(
+            id=spec.id,
+            workers={
+                "worker": WorkerResult(
+                    id="worker",
+                    provider="default",
+                    state=WorkerState.RUNNING,
+                    attempts=1,
+                )
+            },
+        ),
+        "worker",
+        "worker started",
+    )
+
+    async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
+        calls.append(worker.id)
+        return WorkerResult.completed(worker.id, worker.provider, "resumed")
+
+    result = asyncio.run(WorkflowEngine(store, execute).run(spec))
+
+    assert calls == ["worker"]
+    assert result.workers["worker"].state is WorkerState.COMPLETED
+    assert any(
+        worker_id == "worker" and detail == "worker recovered from previous process"
+        for _sequence, worker_id, _state, detail in store.events("running-recovery")
+    )
+
+
 def test_isolates_failed_worker_and_blocks_only_its_dependents(tmp_path: Path) -> None:
     async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
         if worker.id == "broken":
@@ -209,6 +247,64 @@ def test_isolates_worker_that_returns_an_explicit_failure_result(tmp_path: Path)
     assert result.workers["dependent"].state is WorkerState.BLOCKED
 
 
+def test_retries_transient_worker_failure_within_attempt_budget(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
+        calls.append(worker.id)
+        if len(calls) == 1:
+            raise RuntimeError("transient provider failure")
+        return WorkerResult.completed(worker.id, worker.provider, "recovered")
+
+    result = asyncio.run(
+        WorkflowEngine(SQLiteWorkflowStore(tmp_path / "workflows.sqlite"), execute).run(
+            WorkflowSpec(
+                id="retry-budget",
+                workers=[
+                    WorkerSpec(
+                        id="worker",
+                        title="Worker",
+                        objective="retry",
+                        max_attempts=2,
+                    )
+                ],
+            )
+        )
+    )
+
+    assert calls == ["worker", "worker"]
+    assert result.workers["worker"].state is WorkerState.COMPLETED
+    assert result.workers["worker"].attempts == 2
+
+
+def test_does_not_retry_after_attempt_budget_is_exhausted(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
+        calls.append(worker.id)
+        raise RuntimeError("permanent provider failure")
+
+    result = asyncio.run(
+        WorkflowEngine(SQLiteWorkflowStore(tmp_path / "workflows.sqlite"), execute).run(
+            WorkflowSpec(
+                id="retry-exhausted",
+                workers=[
+                    WorkerSpec(
+                        id="worker",
+                        title="Worker",
+                        objective="fail",
+                        max_attempts=2,
+                    )
+                ],
+            )
+        )
+    )
+
+    assert calls == ["worker", "worker"]
+    assert result.workers["worker"].state is WorkerState.FAILED
+    assert result.workers["worker"].attempts == 2
+
+
 def test_conversation_exposes_and_runs_persisted_provider_workflow(tmp_path: Path) -> None:
     class FakeProvider:
         model = "fake-model"
@@ -253,3 +349,34 @@ def test_conversation_exposes_and_runs_persisted_provider_workflow(tmp_path: Pat
     assert result["workers"]["research"]["provider"] == "openai"
     assert result["workers"]["review"]["state"] == "completed"
     assert (tmp_path / ".agent" / "workflows.sqlite").exists()
+
+
+def test_conversation_workflow_decoder_preserves_attempt_budget(tmp_path: Path) -> None:
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=None,
+        tool_registry=ToolRegistry(),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+    )
+
+    workflow = runner._decode_workflow(
+        json.dumps(
+            {
+                "id": "attempt-budget-decoder",
+                "workers": [
+                    {
+                        "id": "worker",
+                        "title": "Worker",
+                        "objective": "retry",
+                        "max_attempts": 3,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert workflow.workers[0].max_attempts == 3
