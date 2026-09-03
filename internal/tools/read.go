@@ -37,13 +37,13 @@ func (e *Executor) executeRead(ctx context.Context, args map[string]any) (ToolRe
 		return ToolResult{Name: "Read", Output: fmt.Sprintf("[Read %s: empty file]", path)}, nil
 	}
 	if isImagePath(abs) {
-		return e.readImage(path, data)
+		return e.readImage(ctx, path, data)
 	}
 	if strings.EqualFold(filepath.Ext(abs), ".pdf") {
 		return e.readPDF(ctx, path, abs, data, args)
 	}
 	if strings.EqualFold(filepath.Ext(abs), ".ipynb") {
-		return e.readNotebook(path, data)
+		return e.readNotebook(ctx, path, data)
 	}
 	if !utf8.Valid(data) || looksBinary(data) {
 		err := fmt.Errorf("binary file cannot be displayed as text: %s", path)
@@ -106,21 +106,18 @@ func (e *Executor) executeRead(ctx context.Context, args map[string]any) (ToolRe
 		output = strings.Join(metadata, "\n")
 	}
 
-	output, truncated := e.TruncateOutput(output)
-	return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
+	return ToolResult{Name: "Read", Output: output}, nil
 }
 
-func (e *Executor) readImage(path string, data []byte) (ToolResult, error) {
+func (e *Executor) readImage(_ context.Context, path string, data []byte) (ToolResult, error) {
 	mime := imageMime(path)
 	if len(data) > maxMultimodalBytes {
 		err := fmt.Errorf("image is too large for multimodal delivery: %s (%d bytes, limit %d)", path, len(data), maxMultimodalBytes)
 		return ToolResult{Name: "Read", Error: err.Error(), ExitCode: 1}, err
 	}
-	output, truncated := e.TruncateOutput(fmt.Sprintf("[Image %s: %s, %d bytes]", path, mime, len(data)))
 	return ToolResult{
-		Name:      "Read",
-		Output:    output,
-		Truncated: truncated,
+		Name:   "Read",
+		Output: fmt.Sprintf("[Image %s: %s, %d bytes]", path, mime, len(data)),
 		ContentBlocks: []ContentBlock{{
 			ImageBlob: data,
 			MIME:      mime,
@@ -128,11 +125,10 @@ func (e *Executor) readImage(path string, data []byte) (ToolResult, error) {
 	}, nil
 }
 
-// readNotebook 把 .ipynb 渲染成简洁的单元格摘要（而非原始 JSON），保持输出可读、
-// 并受 TruncateOutput 约束。
-func (e *Executor) readNotebook(path string, data []byte) (ToolResult, error) {
-	output, truncated := e.TruncateOutput(renderNotebookSummary(path, data))
-	return ToolResult{Name: "Read", Output: output, Truncated: truncated}, nil
+// readNotebook 把 .ipynb 渲染成简洁的单元格摘要（而非原始 JSON）；最终输出边界
+// 由 Executor 的统一结果处理器施加。
+func (e *Executor) readNotebook(_ context.Context, path string, data []byte) (ToolResult, error) {
+	return ToolResult{Name: "Read", Output: renderNotebookSummary(path, data)}, nil
 }
 
 // parsePDFPageRange 解析 "1" / "1-3" 形式的页码范围，返回 (首页, 末页, 是否有效)。

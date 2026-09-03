@@ -29,8 +29,10 @@ type ToolResult struct {
 	Error         string         `json:"error,omitempty"`
 	ExitCode      int            `json:"exit_code"`
 	Truncated     bool           `json:"truncated"`
+	Spill         *SpillRef      `json:"spill,omitempty"`
 	Changes       []Change       `json:"changes,omitempty"`
 	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
+	spillContent  string
 }
 
 type ContentBlock struct {
@@ -56,6 +58,7 @@ type Executor struct {
 	rag            rag.Searcher
 	sandbox        sandbox.Runner
 	skills         *skills.Manager
+	spill          SpillStore
 	// httpAllowPrivate lifts the SSRF private/loopback block for WebFetch/WebSearch.
 	// Intended only for tests and trusted local providers; production MUST stay false.
 	httpAllowPrivate bool
@@ -63,10 +66,12 @@ type Executor struct {
 }
 
 func NewExecutor(root string) *Executor {
+	spill, _ := NewFileSpillStore(filepath.Join(root, ".runtime", "spill"))
 	return &Executor{
 		Root:           root,
 		MaxOutputBytes: 50_000,
 		MaxOutputLines: 250,
+		spill:          spill,
 	}
 }
 
@@ -128,6 +133,14 @@ func (e *Executor) SetSkillsManager(manager *skills.Manager) {
 	e.skills = manager
 }
 
+// SetSpillStore configures an optional best-effort backend for complete,
+// redacted tool output that exceeds the model preview budget.
+func (e *Executor) SetSpillStore(store SpillStore) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.spill = store
+}
+
 // SetHTTPAllowPrivate enables fetching loopback/private addresses in WebFetch/WebSearch.
 // Tests use this to target a local mock server; production must leave it disabled.
 func (e *Executor) SetHTTPAllowPrivate(allow bool) {
@@ -137,37 +150,43 @@ func (e *Executor) SetHTTPAllowPrivate(allow bool) {
 }
 
 func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, error) {
+	var result ToolResult
+	var err error
 	switch req.Name {
 	case "Read":
-		return e.executeRead(ctx, req.Arguments)
+		result, err = e.executeRead(ctx, req.Arguments)
 	case "Edit":
-		return e.executeEdit(ctx, req.Arguments)
+		result, err = e.executeEdit(ctx, req.Arguments)
 	case "NotebookEdit":
-		return e.executeNotebookEdit(ctx, req.Arguments)
+		result, err = e.executeNotebookEdit(ctx, req.Arguments)
 	case "Write":
-		return e.executeWrite(ctx, req.Arguments)
+		result, err = e.executeWrite(ctx, req.Arguments)
 	case "Bash":
-		return e.executeBash(ctx, req.Arguments)
+		result, err = e.executeBash(ctx, req.Arguments)
 	case "Glob":
-		return e.executeGlob(ctx, req.Arguments)
+		result, err = e.executeGlob(ctx, req.Arguments)
 	case "Grep":
-		return e.executeGrep(ctx, req.Arguments)
+		result, err = e.executeGrep(ctx, req.Arguments)
 	case "Git":
-		return e.executeGit(ctx, req.Arguments)
+		result, err = e.executeGit(ctx, req.Arguments)
 	case "WebFetch":
-		return e.executeWebFetch(ctx, req.Arguments)
+		result, err = e.executeWebFetch(ctx, req.Arguments)
 	case "WebSearch":
-		return e.executeWebSearch(ctx, req.Arguments)
+		result, err = e.executeWebSearch(ctx, req.Arguments)
 	case "SearchKnowledge":
-		return e.executeSearchKnowledge(ctx, req.Arguments)
+		result, err = e.executeSearchKnowledge(ctx, req.Arguments)
 	case "Skill":
-		return e.executeSkill(ctx, req.Arguments)
+		result, err = e.executeSkill(ctx, req.Arguments)
+	case "ReadSpill":
+		result, err = e.executeReadSpill(ctx, req.Arguments)
 	default:
-		if result, ok, err := e.executeMCPTool(ctx, req); ok {
-			return result, err
+		var ok bool
+		if result, ok, err = e.executeMCPTool(ctx, req); !ok {
+			result = ToolResult{Name: req.Name, Error: "unknown tool"}
+			err = fmt.Errorf("unknown tool %q", req.Name)
 		}
-		return ToolResult{Name: req.Name, Error: "unknown tool"}, fmt.Errorf("unknown tool %q", req.Name)
 	}
+	return e.processResult(ctx, result), err
 }
 
 func (e *Executor) executeMCPTool(ctx context.Context, req ToolRequest) (ToolResult, bool, error) {
@@ -235,8 +254,7 @@ func (e *Executor) executeSkill(_ context.Context, args map[string]any) (ToolRes
 		parts = append(parts, "User focus: "+userArgs)
 	}
 	output := strings.Join(parts, "\n\n")
-	output, truncated := e.TruncateOutput(output)
-	return ToolResult{Name: "Skill", Output: output, Truncated: truncated}, nil
+	return ToolResult{Name: "Skill", Output: output}, nil
 }
 
 func (e *Executor) WorkingDir() string {
@@ -329,6 +347,110 @@ func boolArg(args map[string]any, keys ...string) bool {
 // 文本以及是否发生过截断。导出方法便于调用方与测试直接复用同一套截断策略。
 func (e *Executor) TruncateOutput(output string) (string, bool) {
 	return normalizeOutput(output, e.MaxOutputLines, e.MaxOutputBytes)
+}
+
+// processResult is the sole model-facing result boundary. It redacts text
+// first, persists a complete redacted result when preview truncation occurs,
+// and never turns a successfully executed tool into a failure when spill
+// storage is absent or unavailable. Changes stay untouched for undo fidelity.
+func (e *Executor) processResult(ctx context.Context, result ToolResult) ToolResult {
+	result.Output = redactToolText(result.Output)
+	result.Error = redactToolText(result.Error)
+	for index := range result.ContentBlocks {
+		result.ContentBlocks[index].Text = redactToolText(result.ContentBlocks[index].Text)
+	}
+	if result.Output == "" {
+		return result
+	}
+	complete := result.Output
+	if result.spillContent != "" {
+		complete = redactToolText(result.spillContent)
+	}
+	preview, truncated := normalizeOutput(complete, e.MaxOutputLines, e.MaxOutputBytes)
+	if result.spillContent == "" {
+		result.Output = preview
+	}
+	result.Truncated = result.Truncated || truncated
+	if !result.Truncated {
+		return result
+	}
+	e.mu.Lock()
+	store := e.spill
+	e.mu.Unlock()
+	if store == nil {
+		return result
+	}
+	ref, err := store.Save(ctx, SpillRequest{ToolName: result.Name, Content: complete})
+	if err != nil {
+		result.Output = strings.TrimSpace(result.Output) + "\n[Complete output was not saved: spill storage failed.]"
+		return result
+	}
+	result.Spill = &ref
+	result.Output = strings.TrimSpace(result.Output) + fmt.Sprintf("\n[Complete redacted output: %s. Use ReadSpill with locator to retrieve a bounded range.]", ref.Locator)
+	return result
+}
+
+func (e *Executor) executeReadSpill(ctx context.Context, args map[string]any) (ToolResult, error) {
+	locator, ok := stringArg(args, "locator")
+	if !ok || strings.TrimSpace(locator) == "" {
+		return ToolResult{Name: "ReadSpill", Error: "spill locator is required", ExitCode: 1}, fmt.Errorf("spill locator is required")
+	}
+	e.mu.Lock()
+	store := e.spill
+	e.mu.Unlock()
+	if store == nil {
+		return ToolResult{Name: "ReadSpill", Error: "spill storage is not configured", ExitCode: 1}, fmt.Errorf("spill storage is not configured")
+	}
+	content, err := store.Load(ctx, locator)
+	if err != nil {
+		return ToolResult{Name: "ReadSpill", Error: "spill output is unavailable", ExitCode: 1}, fmt.Errorf("load spill: %w", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	startLine, hasStart, err := intArg(args, "start")
+	if err != nil {
+		return ToolResult{Name: "ReadSpill", Error: err.Error(), ExitCode: 1}, err
+	}
+	offset, hasOffset, err := intArg(args, "offset")
+	if err != nil {
+		return ToolResult{Name: "ReadSpill", Error: err.Error(), ExitCode: 1}, err
+	}
+	limit, hasLimit, err := intArg(args, "limit")
+	if err != nil {
+		return ToolResult{Name: "ReadSpill", Error: err.Error(), ExitCode: 1}, err
+	}
+	if hasStart && startLine <= 0 {
+		return ToolResult{Name: "ReadSpill", Error: "start must be positive", ExitCode: 1}, fmt.Errorf("start must be positive")
+	}
+	if hasOffset && offset < 0 {
+		return ToolResult{Name: "ReadSpill", Error: "offset must be non-negative", ExitCode: 1}, fmt.Errorf("offset must be non-negative")
+	}
+	if hasStart && hasOffset && offset != startLine-1 {
+		return ToolResult{Name: "ReadSpill", Error: "start and offset refer to different lines", ExitCode: 1}, fmt.Errorf("start and offset refer to different lines")
+	}
+	if hasLimit && limit <= 0 {
+		return ToolResult{Name: "ReadSpill", Error: "limit must be positive", ExitCode: 1}, fmt.Errorf("limit must be positive")
+	}
+	if !hasStart && !hasOffset && !hasLimit {
+		limit = e.MaxOutputLines
+		if limit <= 0 {
+			limit = 250
+		}
+		hasLimit = true
+	}
+	start := 0
+	if hasStart {
+		start = startLine - 1
+	} else if hasOffset {
+		start = offset
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := len(lines)
+	if hasLimit && start+limit < end {
+		end = start + limit
+	}
+	return ToolResult{Name: "ReadSpill", Output: strings.Join(lines[start:end], "\n")}, nil
 }
 
 // normalizeOutput 对工具原始输出依次施加行数与字节上限：先按行截断（保留前 maxLines

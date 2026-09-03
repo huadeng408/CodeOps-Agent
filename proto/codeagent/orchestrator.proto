@@ -59,6 +59,9 @@ message ToolResult {
   bool truncated = 5;
   string tool_call_id = 6;
   repeated ContentBlock content_blocks = 7;
+  string spill_locator = 8;
+  string spill_sha256 = 9;
+  int64 spill_bytes = 10;
 }
 
 message ContentBlock {

@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"code-agent/internal/sandbox"
 	"code-agent/internal/safety"
+	"code-agent/internal/sandbox"
 )
 
 func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolResult, error) {
@@ -32,8 +32,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 			Program:    "git",
 			Args:       requestArgs,
 		})
-		text, truncated := e.TruncateOutput(sandboxResult.Output)
-		result := ToolResult{Name: "Git", Output: text, ExitCode: sandboxResult.ExitCode, Truncated: truncated}
+		result := ToolResult{Name: "Git", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {
@@ -47,8 +46,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 	cmdArgs := append([]string{"-C", e.Root, command}, extraArgs...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	output, err := cmd.CombinedOutput()
-	text, truncated := e.TruncateOutput(string(output))
-	result := ToolResult{Name: "Git", Output: text, Truncated: truncated}
+	result := ToolResult{Name: "Git", Output: string(output)}
 	if err != nil {
 		result.Error = err.Error()
 		result.ExitCode = exitCodeFromError(err)

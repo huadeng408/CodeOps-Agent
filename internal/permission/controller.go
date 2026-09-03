@@ -47,6 +47,7 @@ const maxApprovalHistory = 200
 
 var DefaultPermissions = map[string]Level{
 	"Read":            AutoAllow,
+	"ReadSpill":       AutoAllow,
 	"Glob":            AutoAllow,
 	"Grep":            AutoAllow,
 	"SearchKnowledge": AutoAllow,

@@ -79,8 +79,13 @@ func (e *Executor) executeGrep(_ context.Context, args map[string]any) (ToolResu
 	}
 
 	output, headTruncated := formatGrepOutput(matches, files, fileCounts, options)
-	output, byteTruncated := e.TruncateOutput(output)
-	return ToolResult{Name: "Grep", Output: output, Truncated: headTruncated || byteTruncated}, nil
+	result := ToolResult{Name: "Grep", Output: output, Truncated: headTruncated}
+	if headTruncated {
+		fullOptions := options
+		fullOptions.HeadLimit = 0
+		result.spillContent, _ = formatGrepOutput(matches, files, fileCounts, fullOptions)
+	}
+	return result, nil
 }
 
 type grepOptions struct {

@@ -1232,9 +1232,15 @@ class ConversationRunner:
         # 当 Go 侧已按行/字节上限截断输出时，显式提示 LLM 结果被裁剪，便于其主动
         # 决定是否需要分页或重读。注意：设计方案 22.4 中的“智能摘要”（对超大输出调用
         # LLM 生成摘要）暂未实现，当前只做截断；后续如需引入再在此处扩展。
-        if result is not None and getattr(result, "truncated", False):
+        spill_locator = str(getattr(result, "spill_locator", "") or "") if result is not None else ""
+        if result is not None and getattr(result, "truncated", False) and not spill_locator:
             content = (
                 f"{content}\n[Output truncated — larger result was capped; ask if you need more.]"
+            )
+        if spill_locator and "Complete redacted output:" not in content:
+            content = (
+                f"{content}\n[Complete redacted output: {spill_locator}. "
+                "Use ReadSpill with locator to retrieve a bounded range.]"
             )
         content = self._wrap_untrusted_tool_output(content)
         content_blocks: list[dict[str, Any]] = []

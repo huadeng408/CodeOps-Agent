@@ -15,7 +15,7 @@ import (
 // notebookDoc 表示 .ipynb 顶层结构。metadata / nbformat / nbformat_minor 用
 // json.RawMessage 保留原始内容，避免回写时改变既有字段或键顺序。
 type notebookDoc struct {
-	Cells         []notebookCell `json:"cells"`
+	Cells         []notebookCell  `json:"cells"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
 	NBFormat      json.RawMessage `json:"nbformat,omitempty"`
 	NBFormatMinor json.RawMessage `json:"nbformat_minor,omitempty"`
@@ -139,11 +139,9 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 	if err := os.WriteFile(abs, encoded, 0o644); err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
-	output, truncated := e.TruncateOutput(summary)
 	return ToolResult{
-		Name:      "NotebookEdit",
-		Output:    output,
-		Truncated: truncated,
+		Name:   "NotebookEdit",
+		Output: summary,
 		Changes: []Change{{
 			Path:   filepath.ToSlash(path),
 			Before: before,

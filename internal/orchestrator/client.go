@@ -41,7 +41,35 @@ type ToolResult struct {
 	Error         string
 	ExitCode      int32
 	Truncated     bool
+	Spill         *SpillRef
 	ContentBlocks []ContentBlock
+}
+
+type SpillRef struct {
+	Locator string
+	SHA256  string
+	Bytes   int64
+}
+
+func spillLocator(ref *SpillRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.Locator
+}
+
+func spillSHA256(ref *SpillRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.SHA256
+}
+
+func spillBytes(ref *SpillRef) int64 {
+	if ref == nil {
+		return 0
+	}
+	return ref.Bytes
 }
 
 type ContentBlock struct {
@@ -628,6 +656,9 @@ func sendToolResult(stream codeagentpb.Orchestrator_ConverseClient, result ToolR
 				Truncated:     result.Truncated,
 				ToolCallId:    result.ToolCallID,
 				ContentBlocks: contentBlocks,
+				SpillLocator:  spillLocator(result.Spill),
+				SpillSha256:   spillSHA256(result.Spill),
+				SpillBytes:    spillBytes(result.Spill),
 			},
 		},
 	}); err != nil {

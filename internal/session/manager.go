@@ -33,6 +33,9 @@ type ToolResultRecord struct {
 	Error         string
 	Output        string
 	Truncated     bool
+	SpillLocator  string
+	SpillSHA256   string
+	SpillBytes    int64
 	ModifiedFiles []string
 }
 
@@ -876,6 +879,13 @@ func formatToolResult(record ToolResultRecord) string {
 		"tool: " + name,
 		fmt.Sprintf("exit_code: %d", record.ExitCode),
 		fmt.Sprintf("truncated: %t", record.Truncated),
+	}
+	if strings.TrimSpace(record.SpillLocator) != "" {
+		lines = append(lines,
+			"spill_locator: "+strings.TrimSpace(record.SpillLocator),
+			"spill_sha256: "+strings.TrimSpace(record.SpillSHA256),
+			fmt.Sprintf("spill_bytes: %d", record.SpillBytes),
+		)
 	}
 	if len(record.ModifiedFiles) > 0 {
 		lines = append(lines, "modified_files: "+strings.Join(mergeFiles(nil, record.ModifiedFiles), ", "))

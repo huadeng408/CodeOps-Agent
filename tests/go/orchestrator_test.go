@@ -18,6 +18,7 @@ import (
 
 type testOrchestratorServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
+	toolResult *codeagentpb.ToolResult
 }
 
 func (s *testOrchestratorServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
@@ -54,6 +55,7 @@ func (s *testOrchestratorServer) Converse(stream codeagentpb.Orchestrator_Conver
 	}
 	toolOutput := ""
 	if payload := toolMessage.GetToolResult(); payload != nil {
+		s.toolResult = payload
 		toolOutput = payload.Output
 		if len(payload.ContentBlocks) == 1 {
 			block := payload.ContentBlocks[0]
@@ -274,7 +276,8 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	}
 
 	server := grpc.NewServer()
-	codeagentpb.RegisterOrchestratorServer(server, &testOrchestratorServer{})
+	capturing := &testOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capturing)
 	go func() {
 		_ = server.Serve(listener)
 	}()
@@ -298,6 +301,7 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 		return orchestrator.ToolResult{
 			ToolName: "Echo",
 			Output:   "tool-ok",
+			Spill:    &orchestrator.SpillRef{Locator: "spill://" + strings.Repeat("a", 64), SHA256: strings.Repeat("a", 64), Bytes: 128},
 			ContentBlocks: []orchestrator.ContentBlock{{
 				ImageBlob: []byte("png"),
 				MIME:      "image/png",
@@ -309,6 +313,9 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	}
 	if !strings.Contains(reply, "hello agent tool-ok image/png:png") {
 		t.Fatalf("unexpected reply: %q", reply)
+	}
+	if capturing.toolResult == nil || capturing.toolResult.SpillLocator != "spill://"+strings.Repeat("a", 64) || capturing.toolResult.SpillBytes != 128 {
+		t.Fatalf("spill metadata was not sent over gRPC: %#v", capturing.toolResult)
 	}
 }
 

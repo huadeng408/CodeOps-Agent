@@ -88,6 +88,7 @@ func (e *Executor) readPDF(
 	commandOutput, runErr := runPDFParser(runCtx, executable, commandArgs...)
 	if runErr != nil {
 		detail, _ := e.TruncateOutput(strings.TrimSpace(string(commandOutput)))
+		detail = RedactSensitive(detail)
 		if detail != "" {
 			runErr = fmt.Errorf("%w: %s", runErr, detail)
 		}
@@ -113,11 +114,9 @@ func (e *Executor) readPDF(
 	if strings.TrimSpace(markdown) != "" {
 		output += "\n" + markdown
 	}
-	output, truncated := e.TruncateOutput(output)
 	return ToolResult{
 		Name:          "Read",
 		Output:        output,
-		Truncated:     truncated,
 		ContentBlocks: imageBlocks,
 	}, nil
 }

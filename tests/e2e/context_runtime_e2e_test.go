@@ -155,6 +155,13 @@ func contextE2EToolHandler(executor *tools.Executor, calls *atomic.Int32) orches
 			ExitCode:   int32(result.ExitCode),
 			Truncated:  result.Truncated,
 		}
+		if result.Spill != nil {
+			converted.Spill = &orchestrator.SpillRef{
+				Locator: result.Spill.Locator,
+				SHA256:  result.Spill.SHA256,
+				Bytes:   result.Spill.Bytes,
+			}
+		}
 		if executeErr != nil && converted.Error == "" {
 			converted.Error = executeErr.Error()
 			converted.ExitCode = 1

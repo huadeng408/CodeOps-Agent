@@ -566,6 +566,7 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 			Error:         result.Error,
 			ExitCode:      int32(result.ExitCode),
 			Truncated:     result.Truncated,
+			Spill:         orchestratorSpillRef(result.Spill),
 			ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 		}
 	}
@@ -576,8 +577,16 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		Error:         result.Error,
 		ExitCode:      int32(result.ExitCode),
 		Truncated:     result.Truncated,
+		Spill:         orchestratorSpillRef(result.Spill),
 		ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 	}
+}
+
+func orchestratorSpillRef(ref *tools.SpillRef) *orchestrator.SpillRef {
+	if ref == nil {
+		return nil
+	}
+	return &orchestrator.SpillRef{Locator: ref.Locator, SHA256: ref.SHA256, Bytes: ref.Bytes}
 }
 
 func orchestratorContentBlocks(blocks []tools.ContentBlock) []orchestrator.ContentBlock {
@@ -1201,6 +1210,9 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 		Error:         result.Error,
 		Output:        result.Output,
 		Truncated:     result.Truncated,
+		SpillLocator:  spillLocator(result.Spill),
+		SpillSHA256:   spillSHA256(result.Spill),
+		SpillBytes:    spillBytes(result.Spill),
 		ModifiedFiles: modifiedFiles,
 	})
 
@@ -1219,6 +1231,27 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 	if err := a.session.AutoSave(ctx); err != nil {
 		a.renderer.PrintLine("autosave failed: " + err.Error())
 	}
+}
+
+func spillLocator(ref *tools.SpillRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.Locator
+}
+
+func spillSHA256(ref *tools.SpillRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.SHA256
+}
+
+func spillBytes(ref *tools.SpillRef) int64 {
+	if ref == nil {
+		return 0
+	}
+	return ref.Bytes
 }
 
 func formatToolProgress(progress *orchestrator.ToolProgress) string {

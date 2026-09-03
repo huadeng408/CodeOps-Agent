@@ -53,8 +53,7 @@ func (e *Executor) executeWebSearch(ctx context.Context, args map[string]any) (T
 	if strings.TrimSpace(output) == "" {
 		output = "no results"
 	}
-	output, truncated := e.TruncateOutput(output)
-	return ToolResult{Name: "WebSearch", Output: output, Truncated: truncated}, nil
+	return ToolResult{Name: "WebSearch", Output: output}, nil
 }
 
 func webSearchURL(endpoint, query string) (string, error) {

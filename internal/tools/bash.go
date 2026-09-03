@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"code-agent/internal/sandbox"
 	"code-agent/internal/safety"
+	"code-agent/internal/sandbox"
 )
 
 func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolResult, error) {
@@ -57,8 +57,7 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 			WorkingDir: absDir,
 			Command:    command,
 		})
-		text, truncated := e.TruncateOutput(sandboxResult.Output)
-		result := ToolResult{Name: "Bash", Output: text, ExitCode: sandboxResult.ExitCode, Truncated: truncated}
+		result := ToolResult{Name: "Bash", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {
@@ -73,8 +72,7 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 	cmd := exec.CommandContext(runCtx, name, shellArgs...)
 	cmd.Dir = absDir
 	output, err := cmd.CombinedOutput()
-	text, truncated := e.TruncateOutput(string(output))
-	result := ToolResult{Name: "Bash", Output: text, Truncated: truncated}
+	result := ToolResult{Name: "Bash", Output: string(output)}
 
 	if runCtx.Err() == context.DeadlineExceeded {
 		result.Error = "command timed out"

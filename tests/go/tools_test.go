@@ -200,6 +200,34 @@ func TestExecutorGlobUsesDefaultLimit(t *testing.T) {
 	}
 }
 
+func TestExecutorGlobSpillRetainsMatchesBeyondRequestedLimit(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("sample-%d.txt", i)), []byte("alpha"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := tools.NewExecutor(root)
+	store, err := tools.NewFileSpillStore(filepath.Join(root, "spill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.SetSpillStore(store)
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Glob", Arguments: map[string]any{"pattern": "*.txt", "head_limit": 1},
+	})
+	if err != nil || result.Spill == nil {
+		t.Fatalf("expected glob spill, result=%+v err=%v", result, err)
+	}
+	complete, err := store.Load(context.Background(), result.Spill.Locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(complete, "sample-0.txt") || !strings.Contains(complete, "sample-1.txt") || !strings.Contains(complete, "sample-2.txt") {
+		t.Fatalf("glob spill lost matches: %q", complete)
+	}
+}
+
 func TestExecutorEditReturnsUndoChange(t *testing.T) {
 	root := t.TempDir()
 	executor := tools.NewExecutor(root)
@@ -553,4 +581,155 @@ func TestExecutorTruncateOutputHonorsLineAndByteLimits(t *testing.T) {
 			t.Fatalf("expected byte-capped output to be smaller than input: %d vs %d", len(out), len(big))
 		}
 	})
+}
+
+func TestExecutorSpillsLongReadOutputWithRedactedContent(t *testing.T) {
+	root := t.TempDir()
+	secret := "super-secret-value"
+	content := strings.Repeat("prefix\n", 20) + "API_KEY=" + secret + "\n" + strings.Repeat("suffix\n", 20)
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := tools.NewExecutor(root)
+	executor.MaxOutputLines = 0
+	executor.MaxOutputBytes = 64
+	store, err := tools.NewFileSpillStore(filepath.Join(root, "spill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.SetSpillStore(store)
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Read",
+		Arguments: map[string]any{"path": "large.txt"},
+	})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if !result.Truncated {
+		t.Fatalf("expected long output to be truncated: %+v", result)
+	}
+	if result.Spill == nil || !strings.HasPrefix(result.Spill.Locator, "spill://") {
+		t.Fatalf("expected opaque spill reference, got %+v", result.Spill)
+	}
+	if strings.Contains(result.Output, secret) {
+		t.Fatalf("preview leaked secret: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, result.Spill.Locator) || !strings.Contains(result.Output, "ReadSpill") {
+		t.Fatalf("preview missing retrieval hint: %q", result.Output)
+	}
+
+	spilled, err := store.Load(context.Background(), result.Spill.Locator)
+	if err != nil {
+		t.Fatalf("load spill failed: %v", err)
+	}
+	if strings.Contains(spilled, secret) || !strings.Contains(spilled, "[REDACTED]") {
+		t.Fatalf("spill content was not redacted: %q", spilled)
+	}
+	if !strings.Contains(spilled, "prefix") || !strings.Contains(spilled, "suffix") {
+		t.Fatalf("spill did not retain complete formatted output: %q", spilled)
+	}
+}
+
+func TestExecutorSpillFailureKeepsBoundedPreview(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 256)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+	executor.MaxOutputLines = 0
+	executor.MaxOutputBytes = 32
+	executor.SetSpillStore(failingSpillStore{})
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "Read",
+		Arguments: map[string]any{"path": "large.txt"},
+	})
+	if err != nil {
+		t.Fatalf("spill failure must not fail read: %v", err)
+	}
+	if !result.Truncated || result.Spill != nil {
+		t.Fatalf("expected bounded fallback without spill reference: %+v", result)
+	}
+	if !strings.Contains(result.Output, "spill storage failed") {
+		t.Fatalf("expected spill failure hint, got %q", result.Output)
+	}
+}
+
+func TestRedactSensitivePreservesDiagnosticsWithoutCredentials(t *testing.T) {
+	input := `Authorization: Bearer abc123 API_KEY=xyz {"token":"json-secret"} mysql://user:pw@db.local:3306/app`
+	output := tools.RedactSensitive(input)
+	for _, secret := range []string{"abc123", "xyz", "json-secret", "pw"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("redaction leaked %q in %q", secret, output)
+		}
+	}
+	if !strings.Contains(output, "Bearer [REDACTED]") || !strings.Contains(output, "API_KEY=[REDACTED]") {
+		t.Fatalf("redaction removed useful diagnostic labels: %q", output)
+	}
+}
+
+func TestFileSpillStoreRejectsNonOpaqueLocator(t *testing.T) {
+	store, err := tools.NewFileSpillStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(context.Background(), "C:\\outside.txt"); err == nil {
+		t.Fatal("expected external spill path to be rejected")
+	}
+}
+
+func TestExecutorReadSpillSupportsBoundedLineRange(t *testing.T) {
+	root := t.TempDir()
+	executor := tools.NewExecutor(root)
+	store, err := tools.NewFileSpillStore(filepath.Join(root, "spill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.SetSpillStore(store)
+	ref, err := store.Save(context.Background(), tools.SpillRequest{ToolName: "Read", Content: "one\ntwo\nthree\nfour"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "ReadSpill",
+		Arguments: map[string]any{"locator": ref.Locator, "start": 2, "limit": 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "two\nthree" {
+		t.Fatalf("unexpected spill range: %q", result.Output)
+	}
+}
+
+func TestExecutorReadSpillDefaultsToBoundedPage(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	store, err := tools.NewFileSpillStore(filepath.Join(executor.Root, "spill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.SetSpillStore(store)
+	ref, err := store.Save(context.Background(), tools.SpillRequest{ToolName: "Read", Content: strings.Repeat("line\n", 400)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "ReadSpill", Arguments: map[string]any{"locator": ref.Locator}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(result.Output, "line") >= 400 {
+		t.Fatalf("default spill read was unbounded: %d lines", strings.Count(result.Output, "line"))
+	}
+}
+
+type failingSpillStore struct{}
+
+func (failingSpillStore) Save(context.Context, tools.SpillRequest) (tools.SpillRef, error) {
+	return tools.SpillRef{}, fmt.Errorf("intentional spill storage failure")
+}
+
+func (failingSpillStore) Load(context.Context, string) (string, error) {
+	return "", fmt.Errorf("intentional spill storage failure")
 }

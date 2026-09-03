@@ -925,6 +925,36 @@ def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
         server.stop(grace=0)
 
 
+def test_spilled_tool_result_surfaces_opaque_retrieval_hint(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    app.llm = FakeLLM()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            list(stub.Converse(iter([
+                orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(text="inspect")),
+                orchestrator_pb2.HarnessMessage(tool_result=orchestrator_pb2.ToolResult(
+                    tool_name="Read",
+                    output="preview",
+                    truncated=True,
+                    spill_locator="spill://" + "a" * 64,
+                    spill_sha256="a" * 64,
+                    spill_bytes=4096,
+                )),
+            ])))
+            tool_message = next(message for message in app.llm.requests[1].messages if message.role == "tool")
+            assert "spill://" + "a" * 64 in tool_message.content
+            assert "ReadSpill" in tool_message.content
+            assert "Output truncated" not in tool_message.content
+    finally:
+        server.stop(grace=0)
+
+
 def test_server_exposes_configured_provider_to_workflows(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "local")
     monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")

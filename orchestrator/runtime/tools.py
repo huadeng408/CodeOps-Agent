@@ -197,6 +197,39 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="ReadSpill",
+                description=(
+                    "Retrieve a bounded complete redacted result previously returned by a tool. "
+                    "Use only the opaque spill locator from that result."
+                ),
+                permission=orchestrator_pb2.AUTO_ALLOW,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "locator": {
+                            "type": "string",
+                            "description": "Opaque spill:// locator returned by a tool.",
+                        },
+                        "start": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional one-based line number to start reading.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional zero-based line offset; prefer start.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional maximum number of lines to return.",
+                        },
+                    },
+                    "required": ["locator"],
+                },
+            ),
+            ToolSpec(
                 name="Glob",
                 description="Find files in the workspace by glob pattern, with bounded output.",
                 permission=orchestrator_pb2.AUTO_ALLOW,

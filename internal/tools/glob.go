@@ -43,6 +43,7 @@ func (e *Executor) executeGlob(_ context.Context, args map[string]any) (ToolResu
 	}
 
 	sort.Strings(matches)
+	completeOutput := strings.Join(matches, "\n")
 	limit, hasLimit, err := intArg(args, "head_limit", "limit")
 	if err != nil {
 		return ToolResult{Name: "Glob", Error: err.Error(), ExitCode: 1}, err
@@ -59,10 +60,13 @@ func (e *Executor) executeGlob(_ context.Context, args map[string]any) (ToolResu
 		matches = append(matches[:limit], fmt.Sprintf("[glob output truncated: %d more files]", remaining))
 		truncated = true
 	}
-	// 计数上限（匹配文件数）与输出尺寸上限（行/字节）是两类独立的限制：
-	// 这里在计数截断后再统一走尺寸截断，避免超大的 glob 列表绕过输出上限。
-	output, sizeTruncated := e.TruncateOutput(strings.Join(matches, "\n"))
-	return ToolResult{Name: "Glob", Output: output, Truncated: truncated || sizeTruncated}, nil
+	// 计数上限（匹配文件数）与输出尺寸上限（行/字节）是两类独立的限制；
+	// 尺寸边界由 Executor 的统一结果处理器施加。
+	result := ToolResult{Name: "Glob", Output: strings.Join(matches, "\n"), Truncated: truncated}
+	if truncated {
+		result.spillContent = completeOutput
+	}
+	return result, nil
 }
 
 func matchGlob(pattern, candidate string) (bool, error) {

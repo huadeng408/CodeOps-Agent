@@ -35,10 +35,8 @@ func (e *Executor) executeWebFetch(ctx context.Context, args map[string]any) (To
 		return ToolResult{Name: "WebFetch", Error: err.Error()}, err
 	}
 
-	output, truncated := e.TruncateOutput(string(body))
 	return ToolResult{
-		Name:      "WebFetch",
-		Output:    fmt.Sprintf("status=%d\n%s", resp.StatusCode, output),
-		Truncated: truncated,
+		Name:   "WebFetch",
+		Output: fmt.Sprintf("status=%d\n%s", resp.StatusCode, string(body)),
 	}, nil
 }

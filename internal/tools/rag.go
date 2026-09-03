@@ -78,11 +78,10 @@ func (e *Executor) executeSearchKnowledge(ctx context.Context, args map[string]a
 	}
 
 	output := formatRAGResults(results)
-	output, truncated := e.TruncateOutput(output)
 	if retrieveSpan != nil {
 		retrieveSpan.SetAttributes(genai.DocumentLengthKV(len(output)))
 	}
-	return ToolResult{Name: "SearchKnowledge", Output: output, Truncated: truncated}, nil
+	return ToolResult{Name: "SearchKnowledge", Output: output}, nil
 }
 
 func ragTopKArg(args map[string]any) (int, error) {

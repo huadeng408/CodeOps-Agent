@@ -351,6 +351,22 @@ func TestAppendToolResultStoresBoundedToolHistory(t *testing.T) {
 	}
 }
 
+func TestAppendToolResultStoresSpillAuditMetadata(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession(t.TempDir())
+	manager.AppendToolResult(session.ToolResultRecord{
+		Name: "Read", Output: "preview", Truncated: true,
+		SpillLocator: "spill://" + strings.Repeat("a", 64),
+		SpillSHA256:  strings.Repeat("a", 64), SpillBytes: 123,
+	})
+	message := manager.Current().Messages[len(manager.Current().Messages)-1].Content
+	for _, want := range []string{"spill_locator: spill://", "spill_sha256: " + strings.Repeat("a", 64), "spill_bytes: 123"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("tool audit missing %q: %q", want, message)
+		}
+	}
+}
+
 func TestManagerAutoSaveRequiresCurrentSession(t *testing.T) {
 	manager := session.NewManager(session.NewMemoryStore())
 
