@@ -37,6 +37,7 @@ class ServerConfig:
     working_dir: str = "."
     max_tokens: int = 1_000_000
     max_cost: float = 5.0
+    context_window: int = 256_000
 
 
 class OrchestratorServer:
@@ -160,6 +161,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             main_llm=self.app.llm,
             provider_clients=self._provider_clients_for_request(),
             layered_context=self.app.layered_context,
+            context_window=self.app.config.context_window,
         )
         try:
             yield from runner.run(
@@ -249,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--working-dir", default=".")
     parser.add_argument("--max-tokens", type=int, default=1_000_000)
     parser.add_argument("--max-cost", type=float, default=5.0)
+    parser.add_argument("--context-window", type=int, default=256_000)
     return parser
 
 
@@ -263,6 +266,7 @@ def main(argv: list[str] | None = None) -> None:
             working_dir=args.working_dir,
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
+            context_window=args.context_window,
         )
     )
     server.serve()

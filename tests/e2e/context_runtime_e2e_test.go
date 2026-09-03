@@ -118,6 +118,100 @@ func TestContextRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 	contextE2EAssertSQLite(t, filepath.Join(projectRoot, ".agent", "context.sqlite"))
 }
 
+func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
+	}
+
+	repositoryRoot := contextE2ERepositoryRoot(t)
+	python := contextE2EPython(t)
+	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
+	projectRoot := t.TempDir()
+	address := contextE2EAddress(t)
+	pythonPath := repositoryRoot
+	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
+		pythonPath += string(os.PathListSeparator) + inherited
+	}
+	t.Setenv("PYTHONPATH", pythonPath)
+
+	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
+		Address:             address,
+		AutoStart:           true,
+		Command:             python,
+		Args:                []string{fixture, "--context-window", "512"},
+		ProjectRoot:         projectRoot,
+		WorkingDir:          projectRoot,
+		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
+		StartupTimeout:      15 * time.Second,
+		ConversationTimeout: 30 * time.Second,
+	})
+	t.Cleanup(manager.Stop)
+
+	client, err := manager.Client(context.Background())
+	if err != nil {
+		t.Fatalf("start real Python orchestrator: %v", err)
+	}
+	history := make([]orchestrator.ConversationMessage, 0, 24)
+	for index := 0; index < 24; index++ {
+		history = append(history, orchestrator.ConversationMessage{
+			Role:    "user",
+			Content: fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160)),
+		})
+	}
+	response, err := client.ConverseWithHistory(
+		context.Background(),
+		"COMPACTION_CHECK",
+		"context-compaction-e2e",
+		history,
+	)
+	if err != nil {
+		t.Fatalf("compaction conversation: %v", err)
+	}
+	if !strings.HasPrefix(response, "COMPACTION_OK:") {
+		t.Fatalf("response = %q, want compaction confirmation", response)
+	}
+
+	databasePath := filepath.Join(projectRoot, ".agent", "context.sqlite")
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open compaction context SQLite: %v", err)
+	}
+	defer database.Close()
+	for _, kind := range []string{"compaction/start", "compaction/summary", "compaction/end"} {
+		var count int
+		if err := database.QueryRow(
+			"SELECT COUNT(*) FROM context_events WHERE session_id = ? AND kind = ?",
+			"context-compaction-e2e",
+			kind,
+		).Scan(&count); err != nil {
+			t.Fatalf("count %s events: %v", kind, err)
+		}
+		if count == 0 {
+			t.Fatalf("no persisted %s event", kind)
+		}
+	}
+	gitSHA := contextE2EGitSHA(t, repositoryRoot)
+	receipt := map[string]any{
+		"status":         "VERIFIED",
+		"git_sha":        gitSHA,
+		"session_id":     "context-compaction-e2e",
+		"response_pid":   contextE2EProcessID(t, response, "COMPACTION_OK:"),
+		"context_window": 512,
+		"event_kinds":    []string{"compaction/start", "compaction/summary", "compaction/end"},
+	}
+	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("encode compaction E2E receipt: %v", err)
+	}
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-compaction-process-recovery.json")
+	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
+		t.Fatalf("create compaction receipt directory: %v", err)
+	}
+	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatalf("write compaction E2E receipt: %v", err)
+	}
+}
+
 func contextE2EProcessID(t *testing.T, response, prefix string) int {
 	t.Helper()
 	raw, found := strings.CutPrefix(response, prefix)
@@ -224,6 +318,20 @@ func contextE2EPython(t *testing.T) string {
 	}
 	t.Fatal("Python executable not found")
 	return ""
+}
+
+func contextE2EGitSHA(t *testing.T, repositoryRoot string) string {
+	t.Helper()
+	command := exec.Command("git", "-C", repositoryRoot, "rev-parse", "HEAD")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("resolve current git SHA: %v", err)
+	}
+	sha := strings.TrimSpace(string(output))
+	if len(sha) < 12 {
+		t.Fatalf("git SHA is unexpectedly short: %q", sha)
+	}
+	return sha
 }
 
 func contextE2EAddress(t *testing.T) string {

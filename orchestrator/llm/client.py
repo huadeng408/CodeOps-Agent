@@ -306,6 +306,29 @@ class RequestInterrupted(RuntimeError):
     """
 
 
+def is_context_window_exceeded(error: BaseException) -> bool:
+    """Recognize provider context-overflow failures without provider coupling."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        code = str(getattr(current, "code", "") or "").upper()
+        text = str(current).upper()
+        normalized = text.replace("_", " ").replace("-", " ")
+        if "CONTEXT WINDOW EXCEEDED" in code.replace("_", " ") or "CONTEXT WINDOW EXCEEDED" in normalized:
+            return True
+        if (
+            "CONTEXT LENGTH" in normalized
+            or "MAXIMUM CONTEXT" in normalized
+            or "TOKEN LIMIT" in normalized
+            or "TOO MANY TOKENS" in normalized
+            or "PROMPT IS TOO LONG" in normalized
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class LLMClient(ABC):
     max_retries: int = 3
 

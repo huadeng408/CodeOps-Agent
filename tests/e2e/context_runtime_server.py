@@ -56,6 +56,12 @@ class DeterministicContextLLM(LLMClient):
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 
+        if latest_user == "COMPACTION_CHECK":
+            return ChatResponse(
+                text=f"COMPACTION_OK:{os.getpid()}",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
         if any(
             message.role == "tool" and message.tool_call_id == _TOOL_CALL_ID
             for message in request.messages
@@ -93,6 +99,7 @@ def main() -> None:
             working_dir=args.working_dir,
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
+            context_window=args.context_window,
         )
     )
     deterministic = DeterministicContextLLM()

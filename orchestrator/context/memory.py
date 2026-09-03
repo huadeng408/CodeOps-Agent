@@ -23,7 +23,17 @@ from typing import Any
 
 from orchestrator.security.credentials import redact_credential_text
 
-_EVENT_KINDS = {"plan", "tool_call", "file_diff", "execution_result", "reflection"}
+_EVENT_KINDS = {
+    "plan",
+    "tool_call",
+    "file_diff",
+    "execution_result",
+    "reflection",
+    "compaction/start",
+    "compaction/summary",
+    "compaction/end",
+    "tool_result/prune",
+}
 _SKIP_DIRS = {
     ".git",
     ".agent",
@@ -537,6 +547,10 @@ class LayeredContext:
             f"#{event.sequence} {event.kind}: "
             f"{json.dumps(self._prompt_event_payload(event), ensure_ascii=False, sort_keys=True)}"
             for event in events
+            if not (
+                event.kind.startswith("compaction/")
+                or event.kind.startswith("tool_result/")
+            )
         ]
         events_text = "\n".join(event_lines)
         if len(events_text) > self.max_event_chars:
@@ -680,6 +694,12 @@ class LayeredContext:
                 "response_sha256",
             },
             "reflection": {"memory_id", "tags", "status", "turn"},
+            # Compaction lifecycle events are durable audit markers only.  The
+            # current surface, not this log metadata, is what reaches a model.
+            "compaction/start": {"range", "trigger", "attempt"},
+            "compaction/summary": {"replaced_tokens", "summary_tokens", "summary_sha256", "attempt"},
+            "compaction/end": {"status", "replaced_tokens", "summary_tokens"},
+            "tool_result/prune": {"count", "original_chars", "pruned_chars", "threshold"},
         }
         allowed = allowed_by_kind.get(event.kind, set())
         return {key: value for key, value in event.payload.items() if key in allowed}

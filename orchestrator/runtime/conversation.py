@@ -32,6 +32,7 @@ from orchestrator.llm.client import (
     ToolCall,
     Usage,
     assess_complexity,
+    is_context_window_exceeded,
     message_content_text,
 )
 from orchestrator.llm.providers.anthropic import AnthropicClient
@@ -192,6 +193,8 @@ class ConversationRunner:
     provider_clients: dict[str, LLMClient] | None = None
     workflow_max_concurrency: int = 4
     layered_context: LayeredContext | None = None
+    context_window: int | None = None
+    max_overflow_retries: int = 2
     _context_persistence_error: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -205,6 +208,7 @@ class ConversationRunner:
             self.recovery = ErrorRecoveryEngine()
         if self.provider_clients is None:
             self.provider_clients = {}
+        self.max_overflow_retries = max(0, int(self.max_overflow_retries))
         if self.llm is not None:
             self.provider_clients.setdefault("default", self.llm)
         if self.main_llm is None:
@@ -247,6 +251,7 @@ class ConversationRunner:
         consecutive_empty_responses = 0
         plan_mode_active = False
         tool_cache: dict[str, CachedToolResult] = {}
+        overflow_retries = 0
 
         for turn in range(1, self.max_tool_rounds + 1):
             # ── Cooperative user interrupt (design 22.8) ──────────────
@@ -288,7 +293,7 @@ class ConversationRunner:
             try:
                 response_box: list[ChatResponse] = []
                 yield from self._stream_chat(
-                    self._compact_messages(messages),
+                    self._compact_messages(messages, session_id=session_id, trigger="pressure"),
                     response_box=response_box,
                     cancel_event=cancel_event,
                     **thinking_kwargs,
@@ -303,6 +308,22 @@ class ConversationRunner:
                 )
                 yield self._finish(session_id, False, "interrupted", turn=turn)
                 return
+            except Exception as exc:
+                if not is_context_window_exceeded(exc) or overflow_retries >= self.max_overflow_retries:
+                    raise
+                before = self._message_fingerprint(messages)
+                compacted_messages = self._compact_messages(
+                    messages,
+                    session_id=session_id,
+                    trigger="context-overflow",
+                    force=True,
+                )
+                after = self._message_fingerprint(compacted_messages)
+                if before == after:
+                    raise
+                messages = compacted_messages
+                overflow_retries += 1
+                continue
             response = response_box[0]
             # If the interrupt arrived just as the response came back, stop
             # before consuming tokens / tool calls for a stale turn. Text (if
@@ -323,6 +344,7 @@ class ConversationRunner:
                 response.usage.output_tokens,
             )
             total_cost += response_cost
+            overflow_retries = 0
             self._consume_budget(
                 response.usage.input_tokens + response.usage.output_tokens,
                 response_cost,
@@ -706,7 +728,7 @@ class ConversationRunner:
         try:
             response_box: list[ChatResponse] = []
             yield from self._stream_chat(
-                self._compact_messages(messages),
+                self._compact_messages(messages, session_id=session_id, trigger="pressure"),
                 allow_tools=False,
                 response_box=response_box,
                 cancel_event=cancel_event,
@@ -1670,6 +1692,21 @@ class ConversationRunner:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _message_fingerprint(messages: list[ChatMessage]) -> str:
+        return ConversationRunner._digest_value(
+            [
+                {
+                    "role": message.role,
+                    "content": message_content_text(message.content),
+                    "tool_call_ids": [call.id for call in message.tool_calls],
+                    "tool_call_names": [call.name for call in message.tool_calls],
+                    "tool_call_id": message.tool_call_id,
+                }
+                for message in messages
+            ]
+        )
+
+    @staticmethod
     def _count_lines(value: str) -> int:
         if not value.strip():
             return 0
@@ -1720,10 +1757,147 @@ class ConversationRunner:
             f"${self.token_budget.max_cost:.6f}"
         )
 
-    def _compact_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        if self.compactor is None or not self.compactor.should_compact(messages):
+    def _compact_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        session_id: str = "",
+        trigger: str = "pressure",
+        force: bool = False,
+    ) -> list[ChatMessage]:
+        if self.compactor is None:
             return messages
         if len(messages) <= 2:
+            return messages
+        model = str(getattr(getattr(self, "llm", None), "model", ""))
+        select_range = getattr(self.compactor, "select_compaction_range", None)
+        if callable(select_range):
+            pruner = getattr(self.compactor, "prune_tool_results", None)
+            if callable(pruner):
+                original_messages = messages
+                pruned = pruner(original_messages)
+                if pruned != original_messages:
+                    original_chars = sum(
+                        len(message_content_text(message.content))
+                        for message in messages
+                        if message.role == "tool"
+                    )
+                    pruned_chars = sum(
+                        len(message_content_text(message.content))
+                        for message in pruned
+                        if message.role == "tool"
+                    )
+                    messages = pruned
+                    if session_id.strip():
+                        self._persist_event(
+                            session_id,
+                            "tool_result/prune",
+                            {
+                                "count": sum(
+                                    1
+                                    for before, after in zip(original_messages, pruned)
+                                    if before is not after
+                                ),
+                                "original_chars": original_chars,
+                                "pruned_chars": pruned_chars,
+                                "threshold": self.compactor.tool_result_threshold,
+                            },
+                        )
+            try:
+                should_compact = self.compactor.should_compact(
+                    messages,
+                    model=model,
+                    context_window=getattr(self, "context_window", None),
+                    force=force,
+                )
+            except TypeError:
+                should_compact = self.compactor.should_compact(messages)
+            if not should_compact:
+                return messages
+
+            current = list(messages)
+            max_attempts = 1 if force else self.compactor.compaction_retries + 1
+            for attempt in range(max_attempts):
+                selected = select_range(
+                    current,
+                    history_start=1,
+                    model=model,
+                    context_window=getattr(self, "context_window", None),
+                    force=force,
+                )
+                if selected is None:
+                    return current
+                selected_start, selected_end = selected
+                compactable = current[selected_start : selected_end + 1]
+                recent = current[selected_end + 1 :]
+                before_tokens = self.compactor.estimate_tokens(current)
+                lifecycle_started = False
+                if session_id.strip():
+                    self._persist_event(
+                        session_id,
+                        "compaction/start",
+                        {
+                            "range": [selected_start, selected_end],
+                            "trigger": trigger,
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    lifecycle_started = not bool(self._context_persistence_error)
+                try:
+                    summary = self.compactor.compact_history(
+                        [self._message_for_compaction(message) for message in compactable]
+                    )
+                except Exception:
+                    if lifecycle_started:
+                        self._persist_event(
+                            session_id,
+                            "compaction/end",
+                            {"status": "failed"},
+                        )
+                    raise
+                current = [current[0], ChatMessage(role="system", content=summary), *recent]
+                after_tokens = self.compactor.estimate_tokens(current)
+                if session_id.strip():
+                    self._persist_event(
+                        session_id,
+                        "compaction/summary",
+                        {
+                            "replaced_tokens": self.compactor.estimate_tokens(compactable),
+                            "summary_tokens": self.compactor.estimate_tokens([current[1]]),
+                            "summary_sha256": self._digest_value(summary),
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    self._persist_event(
+                        session_id,
+                        "compaction/end",
+                        {
+                            "status": "completed",
+                            "replaced_tokens": max(0, before_tokens - after_tokens),
+                            "summary_tokens": self.compactor.estimate_tokens([current[1]]),
+                        },
+                    )
+                if force:
+                    return current
+                try:
+                    still_needed = self.compactor.should_compact(
+                        current,
+                        model=model,
+                        context_window=getattr(self, "context_window", None),
+                    )
+                except TypeError:
+                    still_needed = self.compactor.should_compact(current)
+                if not still_needed:
+                    return current
+            return current
+
+        # Compatibility path for old injected compactors used by downstream
+        # callers.  New production compactors always expose range selection.
+        try:
+            legacy_should_compact = self.compactor.should_compact(messages)
+        except (AttributeError, TypeError):
+            legacy_should_compact = True
+        if not legacy_should_compact:
             return messages
         system = messages[0]
         compactable = messages[1:]

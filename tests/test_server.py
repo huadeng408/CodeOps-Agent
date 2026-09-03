@@ -1323,6 +1323,19 @@ class InterruptibleFakeLLM:
         raise RequestInterrupted("simulated in-flight abort")
 
 
+class ContextOverflowThenSuccessLLM:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise RuntimeError("CONTEXT_WINDOW_EXCEEDED")
+        return ChatResponse(text="recovered")
+
+
 def _runner_from_app(app, llm) -> ConversationRunner:
     return ConversationRunner(
         graph=app.graph,
@@ -1378,6 +1391,31 @@ def test_runner_handles_in_flight_interrupt(monkeypatch, tmp_path) -> None:
     )
     assert "[interrupted]" in texts
     assert responses[-1].done.success is False
+
+
+def test_runner_recovers_from_context_overflow_after_forced_compaction(tmp_path) -> None:
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path), context_window=80))
+    llm = ContextOverflowThenSuccessLLM()
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+        context_window=app.config.context_window,
+    )
+    history = [{"role": "user", "content": "old context " + "x" * 100} for _ in range(6)]
+
+    responses = list(runner.run("continue", iter(()), session_id="overflow", history=history))
+
+    assert responses[-1].done.success is True
+    assert len(llm.requests) == 2
+    assert any("Compacted conversation history" in str(message.content) for message in llm.requests[1].messages)
 
 
 class StreamingFakeLLM:
