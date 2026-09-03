@@ -312,11 +312,13 @@ runner 会启动真实 Python 子进程，复用 `WorkflowEngine` 和 SQLite che
 只有故障次数、任务分母、最终状态和 checksum 全部满足约束时才会输出
 `VERIFIED`，夹具或 mock 不会被计为该验收证据。
 
-最新 canonical 批次 `fault-20260903-canonical-1` 在 clean commit `11ed6e30`
-上以 8 Worker 执行 200 个 deterministic 80ms 任务，向 30 个不同 PID 注入
+最新 canonical 批次 `fault-20260903-canonical-2` 在 clean commit `e7bd98ae`
+上以 8 Worker 执行 200 个 deterministic 80ms 任务，向 30 个不同进程注入
 30 次真实进程终止，最终恢复 `200/200`（100%），SQLite integrity 与 artifact
-checksum 均通过。该 receipt 只验证固定进程故障恢复 lane；由于任务不调用外部模型，
-不能外推为真实模型长任务的端到端成功率。
+checksum 均通过，精简 receipt 位于
+`data/eval/workflow/receipts/fault-20260903-canonical-2.json`。该 receipt 只验证
+固定进程故障恢复 lane；由于任务不调用外部模型，不能外推为真实模型长任务的端到端
+成功率。
 
 运行 Context/Memory 的固定双臂输入 Token 验收：
 
