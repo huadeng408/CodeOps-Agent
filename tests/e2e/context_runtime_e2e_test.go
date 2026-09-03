@@ -71,6 +71,16 @@ func TestLongTermMemoryRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 		t.Fatalf("persist reflection conversation: %v", err)
 	}
 	firstProcessID := contextE2EProcessID(t, first, "MEMORY_ANCHOR_WRITTEN:")
+	noise, err := client.ConverseWithHistory(
+		context.Background(),
+		"PERSIST_MEMORY_NOISE",
+		contextE2EMemorySessionID,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("persist noise reflection conversation: %v", err)
+	}
+	noiseProcessID := contextE2EProcessID(t, noise, "MEMORY_NOISE_WRITTEN:")
 
 	restartedClient, err := manager.Restart(context.Background())
 	if err != nil {
@@ -119,6 +129,7 @@ func TestLongTermMemoryRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 		"git_sha":                contextE2EGitSHA(t, repositoryRoot),
 		"session_id":             contextE2EMemorySessionID,
 		"initial_response_pid":   firstProcessID,
+		"noise_response_pid":     noiseProcessID,
 		"recovery_response_pid":  secondProcessID,
 		"orchestrator_restarted": true,
 		"sqlite_user_version":    schemaVersion,

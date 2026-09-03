@@ -426,13 +426,14 @@ class SQLiteContextStore:
         return LongTermMemory(memory_id, session_id, safe_content, normalized, created_at, checksum)
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
-        tokens = [token.lower() for token in re.split(r"\W+", query) if len(token) >= 2]
+        tokens = [token.casefold() for token in re.split(r"\W+", query) if len(token) >= 2]
+        phrase = " ".join(str(query).casefold().split())
         with self._lock:
             rows = self._connection.execute(
                 "SELECT id, session_id, content, tags_json, created_at, checksum FROM long_term_memory "
                 "ORDER BY created_at DESC, id DESC",
             ).fetchall()
-        result: list[LongTermMemory] = []
+        ranked: list[tuple[int, str, str, LongTermMemory]] = []
         for row in rows:
             tags = tuple(str(item) for item in json.loads(str(row["tags_json"])))
             expected = hashlib.sha256(
@@ -446,13 +447,33 @@ class SQLiteContextStore:
             ).hexdigest()
             if expected != str(row["checksum"]):
                 raise ValueError(f"memory checksum mismatch for {row['id']}")
-            haystack = " ".join((str(row["content"]), *tags)).lower()
+            content = str(row["content"])
+            haystack = " ".join((content, *tags)).casefold()
             if tokens and not any(token in haystack for token in tokens):
                 continue
-            result.append(LongTermMemory(str(row["id"]), str(row["session_id"]), str(row["content"]), tags, str(row["created_at"]), str(row["checksum"])))
-            if len(result) >= max(1, int(limit)):
-                break
-        return result
+            content_tokens = set(re.split(r"\W+", content.casefold()))
+            tag_tokens = set(re.split(r"\W+", " ".join(tags).casefold()))
+            score = 0
+            for token in tokens:
+                if token in content_tokens:
+                    score += 3
+                elif token in haystack:
+                    score += 1
+                if token in tag_tokens:
+                    score += 2
+            if phrase and phrase in haystack:
+                score += 2
+            memory = LongTermMemory(
+                str(row["id"]),
+                str(row["session_id"]),
+                content,
+                tags,
+                str(row["created_at"]),
+                str(row["checksum"]),
+            )
+            ranked.append((score, str(row["created_at"]), str(row["id"]), memory))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in ranked[: max(1, int(limit))]]
 
     def close(self) -> None:
         with self._lock:

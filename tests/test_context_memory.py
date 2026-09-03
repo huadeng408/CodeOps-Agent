@@ -240,6 +240,22 @@ def test_search_memory_filters_before_applying_limit(tmp_path: Path) -> None:
     store.close()
 
 
+def test_search_memory_ranks_multi_token_matches_before_recent_noise(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    store.add_memory(
+        "session-1",
+        "SQLite checkpoint recovery stays durable",
+        ["workflow", "recovery"],
+    )
+    store.add_memory("session-1", "SQLite migration notes", ["workflow"])
+
+    matches = store.search_memory("SQLite recovery", limit=1)
+
+    assert len(matches) == 1
+    assert matches[0].content.startswith("SQLite checkpoint recovery")
+    store.close()
+
+
 def test_layered_context_bounds_events_and_redacts_credential_shapes(tmp_path: Path) -> None:
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     provider_key_prefix = "sk-" + "proj-"

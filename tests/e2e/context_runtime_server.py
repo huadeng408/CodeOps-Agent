@@ -79,10 +79,20 @@ class DeterministicContextLLM(LLMClient):
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 
+        if latest_user == "PERSIST_MEMORY_NOISE":
+            return ChatResponse(
+                text=f"MEMORY_NOISE_WRITTEN:{os.getpid()}",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
         if latest_user == "SEARCH MEMORY ANCHOR AFTER RESTART":
+            anchor_index = rendered.find("MEMORY_ANCHOR_WRITTEN:")
+            noise_index = rendered.find("MEMORY_NOISE_WRITTEN:")
             recovered = (
                 "Long-term memory:" in rendered
-                and "MEMORY_ANCHOR_WRITTEN:" in rendered
+                and anchor_index >= 0
+                and noise_index >= 0
+                and anchor_index < noise_index
             )
             return ChatResponse(
                 text=(
