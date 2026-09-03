@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from eval.adapter import EvalInstance
-from eval.driver_headless import HeadlessDriver
+from eval.driver_headless import HeadlessDriver, LocalToolExecutor
 from orchestrator.llm.client import ChatResponse
 
 
@@ -14,6 +16,25 @@ class _RecordingLLM:
     async def chat(self, request):
         self.requests.append(request)
         return ChatResponse(text="done")
+
+
+def test_bash_tool_executes_bash_syntax(tmp_path) -> None:
+    result = LocalToolExecutor(str(tmp_path)).execute(
+        "Bash", json.dumps({"command": "printf alpha"})
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.error == ""
+    assert result.output == "alpha"
+
+
+def test_bash_tool_reports_nonzero_exit_as_error(tmp_path) -> None:
+    result = LocalToolExecutor(str(tmp_path)).execute(
+        "Bash", json.dumps({"command": "exit 7"})
+    )
+
+    assert result.exit_code == 7
+    assert result.error
 
 
 def test_headless_runner_advertises_only_serviced_tools(monkeypatch, tmp_path) -> None:

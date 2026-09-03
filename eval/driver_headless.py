@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -128,6 +129,35 @@ class _LocalToolResult:
     error: str = ""
     exit_code: int = 0
     truncated: bool = False
+
+
+def _find_bash_executable() -> str | None:
+    """Return a real Bash executable, preferring Git Bash on Windows."""
+    if os.name == "nt":
+        candidates: list[Path] = []
+        git_executable = shutil.which("git")
+        if git_executable:
+            git_root = Path(git_executable).resolve().parent.parent
+            candidates.extend(
+                (git_root / "bin" / "bash.exe", git_root / "usr" / "bin" / "bash.exe")
+            )
+        for variable in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            root = os.environ.get(variable)
+            if not root:
+                continue
+            root_path = Path(root)
+            if variable == "LOCALAPPDATA":
+                root_path /= "Programs"
+            candidates.extend(
+                (
+                    root_path / "Git" / "bin" / "bash.exe",
+                    root_path / "Git" / "usr" / "bin" / "bash.exe",
+                )
+            )
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("bash")
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +372,14 @@ class LocalToolExecutor:
             timeout = 60.0
 
         try:
+            bash_executable = _find_bash_executable()
+            if bash_executable is None:
+                return _LocalToolResult(
+                    error="Bash executable not found; install Bash or Git for Windows",
+                    exit_code=127,
+                )
             proc = subprocess.run(
-                command,
-                shell=True,
+                [bash_executable, "-c", command],
                 cwd=str(cwd),
                 capture_output=True,
                 timeout=timeout,
@@ -365,7 +400,9 @@ class LocalToolExecutor:
         output, truncated = self._truncate(output)
         return _LocalToolResult(
             output=output,
-            error="",
+            error=(
+                "" if proc.returncode == 0 else f"Command exited with code {proc.returncode}"
+            ),
             exit_code=proc.returncode,
             truncated=truncated,
         )
