@@ -53,6 +53,7 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+/memory/
 
 # Editors and OS files
 .vscode/

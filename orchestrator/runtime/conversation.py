@@ -55,6 +55,7 @@ from orchestrator.workflows import (
 )
 
 from .tools import ToolRegistry
+from .agent_loop import AgentLoopPluginRegistry, LoopEvent
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.0025, 0.01),
@@ -196,8 +197,12 @@ class ConversationRunner:
     layered_context: LayeredContext | None = None
     context_window: int | None = None
     max_overflow_retries: int = 2
+    loop_plugins: AgentLoopPluginRegistry | None = None
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
+    _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
+    _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _loop_last_turn: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -208,6 +213,8 @@ class ConversationRunner:
             self.injection_detector = InjectionDetector()
         if self.recovery is None:
             self.recovery = ErrorRecoveryEngine()
+        if self.loop_plugins is None:
+            self.loop_plugins = AgentLoopPluginRegistry()
         if self.provider_clients is None:
             self.provider_clients = {}
         self.max_overflow_retries = max(0, int(self.max_overflow_retries))
@@ -216,7 +223,57 @@ class ConversationRunner:
         if self.main_llm is None:
             object.__setattr__(self, "main_llm", self.llm)
 
+    @property
+    def loop_plugin_errors(self) -> tuple[dict[str, str], ...]:
+        """Sanitized plugin callback failures from the most recent run."""
+
+        return tuple(dict(error) for error in self._loop_plugin_errors)
+
+    @property
+    def loop_plugin_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Metadata returned by plugins, grouped by lifecycle phase."""
+
+        return tuple(
+            {"phase": item["phase"], "metadata": dict(item["metadata"])}
+            for item in self._loop_plugin_metadata
+        )
+
     def run(
+        self,
+        user_text: str,
+        request_iterator,
+        session_id: str = "",
+        history: list[dict[str, str]] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        """Run one conversation while containing observation-plugin failures."""
+
+        self._loop_plugin_errors.clear()
+        self._loop_plugin_metadata.clear()
+        self._loop_last_turn = 0
+        self._emit_loop_event(
+            "loop_start",
+            session_id=session_id,
+            turn=0,
+            metadata={"model": str(getattr(self.llm, "model", ""))},
+        )
+        try:
+            yield from self._run(
+                user_text,
+                request_iterator,
+                session_id=session_id,
+                history=history,
+                cancel_event=cancel_event,
+            )
+        finally:
+            self._emit_loop_event(
+                "loop_end",
+                session_id=session_id,
+                turn=self._loop_last_turn,
+                metadata={"plugin_error_count": len(self._loop_plugin_errors)},
+            )
+
+    def _run(
         self,
         user_text: str,
         request_iterator,
@@ -257,6 +314,7 @@ class ConversationRunner:
         self._pending_compaction_updates.clear()
 
         for turn in range(1, self.max_tool_rounds + 1):
+            self._loop_last_turn = max(self._loop_last_turn, turn)
             # ── Cooperative user interrupt (design 22.8) ──────────────
             # Stop before doing any work this turn when the harness has
             # cancelled the gRPC call (e.g. the user pressed Ctrl+C).
@@ -299,6 +357,15 @@ class ConversationRunner:
                     messages, session_id=session_id, trigger="pressure"
                 )
                 yield from self._emit_compaction_updates()
+                self._emit_loop_event(
+                    "model_before",
+                    session_id=session_id,
+                    turn=turn,
+                    metadata={
+                        "message_count": len(request_messages),
+                        "allow_tools": True,
+                    },
+                )
                 yield from self._stream_chat(
                     request_messages,
                     response_box=response_box,
@@ -332,6 +399,15 @@ class ConversationRunner:
                 overflow_retries += 1
                 continue
             response = response_box[0]
+            self._emit_loop_event(
+                "model_after",
+                session_id=session_id,
+                turn=turn,
+                metadata={
+                    "text_length": len(response.text),
+                    "tool_call_count": len(response.tool_calls),
+                },
+            )
             # If the interrupt arrived just as the response came back, stop
             # before consuming tokens / tool calls for a stale turn. Text (if
             # any) was already streamed incrementally above, so do not re-emit.
@@ -442,6 +518,12 @@ class ConversationRunner:
 
             for call in response.tool_calls:
                 call_id = self._tool_call_id(call)
+                self._emit_loop_event(
+                    "tool_before",
+                    session_id=session_id,
+                    turn=turn,
+                    metadata={"tool_name": call.name, "has_call_id": bool(call_id)},
+                )
                 self._persist_tool_call(session_id, call)
                 if call.name == "AskUser":
                     try:
@@ -457,6 +539,12 @@ class ConversationRunner:
                             )
                         )
                         yield self._text(f"AskUser rejected: {exc}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     yield self._ask_user_request(call_id, ask_request)
                     result = self._next_tool_result(request_iterator, call_id)
@@ -469,6 +557,12 @@ class ConversationRunner:
                         return
                     messages.append(self._tool_result_message(call_id, call.name, result))
                     self._persist_tool_result(session_id, call, result)
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={"tool_name": call.name, "is_error": bool(result.error)},
+                    )
                     continue
                 if call.name == "TodoWrite":
                     try:
@@ -484,6 +578,12 @@ class ConversationRunner:
                             )
                         )
                         yield self._text(f"TodoWrite rejected: {exc}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     self.todo_manager.update(todo_items)
                     snapshot = self.todo_manager.snapshot()
@@ -517,6 +617,12 @@ class ConversationRunner:
                             is_error=False,
                         )
                     )
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={"tool_name": call.name, "is_error": False},
+                    )
                     continue
                 if call.name == "PlanWrite":
                     try:
@@ -532,6 +638,12 @@ class ConversationRunner:
                             )
                         )
                         yield self._text(f"PlanWrite rejected: {exc}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     yield orchestrator_pb2.OrchestratorMessage(
                         plan_update=orchestrator_pb2.PlanUpdate(
@@ -551,6 +663,12 @@ class ConversationRunner:
                     )
                     plan_mode_active = True
                     self._persist_event(session_id, "plan", plan_update)
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={"tool_name": call.name, "is_error": False},
+                    )
                     continue
                 if call.name == "SpawnAgent":
                     try:
@@ -566,6 +684,12 @@ class ConversationRunner:
                             )
                         )
                         yield self._text(f"SpawnAgent rejected: {exc}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     yield orchestrator_pb2.OrchestratorMessage(
                         agent_spawn=orchestrator_pb2.AgentSpawn(
@@ -595,6 +719,15 @@ class ConversationRunner:
                             is_error=False,
                         )
                     )
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "is_error": agent_result.get("status") not in {"completed", "ok"},
+                        },
+                    )
                     continue
 
                 if call.name == "RunWorkflow":
@@ -611,6 +744,12 @@ class ConversationRunner:
                             )
                         )
                         yield self._text(f"RunWorkflow rejected: {exc}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     for worker in workflow.workers:
                         context = dict(worker.context)
@@ -662,12 +801,31 @@ class ConversationRunner:
                             is_error=workflow_result["state"] != "completed",
                         )
                     )
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "is_error": workflow_result["state"] != "completed",
+                        },
+                    )
                     continue
 
                 request = self._tool_request(call, self._call_arguments_json(call))
                 cached_message = self._cached_tool_message(tool_cache, call)
                 if cached_message is not None:
                     messages.append(cached_message)
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "is_error": bool(cached_message.is_error),
+                            "cached": True,
+                        },
+                    )
                     if cached_message.is_error:
                         consecutive_errors += 1
                         recovery_message = self._recovery_message(
@@ -699,6 +857,12 @@ class ConversationRunner:
                 messages.append(tool_message)
                 self._persist_tool_result(session_id, call, result)
                 self._persist_file_change(session_id, call, result)
+                self._emit_loop_event(
+                    "tool_after",
+                    session_id=session_id,
+                    turn=turn,
+                    metadata={"tool_name": call.name, "is_error": bool(result.error)},
+                )
                 self._remember_tool_result(tool_cache, call, tool_message)
                 self._invalidate_tool_cache_after(tool_cache, call, result)
                 if self._tool_result_failed(result):
@@ -738,6 +902,15 @@ class ConversationRunner:
                 messages, session_id=session_id, trigger="pressure"
             )
             yield from self._emit_compaction_updates()
+            self._emit_loop_event(
+                "model_before",
+                session_id=session_id,
+                turn=final_turn,
+                metadata={
+                    "message_count": len(request_messages),
+                    "allow_tools": False,
+                },
+            )
             yield from self._stream_chat(
                 request_messages,
                 allow_tools=False,
@@ -754,6 +927,15 @@ class ConversationRunner:
             )
             return
         response = response_box[0]
+        self._emit_loop_event(
+            "model_after",
+            session_id=session_id,
+            turn=final_turn,
+            metadata={
+                "text_length": len(response.text),
+                "tool_call_count": len(response.tool_calls),
+            },
+        )
         total_tokens_in += response.usage.input_tokens
         total_tokens_out += response.usage.output_tokens
         response_cost = self._estimate_cost(
@@ -1041,6 +1223,35 @@ class ConversationRunner:
         """Return True when the caller has signalled a user interrupt."""
         return cancel_event is not None and cancel_event.is_set()
 
+    def _emit_loop_event(
+        self,
+        phase: str,
+        *,
+        session_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Dispatch bounded lifecycle metadata without changing loop control."""
+
+        self._loop_last_turn = max(self._loop_last_turn, int(turn))
+        registry = self.loop_plugins
+        if registry is None:
+            return
+        result = registry.emit(
+            LoopEvent(
+                schema_version="1",
+                session_id=session_id,
+                turn=max(0, int(turn)),
+                phase=phase,
+                metadata=metadata or {},
+            )
+        )
+        self._loop_plugin_errors.extend(result.errors)
+        if result.metadata:
+            self._loop_plugin_metadata.append(
+                {"phase": phase, "metadata": dict(result.metadata)}
+            )
+
     @staticmethod
     def _should_enable_thinking(
         error_count: int,
@@ -1324,6 +1535,12 @@ class ConversationRunner:
         session_id: str = "",
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         for call in calls:
+            self._emit_loop_event(
+                "tool_before",
+                session_id=session_id,
+                turn=turn,
+                metadata={"tool_name": call.name, "has_call_id": bool(self._tool_call_id(call))},
+            )
             self._persist_tool_call(session_id, call)
         request_calls: list[ToolCall] = []
         requested_keys: set[str] = set()
@@ -1381,6 +1598,16 @@ class ConversationRunner:
                 )
                 return consecutive_errors, True
             messages.append(cached_message)
+            self._emit_loop_event(
+                "tool_after",
+                session_id=session_id,
+                turn=turn,
+                metadata={
+                    "tool_name": call.name,
+                    "is_error": bool(cached_message.is_error),
+                    "cached": True,
+                },
+            )
             if cached_message.is_error:
                 consecutive_errors += 1
                 recovery_message = self._recovery_message(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 from orchestrator.llm.client import (
     ChatRequest,
@@ -144,6 +145,17 @@ def main() -> None:
             context_window=context_window,
         )
     )
+    loop_receipt = os.environ.get("CODE_AGENT_AGENT_LOOP_E2E_RECEIPT", "").strip()
+    if loop_receipt:
+        receipt_path = Path(loop_receipt).resolve()
+
+        def record_loop_phase(event) -> None:
+            # Test-only observability sink. It records phase names only; no
+            # prompt, tool output, credentials, or Session state is written.
+            with receipt_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(event.phase + "\n")
+
+        app.loop_plugins.register("e2e-phase-recorder", record_loop_phase)
     deterministic = DeterministicContextLLM()
     app.llm = deterministic
     app.fast_llm = deterministic

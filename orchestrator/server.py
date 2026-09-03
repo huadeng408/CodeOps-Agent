@@ -21,7 +21,7 @@ from .llm.providers import (
     build_fast_client,
 )
 from .memory.manager import MemoryManager
-from .runtime import ConversationRunner, ToolRegistry
+from .runtime import AgentLoopPluginRegistry, ConversationRunner, ToolRegistry
 from .skills.manager import SkillManager
 from .todo.manager import TodoManager
 
@@ -50,6 +50,7 @@ class OrchestratorServer:
         self.graph = build_graph()
         self.llm = build_default_client()
         self.provider_clients = _build_provider_clients(self.llm)
+        self.loop_plugins = AgentLoopPluginRegistry()
         self.fast_llm = build_fast_client()
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
@@ -116,6 +117,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             provider_clients=self._provider_clients_for_request(),
             layered_context=self.app.layered_context,
             context_window=self.app.config.context_window,
+            loop_plugins=self.app.loop_plugins,
         )
 
     def Compact(self, request, context):

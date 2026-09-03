@@ -497,6 +497,8 @@ def test_persisted_harness_history_is_bounded_before_llm_prompt() -> None:
 def test_tool_request_batch_roundtrip(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    phases = []
+    app.loop_plugins.register("batch-phase-recorder", lambda event: phases.append(event.phase) or None)
     app.llm = BatchFakeLLM()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
@@ -539,6 +541,18 @@ def test_tool_request_batch_roundtrip(monkeypatch, tmp_path) -> None:
             history = app.llm.requests[1].messages
             tool_messages = [message for message in history if message.role == "tool"]
             assert [message.tool_call_id for message in tool_messages] == ["read-1", "glob-1"]
+            assert phases == [
+                "loop_start",
+                "model_before",
+                "model_after",
+                "tool_before",
+                "tool_before",
+                "tool_after",
+                "tool_after",
+                "model_before",
+                "model_after",
+                "loop_end",
+            ]
     finally:
         server.stop(grace=0)
 
