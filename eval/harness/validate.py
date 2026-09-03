@@ -109,6 +109,14 @@ def patched_paths(diff: str) -> list[str]:
     ]
 
 
+def partition_patched_paths(diff: str) -> tuple[list[str], list[str]]:
+    """Return ``(source_paths, test_paths)`` for a unified diff."""
+    paths = patched_paths(diff)
+    test_paths = [path for path in paths if _TEST_PATH_RE.search(path)]
+    source_paths = [path for path in paths if path not in test_paths]
+    return source_paths, test_paths
+
+
 def check_patch_shape(diff: str) -> list[Check]:
     """Checks that need only the diff text.
 
@@ -140,8 +148,7 @@ def check_patch_shape(diff: str) -> list[Check]:
         return checks
     checks.append(Check("parses_as_diff", Evidence.WEAK_POSITIVE, ", ".join(paths)))
 
-    test_paths = [p for p in paths if _TEST_PATH_RE.search(p)]
-    source_paths = [p for p in paths if p not in test_paths]
+    source_paths, test_paths = partition_patched_paths(diff)
     if test_paths and not source_paths:
         checks.append(
             Check(

@@ -331,7 +331,7 @@ def _retry_if_disqualified(
     own output. No test names, no expected behaviour, nothing from the dataset.
     """
     from eval.harness.uplift import uplift_config
-    from eval.harness.validate import validate_patch
+    from eval.harness.validate import partition_patched_paths, validate_patch
 
     config = uplift_config()
     if not (config.enabled and config.validation):
@@ -340,6 +340,17 @@ def _retry_if_disqualified(
     report = validate_patch(result.model_patch, str(workdir))
     if not report.disqualified:
         return result
+
+    source_paths, test_paths = partition_patched_paths(result.model_patch)
+    if source_paths and test_paths:
+        source_patch = _capture_git_diff(str(workdir), paths=source_paths)
+        if not validate_patch(source_patch, str(workdir)).disqualified:
+            result.model_patch = source_patch
+            print(
+                f"[uplift] submitting source-only patch for {instance.instance_id}; "
+                f"excluded {len(test_paths)} test file(s)"
+            )
+            return result
 
     reasons = "\n".join(f"- {check.detail}" for check in report.blocking)
     print(f"[uplift] retrying {instance.instance_id}: {report.summary}")
@@ -760,8 +771,8 @@ def _init_git_repo(path: str) -> None:
     )
 
 
-def _capture_git_diff(workdir: str) -> str:
-    """Capture the unified diff of all uncommitted changes in *workdir*.
+def _capture_git_diff(workdir: str, *, paths: Sequence[str] | None = None) -> str:
+    """Capture uncommitted changes, optionally limited to exact repository paths.
 
     The encoding is pinned to UTF-8 rather than left to ``text=True``, which
     would decode with the locale codec: on a zh-CN Windows that is gbk, and a
@@ -769,11 +780,19 @@ def _capture_git_diff(workdir: str) -> str:
     the subprocess reader thread.  The bare ``except`` below then returned an
     empty string, so an encoding fault was indistinguishable from an agent that
     produced no patch.  ``errors="replace"`` keeps one undecodable byte from
-    costing the whole diff.
+    costing the whole diff. Explicit paths use Git's ``literal`` pathspec magic
+    so repository filenames cannot be interpreted as pathspec expressions.
     """
     try:
+        if paths is not None and not paths:
+            return ""
+        command = ["git", "-C", workdir, "diff", "--no-color", "HEAD"]
+        if paths is not None:
+            command.extend(
+                ["--", *(f":(top,literal){path}" for path in paths)]
+            )
         result = subprocess.run(
-            ["git", "-C", workdir, "diff", "--no-color", "HEAD"],
+            command,
             capture_output=True,
             encoding="utf-8",
             errors="replace",

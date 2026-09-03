@@ -8,6 +8,7 @@ experiment whose control arm drifted is not a comparison.
 from __future__ import annotations
 
 import inspect
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -279,6 +280,64 @@ def test_no_retry_when_patch_is_fine(monkeypatch, repo: Path):
     )
     assert adapter.calls == []
     assert out.model_patch == GOOD_DIFF
+
+
+def test_mixed_patch_uses_source_diff_without_retry(monkeypatch, repo: Path):
+    """A useful source edit must not be discarded because tests were also edited."""
+    from eval.benchmarks.swebench import (
+        EvalResult,
+        _capture_git_diff,
+        _retry_if_disqualified,
+    )
+    from eval.harness.validate import patched_paths
+
+    tests_dir = repo / "pkg" / "tests"
+    tests_dir.mkdir()
+    test_file = tests_dir / "test_x.py"
+    test_file.write_text("assert True\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=eval@example.invalid",
+            "-c",
+            "user.name=SWE Eval",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+
+    source_file = repo / "pkg" / "table.py"
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8").replace("return data", "return list(data)"),
+        encoding="utf-8",
+    )
+    test_file.write_text("assert False\n", encoding="utf-8")
+    mixed_patch = _capture_git_diff(str(repo))
+
+    monkeypatch.setenv(uplift.UPLIFT_ENV, "1")
+    adapter = _StubAdapter([GOOD_DIFF])
+    out = _retry_if_disqualified(
+        _instance(), EvalResult(instance_id="x", model_patch=mixed_patch), repo, adapter
+    )
+
+    assert adapter.calls == []
+    assert patched_paths(out.model_patch) == ["pkg/table.py"]
+    assert test_file.read_text(encoding="utf-8") == "assert False\n"
+    changed = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.splitlines()
+    assert set(changed) == {"pkg/table.py", "pkg/tests/test_x.py"}
 
 
 def test_retry_only_happens_once(monkeypatch, repo: Path):
