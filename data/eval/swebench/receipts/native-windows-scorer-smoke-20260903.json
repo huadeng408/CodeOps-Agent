@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "status": "SMOKE_PASS",
+  "exit_code": 0,
+  "evidence_scope": "OFFICIAL_SWEBENCH_SCORER_RUNTIME",
+  "limitations": [
+    "This is one astropy instance and is not evidence for the locked astropy-20 threshold.",
+    "The instance was unresolved; the receipt proves scorer execution and verdict capture, not patch quality."
+  ],
+  "run_id": "native-wrapper-smoke-20260903",
+  "source_pin": {
+    "git_sha": "188100c33364b418a698b56dc6563e07371f32dc",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "dataset_pin": {
+    "dataset_id": "princeton-nlp/SWE-bench_Verified",
+    "split": "test",
+    "instance_ids": ["astropy__astropy-13398"]
+  },
+  "scorer": {
+    "name": "swebench.harness.run_evaluation",
+    "backend": "native-windows",
+    "namespace": "swebench",
+    "max_workers": 1,
+    "timeout_seconds": 300
+  },
+  "official_verdict": {
+    "dataset_total_instances": 500,
+    "submitted_instances": 1,
+    "completed_instances": 1,
+    "incomplete_instances": 499,
+    "resolved_instances": 0,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 0,
+    "error_instances": 0,
+    "unstopped_containers": 0,
+    "unremoved_images": 1
+  },
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "predictions_path": "eval_results/native-scorer-smoke-20260903-one/predictions.jsonl",
+    "predictions_sha256": "e145e8573e49a6e5b932a625bf5adcba92e886d299898986e9b3bc801cad1222",
+    "report_path": "code-agent-native-smoke.native-wrapper-smoke-20260903.json",
+    "report_sha256": "c90bdf6269b013373c143d5b0730da2b0d8f8680181d8688141fde6a3c45a992"
+  }
+}

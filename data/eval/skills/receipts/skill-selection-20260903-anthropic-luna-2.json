@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "status": "BLOCKED",
+  "exit_code": 2,
+  "evidence_scope": "REMOTE_PROVIDER_TOOL_SELECTION",
+  "limitations": [
+    "Repository-authored cases measure selection against this catalog, not external task validity.",
+    "BeeAPI did not return a non-empty system fingerprint, so immutable model revision verification remains blocked.",
+    "The full raw artifact tree is retained in the local ignored eval_results directory."
+  ],
+  "run_id": "skill-selection-20260903-anthropic-luna-2",
+  "trace_id": "7e85ec75c285424bac33afe0ed771667",
+  "source_pin": {
+    "git_sha": "188100c33364b418a698b56dc6563e07371f32dc",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "dataset_pin": {
+    "dataset_id": "skill-selection-v1",
+    "sha256": "a89c2b77e241aea00c94a3a86be8fe254c10ee1ccd9cc90763d2eb38d3ba4239",
+    "license": "CC0-1.0",
+    "provenance": "Repository-authored English coding-agent routing cases; no external text was copied.",
+    "case_count": 1000
+  },
+  "catalog_pin": {
+    "sha256": "c3c82070630a283e8a9e77f5969a22bf3ba09961444f25e88260787649c183d9",
+    "skill_count": 40
+  },
+  "prompt_pins": {
+    "system_sha256": "554ac7f5a6407349753057b214a6b0e81e9f928fce8f948bd67e36e8f8ffaa1f",
+    "tool_schema_sha256": "456dd52e6a6671f7afed91f3c8858ccfb00b186da16710ba035f604b4048ac24"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-luna",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev",
+      "port": "443",
+      "path": "/anthropic"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED",
+    "system_fingerprints": [""]
+  },
+  "budget": {
+    "max_output_tokens_per_case": 256,
+    "timeout_seconds_per_case": 120.0,
+    "max_concurrency": 10,
+    "calls": 1000,
+    "max_provider_attempts_per_case": 4,
+    "temperature": 0.0,
+    "minimum_required_accuracy": 0.948
+  },
+  "scoring": {
+    "correct": 968,
+    "incorrect": 32,
+    "denominator": 1000,
+    "accuracy": 0.968,
+    "minimum_required_accuracy": 0.948
+  },
+  "incorrect_case_ids": [
+    "skill-selection-v1-00-04-02",
+    "skill-selection-v1-07-02-01",
+    "skill-selection-v1-07-02-02",
+    "skill-selection-v1-07-02-03",
+    "skill-selection-v1-07-02-04",
+    "skill-selection-v1-13-01-00",
+    "skill-selection-v1-13-01-02",
+    "skill-selection-v1-14-01-00",
+    "skill-selection-v1-14-01-01",
+    "skill-selection-v1-14-01-02",
+    "skill-selection-v1-14-01-03",
+    "skill-selection-v1-14-03-00",
+    "skill-selection-v1-14-04-03",
+    "skill-selection-v1-15-02-00",
+    "skill-selection-v1-15-02-01",
+    "skill-selection-v1-15-02-02",
+    "skill-selection-v1-15-02-04",
+    "skill-selection-v1-15-03-00",
+    "skill-selection-v1-16-02-01",
+    "skill-selection-v1-16-03-01",
+    "skill-selection-v1-24-02-00",
+    "skill-selection-v1-24-02-01",
+    "skill-selection-v1-24-02-02",
+    "skill-selection-v1-24-02-04",
+    "skill-selection-v1-26-04-04",
+    "skill-selection-v1-27-03-00",
+    "skill-selection-v1-27-03-01",
+    "skill-selection-v1-27-03-04",
+    "skill-selection-v1-27-04-00",
+    "skill-selection-v1-27-04-01",
+    "skill-selection-v1-27-04-04",
+    "skill-selection-v1-30-01-00"
+  ],
+  "operational_failure_case_ids": [],
+  "failures": [
+    {
+      "category": "model_revision",
+      "message": "remote verification requires one non-empty provider system fingerprint across all cases"
+    }
+  ],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": "eval_results/skill-selection-20260903-anthropic-luna-2",
+    "checksum_manifest_sha256": "14b87629e017ba9cbb4e072466a952bdbb2e4163f3b9821eff2c0fe164a57a34",
+    "checkpoint_sha256": "61b4723ece066d7f02d8a38338e97e59b67e642c17a6bdd9d4c8197d0f981b3d",
+    "environment_sha256": "63f9bad55fe4b57ae1bf609e97efcc7a7d2e0b8d22b64eb131f7ec1cb378c53d",
+    "source_receipt_sha256": "32966a1cbadff6a397e3846a978e6f41f1acf0b6bd5254a16c8af0298f59271a",
+    "run_manifest_sha256": "faf83992b1b2ed07490cd74e5cd2f64212a3bdcda1155e47e9771787ed13bdcb",
+    "selection_results_sha256": "a7bebbce1e3159f96ea1fdb36331a3f61a3e3f31982db603156d812290975572"
+  }
+}
