@@ -256,6 +256,43 @@ def test_search_memory_ranks_multi_token_matches_before_recent_noise(tmp_path: P
     store.close()
 
 
+def test_initial_messages_bound_long_term_memory_injection(tmp_path: Path) -> None:
+    from orchestrator.graph.main_graph import build_graph
+    from orchestrator.memory.manager import MemoryManager
+    from orchestrator.runtime.conversation import ConversationRunner
+    from orchestrator.runtime.tools import ToolRegistry
+    from orchestrator.skills.manager import SkillManager
+    from orchestrator.todo.manager import TodoManager
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path)
+    for index in range(5):
+        context.reflect(
+            "session-1",
+            f"durable checkpoint memory {index} " + ("x" * 1_200),
+            tags=("durable",),
+        )
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=None,
+        tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        layered_context=context,
+    )
+
+    messages = runner._initial_messages("durable checkpoint", 1, session_id="session-1")
+    rendered = "\n".join(str(message.content) for message in messages)
+    section = rendered.split("Long-term memory:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert len(section) <= 4_096
+    assert "older memories omitted" in section
+    store.close()
+
+
 def test_layered_context_bounds_events_and_redacts_credential_shapes(tmp_path: Path) -> None:
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     provider_key_prefix = "sk-" + "proj-"

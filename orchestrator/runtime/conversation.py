@@ -66,6 +66,7 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 MAX_HISTORY_MESSAGES = 40
 MAX_HISTORY_CHARS = 32_000
 MAX_HISTORY_MESSAGE_CHARS = 4_000
+MAX_LONG_TERM_MEMORY_CHARS = 4_096
 MAX_CONSECUTIVE_EMPTY_RESPONSES = 3
 
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
@@ -821,9 +822,7 @@ class ConversationRunner:
                     ("Event-sourced context:", snapshot.p0, snapshot.p1, event_text)
                 )
                 if long_term:
-                    layered += "\nLong-term memory:\n" + "\n".join(
-                        f"- {item.content}" for item in long_term
-                    )
+                    layered += "\n" + self._long_term_memory_context(long_term)
         memory_text = self._memory_context(memories) or "_No relevant memories found._"
         if layered:
             memory_text += "\n\n" + layered
@@ -1741,6 +1740,26 @@ class ConversationRunner:
                 content = content[:357].rstrip() + "..."
             lines.append(f"- {item.name} (tags: {tags}): {content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _long_term_memory_context(
+        memories: list[Any], max_chars: int = MAX_LONG_TERM_MEMORY_CHARS
+    ) -> str:
+        """Render ranked long-term memories within a fixed prompt budget."""
+        max_chars = max(256, int(max_chars))
+        rendered = "Long-term memory:"
+        for item in memories:
+            content = " ".join(str(item.content).split())
+            if len(content) > 1_200:
+                content = content[:1_197].rstrip() + "..."
+            line = f"- {content}"
+            if len(rendered) + 1 + len(line) > max_chars:
+                marker = "- [older memories omitted]"
+                if len(rendered) + 1 + len(marker) <= max_chars:
+                    rendered += "\n" + marker
+                break
+            rendered += "\n" + line
+        return rendered
 
     @staticmethod
     def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
