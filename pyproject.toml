@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "protobuf>=5.26,<6",          # required by grpcio-tools 1.71+ codegen (runtime_version)
     "grpcio>=1.60,<2",
+    "langgraph>=0.2,<1",
     "grpcio-tools>=1.71,<2",      # protoc 29.0 embedded → generates protobuf 5.x API
 ]
 
