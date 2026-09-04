@@ -200,6 +200,29 @@ func TestDetectAvailabilityPublicContractRetriesTransientReadiness(t *testing.T)
 	}
 }
 
+func TestDetectAvailabilityUsesReadinessBudgetWhenAttemptsAreUnset(t *testing.T) {
+	var calls atomic.Int32
+	probe := func(_ context.Context, _ time.Duration, binary string, _ ...string) bool {
+		if binary != "docker" {
+			return false
+		}
+		return calls.Add(1) >= 6
+	}
+
+	availability := detectAvailabilityWithRetry(context.Background(), Config{
+		Backend:               BackendDocker,
+		ProbeTimeout:          10 * time.Millisecond,
+		ProbeRetryDelay:       1 * time.Millisecond,
+		ProbeReadinessTimeout: 100 * time.Millisecond,
+	}, "linux", probe)
+	if !availability.Docker {
+		t.Fatalf("Docker should become available within the readiness budget: %+v", availability)
+	}
+	if got := calls.Load(); got != 6 {
+		t.Fatalf("probe calls = %d, want 6 before readiness succeeds", got)
+	}
+}
+
 func TestDetectAvailabilityStopsRetryingWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

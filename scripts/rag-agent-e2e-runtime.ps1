@@ -20,6 +20,36 @@ function Invoke-WithOrchestratorSharedSecret {
     }
 }
 
+function Wait-DockerDaemonReady {
+    [CmdletBinding()]
+    param(
+        [int]$TimeoutSeconds = 60
+    )
+
+    if ($TimeoutSeconds -le 0) {
+        throw "Docker readiness timeout must be greater than zero"
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastFailure = "unknown error"
+    do {
+        try {
+            & docker info --format '{{.ServerVersion}}' 1>$null 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "ready: Docker daemon"
+                return
+            }
+            $lastFailure = "docker info exited with code $LASTEXITCODE"
+        }
+        catch {
+            $lastFailure = $_.Exception.Message
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    throw "timed out waiting for Docker daemon after $TimeoutSeconds seconds ($lastFailure)"
+}
+
 function Invoke-WithPaismartInternalToken {
     [CmdletBinding()]
     param(

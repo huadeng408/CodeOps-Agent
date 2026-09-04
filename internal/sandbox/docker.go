@@ -26,7 +26,8 @@ type Config struct {
 	TrustRoot string
 	// ProbeTimeout bounds backend availability probes. Zero uses the default.
 	ProbeTimeout time.Duration
-	// ProbeAttempts controls bounded readiness retries. Zero uses the default.
+	// ProbeAttempts caps readiness retries. Zero keeps probing until the total
+	// ProbeReadinessTimeout expires, which accommodates Docker Desktop startup.
 	ProbeAttempts int
 	// ProbeRetryDelay is the initial delay between readiness attempts. Zero uses
 	// the default exponential backoff.
@@ -237,8 +238,8 @@ func normalizeConfig(config Config) Config {
 	if config.ProbeTimeout <= 0 {
 		config.ProbeTimeout = 5 * time.Second
 	}
-	if config.ProbeAttempts <= 0 {
-		config.ProbeAttempts = 5
+	if config.ProbeAttempts < 0 {
+		config.ProbeAttempts = 0
 	}
 	if config.ProbeRetryDelay <= 0 {
 		config.ProbeRetryDelay = 500 * time.Millisecond

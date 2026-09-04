@@ -326,10 +326,7 @@ try {
     if (-not (Test-Path -LiteralPath $MinerUCommand -PathType Leaf)) {
         throw "MinerU executable not found at $MinerUCommand"
     }
-    docker info --format '{{.ServerVersion}}' | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Docker daemon is unavailable"
-    }
+    Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds
 
     Write-Host "Starting required RAG infrastructure without removing existing containers or volumes..."
     # Reuse an already healthy Tika endpoint (for example, a separately

@@ -14,7 +14,6 @@ import (
 )
 
 const defaultProbeTimeout = 5 * time.Second
-const defaultProbeAttempts = 5
 const defaultProbeRetryDelay = 500 * time.Millisecond
 const defaultProbeReadinessTimeout = 60 * time.Second
 
@@ -281,17 +280,14 @@ func detectAvailabilityWithRetry(ctx context.Context, config Config, platform st
 	probeCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
 	defer cancel()
 	attempts := config.ProbeAttempts
-	if attempts <= 0 {
-		attempts = defaultProbeAttempts
-	}
 	delay := config.ProbeRetryDelay
 	if delay <= 0 {
 		delay = defaultProbeRetryDelay
 	}
 	var availability Availability
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := 0; attempts == 0 || attempt < attempts; attempt++ {
 		availability = detectAvailabilityOnce(probeCtx, config, platform, probe)
-		if backendReady(config.Backend, platform, availability) || attempt == attempts-1 {
+		if backendReady(config.Backend, platform, availability) || (attempts > 0 && attempt == attempts-1) {
 			return availability
 		}
 		wait := delay

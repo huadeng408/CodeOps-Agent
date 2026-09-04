@@ -267,6 +267,15 @@ def test_powershell_wrapper_reuses_scoped_runtime_secret_helpers() -> None:
     assert '$env:PAISMART_INTERNAL_TOKEN = $internalSecret' not in source
 
 
+def test_powershell_wrapper_waits_for_docker_desktop_readiness() -> None:
+    wrapper = Path(__file__).parents[1] / "scripts" / "multimodal-rag-pilot.ps1"
+    source = wrapper.read_text(encoding="utf-8")
+    runtime = (Path(__file__).parents[1] / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
+    assert "Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds" in source
+    assert "function Wait-DockerDaemonReady" in runtime
+    assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
+
+
 def test_powershell_wrapper_starts_only_the_approved_docker_services() -> None:
     wrapper = Path(__file__).parents[1] / "scripts" / "multimodal-rag-pilot.ps1"
     source = wrapper.read_text(encoding="utf-8")

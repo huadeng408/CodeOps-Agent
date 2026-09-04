@@ -184,8 +184,7 @@ try {
     $targetIndex = Resolve-CorpusSetting "text_index"
     $corpusGeneration = Resolve-CorpusSetting "generation"
 
-    docker info --format '{{.ServerVersion}}' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Docker daemon is unavailable" }
+    Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds
 
     Write-Host "Starting required RAG infrastructure without removing existing containers or volumes..."
     & docker compose up -d mysql redis minio minio-init zookeeper kafka kafka-init es embedding phoenix
