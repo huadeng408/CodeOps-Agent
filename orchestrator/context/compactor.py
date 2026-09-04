@@ -282,16 +282,17 @@ class Compactor:
         if keep_from <= start:
             return None
 
-        if keep_from < len(messages) and (getattr(messages[keep_from], "role", None) == "tool" or (
-            isinstance(messages[keep_from], dict) and messages[keep_from].get("role") == "tool"
-        )):
-            call_id = self._tool_call_id(messages[keep_from])
-            anchor = self._find_tool_anchor(messages, keep_from - 1, start, call_id)
-            if anchor is None:
-                while keep_from < len(messages) and self._role(messages[keep_from]) == "tool":
-                    keep_from += 1
-            else:
-                keep_from = anchor
+        # A cut is only safe when all calls opened in the compacted prefix
+        # have their results there as well.  This also handles parallel calls
+        # whose results are separated by an ordinary assistant message.
+        while keep_from > start and not self._tool_pairing_balanced(messages, start, keep_from):
+            keep_from -= 1
+
+        # A balanced prefix can still be followed by an unattributable tool
+        # result (for example, a restored or corrupted history).  Drop those
+        # leading results instead of emitting an invalid provider request.
+        while keep_from < len(messages) and self._role(messages[keep_from]) == "tool":
+            keep_from += 1
         if keep_from <= start:
             return None
         return start, keep_from - 1
@@ -361,19 +362,47 @@ class Compactor:
         return str(getattr(message, "tool_call_id", "") or "")
 
     @classmethod
-    def _find_tool_anchor(
-        cls, messages: list[Any], index: int, start: int, call_id: str
-    ) -> int | None:
-        for candidate_index in range(index, start - 1, -1):
-            candidate = messages[candidate_index]
-            if cls._role(candidate) != "assistant":
-                continue
-            calls = candidate.get("tool_calls", []) if isinstance(candidate, dict) else getattr(candidate, "tool_calls", [])
-            if not calls:
-                continue
-            if not call_id or any(str(getattr(call, "id", "") if not isinstance(call, dict) else call.get("id", "")) == call_id for call in calls):
-                return candidate_index
-        return None
+    def _tool_pairing_balanced(cls, messages: list[Any], start: int, boundary: int) -> bool:
+        """Return whether no assistant tool-call crosses ``boundary``.
+
+        IDs are tracked rather than a plain count so a mismatched tool result
+        cannot accidentally make an unsafe cut appear balanced.
+        """
+        pending: dict[str, int] = {}
+        anonymous = 0
+        for message in messages[start:boundary]:
+            role = cls._role(message)
+            if role == "assistant":
+                calls = (
+                    message.get("tool_calls", [])
+                    if isinstance(message, dict)
+                    else getattr(message, "tool_calls", [])
+                ) or []
+                for call in calls:
+                    call_id = str(
+                        call.get("id", "")
+                        if isinstance(call, dict)
+                        else getattr(call, "id", "")
+                    )
+                    if call_id:
+                        pending[call_id] = pending.get(call_id, 0) + 1
+                    else:
+                        anonymous += 1
+            elif role == "tool":
+                call_id = cls._tool_call_id(message)
+                if call_id:
+                    count = pending.get(call_id, 0)
+                    if count <= 0:
+                        return False
+                    if count == 1:
+                        del pending[call_id]
+                    else:
+                        pending[call_id] = count - 1
+                elif anonymous:
+                    anonymous -= 1
+                else:
+                    return False
+        return not pending and anonymous == 0
 
     @staticmethod
     def _first_content(messages: list[dict[str, Any]], role: str) -> str:

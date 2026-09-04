@@ -331,6 +331,18 @@ def test_runner_allows_slow_first_phoenix_pull():
     assert "-TimeoutSeconds $PhoenixStartupTimeoutSeconds" in script
 
 
+def test_runner_waits_for_docker_daemon_before_compose_probe():
+    root = Path(__file__).parents[1]
+    script = (root / "scripts" / "test-trace-e2e.ps1").read_text(encoding="utf-8")
+    runtime = (root / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "rag-agent-e2e-runtime.ps1" in script
+    assert "Wait-DockerDaemonReady -TimeoutSeconds $PhoenixStartupTimeoutSeconds" in script
+    assert "function Wait-DockerDaemonReady" in runtime
+
+
 def test_runner_uses_basic_parsing_for_windows_powershell_readiness_probe():
     script = (Path(__file__).parents[1] / "scripts" / "test-trace-e2e.ps1").read_text(
         encoding="utf-8"

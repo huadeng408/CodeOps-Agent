@@ -186,6 +186,31 @@ def test_select_compaction_range_keeps_tool_call_anchor_when_tail_starts_at_resu
     assert retained[0]["tool_calls"][0].id == "call-2"
 
 
+def test_select_compaction_range_keeps_parallel_tool_calls_together() -> None:
+    compactor = Compactor(context_window=1_000)
+    calls = [
+        ToolCall(id="call-1", name="Read", arguments={}, arguments_json="{}"),
+        ToolCall(id="call-2", name="Grep", arguments={}, arguments_json="{}"),
+    ]
+    messages = [
+        {"role": "user", "content": "old context " * 30},
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "content": "first result", "tool_call_id": "call-1"},
+        {"role": "assistant", "content": "intermediate response"},
+        {"role": "tool", "content": "second result", "tool_call_id": "call-2"},
+        {"role": "assistant", "content": "latest instruction"},
+    ]
+
+    selection = compactor.select_compaction_range(messages, retain_tokens=20)
+
+    assert selection is not None
+    _, end = selection
+    retained = messages[end + 1 :]
+    assert retained[0]["role"] == "assistant"
+    assert [call.id for call in retained[0]["tool_calls"]] == ["call-1", "call-2"]
+    assert [message["tool_call_id"] for message in retained[1:4:2]] == ["call-1", "call-2"]
+
+
 def test_forced_compaction_honors_explicit_retain_ratio() -> None:
     compactor = Compactor(context_window=1_000, retain_ratio=0.16)
     messages = [

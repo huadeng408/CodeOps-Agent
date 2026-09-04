@@ -31,6 +31,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $endpointHelper = Join-Path $PSScriptRoot 'lib\receipt-endpoints.ps1'
 . $endpointHelper
+$dockerRuntimeHelper = Join-Path $PSScriptRoot 'rag-agent-e2e-runtime.ps1'
+. $dockerRuntimeHelper
 $otlpTraceEndpoint = Resolve-OtlpHttpTraceEndpoint -PhoenixUrl $PhoenixUrl
 
 function Get-ScrubbedText {
@@ -332,6 +334,7 @@ try {
         -RepositoryRoot $repositoryRoot
     $goPath = Assert-Command 'go'
     $dockerPath = Assert-Command 'docker'
+    Wait-DockerDaemonReady -TimeoutSeconds $PhoenixStartupTimeoutSeconds
     $modelCheck = Invoke-PythonHelper `
         -PythonPath $pythonPath `
         -HelperPath $helperPath `
