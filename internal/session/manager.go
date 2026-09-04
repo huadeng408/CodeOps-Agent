@@ -52,11 +52,15 @@ type PlanState struct {
 }
 
 type AgentSpawnRecord struct {
-	Kind        string    `json:"kind"`
-	Task        string    `json:"task"`
-	ContextJSON string    `json:"context_json,omitempty"`
-	Parallel    bool      `json:"parallel,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	Kind            string    `json:"kind"`
+	Task            string    `json:"task"`
+	ContextJSON     string    `json:"context_json,omitempty"`
+	Parallel        bool      `json:"parallel,omitempty"`
+	ProtocolVersion string    `json:"protocol_version,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	ChildSessionID  string    `json:"child_session_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type UndoChange struct {
@@ -389,6 +393,10 @@ func (m *Manager) AppendAgentSpawn(record AgentSpawnRecord) Session {
 	record.Kind = strings.TrimSpace(record.Kind)
 	record.Task = strings.TrimSpace(record.Task)
 	record.ContextJSON = strings.TrimSpace(record.ContextJSON)
+	record.ProtocolVersion = strings.TrimSpace(record.ProtocolVersion)
+	record.RequestID = strings.TrimSpace(record.RequestID)
+	record.ParentSessionID = strings.TrimSpace(record.ParentSessionID)
+	record.ChildSessionID = strings.TrimSpace(record.ChildSessionID)
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = now
 	}
@@ -1047,6 +1055,18 @@ func formatAgentSpawn(record AgentSpawnRecord) string {
 	}
 	if strings.TrimSpace(record.ContextJSON) != "" {
 		lines = append(lines, "context_json: "+strings.TrimSpace(record.ContextJSON))
+	}
+	if strings.TrimSpace(record.ProtocolVersion) != "" {
+		lines = append(lines, "protocol_version: "+strings.TrimSpace(record.ProtocolVersion))
+	}
+	if strings.TrimSpace(record.RequestID) != "" {
+		lines = append(lines, "request_id: "+strings.TrimSpace(record.RequestID))
+	}
+	if strings.TrimSpace(record.ParentSessionID) != "" {
+		lines = append(lines, "parent_session_id: "+strings.TrimSpace(record.ParentSessionID))
+	}
+	if strings.TrimSpace(record.ChildSessionID) != "" {
+		lines = append(lines, "child_session_id: "+strings.TrimSpace(record.ChildSessionID))
 	}
 	return strings.Join(lines, "\n")
 }

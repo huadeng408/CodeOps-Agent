@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ from typing import Any
 
 from codeagent import orchestrator_pb2
 from orchestrator.agents.deep_agent import DeepAgentManager
+from orchestrator.agents.process import ProcessAgentExecutor
 from orchestrator.context import (
     BudgetStatus,
     Compactor,
@@ -77,6 +79,20 @@ MAX_HISTORY_CHARS = 32_000
 MAX_HISTORY_MESSAGE_CHARS = 4_000
 MAX_LONG_TERM_MEMORY_CHARS = 4_096
 MAX_CONSECUTIVE_EMPTY_RESPONSES = 3
+
+
+def _sub_agent_request_id(session_id: str, call_id: str) -> str:
+    seed = f"{session_id.strip()}:{call_id.strip()}".strip(":") or "anonymous"
+    return "spawn-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def _sub_agent_child_session_id(session_id: str, call_id: str) -> str:
+    parent = re.sub(r"[^A-Za-z0-9_.:-]", "_", session_id.strip()) or "session"
+    return f"{parent}:subagent:{_sub_agent_request_id(session_id, call_id)}"[:96]
+
+
+def _sub_agent_parent_session_id(session_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", session_id.strip()) or "session"
 
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 THINKING_BUDGET_TOKENS: int = 10000
@@ -210,6 +226,8 @@ class ConversationRunner:
     hooks: HookRegistry | None = None
     commands: CommandRegistry | None = None
     allow_parallel_todos: bool = False
+    sub_agent_executor: ProcessAgentExecutor | None = None
+    legacy_sub_agent_manager: DeepAgentManager | None = None
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
@@ -1013,21 +1031,37 @@ class ConversationRunner:
                             metadata={"tool_name": call.name, "is_error": True},
                         )
                         continue
+                    request_id = _sub_agent_request_id(session_id, call_id)
+                    parent_session_id = _sub_agent_parent_session_id(session_id)
+                    child_session_id = _sub_agent_child_session_id(session_id, call_id)
                     yield orchestrator_pb2.OrchestratorMessage(
                         agent_spawn=orchestrator_pb2.AgentSpawn(
                             kind=spawn["kind"],
                             task=f"{spawn['title']}: {spawn['objective']}",
                             context_json=spawn["context_json"],
                             parallel=spawn["parallel"],
+                            protocol_version="agent.v1",
+                            request_id=request_id,
+                            parent_session_id=parent_session_id,
+                            child_session_id=child_session_id,
                         )
                     )
-                    agent_result = self._run_sub_agent(spawn)
+                    agent_result = self._run_sub_agent(
+                        spawn,
+                        request_id=request_id,
+                        parent_session_id=parent_session_id,
+                        child_session_id=child_session_id,
+                    )
                     self._persist_event(
                         session_id,
                         "execution_result",
                         {
                             "tool_call_id": call_id,
                             "tool_name": call.name,
+                            "protocol_version": "agent.v1",
+                            "request_id": request_id,
+                            "parent_session_id": parent_session_id,
+                            "child_session_id": child_session_id,
                             "status": agent_result.get("status", "completed"),
                             "result_sha256": self._digest_value(agent_result),
                         },
@@ -2841,20 +2875,48 @@ class ConversationRunner:
             "tool_calls": list(message.tool_calls),
         }
 
-    def _run_sub_agent(self, spawn: dict[str, object]) -> dict[str, object]:
+    def _run_sub_agent(
+        self,
+        spawn: dict[str, object],
+        *,
+        request_id: str = "compat-request",
+        parent_session_id: str = "compat-parent",
+        child_session_id: str = "compat-child",
+    ) -> dict[str, object]:
         context_payload = json.loads(str(spawn.get("context_json") or "{}"))
         if not isinstance(context_payload, dict):
             context_payload = {"value": context_payload}
-        manager = DeepAgentManager(
-            project_root=self.project_root,
-            working_dir=self.working_dir,
-        )
-        result = manager.run(
-            kind=str(spawn["kind"]),
-            title=str(spawn["title"]),
-            objective=str(spawn["objective"]),
-            context=context_payload,
-        )
+        if self.legacy_sub_agent_manager is not None:
+            result = self.legacy_sub_agent_manager.run(
+                kind=str(spawn["kind"]),
+                title=str(spawn["title"]),
+                objective=str(spawn["objective"]),
+                context=context_payload,
+            )
+        else:
+            executor = self.sub_agent_executor
+            if executor is None:
+                executor = ProcessAgentExecutor(
+                    project_root=self.project_root,
+                    working_dir=self.working_dir,
+                )
+            try:
+                result = executor.run(
+                    kind=str(spawn["kind"]),
+                    title=str(spawn["title"]),
+                    objective=str(spawn["objective"]),
+                    context=context_payload,
+                    request_id=request_id,
+                    parent_session_id=parent_session_id,
+                    child_session_id=child_session_id,
+                )
+            except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                return {
+                    "status": "failed",
+                    "summary": "sub-agent execution failed",
+                    "artifacts": [],
+                    "notes": [f"error_type: {type(exc).__name__}"],
+                }
         return {
             "status": result.status,
             "summary": result.summary,

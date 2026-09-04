@@ -793,15 +793,22 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 
 	if event.AgentSpawn != nil {
 		a.session.AppendAgentSpawn(session.AgentSpawnRecord{
-			Kind:        event.AgentSpawn.GetKind(),
-			Task:        event.AgentSpawn.GetTask(),
-			ContextJSON: event.AgentSpawn.GetContextJson(),
-			Parallel:    event.AgentSpawn.GetParallel(),
+			Kind:            event.AgentSpawn.GetKind(),
+			Task:            event.AgentSpawn.GetTask(),
+			ContextJSON:     event.AgentSpawn.GetContextJson(),
+			Parallel:        event.AgentSpawn.GetParallel(),
+			ProtocolVersion: event.AgentSpawn.GetProtocolVersion(),
+			RequestID:       event.AgentSpawn.GetRequestId(),
+			ParentSessionID: event.AgentSpawn.GetParentSessionId(),
+			ChildSessionID:  event.AgentSpawn.GetChildSessionId(),
 		})
 		lines := []string{
 			"kind: " + event.AgentSpawn.GetKind(),
 			"task: " + event.AgentSpawn.GetTask(),
 			"parallel: " + fmt.Sprint(event.AgentSpawn.GetParallel()),
+		}
+		if protocol := strings.TrimSpace(event.AgentSpawn.GetProtocolVersion()); protocol != "" {
+			lines = append(lines, "protocol: "+protocol)
 		}
 		contextJSON := strings.TrimSpace(event.AgentSpawn.GetContextJson())
 		if contextJSON != "" {
