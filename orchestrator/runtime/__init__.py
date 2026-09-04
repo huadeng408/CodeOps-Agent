@@ -11,6 +11,12 @@ from .hooks import (
     HookRegistry,
     HookResult,
 )
+from .session_ops import (
+    SessionOperationBusy,
+    SessionOperationCancelled,
+    SessionOperationCoordinator,
+    SessionOperationLease,
+)
 from .tools import ToolRegistry
 
 __all__ = [
@@ -25,5 +31,9 @@ __all__ = [
     "HookResult",
     "LoopDispatchResult",
     "LoopEvent",
+    "SessionOperationBusy",
+    "SessionOperationCancelled",
+    "SessionOperationCoordinator",
+    "SessionOperationLease",
     "ToolRegistry",
 ]

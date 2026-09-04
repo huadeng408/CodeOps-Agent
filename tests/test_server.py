@@ -3,8 +3,10 @@ from __future__ import annotations
 from concurrent import futures
 import subprocess
 import threading
+import time
 
 import grpc
+import pytest
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
@@ -33,6 +35,43 @@ class FakeLLM:
                 ]
             )
         return ChatResponse(text="found python files")
+
+
+class BlockingOperationRunner:
+    def __init__(self) -> None:
+        self.compact_started = threading.Event()
+        self.release_compact = threading.Event()
+        self.converse_started = threading.Event()
+
+    def compact_now(self, **kwargs):
+        self.compact_started.set()
+        self.release_compact.wait(timeout=2)
+        return orchestrator_pb2.CompactionUpdate(
+            summary="compacted",
+            removed_messages=2,
+            keep_recent_messages=4,
+            trigger="manual",
+        )
+
+    def run(self, *args, **kwargs):
+        self.converse_started.set()
+        yield orchestrator_pb2.OrchestratorMessage(
+            text=orchestrator_pb2.TextChunk(text="conversation complete")
+        )
+        yield orchestrator_pb2.OrchestratorMessage(
+            done=orchestrator_pb2.Done(success=True, message="done")
+        )
+
+
+def _session_actor(session_id: str) -> orchestrator_pb2.ActorContext:
+    return orchestrator_pb2.ActorContext(
+        schema_version=1,
+        actor_id="user:test",
+        subject="test-user",
+        tenant_id="test-tenant",
+        roles=["USER"],
+        session_id=session_id,
+    )
 
 
 class HistoryFakeLLM:
@@ -950,6 +989,101 @@ def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
             assert "review completed: Review current changes" in tool_messages[0].content
             assert "existing files" in tool_messages[0].content
     finally:
+        server.stop(grace=0)
+
+
+def test_compact_is_rejected_when_session_has_active_converse(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    service = OrchestratorService(app)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-busy"
+    active_lease = app.session_operations.acquire_converse(session_id)
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            with pytest.raises(grpc.RpcError) as error:
+                stub.Compact(
+                    orchestrator_pb2.CompactRequest(
+                        session_id=session_id,
+                        actor=_session_actor(session_id),
+                    )
+                )
+        assert error.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+    finally:
+        active_lease.release()
+        server.stop(grace=0)
+
+
+def test_converse_waits_while_same_session_is_compacting(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    service = OrchestratorService(app)
+    runner = BlockingOperationRunner()
+    service._new_runner = lambda: runner
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-compact-queue"
+    compact_result: list[object] = []
+    converse_result: list[object] = []
+
+    def compact():
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            compact_result.append(
+                stub.Compact(
+                    orchestrator_pb2.CompactRequest(
+                        session_id=session_id,
+                        actor=_session_actor(session_id),
+                    )
+                )
+            )
+
+    def converse():
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            converse_result.append(
+                list(
+                    stub.Converse(
+                        iter(
+                            [
+                                orchestrator_pb2.HarnessMessage(
+                                    user_input=orchestrator_pb2.UserInput(
+                                        text="queued prompt",
+                                        session_id=session_id,
+                                        actor=_session_actor(session_id),
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                )
+            )
+
+    compact_thread = threading.Thread(target=compact)
+    compact_thread.start()
+    try:
+        assert runner.compact_started.wait(timeout=2)
+        converse_thread = threading.Thread(target=converse)
+        converse_thread.start()
+        time.sleep(0.05)
+        assert not runner.converse_started.is_set()
+        runner.release_compact.set()
+        compact_thread.join(timeout=2)
+        converse_thread.join(timeout=2)
+        assert not compact_thread.is_alive()
+        assert not converse_thread.is_alive()
+        assert compact_result[0].summary == "compacted"
+        assert runner.converse_started.is_set()
+        assert converse_result[0][-1].done.success is True
+    finally:
+        runner.release_compact.set()
+        compact_thread.join(timeout=2)
         server.stop(grace=0)
 
 

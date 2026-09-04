@@ -31,6 +31,11 @@ from .runtime import (
     HookRegistry,
     ToolRegistry,
 )
+from .runtime.session_ops import (
+    SessionOperationBusy,
+    SessionOperationCancelled,
+    SessionOperationCoordinator,
+)
 from .skills.manager import SkillManager
 from .todo.manager import TodoManager
 
@@ -71,6 +76,7 @@ class OrchestratorServer:
         self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
         self.actor_registry = ActorSessionRegistry()
+        self.session_operations = SessionOperationCoordinator()
         self.token_budget = TokenBudget(
             max_tokens=self.config.max_tokens,
             max_cost=self.config.max_cost,
@@ -161,7 +167,6 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             request.session_id,
             context,
         )
-        runner = self._new_runner()
         history = [
             {
                 "role": item.role,
@@ -171,6 +176,11 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             for item in request.history
         ]
         try:
+            lease = self.app.session_operations.try_acquire_compact(request.session_id)
+        except SessionOperationBusy:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "session is busy")
+        try:
+            runner = self._new_runner()
             update = runner.compact_now(
                 session_id=request.session_id,
                 history=history,
@@ -181,6 +191,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 grpc.StatusCode.INTERNAL,
                 f"compaction failed: {type(exc).__name__}",
             )
+        finally:
+            lease.release()
         return update or orchestrator_pb2.CompactionUpdate()
 
     def Converse(self, request_iterator, context):
@@ -215,6 +227,19 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         if actor is None and session_id.strip():
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "user input with actor context is required")
 
+        cancel_event = threading.Event()
+        context.add_callback(cancel_event.set)
+        try:
+            lease = self.app.session_operations.acquire_converse(
+                session_id,
+                cancel_event,
+            )
+        except SessionOperationCancelled:
+            context.abort(
+                grpc.StatusCode.CANCELLED,
+                "conversation canceled while waiting for session",
+            )
+
         # ── W3C TraceContext recovery ─────────────────────────────────
         # The Go harness injects the active span context via gRPC metadata
         # (per-RPC, not per-process) so the gen_ai inference spans inside
@@ -235,15 +260,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         except Exception:
             pass
 
-        # Propagate a user interrupt (Ctrl+C) from the Go harness into the
-        # orchestrator (design 22.8). When the harness cancels the gRPC call,
-        # grpc fires the RPC-termination callback, which sets the event. The
-        # runner polls it cooperatively and aborts the in-flight LLM call.
-        cancel_event = threading.Event()
-        context.add_callback(cancel_event.set)
-
-        runner = self._new_runner()
         try:
+            runner = self._new_runner()
             runner_actor = actor
             yield from runner.run(
                 user_text,
@@ -255,6 +273,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 actor=runner_actor,
             )
         finally:
+            lease.release()
             # Detach the TraceContext parent so following calls on this
             # thread do not inherit it.
             if otel_token is not None:
