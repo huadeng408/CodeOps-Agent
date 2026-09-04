@@ -23,6 +23,7 @@ class Compactor:
     tool_result_threshold: int = 8_192
     tool_result_head: int = 4_096
     tool_result_tail: int = 1_024
+    summary_target: str = ""
 
     def __post_init__(self) -> None:
         if self.context_window is not None and self.context_window < 1:
@@ -33,6 +34,7 @@ class Compactor:
         self.tool_result_threshold = max(0, int(self.tool_result_threshold))
         self.tool_result_head = max(0, int(self.tool_result_head))
         self.tool_result_tail = max(0, int(self.tool_result_tail))
+        self.summary_target = str(self.summary_target or "").strip()
         self.model_context_windows = {
             str(model): int(window)
             for model, window in self.model_context_windows.items()

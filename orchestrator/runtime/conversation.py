@@ -17,6 +17,8 @@ from orchestrator.agents.deep_agent import DeepAgentManager
 from orchestrator.agents.process import ProcessAgentExecutor
 from orchestrator.context import (
     BudgetStatus,
+    CompactionRequest,
+    CompactionSummarizer,
     Compactor,
     LayeredContext,
     TokenBudget,
@@ -221,6 +223,8 @@ class ConversationRunner:
     recovery: ErrorRecoveryEngine | None = None
     max_tool_rounds: int = 6
     compactor: Compactor | None = None
+    compaction_summarizer: CompactionSummarizer | None = None
+    compaction_summary_target: str = ""
     fast_llm: LLMClient | None = None
     main_llm: LLMClient | None = None
     provider_clients: dict[str, LLMClient] | None = None
@@ -540,7 +544,10 @@ class ConversationRunner:
                         ),
                     ]
                 request_messages = self._compact_messages(
-                    candidate_messages, session_id=session_id, trigger="pressure"
+                    candidate_messages,
+                    session_id=session_id,
+                    trigger="pressure",
+                    cancel_event=cancel_event,
                 )
                 yield from self._emit_compaction_updates()
                 self._emit_loop_event(
@@ -578,6 +585,7 @@ class ConversationRunner:
                     session_id=session_id,
                     trigger="context-overflow",
                     force=True,
+                    cancel_event=cancel_event,
                 )
                 after = self._message_fingerprint(compacted_messages)
                 if before == after:
@@ -1348,7 +1356,10 @@ class ConversationRunner:
         try:
             response_box: list[ChatResponse] = []
             request_messages = self._compact_messages(
-                messages, session_id=session_id, trigger="pressure"
+                messages,
+                session_id=session_id,
+                trigger="pressure",
+                cancel_event=cancel_event,
             )
             yield from self._emit_compaction_updates()
             self._emit_loop_event(
@@ -1677,6 +1688,7 @@ class ConversationRunner:
                         thinking_enabled=thinking_enabled,
                         thinking_budget=thinking_budget,
                         reasoning_effort=reasoning_effort,
+                        allow_tools=allow_tools,
                         cancel_event=cancel_event,
                     )
                 )
@@ -1770,6 +1782,7 @@ class ConversationRunner:
                 thinking_enabled=thinking_enabled,
                 thinking_budget=thinking_budget,
                 reasoning_effort=reasoning_effort,
+                allow_tools=allow_tools,
                 cancel_event=cancel_event,
             )
 
@@ -2778,6 +2791,7 @@ class ConversationRunner:
         trigger: str = "pressure",
         force: bool = False,
         retain_ratio: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> list[ChatMessage]:
         if self.compactor is None:
             return messages
@@ -2869,12 +2883,19 @@ class ConversationRunner:
                             "range": [selected_start, selected_end],
                             "trigger": trigger,
                             "attempt": attempt + 1,
+                            "provider": provider,
+                            "model": model,
                         },
                     )
                     lifecycle_started = not bool(self._context_persistence_error)
                 try:
-                    summary = self.compactor.compact_history(
-                        [self._message_for_compaction(message) for message in compactable]
+                    summary, summary_mode = self._build_compaction_summary(
+                        current,
+                        selected_start,
+                        compactable,
+                        provider=provider,
+                        model=model,
+                        cancel_event=cancel_event,
                     )
                 except Exception:
                     if lifecycle_started:
@@ -2895,6 +2916,9 @@ class ConversationRunner:
                             "summary_tokens": self.compactor.estimate_tokens([current[1]]),
                             "summary_sha256": self._digest_value(summary),
                             "attempt": attempt + 1,
+                            "summary_mode": summary_mode,
+                            "provider": provider,
+                            "model": model,
                         },
                     )
                     self._persist_event(
@@ -2904,6 +2928,9 @@ class ConversationRunner:
                             "status": "completed",
                             "replaced_tokens": max(0, before_tokens - after_tokens),
                             "summary_tokens": self.compactor.estimate_tokens([current[1]]),
+                            "summary_mode": summary_mode,
+                            "provider": provider,
+                            "model": model,
                         },
                     )
                 self._queue_compaction_update(
@@ -2983,6 +3010,76 @@ class ConversationRunner:
                 recent = _strip_leading_tool_messages(recent)
 
         return [system, ChatMessage(role="system", content=summary), *recent]
+
+    def _build_compaction_summary(
+        self,
+        current: list[ChatMessage],
+        selected_start: int,
+        compactable: list[ChatMessage],
+        *,
+        provider: str,
+        model: str,
+        cancel_event: threading.Event | None,
+    ) -> tuple[str, str]:
+        """Prefer an injected LLM summary, with deterministic fail-closed fallback."""
+        deterministic = self.compactor.compact_history(
+            [self._message_for_compaction(message) for message in compactable]
+        )
+        summarizer = getattr(self, "compaction_summarizer", None)
+        if summarizer is None:
+            return deterministic, "deterministic"
+        try:
+            tools: tuple[dict[str, Any], ...] = ()
+            registry = getattr(self, "tool_registry", None)
+            if registry is not None:
+                try:
+                    tools = tuple(registry.openai_schemas())
+                except Exception:
+                    tools = ()
+            candidate = summarizer.summarize(
+                CompactionRequest(
+                    prefix_messages=tuple(current[:selected_start]),
+                    messages=tuple(compactable),
+                    tools=tools,
+                    provider=provider,
+                    model=model,
+                    target=self._compaction_summary_target(provider, model),
+                    cancel_event=cancel_event,
+                )
+            )
+        except RequestInterrupted:
+            raise
+        except Exception:
+            return deterministic, "deterministic-fallback"
+        if not isinstance(candidate, str) or not candidate.strip():
+            return deterministic, "deterministic-fallback"
+        framed = "[Compacted conversation history]\n" + candidate.strip()
+        replaced_tokens = self.compactor.estimate_tokens(
+            [self._message_for_compaction(message) for message in compactable]
+        )
+        summary_tokens = self.compactor.estimate_tokens(
+            [{"role": "system", "content": framed}]
+        )
+        if summary_tokens >= replaced_tokens:
+            return deterministic, "deterministic-fallback"
+        return framed, "llm"
+
+    def _compaction_summary_target(self, provider: str, model: str) -> str:
+        configured = str(getattr(self, "compaction_summary_target", "") or "").strip()
+        if not configured:
+            configured = str(getattr(self.compactor, "summary_target", "") or "").strip()
+        if configured:
+            return configured
+        route_target = "/".join(part for part in (provider.strip(), model.strip()) if part)
+        if route_target:
+            return route_target
+        options = getattr(self, "agent_options", None)
+        if isinstance(options, dict):
+            option_target = str(options.get("compaction_summary_target", "") or "").strip()
+            if option_target:
+                return option_target
+        option_target = str(getattr(options, "compaction_summary_target", "") or "").strip()
+        return option_target or "conversation history"
 
     @staticmethod
     def _message_for_compaction(message: ChatMessage) -> dict[str, object]:

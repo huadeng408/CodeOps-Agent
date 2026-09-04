@@ -250,6 +250,10 @@ class ChatRequest:
     thinking_enabled: bool = False
     thinking_budget: int = 10000
     reasoning_effort: str = ""  # "low" | "medium" | "high" for OpenAI reasoning models
+    # ``purpose`` distinguishes auxiliary calls such as context compaction
+    # from normal agent turns without exposing credentials or raw history.
+    purpose: str = ""
+    allow_tools: bool = True
     # Optional cancellation handle. When set, providers forward it to
     # http_call_with_retry so an in-flight request can be aborted by the
     # harness when the user interrupts the turn (design 22.8).

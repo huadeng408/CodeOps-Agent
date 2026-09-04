@@ -7,7 +7,7 @@ import threading
 import grpc
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
-from orchestrator.llm.client import ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
+from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
@@ -1498,6 +1498,24 @@ def test_runner_emits_incremental_text_chunks(monkeypatch, tmp_path) -> None:
     assert "".join(text_chunks) == "Hello streaming world"
     assert responses[-1].done.success is True
     assert len(llm.requests) == 1
+
+
+def test_stream_request_preserves_allow_tools_flag(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = StreamingFakeLLM()
+    app.llm = llm
+    runner = _runner_from_app(app, llm)
+
+    list(
+        runner._stream_chat(
+            [ChatMessage(role="user", content="summarize")], allow_tools=False
+        )
+    )
+
+    assert len(llm.requests) == 1
+    assert llm.requests[0].allow_tools is False
+    assert llm.requests[0].tools == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
+from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
 from orchestrator.context.compactor import Compactor
 from orchestrator.graph.main_graph import build_graph
-from orchestrator.llm.client import ChatMessage, ToolCall
+from orchestrator.llm.client import ChatMessage, RequestInterrupted, StreamDelta, ToolCall
 from orchestrator.llm.router import ModelInfo, ProviderRouter
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
@@ -164,6 +167,25 @@ def test_select_compaction_range_keeps_latest_sixteen_percent_and_tool_pair() ->
     assert end == 0
 
 
+def test_select_compaction_range_keeps_tool_call_anchor_when_tail_starts_at_result() -> None:
+    compactor = Compactor(context_window=1_000)
+    call = ToolCall(id="call-2", name="Read", arguments={}, arguments_json="{}")
+    messages = [
+        {"role": "user", "content": "old context " * 30},
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "content": "tool output"},
+        {"role": "assistant", "content": "latest instruction"},
+    ]
+
+    selection = compactor.select_compaction_range(messages, retain_tokens=20)
+
+    assert selection is not None
+    _, end = selection
+    retained = messages[end + 1 :]
+    assert [message["role"] for message in retained] == ["assistant", "tool", "assistant"]
+    assert retained[0]["tool_calls"][0].id == "call-2"
+
+
 def test_forced_compaction_honors_explicit_retain_ratio() -> None:
     compactor = Compactor(context_window=1_000, retain_ratio=0.16)
     messages = [
@@ -287,3 +309,130 @@ def test_manual_compaction_returns_update_without_model_turn(tmp_path) -> None:
     assert update.trigger == "manual"
     assert update.removed_messages > 0
     assert update.keep_recent_messages > 0
+
+
+def test_llm_compaction_summarizer_replays_context_without_enabling_tools() -> None:
+    class RecordingClient:
+        async def stream(self, request):
+            self.request = request
+            yield StreamDelta(kind="text", text="short ")
+            yield StreamDelta(kind="text", text="summary")
+            yield StreamDelta(kind="done")
+
+    client = RecordingClient()
+    summarizer = LLMCompactionSummarizer(client=client, provider="deepseek", model="reasoner")
+
+    result = summarizer.summarize(
+        CompactionRequest(
+            prefix_messages=(ChatMessage(role="system", content="system prompt"),),
+            messages=(ChatMessage(role="user", content="old history"),),
+            tools=({"name": "Read", "description": "read files"},),
+            provider="deepseek",
+            model="reasoner",
+            target="conversation history",
+        )
+    )
+
+    assert result == "short summary"
+    request = client.request
+    assert request.model == "reasoner"
+    assert request.purpose == "compaction"
+    assert request.allow_tools is False
+    assert request.tools == []
+    assert "Read" in "\n".join(str(message.content) for message in request.messages)
+    assert request.messages[-1].role == "user"
+
+
+def test_llm_compaction_summarizer_stops_before_provider_when_cancelled() -> None:
+    class NoCallClient:
+        async def stream(self, request):
+            raise AssertionError("cancelled compaction must not call provider")
+            yield  # pragma: no cover
+
+    cancel = threading.Event()
+    cancel.set()
+    summarizer = LLMCompactionSummarizer(
+        client=NoCallClient(), provider="deepseek", model="reasoner"
+    )
+
+    with pytest.raises(RequestInterrupted):
+        summarizer.summarize(
+            CompactionRequest(
+                prefix_messages=(),
+                messages=(ChatMessage(role="user", content="history"),),
+                cancel_event=cancel,
+            )
+        )
+
+
+def test_runner_prefers_llm_compaction_summary_and_audits_metadata(tmp_path) -> None:
+    from orchestrator.context import LayeredContext, SQLiteContextStore
+
+    class SummaryAdapter:
+        def summarize(self, request):
+            self.request = request
+            return "short llm summary"
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path)
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.compactor = Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16)
+    runner.compaction_summarizer = SummaryAdapter()
+    runner.llm = type("Model", (), {"model": "reasoner"})()
+    runner.context_window = None
+    runner.layered_context = context
+    runner._active_route = None
+    runner._context_persistence_error = ""
+    runner._pending_compaction_updates = []
+
+    messages = [ChatMessage(role="system", content="system")]
+    messages.extend(
+        ChatMessage(role="user", content=f"history-{index} " + "x" * 80)
+        for index in range(8)
+    )
+
+    compacted = runner._compact_messages(messages, session_id="session")
+
+    assert compacted[1].content == "[Compacted conversation history]\nshort llm summary"
+    summary_event = next(event for event in store.events("session") if event.kind == "compaction/summary")
+    assert summary_event.payload["summary_mode"] == "llm"
+    assert summary_event.payload["provider"] == ""
+    assert summary_event.payload["model"] == "reasoner"
+    assert summary_event.payload["summary_sha256"]
+    assert "short llm summary" not in repr(summary_event.payload)
+    store.close()
+
+
+@pytest.mark.parametrize("returned", ["", "x" * 10_000])
+def test_runner_falls_back_when_llm_compaction_summary_is_invalid(tmp_path, returned: str) -> None:
+    from orchestrator.context import LayeredContext, SQLiteContextStore
+
+    class SummaryAdapter:
+        def summarize(self, request):
+            return returned
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path)
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.compactor = Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16)
+    runner.compaction_summarizer = SummaryAdapter()
+    runner.llm = type("Model", (), {"model": "reasoner"})()
+    runner.context_window = None
+    runner.layered_context = context
+    runner._active_route = None
+    runner._context_persistence_error = ""
+    runner._pending_compaction_updates = []
+
+    messages = [ChatMessage(role="system", content="system")]
+    messages.extend(
+        ChatMessage(role="user", content=f"history-{index} " + "x" * 80)
+        for index in range(8)
+    )
+
+    compacted = runner._compact_messages(messages, session_id="session")
+
+    assert "[Compacted conversation history]" in compacted[1].content
+    assert "short llm summary" not in compacted[1].content
+    summary_event = next(event for event in store.events("session") if event.kind == "compaction/summary")
+    assert summary_event.payload["summary_mode"] == "deterministic-fallback"
+    store.close()
