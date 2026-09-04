@@ -48,6 +48,7 @@ class FaultInjectionConfig:
     fault_count: int = 30
     task_duration_s: float = 0.08
     fault_interval_s: float = 0.04
+    lease_ttl_s: float = 0.5
     timeout_s: float = 180.0
     model_pin: str = "deterministic-workflow-executor-v1"
     crash_once_task_id: str | None = None
@@ -59,7 +60,7 @@ class FaultInjectionConfig:
             raise ValueError("worker_count and task_count must be positive")
         if self.fault_count < 0:
             raise ValueError("fault_count must not be negative")
-        if self.task_duration_s <= 0 or self.fault_interval_s <= 0 or self.timeout_s <= 0:
+        if self.task_duration_s <= 0 or self.fault_interval_s <= 0 or self.lease_ttl_s <= 0 or self.timeout_s <= 0:
             raise ValueError("durations and timeout must be positive")
         if not self.model_pin.strip():
             raise ValueError("model_pin must not be empty")
@@ -166,6 +167,7 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                     db_path,
                     progress_root / f"worker-{slot}.json",
                     config.task_duration_s,
+                    config.lease_ttl_s,
                     runtime_root / "logs",
                     config.crash_once_task_id,
                     runtime_root / "crash-once.marker",
@@ -280,6 +282,7 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                 "fault_count": config.fault_count,
                 "task_duration_s": config.task_duration_s,
                 "fault_interval_s": config.fault_interval_s,
+                "lease_ttl_s": config.lease_ttl_s,
                 "timeout_s": config.timeout_s,
                 "canonical": _is_canonical(config),
                 "canonical_target": {"worker_count": 8, "task_count": 200, "fault_count": 30},
@@ -347,6 +350,7 @@ def _launch_child(
     db_path: Path,
     progress_path: Path,
     task_duration_s: float,
+    lease_ttl_s: float,
     log_root: Path,
     crash_once_task_id: str | None,
     crash_marker: Path,
@@ -367,6 +371,8 @@ def _launch_child(
         str(progress_path),
         "--task-duration",
         str(task_duration_s),
+        "--lease-ttl",
+        str(lease_ttl_s),
     ]
     if crash_once_task_id:
         command.extend(["--crash-task", crash_once_task_id, "--crash-marker", str(crash_marker)])
@@ -568,6 +574,7 @@ async def _run_child(
     task_ids: list[str],
     progress_path: Path,
     duration: float,
+    lease_ttl_s: float,
     crash_task_id: str | None = None,
     crash_marker: Path | None = None,
 ) -> None:
@@ -590,7 +597,7 @@ async def _run_child(
                 id=task_id,
                 workers=[WorkerSpec(id="worker", title=f"Long task {task_id}", objective="checkpoint and recover")],
             )
-            await WorkflowEngine(store, execute, max_concurrency=1).run(spec)
+            await WorkflowEngine(store, execute, max_concurrency=1, lease_ttl_seconds=lease_ttl_s).run(spec)
             _write_progress(path=progress_path, payload={"slot": slot, "pid": os.getpid(), "task_id": task_id, "state": "completed"})
     finally:
         store.close()
@@ -604,6 +611,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tasks-json", default="[]")
     parser.add_argument("--progress", type=Path)
     parser.add_argument("--task-duration", type=float, default=0.08)
+    parser.add_argument("--lease-ttl", type=float, default=0.5)
     parser.add_argument("--crash-task", default=None)
     parser.add_argument("--crash-marker", type=Path, default=None)
     parser.add_argument("--run-id", default=None)
@@ -630,6 +638,7 @@ def main(argv: list[str] | None = None) -> int:
                 [str(item) for item in task_ids],
                 args.progress,
                 args.task_duration,
+                args.lease_ttl,
                 args.crash_task,
                 args.crash_marker,
             )
@@ -645,6 +654,7 @@ def main(argv: list[str] | None = None) -> int:
             fault_count=args.faults,
             task_duration_s=args.task_duration,
             fault_interval_s=args.fault_interval,
+            lease_ttl_s=args.lease_ttl,
             timeout_s=args.timeout,
             model_pin=args.model_pin,
         )

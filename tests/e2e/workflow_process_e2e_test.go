@@ -26,7 +26,7 @@ func TestWorkflowCheckpointSurvivesPythonProcessTermination(t *testing.T) {
 	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "workflow_process_server.py")
 	t.Setenv("PYTHONPATH", repositoryRoot)
 
-	first := exec.Command(python, fixture, "--db", databasePath, "--calls", callsPath, "--wait")
+	first := exec.Command(python, fixture, "--db", databasePath, "--calls", callsPath, "--wait", "--lease-ttl", "0.2")
 	first.Dir = repositoryRoot
 	first.Env = os.Environ()
 	var firstOutputBuffer strings.Builder
@@ -49,7 +49,7 @@ func TestWorkflowCheckpointSurvivesPythonProcessTermination(t *testing.T) {
 		t.Fatal("first workflow process exited cleanly; termination recovery was not exercised")
 	}
 
-	second := exec.Command(python, fixture, "--db", databasePath, "--calls", callsPath)
+	second := exec.Command(python, fixture, "--db", databasePath, "--calls", callsPath, "--lease-ttl", "0.2")
 	second.Dir = repositoryRoot
 	second.Env = os.Environ()
 	secondOutput, err := second.CombinedOutput()
@@ -128,6 +128,74 @@ func TestWorkflowCheckpointSurvivesPythonProcessTermination(t *testing.T) {
 	}
 	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
 		t.Fatalf("write workflow receipt: %v", err)
+	}
+}
+
+func TestWorkflowLeasePreventsDuplicateAcrossPythonProcesses(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_WORKFLOW_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_WORKFLOW_E2E=1 to run the Python workflow lease E2E")
+	}
+
+	repositoryRoot := contextE2ERepositoryRoot(t)
+	python := contextE2EPython(t)
+	projectRoot := t.TempDir()
+	databasePath := filepath.Join(projectRoot, "leases.sqlite")
+	callsPath := filepath.Join(projectRoot, "worker-calls.log")
+	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "workflow_process_server.py")
+	t.Setenv("PYTHONPATH", repositoryRoot)
+
+	start := func() *exec.Cmd {
+		command := exec.Command(
+			python,
+			fixture,
+			"--db", databasePath,
+			"--calls", callsPath,
+			"--lease-ttl", "0.5",
+			"--delay-ms", "250",
+		)
+		command.Dir = repositoryRoot
+		command.Env = os.Environ()
+		return command
+	}
+
+	first := start()
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first lease process: %v", err)
+	}
+	if !waitForWorkflowEvent(t, databasePath, "long", "running", 20*time.Second) {
+		_ = first.Process.Kill()
+		_ = first.Wait()
+		t.Fatalf("first process did not claim long worker; events=%q", workflowEventSnapshot(databasePath))
+	}
+
+	second := start()
+	secondOutput := make(chan []byte, 1)
+	secondError := make(chan error, 1)
+	go func() {
+		output, err := second.CombinedOutput()
+		secondOutput <- output
+		secondError <- err
+	}()
+
+	firstError := first.Wait()
+	if firstError != nil {
+		t.Fatalf("first lease process failed: %v", firstError)
+	}
+	if err := <-secondError; err != nil {
+		t.Fatalf("second lease process failed: %v; output=%s", err, <-secondOutput)
+	}
+	if output := <-secondOutput; !strings.Contains(string(output), "WORKFLOW_COMPLETED") {
+		t.Fatalf("second output = %q, want completion marker", output)
+	}
+
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read worker calls: %v", err)
+	}
+	for _, workerID := range []string{"done", "long", "final"} {
+		if got := countWorkflowCall(string(calls), workerID); got != 1 {
+			t.Fatalf("worker %s calls = %d, want 1; calls=%q", workerID, got, calls)
+		}
 	}
 }
 

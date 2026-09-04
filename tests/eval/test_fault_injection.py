@@ -51,6 +51,7 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     assert receipt["run_id"] == "fault-test"
     assert receipt["budget"]["worker_count"] == 2
     assert receipt["budget"]["task_count"] == 6
+    assert receipt["budget"]["lease_ttl_s"] == 0.5
     assert receipt["budget"]["canonical"] is False
     assert receipt["budget"]["canonical_target"] == {"worker_count": 8, "task_count": 200, "fault_count": 30}
     assert receipt["fault_injection"]["requested"] == 2
