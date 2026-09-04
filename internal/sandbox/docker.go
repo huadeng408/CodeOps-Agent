@@ -10,11 +10,22 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config controls the container boundary for one sandboxed command.
 // Network access and privilege escalation are intentionally not configurable.
 type Config struct {
+	// Backend selects the isolation implementation. Empty keeps the historical
+	// Docker behaviour for callers that construct Config directly.
+	Backend Backend
+	// WSLDistro names the WSL2 distribution used by the WSL2 Docker backend.
+	WSLDistro string
+	// TrustRoot is the canonical host root that may be exposed to a sandbox.
+	// RoutingRunner refuses requests without one or outside it.
+	TrustRoot string
+	// ProbeTimeout bounds backend availability probes. Zero uses the default.
+	ProbeTimeout        time.Duration
 	Image               string
 	AllowWorkspaceWrite bool
 	MemoryLimit         string
@@ -23,9 +34,31 @@ type Config struct {
 	TmpfsSize           string
 }
 
+// Backend identifies an execution isolation strategy.
+type Backend string
+
+const (
+	BackendAuto    Backend = "auto"
+	BackendDocker  Backend = "docker"
+	BackendWSL2    Backend = "wsl2"
+	BackendNative  Backend = "native"
+	backendMissing Backend = "unavailable"
+)
+
+// Availability is the result of bounded backend health probes. It is exposed
+// so tests and embedding applications can make selection deterministic without
+// starting a process.
+type Availability struct {
+	Docker bool
+	WSL2   bool
+	Native bool
+}
+
 // DefaultConfig is suitable for Docker Desktop on Windows and Docker Engine on Linux.
 func DefaultConfig() Config {
 	return Config{
+		Backend:     BackendAuto,
+		WSLDistro:   "Ubuntu-24.04",
 		Image:       "alpine:3.20",
 		MemoryLimit: "1g",
 		CPULimit:    "2",
@@ -40,9 +73,9 @@ type Request struct {
 	WorkingDir string
 	// Command is interpreted by the sandbox shell. It is intended for the Bash
 	// tool only; structured callers must set Program and Args instead.
-	Command    string
-	Program    string
-	Args       []string
+	Command string
+	Program string
+	Args    []string
 }
 
 // Result is the normalized output of a sandboxed command.
@@ -74,6 +107,9 @@ type DockerRunner struct {
 	platform string
 	executor commandExecutor
 }
+
+// Backend identifies DockerRunner for callers that inspect a concrete runner.
+func (r *DockerRunner) Backend() Backend { return BackendDocker }
 
 func NewDockerRunner(config Config) *DockerRunner {
 	return newDockerRunner(config, runtime.GOOS, osCommandExecutor{})
@@ -108,6 +144,11 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve sandbox workspace: %w", err)
 	}
+	if config.TrustRoot != "" {
+		if err := validateTrustRoot(config.TrustRoot, workspace); err != nil {
+			return "", nil, err
+		}
+	}
 	workingDir := request.WorkingDir
 	if strings.TrimSpace(workingDir) == "" {
 		workingDir = workspace
@@ -130,12 +171,30 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 	if rel != "." && rel != "" {
 		containerDir += "/" + filepath.ToSlash(rel)
 	}
-	mount := "type=bind,src=" + workspace + ",dst=/workspace"
+	args, err := buildDockerRunArgs(config, workspace, containerDir, request)
+	if err != nil {
+		return "", nil, err
+	}
+	args = args[1:] // the local binary is supplied separately below
+	binary := "docker"
+	if strings.EqualFold(strings.TrimSpace(platform), "windows") {
+		binary = "docker.exe"
+	}
+	return binary, args, nil
+}
+
+func buildDockerRunArgs(config Config, workspaceSource, containerDir string, request Request) ([]string, error) {
+	command := strings.TrimSpace(request.Command)
+	program := strings.TrimSpace(request.Program)
+	if (command == "") == (program == "") {
+		return nil, errors.New("sandbox request must contain exactly one of command or program")
+	}
+	mount := "type=bind,src=" + workspaceSource + ",dst=/workspace"
 	if !config.AllowWorkspaceWrite {
 		mount += ",readonly"
 	}
 	args := []string{
-		"run", "--rm", "--init",
+		"docker", "run", "--rm", "--init",
 		"--network", "none",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=" + config.TmpfsSize,
@@ -155,15 +214,20 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 	} else {
 		args = append(args, "sh", "-lc", command)
 	}
-	binary := "docker"
-	if strings.EqualFold(strings.TrimSpace(platform), "windows") {
-		binary = "docker.exe"
-	}
-	return binary, args, nil
+	return args, nil
 }
 
 func normalizeConfig(config Config) Config {
 	defaults := DefaultConfig()
+	if config.Backend == "" {
+		config.Backend = BackendDocker
+	}
+	if config.WSLDistro == "" {
+		config.WSLDistro = "Ubuntu-24.04"
+	}
+	if config.ProbeTimeout <= 0 {
+		config.ProbeTimeout = 5 * time.Second
+	}
 	if strings.TrimSpace(config.Image) == "" {
 		config.Image = defaults.Image
 	}
@@ -180,6 +244,18 @@ func normalizeConfig(config Config) Config {
 		config.TmpfsSize = defaults.TmpfsSize
 	}
 	return config
+}
+
+func validateTrustRoot(root, workspace string) error {
+	trusted, err := absolutePath(root)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrTrustRootRequired, err)
+	}
+	rel, err := filepath.Rel(trusted, workspace)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("sandbox workspace is outside trust root: %s", workspace)
+	}
+	return nil
 }
 
 func absolutePath(path string) (string, error) {

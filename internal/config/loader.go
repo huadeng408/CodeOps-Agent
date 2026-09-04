@@ -56,13 +56,16 @@ type Config struct {
 // SandboxConfig is the persisted policy for Docker-backed Bash execution.
 // It intentionally has no host-fallback or network-enable option.
 type SandboxConfig struct {
-	Enabled             bool   `json:"enabled"`
-	Image               string `json:"image"`
-	AllowWorkspaceWrite bool   `json:"allow_workspace_write"`
-	MemoryLimit         string `json:"memory_limit"`
-	CPULimit            string `json:"cpu_limit"`
-	PidsLimit           int    `json:"pids_limit"`
-	TmpfsSize           string `json:"tmpfs_size"`
+	Backend             sandbox.Backend `json:"backend"`
+	WSLDistro           string          `json:"wsl_distro"`
+	TrustRoot           string          `json:"trust_root"`
+	Enabled             bool            `json:"enabled"`
+	Image               string          `json:"image"`
+	AllowWorkspaceWrite bool            `json:"allow_workspace_write"`
+	MemoryLimit         string          `json:"memory_limit"`
+	CPULimit            string          `json:"cpu_limit"`
+	PidsLimit           int             `json:"pids_limit"`
+	TmpfsSize           string          `json:"tmpfs_size"`
 }
 
 type PermissionConfig struct {
@@ -110,6 +113,9 @@ func Default(projectRoot string) Config {
 		ActorRoles:                      []string{"LOCAL"},
 		SessionDBPath:                   filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
 		Sandbox: SandboxConfig{
+			Backend:             sandbox.BackendAuto,
+			WSLDistro:           sandbox.DefaultConfig().WSLDistro,
+			TrustRoot:           projectRoot,
 			Enabled:             true,
 			Image:               sandboxDefaults.Image,
 			AllowWorkspaceWrite: sandboxDefaults.AllowWorkspaceWrite,
@@ -373,6 +379,15 @@ func mergeSandboxConfig(dst *SandboxConfig, patch SandboxConfig, raw json.RawMes
 	}
 	if _, ok := fields["enabled"]; ok {
 		dst.Enabled = patch.Enabled
+	}
+	if _, ok := fields["backend"]; ok {
+		dst.Backend = patch.Backend
+	}
+	if _, ok := fields["wsl_distro"]; ok {
+		dst.WSLDistro = patch.WSLDistro
+	}
+	if _, ok := fields["trust_root"]; ok {
+		dst.TrustRoot = patch.TrustRoot
 	}
 	if _, ok := fields["image"]; ok {
 		dst.Image = patch.Image

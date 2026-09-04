@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"code-agent/internal/sandbox"
 )
 
 func TestLoadAppliesSandboxPolicyFromProjectSettings(t *testing.T) {
@@ -51,6 +53,30 @@ func TestDefaultEnablesReadOnlySandbox(t *testing.T) {
 	}
 	if cfg.Sandbox.Image == "" || cfg.Sandbox.PidsLimit <= 0 {
 		t.Fatalf("default sandbox is incomplete: %+v", cfg.Sandbox)
+	}
+	if cfg.Sandbox.Backend != sandbox.BackendAuto {
+		t.Fatalf("default sandbox backend = %q, want auto", cfg.Sandbox.Backend)
+	}
+	if cfg.Sandbox.TrustRoot == "" || cfg.Sandbox.WSLDistro == "" {
+		t.Fatalf("default sandbox trust boundary is incomplete: %+v", cfg.Sandbox)
+	}
+}
+
+func TestLoadMergesSandboxBackendAndTrustRoot(t *testing.T) {
+	projectRoot := t.TempDir()
+	agentDir := filepath.Join(projectRoot, ".agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("create agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.local.json"), []byte(`{"sandbox":{"backend":"wsl2","wsl_distro":"Ubuntu-24.04","trust_root":"D:/workspace"}}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	cfg, err := Load(projectRoot)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Sandbox.Backend != sandbox.BackendWSL2 || cfg.Sandbox.WSLDistro != "Ubuntu-24.04" || cfg.Sandbox.TrustRoot != "D:/workspace" {
+		t.Fatalf("sandbox override = %+v", cfg.Sandbox)
 	}
 }
 

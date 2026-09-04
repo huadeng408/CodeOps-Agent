@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +107,25 @@ func TestDockerRunnerIntegrationEnforcesReadOnlyWorkspaceAndNoNetwork(t *testing
 	})
 	if networkErr == nil || networkResult.ExitCode == 0 {
 		t.Fatalf("network-disabled sandbox reached external address: result=%+v err=%v", networkResult, networkErr)
+	}
+}
+
+func TestSandboxRoutingRealProcessE2E(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_SANDBOX_ROUTING_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_SANDBOX_ROUTING_E2E=1 to run sandbox routing E2E")
+	}
+	workspace := t.TempDir()
+	config := Config{Backend: BackendAuto, TrustRoot: workspace, Image: "alpine:3.20", ProbeTimeout: 3 * time.Second}
+	availability := DetectAvailability(context.Background(), config, runtime.GOOS)
+	if !availability.Docker && !availability.WSL2 {
+		t.Fatalf("no isolated backend available: %+v", availability)
+	}
+	runner := NewRoutingRunner(config, runtime.GOOS, availability)
+	result, err := runner.Run(context.Background(), Request{Workspace: workspace, WorkingDir: workspace, Command: "printf SANDBOX_E2E"})
+	if err != nil || result.ExitCode != 0 || !strings.Contains(result.Output, "SANDBOX_E2E") {
+		t.Fatalf("sandbox process result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "SANDBOX_E2E")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sandbox process unexpectedly wrote host workspace: %v", err)
 	}
 }

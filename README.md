@@ -10,6 +10,7 @@
 - 双语言分层：Go 负责稳定的系统操作面，Python 负责灵活的 LLM 编排面。
 - gRPC 流式协议：Harness 和 Orchestrator 通过双向流传递用户输入、工具请求、工具结果、计划更新、Todo 更新、子 Agent 事件和 token/cost 元数据。
 - 安全执行模型：内置权限分级、allow/deny 规则、命令风险分析、Git 危险操作拦截、工具输出不可信包装和 prompt injection 防护。
+- 隔离执行路由：按平台在 Docker 与 WSL2 Docker 后端之间选择，工作区受信根和容器网络、权限、资源限制统一由 Harness 强制；没有可用隔离后端时拒绝执行。
 - 可恢复会话：使用 SQLite 持久化会话，支持恢复历史消息、工作目录、预算指标、已批准工具、Todo、计划、Undo 和 worktree 状态。
 - 工具闭环：支持读写编辑文件、Shell、搜索、Git、网络抓取、网络搜索，以及通过 MCP 动态扩展工具。
 - 任务编排：支持 PlanWrite、TodoWrite、AskUser 和 SpawnAgent，适合多步骤代码任务、探索任务和人工确认流程。
@@ -205,6 +206,13 @@ python -m orchestrator.server
   "memory_dir": ".agent/memory",
   "mcp_config": ".mcp.json",
   "worktree_base_ref": "fresh",
+  "sandbox": {
+    "enabled": true,
+    "backend": "auto",
+    "image": "alpine:3.20",
+    "wsl_distro": "Ubuntu-24.04",
+    "trust_root": "."
+  },
   "rag_enabled": true,
   "rag_server_url": "http://127.0.0.1:8081",
   "rag_user_id": 1,

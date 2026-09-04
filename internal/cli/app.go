@@ -129,7 +129,14 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
 	if cfg.Sandbox.Enabled {
-		executor.SetSandbox(sandbox.NewDockerRunner(sandbox.Config{
+		trustRoot := cfg.Sandbox.TrustRoot
+		if strings.TrimSpace(trustRoot) == "" {
+			trustRoot = cfg.ProjectRoot
+		}
+		executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{
+			Backend:             cfg.Sandbox.Backend,
+			WSLDistro:           cfg.Sandbox.WSLDistro,
+			TrustRoot:           trustRoot,
 			Image:               cfg.Sandbox.Image,
 			AllowWorkspaceWrite: cfg.Sandbox.AllowWorkspaceWrite,
 			MemoryLimit:         cfg.Sandbox.MemoryLimit,
