@@ -130,6 +130,10 @@ message AgentSpawn {
   string task = 2;
   string context_json = 3;
   bool parallel = 4;
+  string protocol_version = 5;
+  string request_id = 6;
+  string parent_session_id = 7;
+  string child_session_id = 8;
 }
 
 message SessionMeta {

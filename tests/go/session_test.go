@@ -58,10 +58,14 @@ func TestSQLiteStorePersistsSessions(t *testing.T) {
 		Mode:         "plan",
 	})
 	manager.AppendAgentSpawn(session.AgentSpawnRecord{
-		Kind:        "general",
-		Task:        "inspect repository",
-		ContextJSON: `{"scope":"repo"}`,
-		Parallel:    true,
+		Kind:            "general",
+		Task:            "inspect repository",
+		ContextJSON:     `{"scope":"repo"}`,
+		Parallel:        true,
+		ProtocolVersion: "agent.v1",
+		RequestID:       "spawn-1",
+		ParentSessionID: created.ID,
+		ChildSessionID:  created.ID + ":subagent:spawn-1",
 	})
 	manager.SetUndo([]session.UndoEntry{{
 		ID:          "undo-1",
@@ -123,7 +127,7 @@ func TestSQLiteStorePersistsSessions(t *testing.T) {
 	if got := loaded.Plan; len(got.Steps) != 3 || got.Steps[1] != "Implement persistence" || got.CurrentIndex != 1 || got.Mode != "plan" {
 		t.Fatalf("unexpected persisted plan: %#v", got)
 	}
-	if got := loaded.Agents; len(got) != 1 || got[0].Kind != "general" || got[0].Task != "inspect repository" || !got[0].Parallel {
+	if got := loaded.Agents; len(got) != 1 || got[0].Kind != "general" || got[0].Task != "inspect repository" || !got[0].Parallel || got[0].ProtocolVersion != "agent.v1" || got[0].RequestID != "spawn-1" || got[0].ParentSessionID != created.ID || got[0].ChildSessionID != created.ID+":subagent:spawn-1" {
 		t.Fatalf("unexpected persisted agents: %#v", got)
 	}
 	if got := loaded.Undo; len(got) != 1 || got[0].Description != "Write" || got[0].Changes[0].Before != "before" {

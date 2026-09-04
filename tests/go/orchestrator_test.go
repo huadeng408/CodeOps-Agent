@@ -83,6 +83,65 @@ type historyOrchestratorServer struct {
 	history   []*codeagentpb.ConversationMessage
 }
 
+type subAgentMetadataServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+func (s *subAgentMetadataServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
+	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
+}
+
+func (s *subAgentMetadataServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_AgentSpawn{
+			AgentSpawn: &codeagentpb.AgentSpawn{
+				Kind:            "review",
+				Task:            "Review files",
+				ProtocolVersion: "agent.v1",
+				RequestId:       "spawn-1",
+				ParentSessionId: "parent",
+				ChildSessionId:  "parent:subagent:spawn-1",
+			},
+		},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{Done: &codeagentpb.Done{Success: true}},
+	})
+}
+
+func TestOrchestratorClientPreservesSubAgentProtocolMetadata(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &subAgentMetadataServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var received *codeagentpb.AgentSpawn
+	_, err = client.ConverseWithEvents(context.Background(), "spawn", func(_ context.Context, event orchestrator.Event) {
+		received = event.AgentSpawn
+	})
+	if err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if received == nil || received.GetProtocolVersion() != "agent.v1" || received.GetRequestId() != "spawn-1" || received.GetParentSessionId() != "parent" || received.GetChildSessionId() != "parent:subagent:spawn-1" {
+		t.Fatalf("sub-agent metadata lost at Go boundary: %#v", received)
+	}
+}
+
 func (s *historyOrchestratorServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
 	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
 }
