@@ -30,13 +30,16 @@ type Config struct {
 	ProbeAttempts int
 	// ProbeRetryDelay is the initial delay between readiness attempts. Zero uses
 	// the default exponential backoff.
-	ProbeRetryDelay     time.Duration
-	Image               string
-	AllowWorkspaceWrite bool
-	MemoryLimit         string
-	CPULimit            string
-	PidsLimit           int
-	TmpfsSize           string
+	ProbeRetryDelay time.Duration
+	// ProbeReadinessTimeout bounds the total readiness wait, including probe
+	// attempts and backoff. Zero uses the default 60-second budget.
+	ProbeReadinessTimeout time.Duration
+	Image                 string
+	AllowWorkspaceWrite   bool
+	MemoryLimit           string
+	CPULimit              string
+	PidsLimit             int
+	TmpfsSize             string
 }
 
 // Backend identifies an execution isolation strategy.
@@ -62,13 +65,14 @@ type Availability struct {
 // DefaultConfig is suitable for Docker Desktop on Windows and Docker Engine on Linux.
 func DefaultConfig() Config {
 	return Config{
-		Backend:     BackendAuto,
-		WSLDistro:   "Ubuntu-24.04",
-		Image:       "alpine:3.20",
-		MemoryLimit: "1g",
-		CPULimit:    "2",
-		PidsLimit:   128,
-		TmpfsSize:   "64m",
+		Backend:               BackendAuto,
+		WSLDistro:             "Ubuntu-24.04",
+		Image:                 "alpine:3.20",
+		MemoryLimit:           "1g",
+		CPULimit:              "2",
+		PidsLimit:             128,
+		TmpfsSize:             "64m",
+		ProbeReadinessTimeout: defaultProbeReadinessTimeout,
 	}
 }
 
@@ -238,6 +242,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.ProbeRetryDelay <= 0 {
 		config.ProbeRetryDelay = 500 * time.Millisecond
+	}
+	if config.ProbeReadinessTimeout <= 0 {
+		config.ProbeReadinessTimeout = defaultProbeReadinessTimeout
 	}
 	if strings.TrimSpace(config.Image) == "" {
 		config.Image = defaults.Image
