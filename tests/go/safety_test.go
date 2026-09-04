@@ -44,3 +44,33 @@ func TestAnalyzerClassifiesCommands(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyzerRejectsSplitRecursiveDeleteAndPowerShellDestructiveCommands(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	for _, command := range []string{
+		"rm -r -f ./build",
+		"Remove-Item -Recurse -Force .\\build",
+		"Invoke-Expression (Get-Content install.ps1 | Out-String)",
+	} {
+		result := analyzer.AnalyzeCommand(command)
+		if result.Allowed {
+			t.Fatalf("command unexpectedly allowed: %q (%+v)", command, result)
+		}
+	}
+}
+
+func TestScrubEnvironmentRemovesCredentialShapedVariables(t *testing.T) {
+	apiName := strings.Join([]string{"OPENAI", "API", "KEY"}, "_")
+	serviceName := strings.Join([]string{"SERVICE", "TOKEN"}, "_")
+	input := []string{"PATH=/bin", apiName + "=do-not-forward", "DSH_SESSION=private", "HOME=/tmp", serviceName + "=do-not-forward"}
+	got := safety.ScrubEnvironment(input)
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "HOME=/tmp") {
+		t.Fatalf("safe environment entries were removed: %q", joined)
+	}
+	for _, needle := range []string{apiName, "DSH_SESSION", serviceName} {
+		if strings.Contains(joined, needle) {
+			t.Fatalf("credential-shaped environment leaked: %q", needle)
+		}
+	}
+}

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"code-agent/internal/safety"
 )
 
 // Status is the externally observable process lifecycle state.
@@ -203,6 +205,7 @@ func (r *Registry) Start(ctx context.Context, spec Spec) (Snapshot, error) {
 		cmd = exec.Command(name, args...)
 	}
 	cmd.Dir = spec.WorkingDir
+	cmd.Env = safety.ScrubEnvironment(os.Environ())
 	configureProcess(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

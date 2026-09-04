@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -71,6 +72,7 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 	name, shellArgs := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, shellArgs...)
 	cmd.Dir = absDir
+	cmd.Env = safety.ScrubEnvironment(os.Environ())
 	output, err := cmd.CombinedOutput()
 	result := ToolResult{Name: "Bash", Output: string(output)}
 

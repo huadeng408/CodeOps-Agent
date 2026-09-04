@@ -200,3 +200,24 @@ func TestExecutorBackgroundJobsDoNotBypassConfiguredSandbox(t *testing.T) {
 		t.Fatalf("unexpected sandbox refusal: %q", result.Error)
 	}
 }
+
+func TestExecutorBackgroundJobDoesNotForwardCredentialEnvironment(t *testing.T) {
+	t.Setenv("CODE_AGENT_TEST_SECRET_TOKEN", "must-not-reach-child")
+	executor := tools.NewExecutor(t.TempDir())
+	body := "if ($env:CODE_AGENT_TEST_SECRET_TOKEN) { exit 7 } else { Write-Output CLEAN_JOB_ENV }"
+	if runtime.GOOS != "windows" {
+		body = "if [ -n \"$CODE_AGENT_TEST_SECRET_TOKEN\" ]; then exit 7; else printf CLEAN_JOB_ENV; fi"
+	}
+	started, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "JobStart", Arguments: map[string]any{"command": body}})
+	if err != nil {
+		t.Fatalf("JobStart: %v", err)
+	}
+	var view jobToolView
+	if err := json.Unmarshal([]byte(started.Output), &view); err != nil {
+		t.Fatalf("decode JobStart output %q: %v", started.Output, err)
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "JobOutput", Arguments: map[string]any{"job_id": view.ID, "wait": true, "timeout_ms": 3000}})
+	if err != nil || !strings.Contains(result.Output, "CLEAN_JOB_ENV") || !strings.Contains(result.Output, `"status":"completed"`) {
+		t.Fatalf("credential environment reached background job: result=%+v err=%v", result, err)
+	}
+}

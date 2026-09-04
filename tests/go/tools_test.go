@@ -438,6 +438,19 @@ func TestExecutorBashRunsSafeCommand(t *testing.T) {
 	}
 }
 
+func TestExecutorBashDoesNotForwardCredentialEnvironmentToHostProcess(t *testing.T) {
+	t.Setenv("CODE_AGENT_TEST_SECRET_TOKEN", "must-not-reach-child")
+	executor := tools.NewExecutor(t.TempDir())
+	command := "if ($env:CODE_AGENT_TEST_SECRET_TOKEN) { exit 7 } else { Write-Output CLEAN_ENV }"
+	if runtime.GOOS != "windows" {
+		command = "if [ -n \"$CODE_AGENT_TEST_SECRET_TOKEN\" ]; then exit 7; else printf CLEAN_ENV; fi"
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "Bash", Arguments: map[string]any{"command": command}})
+	if err != nil || result.ExitCode != 0 || !strings.Contains(result.Output, "CLEAN_ENV") {
+		t.Fatalf("credential environment reached child: result=%+v err=%v", result, err)
+	}
+}
+
 func TestExecutorBashPreservesUTF8OutputOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("PowerShell UTF-8 output is Windows-specific")

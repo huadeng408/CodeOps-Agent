@@ -287,6 +287,7 @@ command-line arguments, logs, or committed artifacts.
 - 工具路径限制在工作区内，防止越界读写。
 - Shell 风险分析会阻止 fork bomb、递归删除、磁盘格式化、curl/wget 管道执行、递归权限变更和广泛进程终止等危险模式。
 - Git 安全规则默认允许 `status`、`diff`、`log`、`show`、`branch`、`fetch`、`worktree list` 等低风险操作，并阻止 `push`、危险 `reset`、`clean`、`rebase`、强制参数和删除分支等操作。
+- Shell 子进程使用受控工作目录、超时和有界输出；宿主执行路径会清理凭据形环境变量，后台任务沿用相同的命令风险与环境策略。
 - 工具输出会被编排层视为不可信内容，避免文件内容或命令输出中的提示注入覆盖系统指令。
 - Hooks 可以在工具执行前后做额外检查或阻断。
 

@@ -39,6 +39,8 @@ func (a *Analyzer) AnalyzeCommand(command string) Analysis {
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "destructive disk format blocked"}
 	case containsCurlPipeShell(lower):
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "piped shell execution blocked"}
+	case containsPowerShellDestructive(lower):
+		return Analysis{Allowed: false, Level: RiskHigh, Reason: "destructive PowerShell execution blocked"}
 	case containsBroadOwnershipChange(fields):
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad permission or ownership change blocked"}
 	case containsProcessKill(fields):
@@ -112,13 +114,21 @@ func containsRecursiveDelete(fields []string) bool {
 		if field != "rm" && !strings.HasSuffix(field, "/rm") {
 			continue
 		}
+		recursive, force := false, false
 		for _, arg := range fields[i+1:] {
 			if strings.HasPrefix(arg, "-") && strings.Contains(arg, "r") && strings.Contains(arg, "f") {
 				return true
 			}
+			if strings.HasPrefix(arg, "-") {
+				recursive = recursive || strings.Contains(arg, "r")
+				force = force || strings.Contains(arg, "f")
+			}
 			if arg == "/" || arg == "/*" || arg == "." || arg == "./" || arg == ".." || strings.HasPrefix(arg, "~") {
 				return true
 			}
+		}
+		if recursive && force {
+			return true
 		}
 	}
 	return false
@@ -135,7 +145,32 @@ func containsCurlPipeShell(lower string) bool {
 	if !(strings.Contains(lower, "curl ") || strings.Contains(lower, "wget ")) {
 		return false
 	}
-	return strings.Contains(lower, "| sh") || strings.Contains(lower, "| bash") || strings.Contains(lower, "iex") || strings.Contains(lower, "invoke-expression")
+	return strings.Contains(lower, "| sh") || strings.Contains(lower, "|sh") || strings.Contains(lower, "| bash") || strings.Contains(lower, "|bash") || strings.Contains(lower, "iex") || strings.Contains(lower, "invoke-expression")
+}
+
+func containsPowerShellDestructive(lower string) bool {
+	return (strings.Contains(lower, "remove-item") && strings.Contains(lower, "-recurse") && strings.Contains(lower, "-force")) ||
+		strings.Contains(lower, "invoke-expression") || strings.Contains(lower, "invoke-command -scriptblock") ||
+		strings.Contains(lower, "set-executionpolicy")
+}
+
+// ScrubEnvironment removes ambient values that commonly carry credentials or
+// Harness internals before a host shell process is started. Explicit command
+// arguments remain visible to the command and are governed by the analyzer.
+func ScrubEnvironment(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "" || strings.HasPrefix(upper, "DSH_") || strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
 }
 
 func containsBroadOwnershipChange(fields []string) bool {
