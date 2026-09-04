@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from orchestrator.context.compactor import Compactor
 from orchestrator.graph.main_graph import build_graph
 from orchestrator.llm.client import ChatMessage, ToolCall
+from orchestrator.llm.router import ModelInfo, ProviderRouter
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.runtime.tools import ToolRegistry
@@ -75,6 +78,72 @@ def test_token_pressure_uses_context_window_and_provider_override() -> None:
     assert compactor.estimate_tokens(messages) == 128
     assert compactor.should_compact(messages, model="deepseek/reasoner") is False
     assert compactor.should_compact(messages, model="other") is True
+
+
+def test_exact_provider_model_policy_overrides_context_and_retention() -> None:
+    compactor = Compactor(
+        context_window=100,
+        pressure_ratio=0.8,
+        retain_ratio=0.16,
+        model_context_windows={"reasoner": 200},
+        model_policies={
+            "deepseek/reasoner": {
+                "context_window": 400,
+                "pressure_ratio": 0.5,
+                "retain_tokens": 40,
+            }
+        },
+    )
+
+    assert compactor.effective_context_window(
+        model="reasoner", provider="deepseek"
+    ) == 400
+    assert compactor.pressure_threshold_tokens(
+        model="reasoner", provider="deepseek"
+    ) == 200
+    assert compactor.effective_retain_tokens(
+        model="reasoner", provider="deepseek"
+    ) == 40
+
+
+def test_model_policy_requires_mapping_values() -> None:
+    with pytest.raises(TypeError, match="must be a mapping"):
+        Compactor(model_policies={"deepseek/reasoner": "invalid"})
+
+
+def test_runner_uses_active_route_context_window_for_pressure() -> None:
+    class DummyClient:
+        model = "reasoner"
+
+        async def chat(self, request):  # pragma: no cover - route metadata only
+            raise AssertionError("chat should not be called")
+
+    client = DummyClient()
+    router = ProviderRouter()
+    router.register(
+        "deepseek",
+        client,
+        models=[ModelInfo(provider="deepseek", id="reasoner", context_window=400)],
+    )
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.llm = client
+    runner._active_route = router.prepare("deepseek", "reasoner")
+    runner.provider_router = router
+    runner.context_window = 100
+    runner.compactor = Compactor(context_window=100, pressure_ratio=0.8)
+    runner._pending_compaction_updates = []
+    runner._context_persistence_error = ""
+
+    messages = [
+        ChatMessage(role="system", content="system"),
+        ChatMessage(role="user", content="x" * 160),
+        ChatMessage(role="assistant", content="y" * 160),
+        ChatMessage(role="user", content="z" * 160),
+    ]
+
+    compacted = runner._compact_messages(messages)
+
+    assert len(compacted) == len(messages)
 
 
 def test_select_compaction_range_keeps_latest_sixteen_percent_and_tool_pair() -> None:

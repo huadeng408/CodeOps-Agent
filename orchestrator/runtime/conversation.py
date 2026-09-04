@@ -1610,11 +1610,13 @@ class ConversationRunner:
         return messages
 
     def _detect_provider(self) -> str:
-        if self._active_route is not None and self._active_route.client is self.llm:
-            return self._active_route.provider
-        if isinstance(self.llm, AnthropicClient):
+        llm = getattr(self, "llm", None)
+        active_route = getattr(self, "_active_route", None)
+        if active_route is not None and active_route.client is llm:
+            return active_route.provider
+        if isinstance(llm, AnthropicClient):
             return "anthropic"
-        model = str(getattr(self.llm, "model", "")).lower()
+        model = str(getattr(llm, "model", "")).lower()
         if model and "claude" in model:
             return "anthropic"
         if model and "gpt" in model:
@@ -2782,6 +2784,17 @@ class ConversationRunner:
         if len(messages) <= 2:
             return messages
         model = str(getattr(getattr(self, "llm", None), "model", ""))
+        provider = self._detect_provider()
+        configured_route = getattr(self, "_active_route", None)
+        active_route = (
+            configured_route
+            if configured_route is not None and configured_route.client is self.llm
+            else None
+        )
+        route_context_window = (
+            getattr(getattr(active_route, "model_info", None), "context_window", None)
+            or getattr(self, "context_window", None)
+        )
         select_range = getattr(self.compactor, "select_compaction_range", None)
         if callable(select_range):
             pruner = getattr(self.compactor, "prune_tool_results", None)
@@ -2819,7 +2832,8 @@ class ConversationRunner:
                 should_compact = self.compactor.should_compact(
                     messages,
                     model=model,
-                    context_window=getattr(self, "context_window", None),
+                    context_window=route_context_window,
+                    provider=provider,
                     force=force,
                 )
             except TypeError:
@@ -2833,7 +2847,8 @@ class ConversationRunner:
                 select_kwargs = {
                     "history_start": 1,
                     "model": model,
-                    "context_window": getattr(self, "context_window", None),
+                    "context_window": route_context_window,
+                    "provider": provider,
                     "force": force,
                 }
                 if retain_ratio is not None:
@@ -2905,7 +2920,8 @@ class ConversationRunner:
                     still_needed = self.compactor.should_compact(
                         current,
                         model=model,
-                        context_window=getattr(self, "context_window", None),
+                        context_window=route_context_window,
+                        provider=provider,
                     )
                 except TypeError:
                     still_needed = self.compactor.should_compact(current)

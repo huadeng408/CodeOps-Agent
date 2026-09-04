@@ -17,6 +17,9 @@ class Compactor:
     retain_ratio: float = 0.16
     compaction_retries: int = 2
     model_context_windows: dict[str, int] = field(default_factory=dict)
+    # Exact provider/model overrides, e.g. {"deepseek/reasoner": {"retain_tokens": 4096}}.
+    # The mapping is intentionally metadata-only; provider credentials never belong here.
+    model_policies: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_result_threshold: int = 8_192
     tool_result_head: int = 4_096
     tool_result_tail: int = 1_024
@@ -35,6 +38,55 @@ class Compactor:
             for model, window in self.model_context_windows.items()
             if int(window) > 0
         }
+        normalized_policies: dict[str, dict[str, Any]] = {}
+        allowed_policy_keys = {
+            "context_window",
+            "pressure_ratio",
+            "retain_ratio",
+            "retain_tokens",
+        }
+        for raw_key, raw_policy in self.model_policies.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise ValueError("model policy key must not be empty")
+            if not isinstance(raw_policy, dict):
+                raise TypeError(f"model policy {key!r} must be a mapping")
+            unknown = set(raw_policy) - allowed_policy_keys
+            if unknown:
+                raise ValueError(
+                    f"model policy {key!r} has unknown keys: {', '.join(sorted(map(str, unknown)))}"
+                )
+            policy = dict(raw_policy)
+            if "context_window" in policy:
+                context_window = int(policy["context_window"])
+                if context_window < 1:
+                    raise ValueError(f"model policy {key!r} context_window must be positive")
+                policy["context_window"] = context_window
+            for ratio_name in ("pressure_ratio", "retain_ratio"):
+                if ratio_name in policy:
+                    ratio = float(policy[ratio_name])
+                    if not 0.0 < ratio <= 1.0:
+                        raise ValueError(f"model policy {key!r} {ratio_name} must be in (0, 1]")
+                    policy[ratio_name] = ratio
+            if "retain_tokens" in policy:
+                retain_tokens = int(policy["retain_tokens"])
+                if retain_tokens < 0:
+                    raise ValueError(f"model policy {key!r} retain_tokens must be non-negative")
+                policy["retain_tokens"] = retain_tokens
+            if "retain_ratio" in policy and "retain_tokens" in policy:
+                raise ValueError(
+                    f"model policy {key!r} cannot set retain_ratio and retain_tokens together"
+                )
+            if (
+                "retain_ratio" in policy
+                and "pressure_ratio" in policy
+                and policy["retain_ratio"] >= policy["pressure_ratio"]
+            ):
+                raise ValueError(
+                    f"model policy {key!r} retain_ratio must be less than pressure_ratio"
+                )
+            normalized_policies[key] = policy
+        self.model_policies = normalized_policies
 
     def compact_text(self, text: str) -> str:
         if len(text) <= self.max_chars:
@@ -72,10 +124,13 @@ class Compactor:
         model: str = "",
         context_window: int | None = None,
         force: bool = False,
+        provider: str = "",
     ) -> bool:
         if force:
             return len(messages) > 1
-        threshold = self.pressure_threshold_tokens(model, context_window)
+        threshold = self.pressure_threshold_tokens(
+            model, context_window, provider=provider
+        )
         if threshold is not None:
             return self.estimate_tokens(messages) >= threshold
         total_chars = 0
@@ -84,8 +139,15 @@ class Compactor:
         return len(messages) > self.max_messages or total_chars > self.max_chars
 
     def effective_context_window(
-        self, model: str = "", context_window: int | None = None
+        self,
+        model: str = "",
+        context_window: int | None = None,
+        *,
+        provider: str = "",
     ) -> int | None:
+        policy = self._policy(provider, model)
+        if "context_window" in policy:
+            return int(policy["context_window"])
         if model and model in self.model_context_windows:
             return self.model_context_windows[model]
         if context_window is not None and context_window > 0:
@@ -93,12 +155,47 @@ class Compactor:
         return self.context_window
 
     def pressure_threshold_tokens(
-        self, model: str = "", context_window: int | None = None
+        self,
+        model: str = "",
+        context_window: int | None = None,
+        *,
+        provider: str = "",
     ) -> int | None:
-        window = self.effective_context_window(model, context_window)
+        window = self.effective_context_window(
+            model, context_window, provider=provider
+        )
         if window is None:
             return None
-        return max(1, int(window * self.pressure_ratio))
+        ratio = self.effective_pressure_ratio(provider=provider, model=model)
+        return max(1, int(window * ratio))
+
+    def effective_pressure_ratio(self, *, provider: str = "", model: str = "") -> float:
+        """Resolve the pressure ratio for one exact routed target."""
+        policy = self._policy(provider, model)
+        return float(policy.get("pressure_ratio", self.pressure_ratio))
+
+    def effective_retain_ratio(self, *, provider: str = "", model: str = "") -> float:
+        """Resolve the relative tail-retention ratio for one exact target."""
+        policy = self._policy(provider, model)
+        return float(policy.get("retain_ratio", self.retain_ratio))
+
+    def effective_retain_tokens(
+        self,
+        *,
+        provider: str = "",
+        model: str = "",
+        context_window: int | None = None,
+    ) -> int | None:
+        """Resolve absolute retention when configured, otherwise scale its ratio."""
+        policy = self._policy(provider, model)
+        if "retain_tokens" in policy:
+            return int(policy["retain_tokens"])
+        window = self.effective_context_window(
+            model, context_window, provider=provider
+        )
+        if window is None:
+            return None
+        return max(0, int(window * self.effective_retain_ratio(provider=provider, model=model)))
 
     @staticmethod
     def estimate_tokens(messages: list[Any]) -> int:
@@ -138,6 +235,8 @@ class Compactor:
         context_window: int | None = None,
         retain_ratio: float | None = None,
         force: bool = False,
+        provider: str = "",
+        retain_tokens: int | None = None,
     ) -> tuple[int, int] | None:
         """Return a head-anchored inclusive range safe to replace.
 
@@ -149,14 +248,30 @@ class Compactor:
         start = max(0, int(history_start))
         if len(messages) - start <= 1:
             return None
-        if force and retain_ratio is None:
+        if force and retain_ratio is None and retain_tokens is None:
             ratio = 0.0
+            resolved_retain_tokens = None
+        elif retain_ratio is not None:
+            # An explicit call-site ratio is stronger than a target policy.
+            resolved_retain_tokens = None
+            ratio = min(max(float(retain_ratio), 0.0), 0.95)
         else:
-            ratio = self.retain_ratio if retain_ratio is None else min(max(float(retain_ratio), 0.0), 0.95)
+            resolved_retain_tokens = retain_tokens
+            if resolved_retain_tokens is None:
+                resolved_retain_tokens = self.effective_retain_tokens(
+                    provider=provider,
+                    model=model,
+                    context_window=context_window,
+                )
+            ratio = self.effective_retain_ratio(provider=provider, model=model)
         total_tokens = self.estimate_tokens(messages[start:])
         # Even forced overflow recovery keeps the newest request message so a
         # retry still contains the active user instruction.
-        retain_tokens = max(1, int(total_tokens * ratio))
+        retain_tokens = (
+            max(1, int(resolved_retain_tokens))
+            if resolved_retain_tokens is not None
+            else max(1, int(total_tokens * ratio))
+        )
         keep_from = len(messages)
         accumulated = 0
         while keep_from > start and accumulated < retain_tokens:
@@ -178,6 +293,17 @@ class Compactor:
         if keep_from <= start:
             return None
         return start, keep_from - 1
+
+    def _policy(self, provider: str, model: str) -> dict[str, Any]:
+        provider_id = str(provider).strip()
+        model_id = str(model).strip()
+        if provider_id and model_id:
+            exact = self.model_policies.get(f"{provider_id}/{model_id}")
+            if exact is not None:
+                return exact
+        # A model-only key is retained as a compatibility fallback for callers
+        # that cannot identify a provider yet.
+        return self.model_policies.get(model_id, {}) if model_id else {}
 
     def prune_tool_results(self, messages: list[Any]) -> list[Any]:
         """Shrink oversized tool output without invoking a model.
