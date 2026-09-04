@@ -11,6 +11,16 @@ from pathlib import Path
 from .models import WorkflowRun
 
 
+class CheckpointConflictError(RuntimeError):
+    """Raised when a checkpoint writer presents an obsolete revision."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowCheckpoint:
+    run: WorkflowRun
+    revision: int
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerLease:
     workflow_id: str
@@ -39,6 +49,7 @@ class SQLiteWorkflowStore:
                 CREATE TABLE IF NOT EXISTS workflow_checkpoints (
                   workflow_id TEXT PRIMARY KEY,
                   state_json TEXT NOT NULL,
+                  revision INTEGER NOT NULL DEFAULT 0,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS workflow_events (
@@ -65,6 +76,13 @@ class SQLiteWorkflowStore:
                 ON workflow_leases(expires_at);
                 """
             )
+            columns = {
+                str(row[1]) for row in self._connection.execute("PRAGMA table_info(workflow_checkpoints)").fetchall()
+            }
+            if "revision" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE workflow_checkpoints ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
+                )
 
     def acquire_lease(
         self,
@@ -177,22 +195,54 @@ class SQLiteWorkflowStore:
         if float(ttl_seconds) <= 0:
             raise ValueError("lease ttl must be positive")
 
-    def save(self, run: WorkflowRun, worker_id: str = "", detail: str = "") -> None:
+    def save(
+        self,
+        run: WorkflowRun,
+        worker_id: str = "",
+        detail: str = "",
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
         payload = json.dumps(run.to_dict(), ensure_ascii=False, separators=(",", ":"))
         worker_state = run.workers.get(worker_id).state.value if worker_id in run.workers else run.state
-        with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO workflow_checkpoints(workflow_id, state_json, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(workflow_id) DO UPDATE SET state_json=excluded.state_json, updated_at=CURRENT_TIMESTAMP
-                """,
-                (run.id, payload),
-            )
-            self._connection.execute(
-                "INSERT INTO workflow_events(workflow_id, worker_id, state, detail) VALUES (?, ?, ?, ?)",
-                (run.id, worker_id, worker_state, detail),
-            )
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT revision FROM workflow_checkpoints WHERE workflow_id = ?", (run.id,)
+                ).fetchone()
+                current_revision = int(row[0]) if row is not None else 0
+                if expected_revision is not None and current_revision != int(expected_revision):
+                    raise CheckpointConflictError(
+                        f"workflow {run.id} checkpoint revision {current_revision} != expected {expected_revision}"
+                    )
+                next_revision = current_revision + 1
+                if row is None:
+                    self._connection.execute(
+                        """
+                        INSERT INTO workflow_checkpoints(workflow_id, state_json, revision, updated_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (run.id, payload, next_revision),
+                    )
+                else:
+                    self._connection.execute(
+                        """
+                        UPDATE workflow_checkpoints
+                           SET state_json = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE workflow_id = ?
+                        """,
+                        (payload, next_revision, run.id),
+                    )
+                self._connection.execute(
+                    "INSERT INTO workflow_events(workflow_id, worker_id, state, detail) VALUES (?, ?, ?, ?)",
+                    (run.id, worker_id, worker_state, detail),
+                )
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+        return next_revision
 
     def record_event(self, workflow_id: str, worker_id: str, state: str, detail: str) -> None:
         """Append an audit event without replacing a newer checkpoint."""
@@ -205,16 +255,20 @@ class SQLiteWorkflowStore:
             )
 
     def load(self, workflow_id: str) -> WorkflowRun | None:
+        checkpoint = self.load_checkpoint(workflow_id)
+        return checkpoint.run if checkpoint is not None else None
+
+    def load_checkpoint(self, workflow_id: str) -> WorkflowCheckpoint | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT state_json FROM workflow_checkpoints WHERE workflow_id = ?", (workflow_id,)
+                "SELECT state_json, revision FROM workflow_checkpoints WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
         if row is None:
             return None
         decoded = json.loads(str(row[0]))
         if not isinstance(decoded, dict):
             raise ValueError(f"invalid workflow checkpoint for {workflow_id}")  # noqa: TRY004 - malformed persisted data
-        return WorkflowRun.from_dict(decoded)
+        return WorkflowCheckpoint(run=WorkflowRun.from_dict(decoded), revision=int(row[1]))
 
     def events(self, workflow_id: str) -> list[tuple[int, str, str, str]]:
         with self._lock:
