@@ -184,6 +184,193 @@ func TestProductionAgentSessionSurvivesProcessTermination(t *testing.T) {
 	t.Logf("session E2E receipt written to ignored runtime path")
 }
 
+func TestProductionLegacySessionImportAcrossProcessBoundary(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_SESSION_E2E") != "1" {
+		t.Skip("set CODE_AGENT_RUN_SESSION_E2E=1 to run the production legacy import E2E")
+	}
+
+	repositoryRoot := e2ERepositoryRoot(t)
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".agent"), 0o755); err != nil {
+		t.Fatalf("create E2E project: %v", err)
+	}
+	databasePath := filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite")
+	legacyID := "legacy-session-import-e2e"
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	legacy := session.Session{
+		ID:         legacyID,
+		WorkingDir: projectRoot,
+		CreatedAt:  createdAt,
+		UpdatedAt:  createdAt,
+		Messages: []session.Message{
+			{Role: session.RoleUser, Content: "legacy user message", CreatedAt: createdAt},
+			{Role: session.RoleAssistant, Content: "legacy assistant message", CreatedAt: createdAt.Add(time.Second)},
+		},
+	}
+	legacyStore := session.NewSQLiteStore(databasePath)
+	if err := legacyStore.Save(context.Background(), legacy); err != nil {
+		t.Fatalf("seed legacy session: %v", err)
+	}
+	if err := legacyStore.Close(); err != nil {
+		t.Fatalf("close legacy session store: %v", err)
+	}
+	beforeSnapshot := readLegacySnapshotPayload(t, databasePath, legacyID)
+
+	settings, err := json.Marshal(map[string]any{
+		"session_db_path":         databasePath,
+		"memory_dir":              filepath.Join(projectRoot, ".agent", "memory"),
+		"orchestrator_addr":       "127.0.0.1:1",
+		"orchestrator_auto_start": false,
+		"mcp_config":              "missing-mcp.json",
+		"sandbox":                 map[string]any{"enabled": false},
+	})
+	if err != nil {
+		t.Fatalf("encode legacy import settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".agent", "settings.local.json"), settings, 0o600); err != nil {
+		t.Fatalf("write legacy import settings: %v", err)
+	}
+
+	agentBinary := buildProductionAgent(t, repositoryRoot)
+	first := exec.Command(agentBinary)
+	first.Dir = projectRoot
+	first.Stdin = strings.NewReader(fmt.Sprintf("/resume %s\n/plan\n", legacyID))
+	var firstOutput strings.Builder
+	first.Stdout = &firstOutput
+	first.Stderr = &firstOutput
+	if err := first.Run(); err != nil {
+		t.Fatalf("run first legacy import process: %v; output=%q", err, firstOutput.String())
+	}
+	if !strings.Contains(firstOutput.String(), "resumed session "+legacyID+" with 2 messages") {
+		t.Fatalf("first process did not restore legacy messages: %q", firstOutput.String())
+	}
+	if afterFirst := readLegacySnapshotPayload(t, databasePath, legacyID); afterFirst != beforeSnapshot {
+		t.Fatal("first process changed the legacy snapshot payload")
+	}
+
+	firstLog, err := session.OpenSQLiteEventLog(databasePath)
+	if err != nil {
+		t.Fatalf("open event log after first import: %v", err)
+	}
+	firstEvents, err := firstLog.Events(context.Background(), legacyID)
+	if err != nil {
+		_ = firstLog.Close()
+		t.Fatalf("read first imported events: %v", err)
+	}
+	if countEventType(firstEvents, "legacy/import") != 1 || countEventType(firstEvents, "session/state") < 2 {
+		_ = firstLog.Close()
+		t.Fatalf("first import events = %+v", firstEvents)
+	}
+	if err := firstLog.Verify(context.Background(), legacyID); err != nil {
+		_ = firstLog.Close()
+		t.Fatalf("verify first imported chain: %v", err)
+	}
+	if err := firstLog.Close(); err != nil {
+		t.Fatalf("close first imported event log: %v", err)
+	}
+
+	second := exec.Command(agentBinary)
+	second.Dir = projectRoot
+	second.Stdin = strings.NewReader(fmt.Sprintf("/resume %s\n/plan\n", legacyID))
+	var secondOutput strings.Builder
+	second.Stdout = &secondOutput
+	second.Stderr = &secondOutput
+	if err := second.Run(); err != nil {
+		t.Fatalf("run second legacy import process: %v; output=%q", err, secondOutput.String())
+	}
+	if !strings.Contains(secondOutput.String(), "resumed session "+legacyID+" with 2 messages") {
+		t.Fatalf("second process did not restore legacy messages: %q", secondOutput.String())
+	}
+	if afterSecond := readLegacySnapshotPayload(t, databasePath, legacyID); afterSecond != beforeSnapshot {
+		t.Fatal("second process changed the legacy snapshot payload")
+	}
+
+	log, err := session.OpenSQLiteEventLog(databasePath)
+	if err != nil {
+		t.Fatalf("open final imported event log: %v", err)
+	}
+	finalEvents, err := log.Events(context.Background(), legacyID)
+	if err != nil {
+		_ = log.Close()
+		t.Fatalf("read final imported events: %v", err)
+	}
+	if len(finalEvents) <= len(firstEvents) || countEventType(finalEvents, "legacy/import") != 1 || countEventType(finalEvents, "session/state") <= countEventType(firstEvents, "session/state") {
+		_ = log.Close()
+		t.Fatalf("legacy import was not idempotent append: first=%d final=%d", len(firstEvents), len(finalEvents))
+	}
+	if err := log.Verify(context.Background(), legacyID); err != nil {
+		_ = log.Close()
+		t.Fatalf("verify final imported chain: %v", err)
+	}
+	var imported session.LegacyImportPayload
+	for _, event := range finalEvents {
+		if event.Type != "legacy/import" {
+			continue
+		}
+		if err := json.Unmarshal(event.Payload, &imported); err != nil {
+			_ = log.Close()
+			t.Fatalf("decode legacy import event: %v", err)
+		}
+		break
+	}
+	if imported.SessionID != legacyID || string(imported.Snapshot) != beforeSnapshot {
+		_ = log.Close()
+		t.Fatal("legacy import event did not preserve the original snapshot")
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close final imported event log: %v", err)
+	}
+	if finalSnapshot := readLegacySnapshotPayload(t, databasePath, legacyID); finalSnapshot != beforeSnapshot {
+		t.Fatal("final process changed the legacy snapshot payload")
+	}
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open final legacy import database: %v", err)
+	}
+	var sessionCount int
+	if err := database.QueryRow("SELECT COUNT(DISTINCT session_id) FROM session_events").Scan(&sessionCount); err != nil {
+		_ = database.Close()
+		t.Fatalf("count legacy import sessions: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close final legacy import database: %v", err)
+	}
+	if sessionCount < 3 {
+		t.Fatalf("legacy import session count = %d, want legacy plus two process bootstraps", sessionCount)
+	}
+
+	receipt := map[string]any{
+		"status":                 "VERIFIED",
+		"kind":                   "production-legacy-session-import",
+		"git_sha":                productionGitSHA(t, repositoryRoot),
+		"command":                "CODE_AGENT_RUN_SESSION_E2E=1 go test ./tests/e2e -run TestProductionLegacySessionImportAcrossProcessBoundary -count=1",
+		"legacy_session_id":      legacyID,
+		"legacy_import_count":    countEventType(finalEvents, "legacy/import"),
+		"state_event_count":      countEventType(finalEvents, "session/state"),
+		"final_event_count":      len(finalEvents),
+		"session_count":          sessionCount,
+		"first_process_id":       first.ProcessState.Pid(),
+		"second_process_id":      second.ProcessState.Pid(),
+		"first_exit_code":        first.ProcessState.ExitCode(),
+		"second_exit_code":       second.ProcessState.ExitCode(),
+		"source_snapshot_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte(beforeSnapshot))),
+		"database_sha256":        productionFileSHA256(t, databasePath),
+	}
+	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("encode legacy import receipt: %v", err)
+	}
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "legacy-session-import-process.json")
+	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
+		t.Fatalf("create legacy import receipt directory: %v", err)
+	}
+	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy import receipt: %v", err)
+	}
+	t.Logf("legacy import E2E receipt written to ignored runtime path")
+}
+
 func TestProductionAgentForkAndRewindSurviveProcessBoundary(t *testing.T) {
 	if os.Getenv("CODE_AGENT_RUN_SESSION_E2E") != "1" {
 		t.Skip("set CODE_AGENT_RUN_SESSION_E2E=1 to run the production session fork/rewind E2E")
@@ -434,6 +621,30 @@ func productionFileSHA256(t *testing.T, path string) string {
 	}
 	digest := sha256.Sum256(data)
 	return fmt.Sprintf("%x", digest[:])
+}
+
+func readLegacySnapshotPayload(t *testing.T, databasePath, sessionID string) string {
+	t.Helper()
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open legacy snapshot database: %v", err)
+	}
+	defer database.Close()
+	var payload string
+	if err := database.QueryRow("SELECT payload FROM sessions WHERE id = ?", sessionID).Scan(&payload); err != nil {
+		t.Fatalf("read legacy snapshot payload: %v", err)
+	}
+	return payload
+}
+
+func countEventType(events []session.Event, eventType string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
 }
 
 func waitForSessionEvents(t *testing.T, databasePath string, minimum int) (string, int) {
