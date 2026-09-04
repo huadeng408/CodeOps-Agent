@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/session"
 	_ "modernc.org/sqlite"
 )
@@ -791,6 +792,63 @@ func TestSQLiteEventStoreForkMaterializesLegacySnapshotIndependently(t *testing.
 	}
 	if len(child.Messages) != 2 || child.Messages[0].Content != "legacy message" || child.Messages[1].Content != "new message" {
 		t.Fatalf("forked legacy state = %+v, want two preserved messages", child.Messages)
+	}
+}
+
+func TestSQLiteEventStoreForkRebindsActorToChildSession(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.sqlite")
+	store := session.NewSQLiteEventStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+	manager := session.NewManager(store)
+	parent := manager.NewSession("workspace")
+	actor, err := (identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "user:42",
+		Subject:       "alice",
+		TenantID:      "org:7",
+		Roles:         []string{"USER", "REVIEWER"},
+	}).BindSession(parent.ID)
+	if err != nil {
+		t.Fatalf("bind parent actor: %v", err)
+	}
+	manager.SetActor(actor)
+	manager.Append(session.RoleUser, "fork with actor")
+
+	events := mustSessionEvents(t, path, parent.ID)
+	targetSeq := stateSeqWithMessageCount(t, events, 1)
+	child, err := store.Fork(ctx, parent.ID, "child-with-actor", targetSeq)
+	if err != nil {
+		t.Fatalf("fork session with actor: %v", err)
+	}
+	if child.ID != "child-with-actor" {
+		t.Fatalf("child id = %q, want child-with-actor", child.ID)
+	}
+	if child.Actor.ActorID != actor.ActorID || child.Actor.Subject != actor.Subject || child.Actor.TenantID != actor.TenantID {
+		t.Fatalf("child actor identity changed: got=%+v want=%+v", child.Actor, actor)
+	}
+	if len(child.Actor.Roles) != len(actor.Roles) || child.Actor.Roles[0] != "USER" || child.Actor.Roles[1] != "REVIEWER" {
+		t.Fatalf("child actor roles changed: got=%v want=%v", child.Actor.Roles, actor.Roles)
+	}
+	if child.Actor.SessionID != child.ID {
+		t.Fatalf("child actor session = %q, want %q", child.Actor.SessionID, child.ID)
+	}
+	if err := child.Actor.Validate(); err != nil {
+		t.Fatalf("forked child actor is invalid: %v", err)
+	}
+	rewound, err := store.Rewind(ctx, child.ID, targetSeq)
+	if err != nil {
+		t.Fatalf("rewind child session with actor: %v", err)
+	}
+	if rewound.Actor.SessionID != child.ID {
+		t.Fatalf("rewound child actor session = %q, want %q", rewound.Actor.SessionID, child.ID)
+	}
+	loadedParent, err := store.Load(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("reload parent after fork: %v", err)
+	}
+	if loadedParent.Actor.SessionID != parent.ID {
+		t.Fatalf("parent actor was rebound: got session %q, want %q", loadedParent.Actor.SessionID, parent.ID)
 	}
 }
 

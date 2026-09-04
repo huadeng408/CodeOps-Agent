@@ -73,7 +73,7 @@ func TestProductionSessionControlToolsRecoverAcrossProcessTermination(t *testing
 	if _, err := io.WriteString(writer, "SESSION_CONTROL_E2E\n"); err != nil {
 		t.Fatalf("send first control request: %v", err)
 	}
-	parentID, parentEventCount := waitForSessionEvents(t, databasePath, 3)
+	parentID, parentEventCount := waitForSessionState(t, databasePath, 1, "chat")
 	waitForSessionEventCount(t, databasePath, "child-session-tool-e2e", 5)
 	if err := firstAgent.Process.Kill(); err != nil {
 		t.Fatalf("terminate first production agent: %v", err)

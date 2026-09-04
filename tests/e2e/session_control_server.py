@@ -36,7 +36,7 @@ class SessionControlLLM(LLMClient):
         if latest_user == "SESSION_CONTROL_E2E_RESUME":
             if any('"operation":"rewind"' in content for content in tool_messages):
                 return ChatResponse(text="SESSION_CONTROL_RESUMED_OK", usage=Usage(input_tokens=1, output_tokens=1))
-            arguments = {"api_version": "v1", "operation": "rewind", "target_seq": 2}
+            arguments = {"api_version": "v1", "operation": "rewind", "target_seq": 3}
             return ChatResponse(
                 tool_calls=[
                     ToolCall(
@@ -55,7 +55,7 @@ class SessionControlLLM(LLMClient):
         if any('"operation":"fork"' in content for content in tool_messages):
             if os.environ.get("CODE_AGENT_SESSION_CONTROL_STAGE") == "first":
                 return ChatResponse(text="SESSION_CONTROL_FORKED", usage=Usage(input_tokens=1, output_tokens=1))
-            arguments = {"api_version": "v1", "operation": "rewind", "target_seq": 2}
+            arguments = {"api_version": "v1", "operation": "rewind", "target_seq": 3}
             return ChatResponse(
                 tool_calls=[
                     ToolCall(
@@ -71,7 +71,7 @@ class SessionControlLLM(LLMClient):
             "api_version": "v1",
             "operation": "fork",
             "target_session_id": "child-session-tool-e2e",
-            "target_seq": 2,
+            "target_seq": 3,
         }
         return ChatResponse(
             tool_calls=[

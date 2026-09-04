@@ -155,6 +155,9 @@ func (s *SQLiteEventStore) Fork(ctx context.Context, sourceSessionID, targetSess
 		return nil, err
 	}
 	child.ID = strings.TrimSpace(targetSessionID)
+	if err := rebindActorToSession(child); err != nil {
+		return nil, err
+	}
 	if err := log.ForkWithState(ctx, sourceSessionID, child.ID, targetSeq, *child); err != nil {
 		return nil, err
 	}
@@ -188,6 +191,9 @@ func (s *SQLiteEventStore) Rewind(ctx context.Context, sessionID string, targetS
 		return nil, err
 	}
 	restored.ID = sessionID
+	if err := rebindActorToSession(restored); err != nil {
+		return nil, err
+	}
 	if _, _, err := log.RewindWithState(ctx, sessionID, targetSeq, *restored); err != nil {
 		return nil, err
 	}
@@ -239,6 +245,23 @@ func replaySessionState(events []Event, targetSeq int64) (*Session, error) {
 		return nil, fmt.Errorf("%w: no session state at or before seq %d", ErrRewindTargetInvalid, targetSeq)
 	}
 	return current, nil
+}
+
+func rebindActorToSession(current *Session) error {
+	if current == nil || current.ID == "" {
+		return nil
+	}
+	actor := current.Actor
+	if actor.SchemaVersion == 0 && actor.ActorID == "" && actor.Subject == "" && actor.TenantID == "" && len(actor.Roles) == 0 && actor.SessionID == "" {
+		return nil
+	}
+	actor.SessionID = ""
+	rebound, err := actor.BindSession(current.ID)
+	if err != nil {
+		return fmt.Errorf("bind session actor to %s: %w", current.ID, err)
+	}
+	current.Actor = rebound
+	return nil
 }
 
 func (s *SQLiteEventStore) Close() error {

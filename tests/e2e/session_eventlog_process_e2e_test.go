@@ -64,7 +64,7 @@ func TestProductionAgentSessionSurvivesProcessTermination(t *testing.T) {
 		t.Fatalf("send first session input: %v", err)
 	}
 
-	sessionID, eventCount := waitForSessionEvents(t, databasePath, 4)
+	sessionID, eventCount := waitForSessionState(t, databasePath, 2, "plan")
 	if err := first.Process.Kill(); err != nil {
 		t.Fatalf("terminate first production agent: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestProductionAgentForkAndRewindSurviveProcessBoundary(t *testing.T) {
 		t.Fatalf("send first session input: %v", err)
 	}
 
-	sessionID, eventCount := waitForSessionEvents(t, databasePath, 3)
+	sessionID, eventCount := waitForSessionState(t, databasePath, 1, "plan")
 	if err := first.Process.Kill(); err != nil {
 		t.Fatalf("terminate first production agent: %v", err)
 	}
@@ -447,20 +447,60 @@ func waitForSessionEvents(t *testing.T, databasePath string, minimum int) (strin
 			if queryErr == nil {
 				var id string
 				var count int
-				if rows.Next() && rows.Scan(&id, &count) == nil {
+				if rows.Next() && rows.Scan(&id, &count) == nil && count >= minimum {
 					_ = rows.Close()
 					_ = db.Close()
-					if count >= minimum {
-						return id, count
-					}
-				} else {
-					_ = rows.Close()
+					return id, count
 				}
+				_ = rows.Close()
 			}
 			_ = db.Close()
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("session event log did not reach %d events before timeout", minimum)
+	return "", 0
+}
+
+func waitForSessionState(t *testing.T, databasePath string, minimumMessages int, mode string) (string, int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		db, err := sql.Open("sqlite", databasePath)
+		if err == nil {
+			_, _ = db.Exec("PRAGMA busy_timeout = 100")
+			rows, queryErr := db.Query(`SELECT session_id, COUNT(*) FROM session_events GROUP BY session_id`)
+			if queryErr == nil {
+				for rows.Next() {
+					var id string
+					var count int
+					if rows.Scan(&id, &count) != nil {
+						continue
+					}
+					var payload string
+					stateErr := db.QueryRow(
+						`SELECT payload FROM session_events WHERE session_id = ? AND type = 'session/state' ORDER BY seq DESC LIMIT 1`,
+						id,
+					).Scan(&payload)
+					if stateErr != nil {
+						continue
+					}
+					var state session.Session
+					if json.Unmarshal([]byte(payload), &state) != nil {
+						continue
+					}
+					if len(state.Messages) >= minimumMessages && state.Mode == mode {
+						_ = rows.Close()
+						_ = db.Close()
+						return id, count
+					}
+				}
+				_ = rows.Close()
+			}
+			_ = db.Close()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session event log did not reach %d messages in mode %q before timeout", minimumMessages, mode)
 	return "", 0
 }
