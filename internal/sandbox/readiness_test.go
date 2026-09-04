@@ -177,6 +177,29 @@ func TestDetectAvailabilityRetriesTransientDockerReadiness(t *testing.T) {
 	}
 }
 
+func TestDetectAvailabilityPublicContractRetriesTransientReadiness(t *testing.T) {
+	var calls atomic.Int32
+	probe := func(_ context.Context, _ time.Duration, binary string, _ ...string) bool {
+		if binary != "docker" {
+			return false
+		}
+		return calls.Add(1) >= 2
+	}
+
+	availability := detectAvailability(context.Background(), Config{
+		Backend:         BackendDocker,
+		ProbeTimeout:    10 * time.Millisecond,
+		ProbeAttempts:   2,
+		ProbeRetryDelay: 1 * time.Millisecond,
+	}, "linux", probe)
+	if !availability.Docker {
+		t.Fatalf("public availability contract should recover transient Docker readiness: %+v", availability)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("public availability probe calls = %d, want 2", got)
+	}
+}
+
 func TestDetectAvailabilityStopsRetryingWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

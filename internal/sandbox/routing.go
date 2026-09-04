@@ -258,8 +258,12 @@ func NewSandboxRunner(config Config) *RoutingRunner {
 // DetectAvailability performs bounded, output-discarding health probes for
 // Docker and WSL2. Native execution is deliberately never considered isolated.
 func DetectAvailability(ctx context.Context, config Config, platform string) Availability {
+	return detectAvailability(ctx, config, platform, probeCommand)
+}
+
+func detectAvailability(ctx context.Context, config Config, platform string, probe availabilityProbe) Availability {
 	config = normalizeConfig(config)
-	return detectAvailabilityOnce(ctx, config, platform, probeCommand)
+	return detectAvailabilityWithRetry(ctx, config, platform, probe)
 }
 
 func detectAvailabilityWithRetry(ctx context.Context, config Config, platform string, probe availabilityProbe) Availability {
