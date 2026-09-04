@@ -450,6 +450,14 @@ def test_persisted_harness_history_is_loaded_into_llm_prompt(monkeypatch, tmp_pa
                                             created_at="2026-06-02T00:00:01Z",
                                         ),
                                     ],
+                                    actor=orchestrator_pb2.ActorContext(
+                                        schema_version=1,
+                                        actor_id="user:42",
+                                        subject="alice",
+                                        tenant_id="org:7",
+                                        roles=["USER"],
+                                        session_id="session-1",
+                                    ),
                                 )
                             )
                         ]

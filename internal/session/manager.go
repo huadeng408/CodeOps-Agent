@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/permission"
 )
 
@@ -85,6 +86,7 @@ type WorktreeState struct {
 
 type Session struct {
 	ID               string             `json:"id"`
+	Actor            identity.Actor     `json:"actor,omitempty"`
 	WorkingDir       string             `json:"working_dir"`
 	CreatedAt        time.Time          `json:"created_at"`
 	UpdatedAt        time.Time          `json:"updated_at"`
@@ -246,6 +248,21 @@ func (m *Manager) SetWorkingDir(workingDir string) Session {
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.WorkingDir = strings.TrimSpace(workingDir)
+	m.current.UpdatedAt = now
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
+	return cloneSession(m.current)
+}
+
+// SetActor persists the authenticated identity bound to the current session.
+func (m *Manager) SetActor(actor identity.Actor) Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	m.current.Actor = actor
 	m.current.UpdatedAt = now
 	if !m.commitLocked(context.Background(), previous) {
 		return cloneSession(previous)
@@ -793,6 +810,7 @@ func (m *Manager) ensureMetadataLocked() {
 
 func cloneSession(session Session) Session {
 	out := session
+	out.Actor.Roles = append([]string(nil), session.Actor.Roles...)
 	if len(session.Messages) > 0 {
 		out.Messages = make([]Message, len(session.Messages))
 		copy(out.Messages, session.Messages)

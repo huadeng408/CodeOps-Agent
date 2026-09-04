@@ -46,6 +46,18 @@ message UserInput {
   string session_id = 2;
   repeated ConversationMessage history = 3;
   PlanTodoSnapshot plan_todo_state = 4;
+  ActorContext actor = 5;
+}
+
+// ActorContext is the authenticated, non-secret identity issued by the Go
+// Harness. The Python orchestrator must validate it before touching a session.
+message ActorContext {
+  uint32 schema_version = 1;
+  string actor_id = 2;
+  string subject = 3;
+  string tenant_id = 4;
+  repeated string roles = 5;
+  string session_id = 6;
 }
 
 message PlanTodoSnapshot {
@@ -64,6 +76,7 @@ message ConversationMessage {
 message CompactRequest {
   string session_id = 1;
   repeated ConversationMessage history = 2;
+  ActorContext actor = 3;
 }
 
 message ToolResult {

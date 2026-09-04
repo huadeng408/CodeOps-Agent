@@ -9,6 +9,8 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
+from orchestrator.identity import ActorIdentity, ActorIdentityError
+
 from .backend import GoBackendClient
 from .config import Settings, load_settings
 from .graph import build_graph
@@ -90,6 +92,27 @@ async def verify_internal_token(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid internal token")
 
 
+def _verify_chat_actor(payload: ChatStreamRequest) -> ActorIdentity:
+    if payload.actor is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="actor context is required")
+    try:
+        actor = ActorIdentity.from_wire(payload.actor.model_dump(mode="json"))
+        actor.validate()
+    except (ActorIdentityError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid actor context") from exc
+    expected_id = f"user:{payload.user.id}"
+    expected_subject = payload.user.username.strip() or expected_id
+    expected_session = expected_id
+    if actor.actor_id != expected_id or actor.subject != expected_subject:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="actor does not match user")
+    if actor.session_id != expected_session:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="actor session does not match user")
+    expected_role = payload.user.role.strip().upper() or "USER"
+    if expected_role not in {role.upper() for role in actor.roles}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="actor role does not match user")
+    return actor
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     await backend.close()
@@ -103,6 +126,7 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/v1/chat/stream")
 async def chat_stream(payload: ChatStreamRequest, request: Request, _: None = Depends(verify_internal_token)):
+    actor = _verify_chat_actor(payload)
     async def event_stream():
         run_task: asyncio.Task | None = None
         try:
@@ -115,6 +139,7 @@ async def chat_stream(payload: ChatStreamRequest, request: Request, _: None = De
             initial_state = {
                 "query": payload.query,
                 "user": payload.user.model_dump(mode="json"),
+                "actor": actor.to_wire(),
                 "stream_callback": on_chunk,
             }
 

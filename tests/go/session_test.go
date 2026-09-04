@@ -9,7 +9,27 @@ import (
 	"time"
 
 	"code-agent/internal/session"
+	"code-agent/internal/identity"
 )
+
+func TestSessionPersistsActorIdentity(t *testing.T) {
+	m := session.NewManager(session.NewMemoryStore())
+	created := m.NewSession(t.TempDir())
+	actor, err := identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "actor:local",
+		Subject:       "local",
+		TenantID:      "tenant:local",
+		Roles:         []string{"LOCAL"},
+	}.BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetActor(actor)
+	if got := m.Current().Actor; got.ScopeKey() != actor.ScopeKey() {
+		t.Fatalf("actor was not persisted in session: got=%+v want=%+v", got, actor)
+	}
+}
 
 func TestSessionManagerTracksMessages(t *testing.T) {
 	manager := session.NewManager(nil)

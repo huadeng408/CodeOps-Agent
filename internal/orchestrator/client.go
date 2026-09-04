@@ -11,6 +11,7 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/telemetry/genai"
 
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +27,10 @@ type ConversationMessage struct {
 	Content   string
 	CreatedAt string
 }
+
+// ActorIdentity is the versioned, non-secret caller identity propagated to
+// the Python orchestrator.
+type ActorIdentity = identity.Actor
 
 type ToolCall struct {
 	ID                 string
@@ -109,6 +114,7 @@ type Client struct {
 	client              codeagentpb.OrchestratorClient
 	conversationTimeout time.Duration
 	askUserTimeout      time.Duration
+	actor               identity.Actor
 	// OnTextDelta is called for each streaming text chunk from the
 	// orchestrator. When nil (default) text deltas are silently
 	// accumulated into the final return value.
@@ -158,7 +164,64 @@ func NewClient(target string) (*Client, error) {
 		client:              codeagentpb.NewOrchestratorClient(conn),
 		conversationTimeout: defaultConversationTimeout,
 		askUserTimeout:      defaultAskUserTimeout,
+		actor:               identity.Default(),
 	}, nil
+}
+
+// SetActor configures the authenticated actor used for subsequent requests.
+func (c *Client) SetActor(actor ActorIdentity) error {
+	if c == nil {
+		return errors.New("orchestrator client is nil")
+	}
+	actor.Roles = append([]string(nil), actor.Roles...)
+	if actor.SchemaVersion == 0 {
+		actor.SchemaVersion = identity.SchemaVersion
+	}
+	if actor.ActorID == "" && actor.Subject == "" && actor.TenantID == "" {
+		return errors.New("actor identity is empty")
+	}
+	if actor.SessionID != "" {
+		if err := actor.Validate(); err != nil {
+			return err
+		}
+	}
+	c.actor = actor
+	return nil
+}
+
+// Actor returns a defensive copy of the configured actor identity.
+func (c *Client) Actor() ActorIdentity {
+	if c == nil {
+		return identity.Actor{}
+	}
+	actor := c.actor
+	actor.Roles = append([]string(nil), actor.Roles...)
+	return actor
+}
+
+func (c *Client) actorForSession(sessionID string) (identity.Actor, string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		// Legacy no-session callers still get an explicit isolated identity. The
+		// production CLI always supplies its durable session id.
+		sessionID = "ephemeral:" + strings.TrimSpace(c.actor.ActorID)
+	}
+	actor, err := c.actor.BindSession(sessionID)
+	if err != nil {
+		return identity.Actor{}, "", err
+	}
+	return actor, sessionID, nil
+}
+
+func actorProto(actor identity.Actor) *codeagentpb.ActorContext {
+	return &codeagentpb.ActorContext{
+		SchemaVersion: actor.SchemaVersion,
+		ActorId:       actor.ActorID,
+		Subject:       actor.Subject,
+		TenantId:      actor.TenantID,
+		Roles:         append([]string(nil), actor.Roles...),
+		SessionId:     actor.SessionID,
+	}
 }
 
 func (c *Client) Close() error {
@@ -290,6 +353,10 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	ctx, cancel := context.WithTimeout(ctx, c.ConversationTimeout())
 	defer cancel()
 	ctx = c.injectTraceMetadata(ctx)
+	actor, sessionID, err := c.actorForSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("bind actor to session: %w", err)
+	}
 
 	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
 	for _, item := range trimConversationHistory(history) {
@@ -300,8 +367,9 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 		})
 	}
 	update, err := c.client.Compact(ctx, &codeagentpb.CompactRequest{
-		SessionId: strings.TrimSpace(sessionID),
+		SessionId: sessionID,
 		History:   historyPayload,
+		Actor:     actorProto(actor),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compact orchestrator history: %w", err)
@@ -345,6 +413,10 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	// orchestrator can attach its gen_ai inference spans as children of the
 	// Go invoke_agent span — replacing the broken launch-time env-var hack.
 	ctx = c.injectTraceMetadata(ctx)
+	actor, sessionID, err := c.actorForSession(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("bind actor to session: %w", err)
+	}
 
 	stream, err := c.client.Converse(ctx)
 	if err != nil {
@@ -364,9 +436,10 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 		Payload: &codeagentpb.HarnessMessage_UserInput{
 			UserInput: &codeagentpb.UserInput{
 				Text:          input,
-				SessionId:     strings.TrimSpace(sessionID),
+				SessionId:     sessionID,
 				History:       historyPayload,
 				PlanTodoState: state,
+				Actor:         actorProto(actor),
 			},
 		},
 	}); err != nil {

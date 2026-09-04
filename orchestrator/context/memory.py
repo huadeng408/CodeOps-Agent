@@ -33,6 +33,7 @@ _EVENT_KINDS = {
     "compaction/summary",
     "compaction/end",
     "tool_result/prune",
+    "actor/authorized",
 }
 _SKIP_DIRS = {
     ".git",

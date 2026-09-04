@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,29 @@ import (
 	"code-agent/internal/serverconfig"
 	"code-agent/pkg/tasks"
 )
+
+func TestStreamResponseCarriesVersionedActorContext(t *testing.T) {
+	seen := make(chan streamRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload streamRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		seen <- payload
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	client := NewClient(serverconfig.AIOrchestratorConfig{Enabled: true, BaseURL: server.URL})
+	err := client.StreamResponse(context.Background(), "private user query", &model.User{ID: 42, Username: "alice", Role: "USER"}, nil, nil)
+	if err == nil {
+		t.Fatal("StreamResponse() error = nil, want non-200 error")
+	}
+	payload := <-seen
+	if payload.Actor.ActorID != "user:42" || payload.Actor.Subject != "alice" || payload.Actor.SessionID != "user:42" {
+		t.Fatalf("unexpected actor context: %+v", payload.Actor)
+	}
+}
 
 func TestStreamResponseDoesNotExposeNonOKResponseBody(t *testing.T) {
 	const privateBody = "private upstream failure detail"

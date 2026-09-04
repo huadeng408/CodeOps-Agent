@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/model"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/telemetry/genai"
@@ -45,6 +47,7 @@ type httpClient struct {
 type streamRequest struct {
 	Query string                 `json:"query"`
 	User  model.OrchestratorUser `json:"user"`
+	Actor identity.Actor         `json:"actor"`
 }
 
 type streamEvent struct {
@@ -109,9 +112,33 @@ func (c *httpClient) StreamResponse(ctx context.Context, query string, user *mod
 		}()
 	}
 
+	orchestratorUser := model.NewOrchestratorUser(user)
+	subject := strings.TrimSpace(user.Username)
+	if subject == "" {
+		subject = "user:" + strconv.FormatUint(uint64(user.ID), 10)
+	}
+	role := strings.ToUpper(strings.TrimSpace(user.Role))
+	if role == "" {
+		role = "USER"
+	}
+	actor := identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "user:" + strconv.FormatUint(uint64(user.ID), 10),
+		Subject:       subject,
+		TenantID:      strings.TrimSpace(user.PrimaryOrg),
+		Roles:         []string{role},
+		SessionID:     "user:" + strconv.FormatUint(uint64(user.ID), 10),
+	}
+	if actor.TenantID == "" {
+		actor.TenantID = "tenant:default"
+	}
+	if err := actor.Validate(); err != nil {
+		return fmt.Errorf("build actor context: %w", err)
+	}
 	bodyBytes, err := json.Marshal(streamRequest{
 		Query: query,
-		User:  model.NewOrchestratorUser(user),
+		User:  orchestratorUser,
+		Actor: actor,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal orchestrator request failed: %w", err)

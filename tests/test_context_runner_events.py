@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from codeagent import orchestrator_pb2
+from orchestrator.identity import ActorIdentity
 from orchestrator.llm.client import ChatResponse, ToolCall
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, ServerConfig, create_grpc_server
@@ -54,6 +55,39 @@ class NoToolLLM:
 
     async def chat(self, request):
         return ChatResponse(text="done")
+
+
+def test_runner_persists_authorized_actor_event(tmp_path: Path) -> None:
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+    actor = ActorIdentity(
+        schema_version=1,
+        actor_id="user:42",
+        subject="alice",
+        tenant_id="org:7",
+        roles=("USER",),
+        session_id="session-actor",
+    )
+
+    list(runner.run("hello", iter(()), session_id="session-actor", actor=actor))
+
+    events = app.context_store.events("session-actor")
+    authorized = [event for event in events if event.kind == "actor/authorized"]
+    assert len(authorized) == 1
+    assert authorized[0].payload["actor_id"] == "user:42"
+    assert authorized[0].payload["tenant_id"] == "org:7"
+    app.context_store.close()
 
 
 def test_conversation_runner_persists_plan_tool_diff_and_final_events(tmp_path: Path) -> None:
