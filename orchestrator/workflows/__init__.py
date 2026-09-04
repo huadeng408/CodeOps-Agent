@@ -3,11 +3,12 @@
 from .engine import WorkflowEngine
 from .models import WorkerResult, WorkerSpec, WorkerState, WorkflowRun, WorkflowSpec
 from .providers import ProviderWorkerExecutor
-from .store import SQLiteWorkflowStore
+from .store import SQLiteWorkflowStore, WorkerLease
 
 __all__ = [
     "ProviderWorkerExecutor",
     "SQLiteWorkflowStore",
+    "WorkerLease",
     "WorkerResult",
     "WorkerSpec",
     "WorkerState",

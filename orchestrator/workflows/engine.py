@@ -3,46 +3,88 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from uuid import uuid4
 
 from .models import WorkerResult, WorkerSpec, WorkerState, WorkflowRun, WorkflowSpec
-from .store import SQLiteWorkflowStore
+from .store import SQLiteWorkflowStore, WorkerLease
 
 WorkerExecutor = Callable[[WorkerSpec, dict[str, WorkerResult]], Awaitable[WorkerResult]]
 
 
+class LeaseLostError(RuntimeError):
+    """Raised when a worker can no longer prove ownership of its lease."""
+
+
 class WorkflowEngine:
-    def __init__(self, store: SQLiteWorkflowStore, execute_worker: WorkerExecutor, max_concurrency: int = 4) -> None:
+    def __init__(
+        self,
+        store: SQLiteWorkflowStore,
+        execute_worker: WorkerExecutor,
+        max_concurrency: int = 4,
+        *,
+        owner_id: str | None = None,
+        lease_ttl_seconds: float = 60.0,
+        lease_poll_interval_seconds: float = 0.05,
+    ) -> None:
         if max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
+        if lease_ttl_seconds <= 0:
+            raise ValueError("lease ttl must be positive")
+        if lease_poll_interval_seconds <= 0:
+            raise ValueError("lease poll interval must be positive")
         self._store = store
         self._execute_worker = execute_worker
         self._max_concurrency = max_concurrency
+        self._owner_id = owner_id.strip() if owner_id and owner_id.strip() else f"workflow-{uuid4().hex}"
+        self._lease_ttl_seconds = float(lease_ttl_seconds)
+        self._lease_poll_interval_seconds = float(lease_poll_interval_seconds)
         self._recovered_worker_ids: list[str] = []
 
     async def run(self, spec: WorkflowSpec) -> WorkflowRun:
         workers = self._validate(spec)
+        self._store.reap_expired_leases()
         checkpoint = self._store.load(spec.id)
         run = self._resume_or_create(spec, checkpoint)
-        self._store.save(run, detail="workflow resumed" if checkpoint else "workflow started")
-        for worker_id in self._recovered_worker_ids:
-            self._store.save(run, worker_id, "worker recovered from previous process")
+        if checkpoint is None:
+            self._store.save(run, detail="workflow started")
+        else:
+            self._store.record_event(spec.id, "", run.state, "workflow resumed")
 
         while True:
+            run = self._refresh_run(run, workers)
             self._block_workers_with_failed_dependencies(run, workers)
-            ready = [
+            candidates = [
                 worker
                 for worker in workers.values()
                 if run.workers[worker.id].state is WorkerState.PENDING
                 and all(run.workers[dependency].state is WorkerState.COMPLETED for dependency in worker.depends_on)
             ]
-            if not ready:
+            if not candidates:
                 if all(result.state in {WorkerState.COMPLETED, WorkerState.FAILED, WorkerState.BLOCKED} for result in run.workers.values()):
                     run.state = "completed" if all(result.state is WorkerState.COMPLETED for result in run.workers.values()) else "partial_failure"
                     self._store.save(run, detail="workflow terminal")
                     return run
-                raise RuntimeError(f"workflow {spec.id} cannot make progress")
+                await asyncio.sleep(self._lease_poll_interval_seconds)
+                continue
 
-            batch = ready[: self._max_concurrency]
+            claimed: list[tuple[WorkerSpec, WorkerLease]] = []
+            for worker in candidates:
+                lease = self._store.acquire_lease(
+                    spec.id,
+                    worker.id,
+                    self._owner_id,
+                    self._lease_ttl_seconds,
+                )
+                if lease is not None:
+                    claimed.append((worker, lease))
+                if len(claimed) >= self._max_concurrency:
+                    break
+            if not claimed:
+                await asyncio.sleep(self._lease_poll_interval_seconds)
+                continue
+
+            batch = [worker for worker, _lease in claimed]
+            leases = {worker.id: lease for worker, lease in claimed}
             for worker in batch:
                 prior = run.workers[worker.id]
                 run.workers[worker.id] = replace(prior, state=WorkerState.RUNNING, attempts=prior.attempts + 1, error="")
@@ -50,22 +92,35 @@ class WorkflowEngine:
 
             tasks = {
                 worker.id: asyncio.create_task(
-                    self._execute_worker(worker, {dependency: run.workers[dependency] for dependency in worker.depends_on})
+                    self._execute_with_lease(
+                        worker,
+                        {dependency: run.workers[dependency] for dependency in worker.depends_on},
+                        leases[worker.id],
+                    )
                 )
                 for worker in batch
             }
             checkpointed: set[str] = set()
 
-            def checkpoint_completed(worker: WorkerSpec, task: asyncio.Task[WorkerResult]) -> None:
+            def checkpoint_completed(
+                worker: WorkerSpec,
+                task: asyncio.Task[WorkerResult],
+                current_run: WorkflowRun = run,
+                current_leases: dict[str, WorkerLease] = leases,
+                current_checkpointed: set[str] = checkpointed,
+            ) -> None:
                 if task.cancelled() or task.exception() is not None:
                     return
                 outcome = task.result()
                 if outcome.state is not WorkerState.COMPLETED:
                     return
-                prior = run.workers[worker.id]
-                run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
-                self._store.save(run, worker.id, "worker completed")
-                checkpointed.add(worker.id)
+                prior = current_run.workers[worker.id]
+                current_run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
+                self._store.save(current_run, worker.id, "worker completed")
+                self._store.release_lease(
+                    spec.id, worker.id, self._owner_id, current_leases[worker.id].token
+                )
+                current_checkpointed.add(worker.id)
 
             for worker in batch:
                 tasks[worker.id].add_done_callback(
@@ -84,6 +139,7 @@ class WorkflowEngine:
                     else:
                         prior = run.workers[worker_id]
                         run.workers[worker_id] = replace(prior, state=WorkerState.PENDING)
+                    self._store.release_lease(spec.id, worker_id, self._owner_id, leases[worker_id].token)
                 self._store.save(run, detail="workflow interrupted")
                 raise
 
@@ -95,6 +151,7 @@ class WorkflowEngine:
                     if isinstance(outcome, asyncio.CancelledError):
                         run.workers[worker.id] = replace(prior, state=WorkerState.PENDING)
                         self._store.save(run, worker.id, "worker interrupted")
+                        self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
                         raise outcome
                     if prior.attempts < worker.max_attempts:
                         run.workers[worker.id] = replace(
@@ -106,6 +163,7 @@ class WorkflowEngine:
                     else:
                         run.workers[worker.id] = WorkerResult.failed(worker.id, worker.provider, str(outcome), prior.attempts)
                         self._store.save(run, worker.id, "worker failed")
+                    self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
                     continue
                 if outcome.state is WorkerState.FAILED and prior.attempts < worker.max_attempts:
                     run.workers[worker.id] = replace(
@@ -117,6 +175,62 @@ class WorkflowEngine:
                 else:
                     run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
                     self._store.save(run, worker.id, "worker completed" if outcome.state is WorkerState.COMPLETED else "worker failed")
+                self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
+
+    async def _execute_with_lease(
+        self,
+        worker: WorkerSpec,
+        upstream: dict[str, WorkerResult],
+        lease: WorkerLease,
+    ) -> WorkerResult:
+        execution = asyncio.create_task(self._execute_worker(worker, upstream))
+        heartbeat = asyncio.create_task(self._heartbeat(lease))
+        try:
+            done, _pending = await asyncio.wait(
+                {execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeat in done:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+                raise LeaseLostError(f"lease lost for worker {worker.id}")
+            result = await execution
+            if not self._store.renew_lease(
+                lease.workflow_id,
+                lease.worker_id,
+                lease.owner_id,
+                lease.token,
+                self._lease_ttl_seconds,
+            ):
+                raise LeaseLostError(f"lease lost for worker {worker.id}")
+            return result
+        finally:
+            if not heartbeat.done():
+                heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _heartbeat(self, lease: WorkerLease) -> bool:
+        interval = max(min(self._lease_ttl_seconds / 3.0, 1.0), 0.01)
+        while True:
+            await asyncio.sleep(interval)
+            if not self._store.renew_lease(
+                lease.workflow_id,
+                lease.worker_id,
+                lease.owner_id,
+                lease.token,
+                self._lease_ttl_seconds,
+            ):
+                return False
+
+    def _refresh_run(self, run: WorkflowRun, workers: Mapping[str, WorkerSpec]) -> WorkflowRun:
+        latest = self._store.load(run.id)
+        if latest is None:
+            return run
+        for worker in workers.values():
+            current = latest.workers.get(worker.id)
+            if current is not None and current.state is WorkerState.RUNNING and self._store.get_lease(run.id, worker.id) is None:
+                latest.workers[worker.id] = replace(current, state=WorkerState.PENDING)
+                self._store.save(latest, worker.id, "worker recovered from previous process")
+        return latest
 
     def _resume_or_create(self, spec: WorkflowSpec, checkpoint: WorkflowRun | None = None) -> WorkflowRun:
         self._recovered_worker_ids = []
@@ -129,9 +243,10 @@ class WorkflowEngine:
             existing = checkpoint.workers.get(worker.id)
             if existing is None or existing.provider != worker.provider:
                 checkpoint.workers[worker.id] = WorkerResult(id=worker.id, provider=worker.provider)
-            elif existing.state is WorkerState.RUNNING:
+            elif existing.state is WorkerState.RUNNING and self._store.get_lease(spec.id, worker.id) is None:
                 checkpoint.workers[worker.id] = replace(existing, state=WorkerState.PENDING)
                 self._recovered_worker_ids.append(worker.id)
+                self._store.save(checkpoint, worker.id, "worker recovered from previous process")
             elif existing.state is WorkerState.FAILED and existing.attempts < worker.max_attempts:
                 checkpoint.workers[worker.id] = replace(existing, state=WorkerState.PENDING)
         return checkpoint
