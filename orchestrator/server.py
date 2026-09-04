@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 from concurrent import futures
 from dataclasses import dataclass
@@ -150,6 +151,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             provider_router=self._provider_router_for_request(),
             hooks=self.app.hooks,
             commands=self.app.commands,
+            require_harness_worktree=os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
 
     def Compact(self, request, context):

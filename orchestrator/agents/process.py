@@ -38,9 +38,22 @@ class ProcessAgentExecutor:
         request_id: str,
         parent_session_id: str,
         child_session_id: str,
+        worktree_path: str | Path | None = None,
+        require_worktree: bool = False,
     ) -> AgentResult:
         if self.timeout <= 0:
             raise ValueError("sub-agent timeout must be positive")
+        effective_working_dir = Path(worktree_path or self.working_dir).resolve()
+        if require_worktree:
+            project_root = Path(self.project_root).resolve()
+            expected_root = (project_root / ".agent" / "worktrees").resolve()
+            try:
+                effective_working_dir.relative_to(expected_root)
+            except ValueError as exc:
+                raise ValueError("harness worktree path is outside the controlled worktree root") from exc
+            if not effective_working_dir.is_dir():
+                raise RuntimeError("harness-assigned worktree does not exist")
+
         payload = {
             "protocol_version": PROTOCOL_VERSION,
             "request_id": _required_id(request_id, "request_id"),
@@ -51,7 +64,7 @@ class ProcessAgentExecutor:
             "objective": str(objective).strip(),
             "context": context or {},
             "project_root": str(Path(self.project_root).resolve()),
-            "working_dir": str(Path(self.working_dir).resolve()),
+            "working_dir": str(effective_working_dir),
         }
         if not payload["kind"] or not payload["title"] or not payload["objective"]:
             raise ValueError("sub-agent kind, title, and objective must not be empty")
@@ -62,7 +75,7 @@ class ProcessAgentExecutor:
 
         process = subprocess.Popen(
             [self.python_executable, "-m", "orchestrator.agents.worker"],
-            cwd=str(Path(self.project_root).resolve()),
+            cwd=str(effective_working_dir),
             env=_child_environment(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

@@ -96,18 +96,19 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 
 	orchestratorManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:             cfg.OrchestratorAddr,
-		AutoStart:           cfg.OrchestratorAutoStart,
-		Command:             cfg.OrchestratorCommand,
-		Args:                cfg.OrchestratorArgs,
-		ProjectRoot:         cfg.ProjectRoot,
-		WorkingDir:          cfg.WorkingDir,
-		MemoryDir:           cfg.MemoryDir,
-		MaxTokens:           cfg.MaxTokensPerSession,
-		MaxCost:             cfg.MaxCostPerSession,
-		ModelFast:           cfg.ModelFast,
-		StartupTimeout:      time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
-		ConversationTimeout: time.Duration(cfg.OrchestratorConversationTimeout) * time.Second,
+		Address:                cfg.OrchestratorAddr,
+		AutoStart:              cfg.OrchestratorAutoStart,
+		Command:                cfg.OrchestratorCommand,
+		Args:                   cfg.OrchestratorArgs,
+		ProjectRoot:            cfg.ProjectRoot,
+		WorkingDir:             cfg.WorkingDir,
+		MemoryDir:              cfg.MemoryDir,
+		MaxTokens:              cfg.MaxTokensPerSession,
+		MaxCost:                cfg.MaxCostPerSession,
+		ModelFast:              cfg.ModelFast,
+		RequireHarnessWorktree: true,
+		StartupTimeout:         time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
+		ConversationTimeout:    time.Duration(cfg.OrchestratorConversationTimeout) * time.Second,
 	})
 	orchestratorClient, _ := orchestratorManager.Client(context.Background())
 	mcpManager := mcp.NewManager()
@@ -225,6 +226,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	if app.orchestrator != nil {
 		app.orchestrator.OnCompaction = app.handleCompactionUpdate
 		app.orchestrator.OnPlanTodoUpdate = app.handlePlanTodoUpdate
+		app.orchestrator.OnAgentSpawn = app.handleAgentSpawn
+		app.orchestrator.OnAgentLifecycle = app.handleAgentLifecycle
 	}
 	app.input.SetWorkspaceDir(cfg.WorkingDir)
 	return app
@@ -568,6 +571,112 @@ func (a *App) handlePlanTodoUpdate(planUpdate *codeagentpb.PlanUpdate, todoUpdat
 		return fmt.Errorf("stale plan/todo revision %d", revision)
 	}
 	return nil
+}
+
+// handleAgentSpawn is the Harness-side gate for Python SpawnAgent events. It
+// creates the isolated checkout and persists its lease before the streaming
+// generator can resume and launch the child process.
+func (a *App) handleAgentSpawn(ctx context.Context, spawn *codeagentpb.AgentSpawn) error {
+	if a == nil || a.session == nil || a.worktree == nil {
+		return errors.New("agent worktree manager is not configured")
+	}
+	if spawn == nil {
+		return errors.New("agent spawn payload is required")
+	}
+	if strings.TrimSpace(spawn.GetIsolation()) != "worktree" {
+		return errors.New("agent spawn must declare worktree isolation")
+	}
+	current := a.session.Current()
+	if current.ID == "" || strings.TrimSpace(spawn.GetParentSessionId()) != current.ID {
+		return errors.New("agent spawn parent session does not match active session")
+	}
+	tree, err := a.worktree.SpawnAgent(ctx, worktree.AgentSpawnRequest{
+		RequestID:       spawn.GetRequestId(),
+		ParentSessionID: spawn.GetParentSessionId(),
+		ChildSessionID:  spawn.GetChildSessionId(),
+		WorktreeName:    spawn.GetWorktreeName(),
+		BaseRef:         spawn.GetBaseRef(),
+	})
+	if err != nil {
+		return err
+	}
+	persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+	if !containsAgentWorktree(persisted.Worktrees, tree.RequestID) {
+		_ = a.worktree.CleanupAgent(context.Background(), tree.RequestID, true, "session-persist-failed")
+		return errors.New("persist agent worktree lease failed")
+	}
+	a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+		Name:            tree.Name,
+		Path:            tree.Path,
+		BaseRef:         tree.BaseRef,
+		RequestID:       tree.RequestID,
+		ParentSessionID: tree.ParentSessionID,
+		ChildSessionID:  tree.ChildSessionID,
+		LeaseID:         tree.LeaseID,
+		Status:          worktree.AgentWorktreeActive,
+		Reason:          "spawned",
+	})
+	return nil
+}
+
+// handleAgentLifecycle validates and records a terminal child state before
+// removing the Harness-owned checkout. Completed children use guarded cleanup;
+// failed/cancelled children use discard semantics so crash recovery cannot be
+// blocked by partial files.
+func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
+	if a == nil || a.session == nil || a.worktree == nil || lifecycle == nil {
+		return errors.New("agent lifecycle manager is not configured")
+	}
+	tree, ok := a.worktree.FindAgent(lifecycle.GetRequestId())
+	if !ok {
+		return nil
+	}
+	if leaseID := strings.TrimSpace(lifecycle.GetLeaseId()); leaseID != "" && leaseID != tree.LeaseID {
+		return errors.New("agent lifecycle lease does not match active worktree")
+	}
+	if childID := strings.TrimSpace(lifecycle.GetChildSessionId()); childID != "" && childID != tree.ChildSessionID {
+		return errors.New("agent lifecycle child session does not match active worktree")
+	}
+	status := strings.ToLower(strings.TrimSpace(lifecycle.GetStatus()))
+	if status == "ok" {
+		status = worktree.AgentWorktreeReleased
+	}
+	if status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
+		return errors.New("unsupported agent lifecycle status")
+	}
+	discard := status != "completed"
+	if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
+		return err
+	}
+	persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+	if len(persisted.Worktrees) != 0 {
+		return errors.New("persist agent worktree cleanup failed")
+	}
+	a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+		Name:            tree.Name,
+		Path:            tree.Path,
+		BaseRef:         tree.BaseRef,
+		RequestID:       tree.RequestID,
+		ParentSessionID: tree.ParentSessionID,
+		ChildSessionID:  tree.ChildSessionID,
+		LeaseID:         tree.LeaseID,
+		Status:          status,
+		Reason:          lifecycle.GetReason(),
+	})
+	return nil
+}
+
+func containsAgentWorktree(trees []session.WorktreeState, requestID string) bool {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return false
+	}
+	for _, tree := range trees {
+		if tree.RequestID == requestID && tree.Status == worktree.AgentWorktreeActive && tree.LeaseID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // restartOrchestrator asks the process manager to tear down and relaunch the
@@ -1712,7 +1821,32 @@ func (a *App) bindSessionActor(current session.Session) error {
 }
 
 func (a *App) restoreWorktrees(restored session.Session) {
-	a.worktree.Restore(worktrees(restored.Worktrees))
+	if err := a.worktree.RestoreChecked(worktrees(restored.Worktrees)); err != nil {
+		a.renderer.PrintLine("restore worktrees failed: " + err.Error())
+		return
+	}
+	reaped, err := a.worktree.ReapExpired(context.Background(), time.Now())
+	if err != nil {
+		a.renderer.PrintLine("reap expired worktrees failed: " + err.Error())
+		return
+	}
+	if len(reaped) == 0 {
+		return
+	}
+	a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+	for _, tree := range reaped {
+		a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+			Name:            tree.Name,
+			Path:            tree.Path,
+			BaseRef:         tree.BaseRef,
+			RequestID:       tree.RequestID,
+			ParentSessionID: tree.ParentSessionID,
+			ChildSessionID:  tree.ChildSessionID,
+			LeaseID:         tree.LeaseID,
+			Status:          worktree.AgentWorktreeReaped,
+			Reason:          "expired lease recovered",
+		})
+	}
 }
 
 func (a *App) restoreTodos(restored session.Session) {
@@ -2000,10 +2134,16 @@ func sessionWorktrees(trees []worktree.Worktree) []session.WorktreeState {
 	out := make([]session.WorktreeState, 0, len(trees))
 	for _, tree := range trees {
 		out = append(out, session.WorktreeState{
-			Name:    tree.Name,
-			Path:    tree.Path,
-			BaseRef: tree.BaseRef,
-			Active:  tree.Active,
+			Name:            tree.Name,
+			Path:            tree.Path,
+			BaseRef:         tree.BaseRef,
+			Active:          tree.Active,
+			RequestID:       tree.RequestID,
+			ParentSessionID: tree.ParentSessionID,
+			ChildSessionID:  tree.ChildSessionID,
+			LeaseID:         tree.LeaseID,
+			LeaseExpiresAt:  tree.LeaseExpiresAt,
+			Status:          tree.Status,
 		})
 	}
 	return out
@@ -2013,10 +2153,16 @@ func worktrees(trees []session.WorktreeState) []worktree.Worktree {
 	out := make([]worktree.Worktree, 0, len(trees))
 	for _, tree := range trees {
 		out = append(out, worktree.Worktree{
-			Name:    tree.Name,
-			Path:    tree.Path,
-			BaseRef: tree.BaseRef,
-			Active:  tree.Active,
+			Name:            tree.Name,
+			Path:            tree.Path,
+			BaseRef:         tree.BaseRef,
+			Active:          tree.Active,
+			RequestID:       tree.RequestID,
+			ParentSessionID: tree.ParentSessionID,
+			ChildSessionID:  tree.ChildSessionID,
+			LeaseID:         tree.LeaseID,
+			LeaseExpiresAt:  tree.LeaseExpiresAt,
+			Status:          tree.Status,
 		})
 	}
 	return out

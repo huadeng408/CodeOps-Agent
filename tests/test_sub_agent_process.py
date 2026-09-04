@@ -58,3 +58,25 @@ def test_child_protocol_round_trip_contains_no_parent_prompt_echo(tmp_path: Path
     encoded = json.dumps({"summary": result.summary, "artifacts": result.artifacts}, ensure_ascii=False)
     assert "structured-context" in encoded
     assert "request-2" not in result.summary
+
+
+def test_process_agent_executor_accepts_harness_assigned_worktree(tmp_path: Path) -> None:
+    child = tmp_path / ".agent" / "worktrees" / "agent-request-3"
+    child.mkdir(parents=True)
+    (child / "child.txt").write_text("isolated", encoding="utf-8")
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+
+    result = executor.run(
+        kind="review",
+        title="Review isolated tree",
+        objective="inspect the isolated checkout",
+        context={"files": ["child.txt"]},
+        request_id="request-3",
+        parent_session_id="session-3",
+        child_session_id="session-3/subagent/request-3",
+        worktree_path=child,
+        require_worktree=True,
+    )
+
+    assert result.status == "completed"
+    assert any("child.txt" in artifact for artifact in result.artifacts)

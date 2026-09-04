@@ -41,7 +41,11 @@ class DeepAgent:
         findings: list[str] = []
         files = _context_files(task.context)
         if files:
-            root = Path(project_root).resolve()
+            # Relative context paths are resolved in the Harness-assigned
+            # checkout so a child cannot read or report files from its parent
+            # working tree. Absolute paths still undergo the same containment
+            # check below.
+            root = Path(working_dir).resolve()
             existing = []
             missing = []
             for value in files[:20]:

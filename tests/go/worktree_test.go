@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"code-agent/internal/worktree"
 )
@@ -259,6 +260,186 @@ func TestWorktreeManagerRefusesUnmergedCommitCleanupWithoutDiscard(t *testing.T)
 	}
 	if branches := runGit(t, repo, "branch", "--list", "agent/commit"); strings.TrimSpace(branches) != "" {
 		t.Fatalf("expected discarded branch removed, got: %s", branches)
+	}
+}
+
+func TestWorktreeManagerSpawnsIsolatedAgentWithIdempotentLease(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+
+	manager := worktree.NewManager(repo, "HEAD")
+	request := worktree.AgentSpawnRequest{
+		RequestID:       "request-1",
+		ParentSessionID: "parent-session",
+		ChildSessionID:  "child-session",
+		WorktreeName:    "child-request-1",
+	}
+	first, err := manager.SpawnAgent(context.Background(), request)
+	if err != nil {
+		t.Fatalf("spawn agent worktree: %v", err)
+	}
+	if first.Status != worktree.AgentWorktreeActive || first.LeaseID == "" || first.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected active lease metadata, got %#v", first)
+	}
+	if first.Path == repo || !strings.HasPrefix(filepath.Clean(first.Path), filepath.Join(repo, ".agent", "worktrees")) {
+		t.Fatalf("agent worktree escaped controlled root: %#v", first)
+	}
+	if _, err := os.Stat(filepath.Join(first.Path, "tracked.txt")); err != nil {
+		t.Fatalf("expected isolated checkout: %v", err)
+	}
+
+	second, err := manager.SpawnAgent(context.Background(), request)
+	if err != nil {
+		t.Fatalf("idempotent spawn: %v", err)
+	}
+	if second.LeaseID != first.LeaseID || second.Path != first.Path {
+		t.Fatalf("duplicate request created a new lease: first=%#v second=%#v", first, second)
+	}
+	if trees := manager.List(); len(trees) != 1 {
+		t.Fatalf("expected one worktree after duplicate spawn, got %#v", trees)
+	}
+
+	if err := manager.CleanupAgent(context.Background(), request.RequestID, true, "completed"); err != nil {
+		t.Fatalf("cleanup agent worktree: %v", err)
+	}
+	if _, err := os.Stat(first.Path); !os.IsNotExist(err) {
+		t.Fatalf("expected isolated worktree removed, stat err: %v", err)
+	}
+	if err := manager.CleanupAgent(context.Background(), request.RequestID, true, "duplicate-cleanup"); err != nil {
+		t.Fatalf("cleanup must be idempotent: %v", err)
+	}
+}
+
+func TestWorktreeManagerSpawnFailsClosedForNonGitAndUnsafeInputs(t *testing.T) {
+	manager := worktree.NewManager(t.TempDir(), "HEAD")
+	_, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-1",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "child",
+	})
+	if err == nil || !strings.Contains(err.Error(), "git repository") {
+		t.Fatalf("expected non-git root to fail closed, got %v", err)
+	}
+
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager = worktree.NewManager(repo, "HEAD")
+	for _, request := range []worktree.AgentSpawnRequest{
+		{RequestID: "", ParentSessionID: "parent", ChildSessionID: "child", WorktreeName: "child"},
+		{RequestID: "request", ParentSessionID: "", ChildSessionID: "child", WorktreeName: "child"},
+		{RequestID: "request", ParentSessionID: "parent", ChildSessionID: "child", WorktreeName: "../escape"},
+	} {
+		if _, err := manager.SpawnAgent(context.Background(), request); err == nil {
+			t.Fatalf("expected unsafe spawn request to fail: %#v", request)
+		}
+	}
+}
+
+func TestWorktreeManagerReapsExpiredAgentLeaseWithDiscard(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	spawned, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-expired",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "expired",
+	})
+	if err != nil {
+		t.Fatalf("spawn expired agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(spawned.Path, "crash.txt"), []byte("orphaned\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reaped, err := manager.ReapExpired(context.Background(), spawned.LeaseExpiresAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("reap expired agent: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0].Status != worktree.AgentWorktreeReaped {
+		t.Fatalf("unexpected reap result: %#v", reaped)
+	}
+	if _, err := os.Stat(spawned.Path); !os.IsNotExist(err) {
+		t.Fatalf("expected expired worktree removed, stat err: %v", err)
+	}
+}
+
+func TestWorktreeManagerRestoreCheckedRejectsAgentPathEscape(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	err := manager.RestoreChecked([]worktree.Worktree{{
+		Name:            "agent",
+		Path:            filepath.Join(repo, "..", "outside"),
+		RequestID:       "request-1",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		LeaseID:         "lease-1",
+		Status:          worktree.AgentWorktreeActive,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+		t.Fatalf("expected restore path escape rejection, got %v", err)
+	}
+	if len(manager.List()) != 0 {
+		t.Fatalf("unsafe restored worktree must not enter manager: %#v", manager.List())
+	}
+}
+
+func TestWorktreeManagerRestoredLeaseCanBeReapedByNewProcess(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	first := worktree.NewManager(repo, "HEAD")
+	spawned, err := first.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-restart",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "restart",
+	})
+	if err != nil {
+		t.Fatalf("spawn restart worktree: %v", err)
+	}
+	second := worktree.NewManager(repo, "HEAD")
+	if err := second.RestoreChecked([]worktree.Worktree{spawned}); err != nil {
+		t.Fatalf("restore lease after process restart: %v", err)
+	}
+	reaped, err := second.ReapExpired(context.Background(), spawned.LeaseExpiresAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("reap restored lease: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0].RequestID != spawned.RequestID {
+		t.Fatalf("unexpected restored reap: %#v", reaped)
+	}
+	if _, err := os.Stat(spawned.Path); !os.IsNotExist(err) {
+		t.Fatalf("restored expired worktree remains, stat err: %v", err)
+	}
+}
+
+func TestWorktreeManagerRenewsOnlyActiveLease(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	spawned, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-renew",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "renew",
+	})
+	if err != nil {
+		t.Fatalf("spawn lease: %v", err)
+	}
+	manager.SetAgentLeaseTTL(time.Hour)
+	renewed, err := manager.RenewAgentLease(context.Background(), spawned.LeaseID)
+	if err != nil {
+		t.Fatalf("renew lease: %v", err)
+	}
+	if !renewed.LeaseExpiresAt.After(spawned.LeaseExpiresAt) || renewed.Status != worktree.AgentWorktreeActive {
+		t.Fatalf("lease was not extended: before=%#v after=%#v", spawned, renewed)
+	}
+	if err := manager.CleanupAgent(context.Background(), spawned.RequestID, true, "done"); err != nil {
+		t.Fatalf("cleanup lease: %v", err)
+	}
+	if _, err := manager.RenewAgentLease(context.Background(), spawned.LeaseID); err == nil {
+		t.Fatal("renewing a released lease must fail")
 	}
 }
 

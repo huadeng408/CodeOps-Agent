@@ -101,10 +101,12 @@ func (s *subAgentMetadataServer) Converse(stream codeagentpb.Orchestrator_Conver
 				Kind:            "review",
 				Task:            "Review files",
 				ProtocolVersion: "agent.v1",
-				RequestId:       "spawn-1",
-				ParentSessionId: "parent",
-				ChildSessionId:  "parent:subagent:spawn-1",
-			},
+					RequestId:       "spawn-1",
+					ParentSessionId: "parent",
+					ChildSessionId:  "parent:subagent:spawn-1",
+					WorktreeName:    "agent-spawn-1",
+					Isolation:        "worktree",
+				},
 		},
 	}); err != nil {
 		return err
@@ -139,6 +141,87 @@ func TestOrchestratorClientPreservesSubAgentProtocolMetadata(t *testing.T) {
 	}
 	if received == nil || received.GetProtocolVersion() != "agent.v1" || received.GetRequestId() != "spawn-1" || received.GetParentSessionId() != "parent" || received.GetChildSessionId() != "parent:subagent:spawn-1" {
 		t.Fatalf("sub-agent metadata lost at Go boundary: %#v", received)
+	}
+}
+
+func TestOrchestratorClientPreparesAgentSpawnBeforeRendering(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &subAgentMetadataServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	prepared := false
+	client.OnAgentSpawn = func(_ context.Context, spawn *codeagentpb.AgentSpawn) error {
+		if spawn.GetWorktreeName() == "" || spawn.GetIsolation() != "worktree" {
+			t.Fatalf("spawn isolation metadata missing: %#v", spawn)
+		}
+		prepared = true
+		return nil
+	}
+	if _, err := client.ConverseWithEvents(context.Background(), "spawn", nil); err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if !prepared {
+		t.Fatal("agent spawn callback was not invoked")
+	}
+}
+
+type lifecycleMetadataServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+func (s *lifecycleMetadataServer) Health(context.Context, *codeagentpb.Empty) (*codeagentpb.HealthResponse, error) {
+	return &codeagentpb.HealthResponse{Status: "ok", Version: "test"}, nil
+}
+
+func (s *lifecycleMetadataServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{Payload: &codeagentpb.OrchestratorMessage_AgentLifecycle{
+		AgentLifecycle: &codeagentpb.AgentLifecycle{
+			RequestId: "request-1", ChildSessionId: "child-1", LeaseId: "lease-1", Status: "completed", Reason: "child finished",
+		},
+	}}); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{Payload: &codeagentpb.OrchestratorMessage_Done{Done: &codeagentpb.Done{Success: true}}})
+}
+
+func TestOrchestratorClientForwardsAgentLifecycle(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &lifecycleMetadataServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	called := false
+	client.OnAgentLifecycle = func(_ context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
+		called = lifecycle.GetStatus() == "completed" && lifecycle.GetLeaseId() == "lease-1"
+		return nil
+	}
+	if _, err := client.ConverseWithEvents(context.Background(), "lifecycle", nil); err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if !called {
+		t.Fatal("agent lifecycle callback was not invoked")
 	}
 }
 

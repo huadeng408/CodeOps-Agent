@@ -96,6 +96,8 @@ type Event struct {
 
 type EventHandler func(context.Context, Event)
 type AskUserHandler func(context.Context, *codeagentpb.AskUserRequest) (ToolResult, error)
+type AgentSpawnHandler func(context.Context, *codeagentpb.AgentSpawn) error
+type AgentLifecycleHandler func(context.Context, *codeagentpb.AgentLifecycle) error
 
 type ToolProgress struct {
 	ToolCallID string
@@ -129,6 +131,14 @@ type Client struct {
 	// the Harness. The callback runs before the public event handler so a stale
 	// revision can abort the stream instead of being rendered as committed.
 	OnPlanTodoUpdate func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error
+
+	// OnAgentSpawn prepares the Harness-owned isolation boundary before the
+	// Python stream resumes and starts the child process.
+	OnAgentSpawn AgentSpawnHandler
+
+	// OnAgentLifecycle persists terminal child-worktree state and performs
+	// Harness-owned cleanup after a child reports its result.
+	OnAgentLifecycle AgentLifecycleHandler
 
 	// Tracer provides gen_ai execute_tool spans; when nil tool spans are skipped.
 	tracer genai.Tracer
@@ -498,8 +508,28 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_AgentSpawn:
+			if payload.AgentSpawn != nil && c.OnAgentSpawn != nil {
+				decision := &codeagentpb.AgentSpawnDecision{RequestId: payload.AgentSpawn.GetRequestId(), Accepted: true}
+				if err := c.OnAgentSpawn(ctx, payload.AgentSpawn); err != nil {
+					decision.Accepted = false
+					decision.Error = "harness rejected agent worktree"
+					_ = stream.Send(&codeagentpb.HarnessMessage{Payload: &codeagentpb.HarnessMessage_AgentSpawnDecision{AgentSpawnDecision: decision}})
+					return "", fmt.Errorf("prepare agent worktree: %w", err)
+				}
+				// Legacy orchestrators may close their request side immediately after
+				// emitting AgentSpawn. The production runner waits for this decision;
+				// a best-effort send keeps older servers readable while any real
+				// transport failure is still observed on the following Recv.
+				_ = stream.Send(&codeagentpb.HarnessMessage{Payload: &codeagentpb.HarnessMessage_AgentSpawnDecision{AgentSpawnDecision: decision}})
+			}
 			if eventHandler != nil {
 				eventHandler(ctx, Event{AgentSpawn: payload.AgentSpawn})
+			}
+		case *codeagentpb.OrchestratorMessage_AgentLifecycle:
+			if payload.AgentLifecycle != nil && c.OnAgentLifecycle != nil {
+				if err := c.OnAgentLifecycle(ctx, payload.AgentLifecycle); err != nil {
+					return "", fmt.Errorf("persist agent lifecycle: %w", err)
+				}
 			}
 		case *codeagentpb.OrchestratorMessage_AskUserRequest:
 			if eventHandler != nil {
