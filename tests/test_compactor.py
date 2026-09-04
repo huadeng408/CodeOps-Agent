@@ -277,6 +277,36 @@ def test_tool_result_pruner_keeps_head_and_tail_without_model_call() -> None:
     assert "[tool result pruned" in pruned[0].content
 
 
+def test_pressure_compaction_does_not_prune_below_threshold() -> None:
+    """Tool-result pruning is a pressure pass, not an unconditional mutation."""
+    runner = ConversationRunner.__new__(ConversationRunner)
+    runner.compactor = Compactor(
+        context_window=10_000,
+        pressure_ratio=0.8,
+        tool_result_threshold=20,
+        tool_result_head=8,
+        tool_result_tail=4,
+    )
+    runner.llm = type("Model", (), {"model": "reasoner"})()
+    runner.context_window = None
+    runner._active_route = None
+    runner.layered_context = None
+    runner._context_persistence_error = ""
+
+    original = "HEAD-" + ("middle-" * 20) + "-TAIL"
+    messages = [
+        ChatMessage(role="system", content="system"),
+        ChatMessage(role="user", content="continue"),
+        ChatMessage(role="tool", content=original, tool_call_id="call-1"),
+    ]
+
+    compacted = runner._compact_messages(messages, session_id="below-pressure")
+
+    assert compacted == messages
+    assert compacted[-1].content == original
+    assert "[tool result pruned" not in compacted[-1].content
+
+
 def test_context_overflow_error_is_retryable_only_after_forced_progress() -> None:
     from orchestrator.llm.client import is_context_window_exceeded
 

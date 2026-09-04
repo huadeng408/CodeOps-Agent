@@ -2811,6 +2811,22 @@ class ConversationRunner:
         )
         select_range = getattr(self.compactor, "select_compaction_range", None)
         if callable(select_range):
+            # Match DeepSeek Harness ordering: pressure is evaluated against
+            # the original surface before the optional model-free prune.  A
+            # large tool result must not mutate an otherwise healthy session.
+            try:
+                should_compact = self.compactor.should_compact(
+                    messages,
+                    model=model,
+                    context_window=route_context_window,
+                    provider=provider,
+                    force=force,
+                )
+            except TypeError:
+                should_compact = self.compactor.should_compact(messages)
+            if not should_compact:
+                return messages
+
             pruner = getattr(self.compactor, "prune_tool_results", None)
             if callable(pruner):
                 original_messages = messages
@@ -2842,18 +2858,17 @@ class ConversationRunner:
                                 "threshold": self.compactor.tool_result_threshold,
                             },
                         )
-            try:
-                should_compact = self.compactor.should_compact(
-                    messages,
-                    model=model,
-                    context_window=route_context_window,
-                    provider=provider,
-                    force=force,
-                )
-            except TypeError:
-                should_compact = self.compactor.should_compact(messages)
-            if not should_compact:
-                return messages
+                    try:
+                        should_compact = self.compactor.should_compact(
+                            messages,
+                            model=model,
+                            context_window=route_context_window,
+                            provider=provider,
+                        )
+                    except TypeError:
+                        should_compact = self.compactor.should_compact(messages)
+                    if not should_compact:
+                        return messages
 
             current = list(messages)
             max_attempts = 1 if force else self.compactor.compaction_retries + 1
