@@ -1,7 +1,9 @@
 package e2e_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -30,6 +32,7 @@ func TestProductionAgentLoopPluginE2E(t *testing.T) {
 	python := contextE2EPython(t)
 	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
 	receiptPath := filepath.Join(t.TempDir(), "agent-loop-phases.jsonl")
+	hookReceiptPath := filepath.Join(t.TempDir(), "hook-phases.jsonl")
 	settings, err := json.Marshal(map[string]any{
 		"session_db_path":                           filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
 		"memory_dir":                                filepath.Join(projectRoot, ".agent", "memory"),
@@ -57,6 +60,7 @@ func TestProductionAgentLoopPluginE2E(t *testing.T) {
 	server.Env = append(os.Environ(),
 		"PYTHONPATH="+repositoryRoot,
 		"CODE_AGENT_AGENT_LOOP_E2E_RECEIPT="+receiptPath,
+		"CODE_AGENT_HOOK_E2E_RECEIPT="+hookReceiptPath,
 	)
 	var serverOutput strings.Builder
 	server.Stdout = &serverOutput
@@ -90,6 +94,41 @@ func TestProductionAgentLoopPluginE2E(t *testing.T) {
 	want := "loop_start\nmodel_before\nmodel_after\ntool_before\ntool_after\nmodel_before\nmodel_after\nloop_end\n"
 	if string(phases) != want {
 		t.Fatalf("plugin phases = %q, want %q", string(phases), want)
+	}
+	hookPhases, err := os.ReadFile(hookReceiptPath)
+	if err != nil {
+		t.Fatalf("read hook phase receipt: %v", err)
+	}
+	hookWant := "session_start:\npre_step:\npost_model:\npre_tool:Write\npost_tool:Write\npre_step:\npost_model:\nturn_stopping:\nsession_end:\n"
+	if string(hookPhases) != hookWant {
+		t.Fatalf("hook phases = %q, want %q", string(hookPhases), hookWant)
+	}
+	hookDigest := sha256.Sum256(hookPhases)
+	receipt := map[string]any{
+		"status":                      "VERIFIED",
+		"git_sha":                     contextE2EGitSHA(t, repositoryRoot),
+		"run_id":                      "agent-loop-hook-process-e2e",
+		"command":                     "CODE_AGENT_RUN_AGENT_LOOP_E2E=1 go test ./tests/e2e -run TestProductionAgentLoopPluginE2E -count=1",
+		"exit_code":                   0,
+		"hook_schema_version":         "1",
+		"hook_phase_count":            9,
+		"hook_phase_sha256":           fmt.Sprintf("%x", hookDigest),
+		"go_agent_pid":                agent.Process.Pid,
+		"python_orchestrator_pid":     server.Process.Pid,
+		"go_harness_grpc_boundary":    true,
+		"python_orchestrator_process": true,
+		"tool_name":                   "Write",
+	}
+	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatalf("encode hook E2E receipt: %v", err)
+	}
+	persistedReceipt := filepath.Join(repositoryRoot, ".runtime", "e2e", "hook-process.json")
+	if err := os.MkdirAll(filepath.Dir(persistedReceipt), 0o755); err != nil {
+		t.Fatalf("create hook E2E receipt directory: %v", err)
+	}
+	if err := os.WriteFile(persistedReceipt, append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatalf("write hook E2E receipt: %v", err)
 	}
 }
 

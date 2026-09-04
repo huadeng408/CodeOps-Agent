@@ -57,6 +57,7 @@ from orchestrator.workflows import (
 
 from .tools import ToolRegistry
 from .agent_loop import AgentLoopPluginRegistry, LoopEvent
+from .hooks import CommandRegistry, HookEvent, HookRegistry, HookDispatchResult
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.0025, 0.01),
@@ -200,12 +201,18 @@ class ConversationRunner:
     max_overflow_retries: int = 2
     loop_plugins: AgentLoopPluginRegistry | None = None
     provider_router: ProviderRouter | None = None
+    hooks: HookRegistry | None = None
+    commands: CommandRegistry | None = None
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _loop_last_turn: int = field(default=0, init=False, repr=False)
     _active_route: PreparedRoute | None = field(default=None, init=False, repr=False)
+    _hook_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
+    _pending_hook_context: list[str] = field(default_factory=list, init=False, repr=False)
+    _hook_stop_message: str = field(default="", init=False, repr=False)
+    _stopping_hook_dispatched: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -232,6 +239,15 @@ class ConversationRunner:
                 ProviderRouter.from_clients(self.provider_clients),
             )
         self._active_route = self.provider_router.route_for_client(self.llm)
+        if self.hooks is None:
+            object.__setattr__(self, "hooks", HookRegistry())
+        if self.commands is None:
+            object.__setattr__(self, "commands", CommandRegistry())
+
+    @property
+    def hook_errors(self) -> tuple[dict[str, str], ...]:
+        """Sanitized failures from hooks dispatched during the current run."""
+        return tuple(dict(error) for error in self._hook_errors)
 
     @property
     def loop_plugin_errors(self) -> tuple[dict[str, str], ...]:
@@ -260,6 +276,10 @@ class ConversationRunner:
 
         self._loop_plugin_errors.clear()
         self._loop_plugin_metadata.clear()
+        self._hook_errors.clear()
+        self._pending_hook_context.clear()
+        self._hook_stop_message = ""
+        self._stopping_hook_dispatched = False
         self._loop_last_turn = 0
         self._emit_loop_event(
             "loop_start",
@@ -268,6 +288,31 @@ class ConversationRunner:
             metadata={"model": str(getattr(self.llm, "model", ""))},
         )
         try:
+            start_hooks = self._dispatch_hook(
+                "session_start",
+                session_id=session_id,
+                turn=0,
+            )
+            if start_hooks.blocked:
+                message = start_hooks.messages[-1] if start_hooks.messages else "blocked by session hook"
+                yield self._text(message)
+                yield self._finish(session_id, False, "hook_blocked", turn=0)
+                return
+            self._pending_hook_context.extend(start_hooks.context)
+            command = self.commands.dispatch(
+                user_text,
+                {"session_id": session_id, "turn": 0},
+            ) if self.commands is not None else None
+            if command is not None and command.handled:
+                if command.text:
+                    yield self._text(command.text)
+                yield self._finish(
+                    session_id,
+                    command.success,
+                    "command_completed" if command.success else "command_failed",
+                    turn=0,
+                )
+                return
             yield from self._run(
                 user_text,
                 request_iterator,
@@ -276,11 +321,19 @@ class ConversationRunner:
                 cancel_event=cancel_event,
             )
         finally:
+            self._dispatch_hook(
+                "session_end",
+                session_id=session_id,
+                turn=self._loop_last_turn,
+            )
             self._emit_loop_event(
                 "loop_end",
                 session_id=session_id,
                 turn=self._loop_last_turn,
-                metadata={"plugin_error_count": len(self._loop_plugin_errors)},
+                metadata={
+                    "plugin_error_count": len(self._loop_plugin_errors),
+                    "hook_error_count": len(self._hook_errors),
+                },
             )
 
     def _run(
@@ -303,6 +356,12 @@ class ConversationRunner:
         using_fast = self.llm is self.fast_llm
 
         messages = self._initial_messages(user_text, turn=1, session_id=session_id, history=history or [])
+        if self._pending_hook_context:
+            messages.extend(
+                ChatMessage(role="system", content=context)
+                for context in self._pending_hook_context
+            )
+            self._pending_hook_context.clear()
         if self.layered_context is not None and session_id.strip():
             self._persist_event(
                 session_id,
@@ -361,10 +420,34 @@ class ConversationRunner:
                 elif provider == "openai":
                     thinking_kwargs["thinking_enabled"] = True
                     thinking_kwargs["reasoning_effort"] = "medium"
+            pre_step = self._dispatch_hook(
+                "pre_step",
+                session_id=session_id,
+                turn=turn,
+                payload={"message_count": len(messages)},
+                metadata={**self._route_metadata(), "allow_tools": True},
+            )
+            if pre_step.blocked:
+                message = pre_step.messages[-1] if pre_step.messages else "blocked by pre-step hook"
+                yield self._text(message)
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._finish(session_id, False, "hook_blocked", turn=turn)
+                return
             try:
                 response_box: list[ChatResponse] = []
+                candidate_messages = messages
+                if pre_step.context:
+                    candidate_messages = [
+                        *messages,
+                        *(
+                            ChatMessage(role="system", content=context)
+                            for context in pre_step.context
+                        ),
+                    ]
                 request_messages = self._compact_messages(
-                    messages, session_id=session_id, trigger="pressure"
+                    candidate_messages, session_id=session_id, trigger="pressure"
                 )
                 yield from self._emit_compaction_updates()
                 self._emit_loop_event(
@@ -420,6 +503,17 @@ class ConversationRunner:
                     "tool_call_count": len(response.tool_calls),
                 },
             )
+            post_model = self._dispatch_hook(
+                "post_model",
+                session_id=session_id,
+                turn=turn,
+                payload={
+                    "text_length": len(response.text),
+                    "tool_call_count": len(response.tool_calls),
+                    "thinking_block_count": len(response.thinking_blocks),
+                },
+                metadata=self._route_metadata(),
+            )
             # If the interrupt arrived just as the response came back, stop
             # before consuming tokens / tool calls for a stale turn. Text (if
             # any) was already streamed incrementally above, so do not re-emit.
@@ -461,6 +555,7 @@ class ConversationRunner:
                 yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                 yield self._finish(session_id, False, "budget_exceeded", turn=turn)
                 return
+
             if not response.text.strip() and not response.tool_calls:
                 consecutive_empty_responses += 1
                 if consecutive_empty_responses < MAX_CONSECUTIVE_EMPTY_RESPONSES:
@@ -527,16 +622,110 @@ class ConversationRunner:
             # its corresponding tool messages.  Some providers (DeepSeek)
             # enforce this ordering strictly (HTTP 400 otherwise).
             deferred_recoveries: list[ChatMessage] = []
+            deferred_recoveries.extend(
+                ChatMessage(role="system", content=context)
+                for context in post_model.context
+            )
 
             for call in response.tool_calls:
                 call_id = self._tool_call_id(call)
+                if self._hook_stop_message:
+                    self._emit_loop_event(
+                        "tool_before",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "has_call_id": bool(call_id),
+                            "skipped": True,
+                        },
+                    )
+                    self._persist_tool_call(session_id, call)
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            name=call.name,
+                            tool_call_id=call_id,
+                            content="Skipped after a post-tool hook stopped the step.",
+                            is_error=True,
+                        )
+                    )
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": call.name,
+                            "status": "hook_blocked",
+                        },
+                    )
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "is_error": True,
+                            "skipped": True,
+                            "hook_dispatched": True,
+                        },
+                    )
+                    continue
                 self._emit_loop_event(
                     "tool_before",
                     session_id=session_id,
                     turn=turn,
                     metadata={"tool_name": call.name, "has_call_id": bool(call_id)},
                 )
+                pre_tool = self._dispatch_hook(
+                    "pre_tool",
+                    session_id=session_id,
+                    turn=turn,
+                    tool_name=call.name,
+                    payload={
+                        "tool_call_id": call_id,
+                        "arguments_sha256": self._digest_value(self._call_arguments_json(call)),
+                    },
+                    metadata={"permission": self._permission_label(self.tool_registry.permission_for(call.name))},
+                )
                 self._persist_tool_call(session_id, call)
+                if pre_tool.context:
+                    deferred_recoveries.extend(
+                        ChatMessage(role="system", content=context)
+                        for context in pre_tool.context
+                    )
+                if pre_tool.blocked:
+                    message = pre_tool.messages[-1] if pre_tool.messages else "blocked by pre-tool hook"
+                    blocked_result = ChatMessage(
+                        role="tool",
+                        name=call.name,
+                        tool_call_id=call_id,
+                        content=message,
+                        is_error=True,
+                    )
+                    messages.append(blocked_result)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": call.name,
+                            "status": "hook_blocked",
+                        },
+                    )
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={
+                            "tool_name": call.name,
+                            "is_error": True,
+                            "hook_blocked": True,
+                            "hook_dispatched": True,
+                        },
+                    )
+                    yield self._text(message)
+                    continue
                 if call.name == "AskUser":
                     try:
                         ask_request = self._decode_ask_user(self._call_arguments_json(call))
@@ -562,6 +751,12 @@ class ConversationRunner:
                     result = self._next_tool_result(request_iterator, call_id)
                     if result is None:
                         yield self._text("User response stream ended before an answer was received.")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                         yield self._finish(
                             session_id, False, "missing_tool_result", turn=turn
@@ -783,16 +978,23 @@ class ConversationRunner:
                     try:
                         workflow_result = self._run_workflow(workflow)
                     except Exception as exc:
+                        safe_error = redact_credential_text(str(exc))
                         messages.append(
                             ChatMessage(
                                 role="tool",
                                 name=call.name,
                                 tool_call_id=call_id,
-                                content=f"RunWorkflow failed: {exc}",
+                                content=f"RunWorkflow failed: {safe_error}",
                                 is_error=True,
                             )
                         )
-                        yield self._text(f"RunWorkflow failed: {exc}")
+                        yield self._text(f"RunWorkflow failed: {safe_error}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
                         continue
                     self._persist_event(
                         session_id,
@@ -860,6 +1062,12 @@ class ConversationRunner:
                 result = self._next_tool_result(request_iterator, call_id)
                 if result is None:
                     yield self._text("Tool result stream ended before a result was received.")
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={"tool_name": call.name, "is_error": True},
+                    )
                     yield self._session_meta(turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens)
                     yield self._finish(
                         session_id, False, "missing_tool_result", turn=turn
@@ -893,8 +1101,21 @@ class ConversationRunner:
 
             # Flush deferred recovery messages AFTER all tool results so the
             # ordering is: assistant(tool_calls) → tool₁ … toolₙ → recovery.
+            if self._pending_hook_context:
+                deferred_recoveries.extend(
+                    ChatMessage(role="system", content=context)
+                    for context in self._pending_hook_context
+                )
+                self._pending_hook_context.clear()
             if deferred_recoveries:
                 messages.extend(deferred_recoveries)
+            if self._hook_stop_message:
+                yield self._text(self._hook_stop_message)
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._finish(session_id, False, "hook_blocked", turn=turn)
+                return
 
         final_turn = self.max_tool_rounds + 1
         messages.append(
@@ -950,6 +1171,17 @@ class ConversationRunner:
                 "tool_call_count": len(response.tool_calls),
             },
         )
+        self._dispatch_hook(
+            "post_model",
+            session_id=session_id,
+            turn=final_turn,
+            payload={
+                "text_length": len(response.text),
+                "tool_call_count": len(response.tool_calls),
+                "thinking_block_count": len(response.thinking_blocks),
+            },
+            metadata={**self._route_metadata(), "allow_tools": False},
+        )
         total_tokens_in += response.usage.input_tokens
         total_tokens_out += response.usage.output_tokens
         response_cost = self._estimate_cost(
@@ -981,6 +1213,21 @@ class ConversationRunner:
     def _fallback_conversation(
         self, user_text: str, request_iterator, session_id: str = ""
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        pre_step = self._dispatch_hook(
+            "pre_step",
+            session_id=session_id,
+            turn=1,
+            payload={"fallback": True},
+            metadata={"allow_tools": True, "model": "fallback"},
+        )
+        if pre_step.blocked:
+            yield self._text(
+                pre_step.messages[-1]
+                if pre_step.messages
+                else "blocked by pre-step hook"
+            )
+            yield self._finish(session_id, False, "hook_blocked", turn=1)
+            return
         yield self._text("Checking workspace...\n")
         fallback_call = ToolCall(
             name="Glob",
@@ -988,14 +1235,85 @@ class ConversationRunner:
             id="fallback-glob",
             arguments_json=json.dumps({"pattern": "**/*"}),
         )
+        self._emit_loop_event(
+            "tool_before",
+            session_id=session_id,
+            turn=1,
+            metadata={"tool_name": fallback_call.name, "has_call_id": True},
+        )
+        pre_tool = self._dispatch_hook(
+            "pre_tool",
+            session_id=session_id,
+            turn=1,
+            tool_name=fallback_call.name,
+            payload={
+                "tool_call_id": fallback_call.id,
+                "arguments_sha256": self._digest_value(fallback_call.arguments_json),
+            },
+            metadata={
+                "permission": self._permission_label(
+                    self.tool_registry.permission_for(fallback_call.name)
+                )
+            },
+        )
         self._persist_tool_call(session_id, fallback_call)
+        if pre_tool.blocked:
+            self._emit_loop_event(
+                "tool_after",
+                session_id=session_id,
+                turn=1,
+                metadata={
+                    "tool_name": fallback_call.name,
+                    "is_error": True,
+                    "hook_blocked": True,
+                    "hook_dispatched": True,
+                },
+            )
+            yield self._text(
+                pre_tool.messages[-1]
+                if pre_tool.messages
+                else "blocked by pre-tool hook"
+            )
+            yield self._finish(session_id, False, "hook_blocked", turn=1)
+            return
         yield self._tool_request(fallback_call, self._call_arguments_json(fallback_call))
         tool_result = self._next_tool_result(request_iterator, self._tool_call_id(fallback_call))
         self._persist_tool_result(session_id, fallback_call, tool_result)
+        post_tool = self._dispatch_hook(
+            "post_tool",
+            session_id=session_id,
+            turn=1,
+            tool_name=fallback_call.name,
+            payload={
+                "tool_call_id": fallback_call.id,
+                "is_error": tool_result is None or bool(tool_result.error),
+                "cached": False,
+            },
+            metadata={"tool_name": fallback_call.name, "fallback": True},
+        )
+        self._emit_loop_event(
+            "tool_after",
+            session_id=session_id,
+            turn=1,
+            metadata={
+                "tool_name": fallback_call.name,
+                "is_error": tool_result is None or bool(tool_result.error),
+                "hook_dispatched": True,
+            },
+        )
+        if post_tool.blocked:
+            yield self._text(
+                post_tool.messages[-1]
+                if post_tool.messages
+                else "blocked by post-tool hook"
+            )
+            yield self._finish(session_id, False, "hook_blocked", turn=1)
+            return
         state = self.graph.run()
         file_count = self._count_lines(tool_result.output) if tool_result else 0
         if tool_result and tool_result.error:
-            text = f"{state.response}: {user_text}\nTool error: {tool_result.error}"
+            safe_error = redact_credential_text(tool_result.error)
+            text = f"{state.response}: {user_text}\nTool error: {safe_error}"
         else:
             text = f"{state.response}: {user_text}\nFiles visible: {file_count}"
         yield self._text(text)
@@ -1273,6 +1591,47 @@ class ConversationRunner:
         """Return True when the caller has signalled a user interrupt."""
         return cancel_event is not None and cancel_event.is_set()
 
+    def _dispatch_hook(
+        self,
+        phase: str,
+        *,
+        session_id: str,
+        turn: int,
+        tool_name: str = "",
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> HookDispatchResult:
+        """Dispatch one mutable-loop hook behind a stable, bounded envelope."""
+
+        registry = self.hooks
+        if registry is None:
+            return HookDispatchResult()
+        try:
+            result = registry.dispatch(
+                HookEvent(
+                    phase=phase,
+                    session_id=session_id,
+                    turn=max(0, int(turn)),
+                    tool_name=tool_name,
+                    payload=payload or {},
+                    metadata=metadata or {},
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a hook must not crash the loop
+            result = HookDispatchResult(
+                errors=(
+                    {
+                        "hook": "<redacted-hook>",
+                        "error_type": type(exc).__name__,
+                        "code": "hook_dispatch_failed",
+                    },
+                )
+            )
+        self._hook_errors.extend(
+            {"phase": phase, **dict(error)} for error in result.errors
+        )
+        return result
+
     def _emit_loop_event(
         self,
         phase: str,
@@ -1284,23 +1643,44 @@ class ConversationRunner:
         """Dispatch bounded lifecycle metadata without changing loop control."""
 
         self._loop_last_turn = max(self._loop_last_turn, int(turn))
+        event_metadata = metadata or {}
         registry = self.loop_plugins
-        if registry is None:
-            return
-        result = registry.emit(
-            LoopEvent(
-                schema_version="1",
+        if registry is not None:
+            result = registry.emit(
+                LoopEvent(
+                    schema_version="1",
+                    session_id=session_id,
+                    turn=max(0, int(turn)),
+                    phase=phase,
+                    metadata=event_metadata,
+                )
+            )
+            self._loop_plugin_errors.extend(result.errors)
+            if result.metadata:
+                self._loop_plugin_metadata.append(
+                    {"phase": phase, "metadata": dict(result.metadata)}
+                )
+        if phase == "tool_after" and not event_metadata.get("hook_dispatched"):
+            post_tool = self._dispatch_hook(
+                "post_tool",
                 session_id=session_id,
-                turn=max(0, int(turn)),
-                phase=phase,
-                metadata=metadata or {},
+                turn=turn,
+                tool_name=str(event_metadata.get("tool_name", "")),
+                payload={
+                    "is_error": bool(event_metadata.get("is_error", False)),
+                    "cached": bool(event_metadata.get("cached", False)),
+                },
+                metadata={
+                    "tool_name": str(event_metadata.get("tool_name", "")),
+                },
             )
-        )
-        self._loop_plugin_errors.extend(result.errors)
-        if result.metadata:
-            self._loop_plugin_metadata.append(
-                {"phase": phase, "metadata": dict(result.metadata)}
-            )
+            self._pending_hook_context.extend(post_tool.context)
+            if post_tool.blocked:
+                self._hook_stop_message = (
+                    post_tool.messages[-1]
+                    if post_tool.messages
+                    else "blocked by post-tool hook"
+                )
 
     @staticmethod
     def _should_enable_thinking(
@@ -1752,6 +2132,11 @@ class ConversationRunner:
     def _can_batch_tool_calls(self, calls: list[ToolCall]) -> bool:
         if len(calls) <= 1:
             return False
+        # Per-tool hooks need a serial decision point and a matching
+        # post_tool event.  Keep the batch protocol for the default path,
+        # but fall back to the same serial path whenever extensions exist.
+        if self.hooks is not None and self.hooks.names():
+            return False
         return all(self._is_batchable_tool_call(call) for call in calls)
 
     def _is_batchable_tool_call(self, call: ToolCall) -> bool:
@@ -1968,6 +2353,20 @@ class ConversationRunner:
         response = safe_details.pop("response", "")
         if response:
             safe_details["response_sha256"] = self._digest_value(response)
+        if self._hook_errors:
+            safe_details["hook_error_count"] = len(self._hook_errors)
+            safe_details["hook_error_codes"] = sorted(
+                {error.get("code", "hook_error") for error in self._hook_errors}
+            )
+        if not self._stopping_hook_dispatched:
+            self._dispatch_hook(
+                "turn_stopping",
+                session_id=session_id,
+                turn=int(safe_details.get("turn", self._loop_last_turn)),
+                payload={"status": status, "success": bool(success)},
+                metadata={"status": status},
+            )
+            self._stopping_hook_dispatched = True
         self._persist_event(
             session_id,
             "execution_result",

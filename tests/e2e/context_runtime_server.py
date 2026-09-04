@@ -13,6 +13,7 @@ from orchestrator.llm.client import (
     message_content_text,
 )
 from orchestrator.server import OrchestratorServer, ServerConfig, build_parser
+from orchestrator.runtime.hooks import HookResult
 
 _MARKER_PATH = "runtime/context-recovery.txt"
 _TOOL_CALL_ID = "context-write-1"
@@ -174,6 +175,26 @@ def main() -> None:
             )
 
         app.loop_plugins.register("e2e-route-recorder", record_route)
+    hook_receipt = os.environ.get("CODE_AGENT_HOOK_E2E_RECEIPT", "").strip()
+    if hook_receipt:
+        hook_path = Path(hook_receipt).resolve()
+
+        def record_hook(event):
+            with hook_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(f"{event.phase}:{event.tool_name}\n")
+            if event.phase == "pre_step":
+                return HookResult(context=f"hook-pre-step-{event.turn}")
+            if event.phase == "post_tool":
+                return HookResult(context="hook-post-tool")
+            return None
+
+        app.hooks.register("e2e-hook-session-start", "session_start", record_hook)
+        app.hooks.register("e2e-hook-pre-step", "pre_step", record_hook)
+        app.hooks.register("e2e-hook-post-model", "post_model", record_hook)
+        app.hooks.register("e2e-hook-pre-tool", "pre_tool", record_hook)
+        app.hooks.register("e2e-hook-post-tool", "post_tool", record_hook)
+        app.hooks.register("e2e-hook-stopping", "turn_stopping", record_hook)
+        app.hooks.register("e2e-hook-session-end", "session_end", record_hook)
     deterministic = DeterministicContextLLM()
     app.llm = deterministic
     app.fast_llm = deterministic
