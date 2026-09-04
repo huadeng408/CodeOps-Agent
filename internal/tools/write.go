@@ -14,7 +14,7 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	}
 	content, _ := stringArg(args, "content", "text", "body")
 
-	abs, err := workspacePath(e.Root, path)
+	abs, err := secureFilePath(e.Root, path)
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
@@ -22,7 +22,13 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
-	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+	// Validate again after parent creation to close the common symlink-swap
+	// window before the temporary file is opened.
+	abs, err = secureFilePath(e.Root, path)
+	if err != nil {
+		return ToolResult{Name: "Write", Error: err.Error()}, err
+	}
+	if err := atomicWriteFile(abs, []byte(content), 0o644); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
 	return ToolResult{

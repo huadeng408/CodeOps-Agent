@@ -19,7 +19,7 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 		return ToolResult{Name: "Edit", Error: "old text is required"}, fmt.Errorf("old text is required")
 	}
 
-	abs, err := workspacePath(e.Root, path)
+	abs, err := secureFilePath(e.Root, path)
 	if err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
@@ -44,7 +44,11 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 	if replaceAll {
 		replaced = strings.ReplaceAll(before, oldText, newText)
 	}
-	if err := os.WriteFile(abs, []byte(replaced), 0o644); err != nil {
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(abs); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := atomicWriteFile(abs, []byte(replaced), mode); err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
 	return ToolResult{
