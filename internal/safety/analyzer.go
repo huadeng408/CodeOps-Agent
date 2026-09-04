@@ -141,17 +141,119 @@ func isDangerousGit(args []string) bool {
 func isSafeGitArgs(subcommand string, args []string) bool {
 	switch subcommand {
 	case "branch":
-		return !hasAny(args, "-d", "-D", "--delete")
+		return isReadOnlyBranchArgs(args)
 	case "worktree":
 		if len(args) == 0 {
 			return true
 		}
 		return args[0] == "list"
 	case "fetch":
-		return !hasAny(args, "--force", "-f")
+		return isBoundedFetchArgs(args)
 	default:
 		return true
 	}
+}
+
+// isReadOnlyBranchArgs keeps the generic Git tool from changing refs or
+// branch metadata. Positional values are accepted only after a read-only
+// selector such as --list/--contains, where Git treats them as patterns or
+// revisions rather than branch names to create.
+func isReadOnlyBranchArgs(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	if hasAny(args,
+		"-d", "-D", "-f", "--delete", "--move", "--copy", "-m", "-M", "-c", "-C",
+		"--edit-description", "--set-upstream-to", "--unset-upstream", "--track",
+		"--no-track", "--set-branch-description", "--create-reflog", "--force",
+	) {
+		return false
+	}
+	readSelector := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--list" || arg == "-l" || arg == "--show-current":
+			readSelector = true
+		case arg == "--all" || arg == "-a" || arg == "--remotes" || arg == "-r":
+			readSelector = true
+		case arg == "--verbose" || arg == "-v" || arg == "-vv":
+			readSelector = true
+		case arg == "--merged" || arg == "--no-merged" || arg == "--contains" || arg == "--no-contains":
+			readSelector = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case arg == "--points-at", arg == "--format", arg == "--sort":
+			readSelector = true
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return false
+			}
+			i++
+		case arg == "--column" || arg == "--color" || arg == "--abbrev":
+			readSelector = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(arg, "--merged=") || strings.HasPrefix(arg, "--no-merged=") ||
+			strings.HasPrefix(arg, "--contains=") || strings.HasPrefix(arg, "--no-contains=") ||
+			strings.HasPrefix(arg, "--points-at=") || strings.HasPrefix(arg, "--format=") ||
+			strings.HasPrefix(arg, "--sort=") || strings.HasPrefix(arg, "--column=") ||
+			strings.HasPrefix(arg, "--color=") ||
+			strings.HasPrefix(arg, "--abbrev="):
+			readSelector = true
+		case arg == "--no-color" || arg == "--no-column" || arg == "--no-abbrev" || arg == "--omit-empty":
+			readSelector = true
+		case arg == "--":
+			return readSelector
+		case strings.HasPrefix(arg, "-"):
+			return false
+		case !readSelector:
+			return false
+		}
+	}
+	return true
+}
+
+// isBoundedFetchArgs permits the ordinary remote-tracking update used for
+// inspection while rejecting options that delete refs, rewrite arbitrary
+// refspecs, update the checked-out branch, or invoke remote-side commands.
+func isBoundedFetchArgs(args []string) bool {
+	safeOptions := map[string]struct{}{
+		"-4": {}, "-6": {}, "-n": {}, "-q": {}, "-v": {},
+		"--all": {}, "--auto-maintenance": {}, "--dry-run": {},
+		"--ipv4": {}, "--ipv6": {}, "--keep": {}, "--multiple": {},
+		"--no-auto-maintenance": {}, "--no-progress": {}, "--no-tags": {},
+		"--no-write-fetch-head": {}, "--porcelain": {}, "--progress": {},
+		"--quiet": {}, "--tags": {}, "--verbose": {},
+	}
+	repositorySeen := false
+	optionsEnded := false
+	for _, arg := range args {
+		if !optionsEnded && arg == "--" {
+			optionsEnded = true
+			continue
+		}
+		if !optionsEnded && strings.HasPrefix(arg, "-") {
+			if strings.HasPrefix(arg, "--force") {
+				return false
+			}
+			if _, ok := safeOptions[arg]; !ok {
+				return false
+			}
+			continue
+		}
+		if !repositorySeen {
+			repositorySeen = true
+			continue
+		}
+		// A colon refspec controls the destination ref. A leading plus forces
+		// an update. Both exceed the generic Git tool's read-only boundary.
+		if strings.Contains(arg, ":") || strings.HasPrefix(arg, "+") {
+			return false
+		}
+	}
+	return true
 }
 
 func containsRecursiveDelete(fields []string) bool {

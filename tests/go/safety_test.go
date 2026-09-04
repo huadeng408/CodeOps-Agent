@@ -94,6 +94,91 @@ func TestAnalyzerRejectsGitRepositoryEscapeAndCommandHooks(t *testing.T) {
 	}
 }
 
+func TestAnalyzerRejectsGitReferenceMutationAndUnsafeFetchOptions(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	cases := [][]string{
+		{"branch", "-m", "main", "renamed"},
+		{"branch", "-M", "main", "renamed"},
+		{"branch", "-c", "main", "copy"},
+		{"branch", "--edit-description", "main"},
+		{"branch", "--set-upstream-to", "origin/main", "main"},
+		{"branch", "--track", "origin/main"},
+		{"branch", "--force", "main"},
+		{"branch", "new-agent-branch"},
+		{"fetch", "--prune", "origin"},
+		{"fetch", "--prune-tags", "origin"},
+		{"fetch", "--append", "origin"},
+		{"fetch", "--refmap=refs/heads/*:refs/remotes/origin/*", "origin"},
+		{"fetch", "--atomic", "origin"},
+		{"fetch", "--update-head-ok", "origin"},
+		{"fetch", "--server-option=update-ref", "origin"},
+	}
+	for _, args := range cases {
+		if result := analyzer.AnalyzeGit(args); result.Allowed {
+			t.Fatalf("git reference mutation unexpectedly allowed: %#v (%+v)", args, result)
+		}
+	}
+}
+
+func TestAnalyzerRejectsGitBranchMutationOptionFormsAndUnknownFlags(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	for _, args := range [][]string{
+		{"branch", "--move=renamed"},
+		{"branch", "--copy=main", "copy"},
+		{"branch", "--delete=main"},
+		{"branch", "--set-upstream-to=origin/main", "main"},
+		{"branch", "--track=direct", "origin/main"},
+		{"branch", "--create-reflog", "new-agent-branch"},
+		{"branch", "-mM", "main", "renamed"},
+		{"branch", "--unknown-option"},
+		{"branch", "--list", "--unknown-option"},
+		{"fetch", "-p", "origin"},
+		{"fetch", "--force=origin/main", "origin"},
+		{"fetch", "--unknown-option", "origin"},
+		{"fetch", "origin", "main:refs/heads/agent"},
+		{"fetch", "origin", "+main"},
+		{"fetch", "origin", ":agent"},
+	} {
+		if result := analyzer.AnalyzeGit(args); result.Allowed {
+			t.Fatalf("git mutation or unknown option unexpectedly allowed: %#v (%+v)", args, result)
+		}
+	}
+}
+
+func TestAnalyzerAllowsReadOnlyGitBranchQueriesAndBoundedFetch(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	cases := [][]string{
+		{"branch"},
+		{"branch", "--list", "--all"},
+		{"branch", "--show-current"},
+		{"branch", "--format=%(refname:short)"},
+		{"fetch", "origin"},
+		{"fetch", "origin", "main"},
+		{"fetch", "--quiet", "origin"},
+		{"fetch", "--dry-run", "origin"},
+	}
+	for _, args := range cases {
+		if result := analyzer.AnalyzeGit(args); !result.Allowed {
+			t.Fatalf("safe git query unexpectedly blocked: %#v (%+v)", args, result)
+		}
+	}
+}
+
+func TestAnalyzerRejectsGitWorktreeMutations(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	for _, args := range [][]string{
+		{"worktree", "add", "../outside"},
+		{"worktree", "remove", "agent/demo"},
+		{"worktree", "prune"},
+		{"worktree", "move", "agent/demo", "agent/other"},
+		{"worktree", "lock", "agent/demo"},
+	} {
+		if result := analyzer.AnalyzeGit(args); result.Allowed {
+			t.Fatalf("git worktree mutation unexpectedly allowed: %#v (%+v)", args, result)
+		}
+	}
+}
+
 func TestAnalyzerRejectsMalformedGitArguments(t *testing.T) {
 	analyzer := safety.NewAnalyzer()
 	if result := analyzer.AnalyzeGit([]string{"status", "ok\x00bad"}); result.Allowed {

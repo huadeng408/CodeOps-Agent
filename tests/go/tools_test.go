@@ -367,6 +367,93 @@ func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
 	}
 }
 
+func TestExecutorGitSafetyBlocksReferenceAndWorktreeMutations(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	executor := tools.NewExecutor(repo)
+	currentBranch := strings.TrimSpace(runGit(t, repo, "branch", "--show-current"))
+
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "branch",
+			"args":    []any{"-m", currentBranch, "renamed-by-agent"},
+		},
+	})
+	if err == nil || !strings.Contains(result.Error, "blocked git command") {
+		t.Fatalf("expected branch mutation to be blocked, result=%+v err=%v", result, err)
+	}
+	if got := strings.TrimSpace(runGit(t, repo, "branch", "--show-current")); got != currentBranch {
+		t.Fatalf("blocked branch mutation changed current branch from %q to %q", currentBranch, got)
+	}
+
+	worktreePath := filepath.Join(repo, "agent-worktree")
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "worktree",
+			"args":    []any{"add", worktreePath},
+		},
+	})
+	if err == nil || !strings.Contains(result.Error, "blocked git command") {
+		t.Fatalf("expected worktree mutation to be blocked, result=%+v err=%v", result, err)
+	}
+	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
+		t.Fatalf("blocked worktree mutation created %q, stat err=%v", worktreePath, statErr)
+	}
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(remote, 0o755); err != nil {
+		t.Fatalf("create bare remote directory: %v", err)
+	}
+	runGit(t, remote, "init", "--bare")
+	runGit(t, repo, "remote", "add", "origin", remote)
+	runGit(t, repo, "push", "origin", currentBranch)
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "fetch",
+			"args":    []any{"origin"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("safe git fetch unexpectedly failed: result=%+v err=%v", result, err)
+	}
+
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "fetch",
+			"args":    []any{"origin", currentBranch + ":refs/heads/agent"},
+		},
+	})
+	if err == nil || !strings.Contains(result.Error, "blocked git command") {
+		t.Fatalf("expected fetch refspec mutation to be blocked, result=%+v err=%v", result, err)
+	}
+	if got := strings.TrimSpace(runGit(t, repo, "branch", "--list", "agent")); got != "" {
+		t.Fatalf("blocked fetch refspec created local branch: %q", got)
+	}
+
+	for _, tc := range []struct {
+		command string
+		args    []any
+	}{
+		{command: "branch", args: []any{"--show-current"}},
+		{command: "status", args: []any{"--short"}},
+	} {
+		result, err = executor.Execute(context.Background(), tools.ToolRequest{
+			Name: "Git",
+			Arguments: map[string]any{
+				"command": tc.command,
+				"args":    tc.args,
+			},
+		})
+		if err != nil {
+			t.Fatalf("safe git %s unexpectedly failed: result=%+v err=%v", tc.command, result, err)
+		}
+	}
+}
+
 func TestExecutorGitRejectsNonStringArgumentItems(t *testing.T) {
 	executor := tools.NewExecutor(t.TempDir())
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{
