@@ -23,6 +23,7 @@ from orchestrator.context import (
     load_git_diff_context,
 )
 from orchestrator.graph.main_graph import MainGraph
+from orchestrator.identity import ActorIdentity, ActorIdentityError
 from orchestrator.llm.client import (
     COMPLEXITY_FAST_THRESHOLD,
     ChatMessage,
@@ -239,6 +240,7 @@ class ConversationRunner:
     _hook_stop_message: str = field(default="", init=False, repr=False)
     _stopping_hook_dispatched: bool = field(default=False, init=False, repr=False)
     _state_machine: PlanTodoStateMachine | None = field(default=None, init=False, repr=False)
+    _active_actor: ActorIdentity | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -298,6 +300,7 @@ class ConversationRunner:
         history: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
         plan_todo_snapshot: PlanTodoSnapshot | dict[str, Any] | None = None,
+        actor: ActorIdentity | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -308,6 +311,26 @@ class ConversationRunner:
         self._hook_stop_message = ""
         self._stopping_hook_dispatched = False
         self._loop_last_turn = 0
+        self._active_actor = actor
+        if actor is not None:
+            try:
+                actor.validate_session(session_id)
+            except ActorIdentityError:
+                yield self._text("invalid actor identity")
+                yield self._finish(session_id, False, "invalid_actor_identity", turn=0)
+                self._active_actor = None
+                return
+            self._persist_event(
+                session_id,
+                "actor/authorized",
+                {
+                    "actor_id": actor.actor_id,
+                    "subject": actor.subject,
+                    "tenant_id": actor.tenant_id,
+                    "roles": list(actor.roles),
+                    "schema_version": actor.schema_version,
+                },
+            )
         try:
             if plan_todo_snapshot is None:
                 legacy_todos = self.todo_manager.snapshot()
@@ -331,6 +354,7 @@ class ConversationRunner:
         except (StateConflictError, StateValidationError, TypeError, ValueError) as exc:
             yield self._text(f"invalid plan/todo state: {type(exc).__name__}")
             yield self._finish(session_id, False, "invalid_plan_todo_state", turn=0)
+            self._active_actor = None
             return
         self._emit_loop_event(
             "loop_start",
@@ -387,6 +411,7 @@ class ConversationRunner:
                     "hook_error_count": len(self._hook_errors),
                 },
             )
+            self._active_actor = None
 
     def _run(
         self,
@@ -2422,6 +2447,9 @@ class ConversationRunner:
         ):
             return
         try:
+            if getattr(self, "_active_actor", None) is not None and kind != "actor/authorized":
+                payload = dict(payload)
+                payload.setdefault("actor_id", self._active_actor.actor_id)
             self.layered_context.store.append(session_id, kind, payload)
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             self._context_persistence_error = type(exc).__name__
@@ -2646,8 +2674,27 @@ class ConversationRunner:
         *,
         session_id: str = "",
         history: list[dict[str, str]] | None = None,
+        actor: ActorIdentity | None = None,
     ) -> orchestrator_pb2.CompactionUpdate | None:
         """Compact persisted history without consuming a model turn."""
+        self._active_actor = actor
+        if actor is not None:
+            try:
+                actor.validate_session(session_id)
+            except ActorIdentityError:
+                self._active_actor = None
+                raise
+            self._persist_event(
+                session_id,
+                "actor/authorized",
+                {
+                    "actor_id": actor.actor_id,
+                    "subject": actor.subject,
+                    "tenant_id": actor.tenant_id,
+                    "roles": list(actor.roles),
+                    "schema_version": actor.schema_version,
+                },
+            )
         self._pending_compaction_updates.clear()
         messages = self._initial_messages(
             "", turn=0, session_id=session_id, history=history or []
@@ -2662,9 +2709,11 @@ class ConversationRunner:
             retain_ratio=getattr(self.compactor, "retain_ratio", 0.16),
         )
         if not self._pending_compaction_updates:
+            self._active_actor = None
             return None
         update = self._pending_compaction_updates[-1]
         self._pending_compaction_updates.clear()
+        self._active_actor = None
         return orchestrator_pb2.CompactionUpdate(**update)
 
     def _compact_messages(

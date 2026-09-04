@@ -25,6 +25,10 @@ type Config struct {
 	OrchestratorArgs                []string         `json:"orchestrator_args"`
 	OrchestratorStartupTimeout      int              `json:"orchestrator_startup_timeout_seconds"`
 	OrchestratorConversationTimeout int              `json:"orchestrator_conversation_timeout_seconds"`
+	ActorID                         string           `json:"actor_id"`
+	ActorSubject                    string           `json:"actor_subject"`
+	ActorTenantID                   string           `json:"actor_tenant_id"`
+	ActorRoles                      []string         `json:"actor_roles"`
 	SessionDBPath                   string           `json:"session_db_path"`
 	Sandbox                         SandboxConfig    `json:"sandbox"`
 	SkillDirectories                []string         `json:"skill_directories"`
@@ -100,6 +104,10 @@ func Default(projectRoot string) Config {
 		OrchestratorArgs:                []string{"-m", "orchestrator.server"},
 		OrchestratorStartupTimeout:      5,
 		OrchestratorConversationTimeout: 300,
+		ActorID:                         "actor:local",
+		ActorSubject:                    "local",
+		ActorTenantID:                   "tenant:local",
+		ActorRoles:                      []string{"LOCAL"},
 		SessionDBPath:                   filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
 		Sandbox: SandboxConfig{
 			Enabled:             true,
@@ -280,6 +288,18 @@ func mergeConfig(dst *Config, patch Config, raw map[string]json.RawMessage) {
 	}
 	if patch.OrchestratorConversationTimeout != 0 {
 		dst.OrchestratorConversationTimeout = patch.OrchestratorConversationTimeout
+	}
+	if patch.ActorID != "" {
+		dst.ActorID = patch.ActorID
+	}
+	if patch.ActorSubject != "" {
+		dst.ActorSubject = patch.ActorSubject
+	}
+	if patch.ActorTenantID != "" {
+		dst.ActorTenantID = patch.ActorTenantID
+	}
+	if len(patch.ActorRoles) > 0 {
+		dst.ActorRoles = append([]string(nil), patch.ActorRoles...)
 	}
 	if patch.SessionDBPath != "" {
 		dst.SessionDBPath = patch.SessionDBPath

@@ -45,6 +45,16 @@ func TestConfigDefaultContextWindowIs256K(t *testing.T) {
 	}
 }
 
+func TestConfigDefaultActorIsExplicitAndNonSecret(t *testing.T) {
+	cfg := config.Default(t.TempDir())
+	if cfg.ActorID == "" || cfg.ActorSubject == "" || cfg.ActorTenantID == "" {
+		t.Fatalf("default actor identity must be explicit: %#v", cfg)
+	}
+	if len(cfg.ActorRoles) == 0 {
+		t.Fatal("default actor roles must not be empty")
+	}
+}
+
 func TestConfigDefaultModelFastIsRelayCompact(t *testing.T) {
 	cfg := config.Default(t.TempDir())
 

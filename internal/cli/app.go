@@ -20,6 +20,7 @@ import (
 	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/config"
 	"code-agent/internal/hooks"
+	"code-agent/internal/identity"
 	"code-agent/internal/mcp"
 	"code-agent/internal/memory"
 	"code-agent/internal/metrics"
@@ -56,6 +57,7 @@ type App struct {
 	memory         *memory.Manager
 	todos          *todo.Manager
 	permissions    *permission.Controller
+	actor          identity.Actor
 	orchestrator   *orchestrator.Client
 	orchestratorPM *orchestrator.ProcessManager
 	hooks          *hooks.Engine
@@ -173,6 +175,21 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 	telemetry := genai.NewTelemetry(context.Background())
 	orchestratorClient.SetTracer(telemetry)
+	actor := identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       cfg.ActorID,
+		Subject:       cfg.ActorSubject,
+		TenantID:      cfg.ActorTenantID,
+		Roles:         append([]string(nil), cfg.ActorRoles...),
+	}
+	if actor.ActorID == "" {
+		actor = identity.Default()
+	}
+	if orchestratorClient != nil {
+		if err := orchestratorClient.SetActor(actor); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "actor configuration failed: %v\n", err)
+		}
+	}
 	executor.SetTracer(telemetry)
 
 	app := &App{
@@ -185,6 +202,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		memory:         memory.NewManager(cfg.MemoryDir),
 		todos:          todo.NewManager(),
 		permissions:    permission.NewControllerWithRules(levels, allowlist, denylist),
+		actor:          actor,
 		orchestrator:   orchestratorClient,
 		orchestratorPM: orchestratorManager,
 		hooks:          hookEngine,
@@ -244,7 +262,10 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
-	a.session.NewSession(a.cfg.WorkingDir)
+	created := a.session.NewSession(a.cfg.WorkingDir)
+	if err := a.bindSessionActor(created); err != nil {
+		return fmt.Errorf("bind initial session actor: %w", err)
+	}
 	a.session.SetMode("chat")
 	a.renderBootstrap()
 
@@ -469,6 +490,10 @@ func (a *App) handleCompactionUpdate(update *codeagentpb.CompactionUpdate) error
 // converse runs a single orchestrator turn using the persisted session.
 func (a *App) converse(ctx context.Context, input string) (string, error) {
 	current := a.session.Current()
+	if err := a.bindSessionActor(current); err != nil {
+		return "", err
+	}
+	current = a.session.Current()
 	return a.orchestrator.ConverseWithHistoryAndState(
 		ctx, input, current.ID,
 		orchestratorHistory(current.Messages, input),
@@ -914,7 +939,10 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		))
 		a.renderer.PrintBlock("summary", strings.Split(update.GetSummary(), "\n"))
 	case "/clear":
-		a.session.Reset()
+		cleared := a.session.Reset()
+		if err := a.bindSessionActor(cleared); err != nil {
+			a.renderer.PrintLine("clear actor failed: " + err.Error())
+		}
 		a.renderer.PrintLine("session cleared")
 	case "/config":
 		a.renderer.PrintBlock("config", []string{
@@ -1639,8 +1667,48 @@ func (a *App) restoreUndo(restored session.Session) {
 }
 
 func (a *App) restorePermissions(restored session.Session) {
+	if restored.ID != "" || restored.Actor.ActorID != "" {
+		if err := a.bindSessionActor(restored); err != nil {
+			a.renderer.PrintLine("restore actor failed: " + err.Error())
+			return
+		}
+		restored = a.session.Current()
+	}
 	a.permissions.RestoreApprovedTools(restored.ApprovedTools)
 	a.permissions.RestoreApprovalHistory(restored.ApprovalHistory)
+}
+
+func (a *App) bindSessionActor(current session.Session) error {
+	if a == nil || a.session == nil || current.ID == "" {
+		return errors.New("session is not configured")
+	}
+	expected, err := a.actor.BindSession(current.ID)
+	if err != nil {
+		return fmt.Errorf("bind configured actor to session: %w", err)
+	}
+	actor := current.Actor
+	if actor.ActorID == "" {
+		actor = expected
+		if updated := a.session.SetActor(actor); updated.Actor.ScopeKey() != actor.ScopeKey() {
+			return errors.New("persist session actor failed")
+		}
+	} else {
+		if _, err := actor.BindSession(current.ID); err != nil {
+			return fmt.Errorf("invalid session actor: %w", err)
+		}
+		if actor.ScopeKey() != expected.ScopeKey() {
+			return errors.New("session actor does not match configured actor")
+		}
+	}
+	if err := a.permissions.SetScope(actor); err != nil {
+		return fmt.Errorf("set permission scope: %w", err)
+	}
+	if a.orchestrator != nil {
+		if err := a.orchestrator.SetActor(actor); err != nil {
+			return fmt.Errorf("set orchestrator actor: %w", err)
+		}
+	}
+	return nil
 }
 
 func (a *App) restoreWorktrees(restored session.Session) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"code-agent/internal/config"
+	"code-agent/internal/identity"
 	"code-agent/internal/metrics"
 	"code-agent/internal/permission"
 	"code-agent/internal/session"
@@ -60,6 +61,62 @@ func TestNewAppPersistsSessionInEventLedger(t *testing.T) {
 	}
 	if messageCount < 2 {
 		t.Fatalf("state event count = %d, want at least 2", messageCount)
+	}
+}
+
+func TestRestoredSessionActorMustMatchConfiguredHarnessActor(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default(root)
+	cfg.ProjectRoot = root
+	cfg.WorkingDir = root
+	cfg.SessionDBPath = filepath.Join(root, "sessions.sqlite")
+	cfg.OrchestratorAddr = "127.0.0.1:1"
+	cfg.OrchestratorAutoStart = false
+	app := NewApp(cfg, strings.NewReader(""), &strings.Builder{}, &strings.Builder{})
+	t.Cleanup(func() { cleanupIntegrationApp(t, app) })
+
+	created := app.session.NewSession(root)
+	foreign, err := (identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "user:other",
+		Subject:       "other",
+		TenantID:      "tenant:local",
+		Roles:         []string{"LOCAL"},
+	}).BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.session.SetActor(foreign)
+
+	if err := app.bindSessionActor(app.session.Current()); err == nil {
+		t.Fatal("restored session with a foreign actor must fail closed")
+	}
+}
+
+func TestBindSessionActorAllowsUnavailableOrchestrator(t *testing.T) {
+	root := t.TempDir()
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession(root)
+	app := &App{
+		cfg:         config.Config{ProjectRoot: root, WorkingDir: root},
+		session:     manager,
+		permissions: permission.NewController(nil, nil),
+		actor:       identity.Default(),
+		// A local/degraded App may not have a live orchestrator client. The
+		// Harness still owns identity and permission scope in this path.
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	if err := app.bindSessionActor(manager.Current()); err != nil {
+		t.Fatalf("binding identity must not require an orchestrator: %v", err)
+	}
+	current := manager.Current()
+	if current.Actor.ActorID != "actor:local" || current.Actor.SessionID != current.ID {
+		t.Fatalf("session actor = %+v, want local actor bound to session", current.Actor)
+	}
+	app.permissions.ApproveSessionFor(current.Actor, "Edit")
+	if got := app.permissions.Check("Edit", nil); got != permission.Approve {
+		t.Fatalf("permission scope was not bound to session actor: decision=%v", got)
 	}
 }
 

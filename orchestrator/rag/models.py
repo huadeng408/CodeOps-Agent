@@ -16,6 +16,15 @@ class UserPayload(BaseModel):
     primaryOrg: str = ""
 
 
+class ActorContext(BaseModel):
+    schema_version: int = 1
+    actor_id: str
+    subject: str
+    tenant_id: str
+    roles: list[str] = Field(min_length=1)
+    session_id: str
+
+
 class ChatMessagePayload(BaseModel):
     role: str
     content: str
@@ -50,6 +59,7 @@ class FileProcessingTaskPayload(BaseModel):
 class ChatStreamRequest(BaseModel):
     query: str = Field(min_length=1)
     user: UserPayload
+    actor: ActorContext | None = None
 
 
 class SessionResponse(BaseModel):

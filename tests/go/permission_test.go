@@ -4,8 +4,40 @@ import (
 	"sort"
 	"testing"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/permission"
 )
+
+func TestPermissionApprovalsAreScopedToActorAndSession(t *testing.T) {
+	ctrl := permission.NewController(nil, nil)
+	first, err := identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "user:42",
+		Subject:       "alice",
+		TenantID:      "org:7",
+		Roles:         []string{"USER"},
+	}.BindSession("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := identity.Actor{
+		SchemaVersion: identity.SchemaVersion,
+		ActorID:       "user:99",
+		Subject:       "bob",
+		TenantID:      "org:7",
+		Roles:         []string{"USER"},
+	}.BindSession("session-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.ApproveSessionFor(first, "Write")
+	if got := ctrl.CheckFor(first, "Write", nil); got != permission.Approve {
+		t.Fatalf("first actor should retain approval, got %v", got)
+	}
+	if got := ctrl.CheckFor(second, "Write", nil); got != permission.AskUser {
+		t.Fatalf("approval leaked across actor/session boundary, got %v", got)
+	}
+}
 
 func TestDefaultPermissions(t *testing.T) {
 	ctrl := permission.NewController(nil, nil)

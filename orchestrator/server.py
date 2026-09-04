@@ -13,6 +13,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from .config import configure_otel, load_dotenv, read_env
 from .context import LayeredContext, SQLiteContextStore, TokenBudget
 from .graph.main_graph import build_graph
+from .identity import ActorIdentity, ActorIdentityError, ActorSessionRegistry
 from .llm.providers import (
     AnthropicClient,
     LocalClient,
@@ -68,6 +69,7 @@ class OrchestratorServer:
         self.context_store = SQLiteContextStore(Path(self.project_root) / ".agent" / "context.sqlite")
         self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
+        self.actor_registry = ActorSessionRegistry()
         self.token_budget = TokenBudget(
             max_tokens=self.config.max_tokens,
             max_cost=self.config.max_cost,
@@ -111,6 +113,23 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             version="0.1.0",
         )
 
+    def _authorize_actor(self, actor_wire, session_id: str, context) -> ActorIdentity | None:
+        # Keep the pre-Actor API usable for ephemeral, session-less callers.
+        # Durable sessions must always carry an explicit identity; this is the
+        # one-way compatibility adapter for older integrations.
+        if actor_wire is None and not str(session_id).strip():
+            return None
+        try:
+            actor = ActorIdentity.from_proto(actor_wire)
+            self.app.actor_registry.authorize(session_id, actor)
+            return actor
+        except ActorIdentityError as exc:
+            code = grpc.StatusCode.PERMISSION_DENIED
+            if "required" in str(exc) or "unsupported" in str(exc):
+                code = grpc.StatusCode.UNAUTHENTICATED
+            context.abort(code, str(exc))
+        raise AssertionError("context.abort must terminate the RPC")
+
     def _new_runner(self) -> ConversationRunner:
         return ConversationRunner(
             graph=self.app.graph,
@@ -134,6 +153,11 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         )
 
     def Compact(self, request, context):
+        actor = self._authorize_actor(
+            request.actor if request.HasField("actor") else None,
+            request.session_id,
+            context,
+        )
         runner = self._new_runner()
         history = [
             {
@@ -147,6 +171,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             update = runner.compact_now(
                 session_id=request.session_id,
                 history=history,
+                actor=actor,
             )
         except Exception as exc:
             context.abort(
@@ -158,6 +183,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
     def Converse(self, request_iterator, context):
         user_text = ""
         session_id = ""
+        actor = None
         history: list[dict[str, str]] = []
         plan_todo_snapshot = None
         for message in request_iterator:
@@ -166,6 +192,11 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 user_input = message.user_input
                 user_text = user_input.text
                 session_id = user_input.session_id
+                actor = self._authorize_actor(
+                    user_input.actor if user_input.HasField("actor") else None,
+                    session_id,
+                    context,
+                )
                 if user_input.HasField("plan_todo_state"):
                     plan_todo_snapshot = self._snapshot_from_proto(user_input.plan_todo_state)
                 history = [
@@ -177,6 +208,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     for item in user_input.history
                 ]
                 break
+
+        if actor is None and session_id.strip():
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "user input with actor context is required")
 
         # ── W3C TraceContext recovery ─────────────────────────────────
         # The Go harness injects the active span context via gRPC metadata
@@ -207,6 +241,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
 
         runner = self._new_runner()
         try:
+            runner_actor = actor
             yield from runner.run(
                 user_text,
                 request_iterator,
@@ -214,6 +249,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 history=history,
                 cancel_event=cancel_event,
                 plan_todo_snapshot=plan_todo_snapshot,
+                actor=runner_actor,
             )
         finally:
             # Detach the TraceContext parent so following calls on this
