@@ -2,6 +2,8 @@ package worktree
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -10,20 +12,46 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	AgentWorktreeActive   = "active"
+	AgentWorktreeReleased = "released"
+	AgentWorktreeReaped   = "reaped"
+	defaultAgentLeaseTTL  = 30 * time.Minute
 )
 
 type Worktree struct {
-	Name    string
-	Path    string
-	BaseRef string
-	Active  bool
+	Name            string
+	Path            string
+	BaseRef         string
+	Active          bool
+	RequestID       string    `json:"request_id,omitempty"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	ChildSessionID  string    `json:"child_session_id,omitempty"`
+	LeaseID         string    `json:"lease_id,omitempty"`
+	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
+	Status          string    `json:"status,omitempty"`
+}
+
+// AgentSpawnRequest is the authenticated boundary between SpawnAgent and the
+// Harness worktree manager. WorktreeName is supplied by the orchestrator but
+// is always validated and resolved beneath the manager's controlled root.
+type AgentSpawnRequest struct {
+	RequestID       string
+	ParentSessionID string
+	ChildSessionID  string
+	WorktreeName    string
+	BaseRef         string
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	root    string
-	baseRef string
-	trees   map[string]Worktree
+	mu       sync.Mutex
+	root     string
+	baseRef  string
+	leaseTTL time.Duration
+	trees    map[string]Worktree
 }
 
 func NewManager(root, baseRef string) *Manager {
@@ -34,10 +62,194 @@ func NewManager(root, baseRef string) *Manager {
 		baseRef = "HEAD"
 	}
 	return &Manager{
-		root:    filepath.Clean(root),
-		baseRef: baseRef,
-		trees:   make(map[string]Worktree),
+		root:     filepath.Clean(root),
+		baseRef:  baseRef,
+		leaseTTL: defaultAgentLeaseTTL,
+		trees:    make(map[string]Worktree),
 	}
+}
+
+// SetAgentLeaseTTL overrides the default lease duration for tests and hosts
+// with a shorter lifecycle. Non-positive values are ignored.
+func (m *Manager) SetAgentLeaseTTL(ttl time.Duration) {
+	if m == nil || ttl <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.leaseTTL = ttl
+	m.mu.Unlock()
+}
+
+// SpawnAgent creates or idempotently resumes an isolated worktree for one
+// SpawnAgent request. It never falls back to the parent working tree.
+func (m *Manager) SpawnAgent(ctx context.Context, request AgentSpawnRequest) (Worktree, error) {
+	if m == nil {
+		return Worktree{}, errors.New("worktree manager is nil")
+	}
+	if err := validateAgentSpawnRequest(request); err != nil {
+		return Worktree{}, err
+	}
+	name, err := normalizeName(request.WorktreeName)
+	if err != nil {
+		return Worktree{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !isGitRepository(ctx, m.root) {
+		return Worktree{}, errors.New("agent worktree requires a git repository")
+	}
+	for _, existing := range m.trees {
+		if existing.RequestID == request.RequestID {
+			if existing.ParentSessionID != request.ParentSessionID || existing.ChildSessionID != request.ChildSessionID || existing.Name != name {
+				return Worktree{}, errors.New("agent request identity conflicts with existing worktree")
+			}
+			if existing.Status == "" {
+				existing.Status = AgentWorktreeActive
+			}
+			return existing, nil
+		}
+	}
+	if existing, ok := m.trees[name]; ok {
+		return Worktree{}, fmt.Errorf("worktree %s already exists", existing.Name)
+	}
+	baseRef := strings.TrimSpace(request.BaseRef)
+	if baseRef == "" {
+		baseRef = strings.TrimSpace(m.baseRef)
+	}
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", baseRef+"^{commit}"); err != nil {
+		return Worktree{}, fmt.Errorf("agent base revision %q is invalid: %w", baseRef, err)
+	}
+	path := filepath.Join(m.root, ".agent", "worktrees", name)
+	if err := ensureContainedPath(m.root, path); err != nil {
+		return Worktree{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Worktree{}, fmt.Errorf("create agent worktree base dir: %w", err)
+	}
+	if _, err := gitOutput(ctx, m.root, "worktree", "add", "-b", "agent/"+name, path, baseRef); err != nil {
+		return Worktree{}, fmt.Errorf("create agent worktree: %w", err)
+	}
+	leaseID, err := newLeaseID()
+	if err != nil {
+		_ = m.removeGitWorktree(ctx, Worktree{Name: name, Path: path, BaseRef: baseRef}, true)
+		return Worktree{}, err
+	}
+	for key, existing := range m.trees {
+		existing.Active = false
+		m.trees[key] = existing
+	}
+	tree := Worktree{
+		Name:            name,
+		Path:            path,
+		BaseRef:         baseRef,
+		Active:          true,
+		RequestID:       request.RequestID,
+		ParentSessionID: request.ParentSessionID,
+		ChildSessionID:  request.ChildSessionID,
+		LeaseID:         leaseID,
+		LeaseExpiresAt:  time.Now().Add(m.leaseTTL),
+		Status:          AgentWorktreeActive,
+	}
+	m.trees[name] = tree
+	return tree, nil
+}
+
+// RenewAgentLease extends an active agent lease without changing its path.
+func (m *Manager) RenewAgentLease(ctx context.Context, leaseID string) (Worktree, error) {
+	_ = ctx
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return Worktree{}, errors.New("agent lease id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, tree := range m.trees {
+		if tree.LeaseID != leaseID {
+			continue
+		}
+		if tree.Status != "" && tree.Status != AgentWorktreeActive {
+			return Worktree{}, errors.New("agent worktree lease is not active")
+		}
+		tree.LeaseExpiresAt = time.Now().Add(m.leaseTTL)
+		tree.Status = AgentWorktreeActive
+		m.trees[name] = tree
+		return tree, nil
+	}
+	return Worktree{}, errors.New("agent lease not found")
+}
+
+// FindAgent returns a defensive copy of an active agent worktree by request
+// identity. It is used by lifecycle handlers to validate the lease before
+// cleanup and to persist the terminal metadata.
+func (m *Manager) FindAgent(requestID string) (Worktree, bool) {
+	if m == nil {
+		return Worktree{}, false
+	}
+	requestID = strings.TrimSpace(requestID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, tree := range m.trees {
+		if tree.RequestID == requestID {
+			return tree, true
+		}
+	}
+	return Worktree{}, false
+}
+
+// CleanupAgent releases one agent worktree. A missing request is treated as
+// an idempotent success so duplicate completion/recovery messages are safe.
+func (m *Manager) CleanupAgent(ctx context.Context, requestID string, discard bool, reason string) error {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return errors.New("agent request id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, tree := range m.trees {
+		if tree.RequestID != requestID {
+			continue
+		}
+		if err := m.removeGitWorktree(ctx, tree, discard); err != nil {
+			return fmt.Errorf("cleanup agent worktree %s: %w", name, err)
+		}
+		delete(m.trees, name)
+		return nil
+	}
+	_ = reason
+	return nil
+}
+
+// ReapExpired removes abandoned leases with discard semantics. It is used by
+// startup recovery and crash cleanup, so dirty child worktrees cannot block
+// the parent session forever.
+func (m *Manager) ReapExpired(ctx context.Context, now time.Time) ([]Worktree, error) {
+	if m == nil {
+		return nil, errors.New("worktree manager is nil")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var reaped []Worktree
+	for name, tree := range m.trees {
+		if tree.Status != AgentWorktreeActive || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
+			continue
+		}
+		if err := m.removeGitWorktree(ctx, tree, true); err != nil {
+			return reaped, fmt.Errorf("reap agent worktree %s: %w", name, err)
+		}
+		tree.Status = AgentWorktreeReaped
+		tree.Active = false
+		reaped = append(reaped, tree)
+		delete(m.trees, name)
+	}
+	sort.Slice(reaped, func(i, j int) bool { return reaped[i].Name < reaped[j].Name })
+	return reaped, nil
 }
 
 func (m *Manager) Create(name string) (Worktree, error) {
@@ -156,6 +368,16 @@ func (m *Manager) List() []Worktree {
 }
 
 func (m *Manager) Restore(trees []Worktree) {
+	_ = m.RestoreChecked(trees)
+}
+
+// RestoreChecked restores persisted state only when every agent checkout is
+// inside the controlled root. The legacy Restore adapter intentionally drops
+// invalid entries; new callers should use this error-returning form.
+func (m *Manager) RestoreChecked(trees []Worktree) error {
+	if m == nil {
+		return errors.New("worktree manager is nil")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -173,6 +395,15 @@ func (m *Manager) Restore(trees []Worktree) {
 		if strings.TrimSpace(tree.BaseRef) == "" {
 			tree.BaseRef = m.baseRef
 		}
+		if tree.RequestID != "" {
+			if err := ensureContainedPath(m.root, tree.Path); err != nil {
+				m.trees = make(map[string]Worktree)
+				return err
+			}
+			if tree.Status == "" {
+				tree.Status = AgentWorktreeActive
+			}
+		}
 		if tree.Active {
 			if activeSeen {
 				tree.Active = false
@@ -182,6 +413,7 @@ func (m *Manager) Restore(trees []Worktree) {
 		}
 		m.trees[tree.Name] = tree
 	}
+	return nil
 }
 
 func (m *Manager) createGitWorktree(ctx context.Context, tree Worktree) error {
@@ -358,6 +590,51 @@ func normalizeName(name string) (string, error) {
 		return "", errors.New("worktree name may contain only letters, digits, dash, and underscore")
 	}
 	return name, nil
+}
+
+func validateAgentSpawnRequest(request AgentSpawnRequest) error {
+	for field, value := range map[string]string{
+		"request id":        request.RequestID,
+		"parent session id": request.ParentSessionID,
+		"child session id":  request.ChildSessionID,
+	} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("agent %s is required", field)
+		}
+		if len(value) > 128 {
+			return fmt.Errorf("agent %s is too long", field)
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("agent %s contains a NUL byte", field)
+		}
+	}
+	return nil
+}
+
+func ensureContainedPath(root, target string) error {
+	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return fmt.Errorf("resolve agent worktree root: %w", err)
+	}
+	targetAbs, err := filepath.Abs(filepath.Clean(target))
+	if err != nil {
+		return fmt.Errorf("resolve agent worktree path: %w", err)
+	}
+	controlledRoot := filepath.Join(rootAbs, ".agent", "worktrees")
+	rel, err := filepath.Rel(controlledRoot, targetAbs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return errors.New("agent worktree path escapes repository root")
+	}
+	return nil
+}
+
+func newLeaseID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate agent lease id: %w", err)
+	}
+	return "lease-" + hex.EncodeToString(raw[:]), nil
 }
 
 func isGitRepository(ctx context.Context, root string) bool {

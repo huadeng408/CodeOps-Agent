@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"code-agent/internal/session"
 	"code-agent/internal/identity"
+	"code-agent/internal/session"
 )
 
 func TestSessionPersistsActorIdentity(t *testing.T) {
@@ -398,6 +398,35 @@ func TestSessionWorktreesAreCloned(t *testing.T) {
 	again := manager.Current()
 	if got := again.Worktrees[0].Name; got != "agent-a" {
 		t.Fatalf("session worktrees leaked mutable slice, got %q", got)
+	}
+}
+
+func TestSessionPersistsWorktreeLifecycleEvents(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store)
+	created := manager.NewSession("workspace")
+	manager.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+		RequestID:       "request-1",
+		ParentSessionID: created.ID,
+		ChildSessionID:  "child-1",
+		LeaseID:         "lease-1",
+		Status:          "active",
+		Reason:          "spawned",
+	})
+	manager.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+		RequestID:       "request-1",
+		ParentSessionID: created.ID,
+		ChildSessionID:  "child-1",
+		LeaseID:         "lease-1",
+		Status:          "completed",
+		Reason:          "child finished",
+	})
+	loaded, err := store.Load(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load lifecycle session: %v", err)
+	}
+	if len(loaded.WorktreeEvents) != 2 || loaded.WorktreeEvents[1].Status != "completed" {
+		t.Fatalf("unexpected worktree lifecycle history: %#v", loaded.WorktreeEvents)
 	}
 }
 

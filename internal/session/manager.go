@@ -78,29 +78,52 @@ type UndoEntry struct {
 }
 
 type WorktreeState struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	BaseRef string `json:"base_ref,omitempty"`
-	Active  bool   `json:"active,omitempty"`
+	Name            string    `json:"name"`
+	Path            string    `json:"path"`
+	BaseRef         string    `json:"base_ref,omitempty"`
+	Active          bool      `json:"active,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	ChildSessionID  string    `json:"child_session_id,omitempty"`
+	LeaseID         string    `json:"lease_id,omitempty"`
+	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
+	Status          string    `json:"status,omitempty"`
+}
+
+// WorktreeLifecycle is an append-only audit record for an agent checkout.
+// Current active leases live in Worktrees; terminal states remain here so a
+// recovery or cleanup decision is visible after the directory is removed.
+type WorktreeLifecycle struct {
+	Name            string    `json:"name,omitempty"`
+	Path            string    `json:"path,omitempty"`
+	BaseRef         string    `json:"base_ref,omitempty"`
+	RequestID       string    `json:"request_id"`
+	ParentSessionID string    `json:"parent_session_id"`
+	ChildSessionID  string    `json:"child_session_id"`
+	LeaseID         string    `json:"lease_id"`
+	Status          string    `json:"status"`
+	Reason          string    `json:"reason,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type Session struct {
-	ID               string             `json:"id"`
-	Actor            identity.Actor     `json:"actor,omitempty"`
-	WorkingDir       string             `json:"working_dir"`
-	CreatedAt        time.Time          `json:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
-	Messages         []Message          `json:"messages"`
-	Metadata         map[string]string  `json:"metadata,omitempty"`
-	Metrics          SessionMetrics     `json:"metrics,omitempty"`
-	Todos            []TodoItem         `json:"todos,omitempty"`
-	Plan             PlanState          `json:"plan,omitempty"`
-	PlanTodoRevision uint64             `json:"plan_todo_revision,omitempty"`
-	Mode             string             `json:"mode,omitempty"`
-	Agents           []AgentSpawnRecord `json:"agents,omitempty"`
-	Undo             []UndoEntry        `json:"undo,omitempty"`
-	ApprovedTools    []string           `json:"approved_tools,omitempty"`
-	Worktrees        []WorktreeState    `json:"worktrees,omitempty"`
+	ID               string              `json:"id"`
+	Actor            identity.Actor      `json:"actor,omitempty"`
+	WorkingDir       string              `json:"working_dir"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	Messages         []Message           `json:"messages"`
+	Metadata         map[string]string   `json:"metadata,omitempty"`
+	Metrics          SessionMetrics      `json:"metrics,omitempty"`
+	Todos            []TodoItem          `json:"todos,omitempty"`
+	Plan             PlanState           `json:"plan,omitempty"`
+	PlanTodoRevision uint64              `json:"plan_todo_revision,omitempty"`
+	Mode             string              `json:"mode,omitempty"`
+	Agents           []AgentSpawnRecord  `json:"agents,omitempty"`
+	Undo             []UndoEntry         `json:"undo,omitempty"`
+	ApprovedTools    []string            `json:"approved_tools,omitempty"`
+	Worktrees        []WorktreeState     `json:"worktrees,omitempty"`
+	WorktreeEvents   []WorktreeLifecycle `json:"worktree_events,omitempty"`
 	// ApprovalHistory 持久化用户对工具调用的批准记录，用于在会话恢复后继续
 	// 推导允许规则建议。仅作为数据载体，session 包本身不解释其含义。
 	ApprovalHistory []permission.ApprovalRecord `json:"approval_history,omitempty"`
@@ -491,6 +514,34 @@ func (m *Manager) SetWorktrees(trees []WorktreeState) Session {
 	return cloneSession(m.current)
 }
 
+// AppendWorktreeLifecycle records a bounded, sanitized lifecycle transition
+// without keeping terminal directories in the active Worktrees projection.
+func (m *Manager) AppendWorktreeLifecycle(event WorktreeLifecycle) Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	event.RequestID = strings.TrimSpace(event.RequestID)
+	event.ParentSessionID = strings.TrimSpace(event.ParentSessionID)
+	event.ChildSessionID = strings.TrimSpace(event.ChildSessionID)
+	event.LeaseID = strings.TrimSpace(event.LeaseID)
+	event.Status = strings.TrimSpace(event.Status)
+	event.Reason = strings.TrimSpace(event.Reason)
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = now
+	}
+	if event.RequestID == "" || event.Status == "" {
+		return cloneSession(previous)
+	}
+	m.current.WorktreeEvents = append(m.current.WorktreeEvents, event)
+	m.current.UpdatedAt = now
+	if !m.commitLocked(context.Background(), previous) {
+		return cloneSession(previous)
+	}
+	return cloneSession(m.current)
+}
+
 func (m *Manager) MergeMetadata(values map[string]string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -828,6 +879,7 @@ func cloneSession(session Session) Session {
 	out.Undo = cloneUndo(session.Undo)
 	out.ApprovedTools = normalizeToolList(session.ApprovedTools)
 	out.Worktrees = cloneWorktrees(session.Worktrees)
+	out.WorktreeEvents = cloneWorktreeEvents(session.WorktreeEvents)
 	out.ApprovalHistory = cloneApprovalHistory(session.ApprovalHistory)
 	return out
 }
@@ -837,6 +889,15 @@ func cloneWorktrees(in []WorktreeState) []WorktreeState {
 		return nil
 	}
 	out := make([]WorktreeState, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneWorktreeEvents(in []WorktreeLifecycle) []WorktreeLifecycle {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]WorktreeLifecycle, len(in))
 	copy(out, in)
 	return out
 }

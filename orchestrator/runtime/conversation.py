@@ -95,6 +95,12 @@ def _sub_agent_child_session_id(session_id: str, call_id: str) -> str:
 def _sub_agent_parent_session_id(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", session_id.strip()) or "session"
 
+
+def _sub_agent_worktree_name(request_id: str) -> str:
+    """Return the deterministic, path-safe slot reserved by the Harness."""
+    request_id = re.sub(r"[^A-Za-z0-9_-]", "-", request_id.strip())
+    return ("agent-" + request_id)[:64]
+
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 THINKING_BUDGET_TOKENS: int = 10000
 THINKING_COMPLEXITY_TURN_THRESHOLD: int = 3
@@ -229,6 +235,7 @@ class ConversationRunner:
     allow_parallel_todos: bool = False
     sub_agent_executor: ProcessAgentExecutor | None = None
     legacy_sub_agent_manager: DeepAgentManager | None = None
+    require_harness_worktree: bool = False
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
@@ -271,6 +278,8 @@ class ConversationRunner:
             object.__setattr__(self, "hooks", HookRegistry())
         if self.commands is None:
             object.__setattr__(self, "commands", CommandRegistry())
+        if os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower() in {"1", "true", "yes", "on"}:
+            self.require_harness_worktree = True
 
     @property
     def hook_errors(self) -> tuple[dict[str, str], ...]:
@@ -1059,6 +1068,7 @@ class ConversationRunner:
                     request_id = _sub_agent_request_id(session_id, call_id)
                     parent_session_id = _sub_agent_parent_session_id(session_id)
                     child_session_id = _sub_agent_child_session_id(session_id, call_id)
+                    worktree_name = _sub_agent_worktree_name(request_id)
                     yield orchestrator_pb2.OrchestratorMessage(
                         agent_spawn=orchestrator_pb2.AgentSpawn(
                             kind=spawn["kind"],
@@ -1069,14 +1079,46 @@ class ConversationRunner:
                             request_id=request_id,
                             parent_session_id=parent_session_id,
                             child_session_id=child_session_id,
+                            worktree_name=worktree_name,
+                            isolation="worktree",
                         )
                     )
+                    if self.require_harness_worktree:
+                        decision = self._next_agent_spawn_decision(request_iterator, request_id)
+                        if decision is None or decision.request_id != request_id or not decision.accepted:
+                            reason = "harness did not acknowledge isolated worktree"
+                            if decision is not None and decision.error:
+                                reason = decision.error
+                            messages.append(
+                                ChatMessage(
+                                    role="tool",
+                                    name=call.name,
+                                    tool_call_id=call_id,
+                                    content=reason,
+                                    is_error=True,
+                                )
+                            )
+                            yield self._text("SpawnAgent rejected: " + reason)
+                            yield self._finish(session_id, False, "agent_worktree_rejected", turn=turn)
+                            return
                     agent_result = self._run_sub_agent(
                         spawn,
                         request_id=request_id,
                         parent_session_id=parent_session_id,
                         child_session_id=child_session_id,
                     )
+                    if self.require_harness_worktree:
+                        lifecycle_status = str(agent_result.get("status", "failed"))
+                        if lifecycle_status not in {"completed", "ok"}:
+                            lifecycle_status = "failed"
+                        yield orchestrator_pb2.OrchestratorMessage(
+                            agent_lifecycle=orchestrator_pb2.AgentLifecycle(
+                                request_id=request_id,
+                                child_session_id=child_session_id,
+                                status=lifecycle_status,
+                                reason="child completed" if lifecycle_status == "completed" else "child failed",
+                            )
+                        )
                     self._persist_event(
                         session_id,
                         "execution_result",
@@ -2401,6 +2443,16 @@ class ConversationRunner:
         return results.get(expected_id)
 
     @staticmethod
+    def _next_agent_spawn_decision(request_iterator, expected_id: str):
+        for message in request_iterator:
+            if message.WhichOneof("payload") != "agent_spawn_decision":
+                continue
+            decision = message.agent_spawn_decision
+            if decision is not None and decision.request_id == expected_id:
+                return decision
+        return None
+
+    @staticmethod
     def _next_tool_results(request_iterator, expected_ids: list[str]):
         expected_ids = [tool_call_id for tool_call_id in expected_ids if tool_call_id]
         if not expected_ids:
@@ -2950,15 +3002,30 @@ class ConversationRunner:
                     working_dir=self.working_dir,
                 )
             try:
-                result = executor.run(
-                    kind=str(spawn["kind"]),
-                    title=str(spawn["title"]),
-                    objective=str(spawn["objective"]),
-                    context=context_payload,
-                    request_id=request_id,
-                    parent_session_id=parent_session_id,
-                    child_session_id=child_session_id,
-                )
+                if self.require_harness_worktree:
+                    worktree_name = _sub_agent_worktree_name(request_id)
+                    worktree_path = Path(self.project_root) / ".agent" / "worktrees" / worktree_name
+                    result = executor.run(
+                        kind=str(spawn["kind"]),
+                        title=str(spawn["title"]),
+                        objective=str(spawn["objective"]),
+                        context=context_payload,
+                        request_id=request_id,
+                        parent_session_id=parent_session_id,
+                        child_session_id=child_session_id,
+                        worktree_path=worktree_path,
+                        require_worktree=True,
+                    )
+                else:
+                    result = executor.run(
+                        kind=str(spawn["kind"]),
+                        title=str(spawn["title"]),
+                        objective=str(spawn["objective"]),
+                        context=context_payload,
+                        request_id=request_id,
+                        parent_session_id=parent_session_id,
+                        child_session_id=child_session_id,
+                    )
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                 return {
                     "status": "failed",

@@ -935,6 +935,8 @@ def test_spawn_agent_emits_event(monkeypatch, tmp_path) -> None:
             assert responses[0].agent_spawn.kind == "review"
             assert responses[0].agent_spawn.parallel is False
             assert responses[0].agent_spawn.protocol_version == "agent.v1"
+            assert responses[0].agent_spawn.worktree_name == "agent-" + responses[0].agent_spawn.request_id
+            assert responses[0].agent_spawn.isolation == "worktree"
             assert responses[0].agent_spawn.parent_session_id == "session"
             assert responses[0].agent_spawn.child_session_id.startswith("session:subagent:spawn-")
             assert len(responses[0].agent_spawn.request_id) == 30

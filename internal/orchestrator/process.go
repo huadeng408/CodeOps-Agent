@@ -19,18 +19,19 @@ import (
 )
 
 type ProcessConfig struct {
-	Address             string
-	AutoStart           bool
-	Command             string
-	Args                []string
-	ProjectRoot         string
-	WorkingDir          string
-	MemoryDir           string
-	MaxTokens           int
-	MaxCost             float64
-	ModelFast           string
-	StartupTimeout      time.Duration
-	ConversationTimeout time.Duration
+	Address                string
+	AutoStart              bool
+	Command                string
+	Args                   []string
+	ProjectRoot            string
+	WorkingDir             string
+	MemoryDir              string
+	MaxTokens              int
+	MaxCost                float64
+	ModelFast              string
+	RequireHarnessWorktree bool
+	StartupTimeout         time.Duration
+	ConversationTimeout    time.Duration
 }
 
 // ManagedProcess abstracts the orchestrator subprocess so the supervisor can
@@ -49,12 +50,12 @@ type ManagedProcess interface {
 type ProcessStarter func(ctx context.Context) (ManagedProcess, error)
 
 type ProcessManager struct {
-	cfg     ProcessConfig
-	mu      sync.Mutex
-	client  *Client
-	process ManagedProcess
-	exitCh  chan error // receives the exit error of the current process
-	owned   bool
+	cfg      ProcessConfig
+	mu       sync.Mutex
+	client   *Client
+	process  ManagedProcess
+	exitCh   chan error // receives the exit error of the current process
+	owned    bool
 	stopping bool
 
 	// starter launches a fresh orchestrator process. Defaults to the
@@ -425,8 +426,12 @@ func buildOrchestratorCmd(cfg ProcessConfig) *exec.Cmd {
 	// so a cancelled request context cannot tear down the orchestrator.
 	cmd := exec.CommandContext(context.Background(), cfg.Command, args...)
 	cmd.Dir = cfg.ProjectRoot
+	cmd.Env = os.Environ()
+	if cfg.RequireHarnessWorktree {
+		cmd.Env = append(cmd.Env, "CODE_AGENT_REQUIRE_HARNESS_WORKTREE=1")
+	}
 	if strings.TrimSpace(cfg.ModelFast) != "" {
-		cmd.Env = append(os.Environ(), "MODEL_FAST="+strings.TrimSpace(cfg.ModelFast))
+		cmd.Env = append(cmd.Env, "MODEL_FAST="+strings.TrimSpace(cfg.ModelFast))
 	}
 	return cmd
 }
@@ -473,8 +478,6 @@ func healthy(ctx context.Context, client *Client) bool {
 	response, err := client.Health(ctx)
 	return err == nil && response != nil && strings.EqualFold(response.Status, "ok")
 }
-
-
 
 // injectTraceContext reads the W3C TraceContext from ctx and injects it into
 // the child process environment so the Python orchestrator can resume the

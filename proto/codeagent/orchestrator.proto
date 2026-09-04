@@ -23,7 +23,24 @@ message HarnessMessage {
     ToolResult tool_result = 2;
     PermissionDecision permission_decision = 3;
     Signal signal = 4;
+    AgentSpawnDecision agent_spawn_decision = 5;
   }
+}
+
+// Go Harness acknowledges the isolated checkout before the Python runner
+// launches a child process. A rejected decision is terminal for that spawn.
+message AgentSpawnDecision {
+  string request_id = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
+message AgentLifecycle {
+  string request_id = 1;
+  string child_session_id = 2;
+  string lease_id = 3;
+  string status = 4;
+  string reason = 5;
 }
 
 message OrchestratorMessage {
@@ -38,6 +55,7 @@ message OrchestratorMessage {
     ToolRequestBatch tool_request_batch = 8;
     AskUserRequest ask_user_request = 9;
     CompactionUpdate compaction_update = 10;
+    AgentLifecycle agent_lifecycle = 11;
   }
 }
 
@@ -147,6 +165,12 @@ message AgentSpawn {
   string request_id = 6;
   string parent_session_id = 7;
   string child_session_id = 8;
+  // WorktreeName is a Harness-controlled isolation slot. The orchestrator
+  // derives it deterministically, while Go validates and creates the actual
+  // checkout before the child process is resumed.
+  string worktree_name = 9;
+  string isolation = 10;
+  string base_ref = 11;
 }
 
 message SessionMeta {
