@@ -49,133 +49,132 @@ class WorkflowEngine:
             self._store.save(run, detail="workflow started")
         else:
             self._store.record_event(spec.id, "", run.state, "workflow resumed")
-
-        while True:
-            run = self._refresh_run(run, workers)
-            self._block_workers_with_failed_dependencies(run, workers)
-            candidates = [
-                worker
-                for worker in workers.values()
-                if run.workers[worker.id].state is WorkerState.PENDING
-                and all(run.workers[dependency].state is WorkerState.COMPLETED for dependency in worker.depends_on)
-            ]
-            if not candidates:
-                if all(result.state in {WorkerState.COMPLETED, WorkerState.FAILED, WorkerState.BLOCKED} for result in run.workers.values()):
-                    run.state = "completed" if all(result.state is WorkerState.COMPLETED for result in run.workers.values()) else "partial_failure"
-                    self._store.save(run, detail="workflow terminal")
-                    return run
-                await asyncio.sleep(self._lease_poll_interval_seconds)
-                continue
-
-            claimed: list[tuple[WorkerSpec, WorkerLease]] = []
-            for worker in candidates:
-                lease = self._store.acquire_lease(
-                    spec.id,
-                    worker.id,
-                    self._owner_id,
-                    self._lease_ttl_seconds,
-                )
-                if lease is not None:
-                    claimed.append((worker, lease))
-                if len(claimed) >= self._max_concurrency:
-                    break
-            if not claimed:
-                await asyncio.sleep(self._lease_poll_interval_seconds)
-                continue
-
-            batch = [worker for worker, _lease in claimed]
-            leases = {worker.id: lease for worker, lease in claimed}
-            for worker in batch:
-                prior = run.workers[worker.id]
-                run.workers[worker.id] = replace(prior, state=WorkerState.RUNNING, attempts=prior.attempts + 1, error="")
-                self._store.save(run, worker.id, "worker started")
-
-            tasks = {
-                worker.id: asyncio.create_task(
-                    self._execute_with_lease(
-                        worker,
-                        {dependency: run.workers[dependency] for dependency in worker.depends_on},
-                        leases[worker.id],
+        active: dict[str, tuple[WorkerSpec, WorkerLease, asyncio.Task[WorkerResult]]] = {}
+        try:
+            while True:
+                run = self._refresh_run(run, workers)
+                self._block_workers_with_failed_dependencies(run, workers)
+                candidates = [
+                    worker
+                    for worker in workers.values()
+                    if worker.id not in active
+                    and run.workers[worker.id].state is WorkerState.PENDING
+                    and all(
+                        run.workers[dependency].state is WorkerState.COMPLETED
+                        for dependency in worker.depends_on
                     )
-                )
-                for worker in batch
-            }
-            checkpointed: set[str] = set()
-
-            def checkpoint_completed(
-                worker: WorkerSpec,
-                task: asyncio.Task[WorkerResult],
-                current_run: WorkflowRun = run,
-                current_leases: dict[str, WorkerLease] = leases,
-                current_checkpointed: set[str] = checkpointed,
-            ) -> None:
-                if task.cancelled() or task.exception() is not None:
-                    return
-                outcome = task.result()
-                if outcome.state is not WorkerState.COMPLETED:
-                    return
-                prior = current_run.workers[worker.id]
-                current_run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
-                self._store.save(current_run, worker.id, "worker completed")
-                self._store.release_lease(
-                    spec.id, worker.id, self._owner_id, current_leases[worker.id].token
-                )
-                current_checkpointed.add(worker.id)
-
-            for worker in batch:
-                tasks[worker.id].add_done_callback(
-                    lambda task, current=worker: checkpoint_completed(current, task)
-                )
-            try:
-                outcomes = await asyncio.gather(*tasks.values(), return_exceptions=True)
-            except asyncio.CancelledError:
-                for worker_id, task in tasks.items():
-                    if worker_id in checkpointed:
+                ]
+                for worker in candidates:
+                    if len(active) >= self._max_concurrency:
+                        break
+                    lease = self._store.acquire_lease(
+                        spec.id,
+                        worker.id,
+                        self._owner_id,
+                        self._lease_ttl_seconds,
+                    )
+                    if lease is None:
                         continue
-                    if task.done() and not task.cancelled() and task.exception() is None:
-                        run.workers[worker_id] = self._completed_result(
-                            workers[worker_id], task.result(), run.workers[worker_id].attempts
-                        )
-                    else:
-                        prior = run.workers[worker_id]
-                        run.workers[worker_id] = replace(prior, state=WorkerState.PENDING)
-                    self._store.release_lease(spec.id, worker_id, self._owner_id, leases[worker_id].token)
-                self._store.save(run, detail="workflow interrupted")
-                raise
-
-            for worker, outcome in zip(batch, outcomes, strict=True):
-                if worker.id in checkpointed:
-                    continue
-                prior = run.workers[worker.id]
-                if isinstance(outcome, BaseException):
-                    if isinstance(outcome, asyncio.CancelledError):
-                        run.workers[worker.id] = replace(prior, state=WorkerState.PENDING)
-                        self._store.save(run, worker.id, "worker interrupted")
-                        self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
-                        raise outcome
-                    if prior.attempts < worker.max_attempts:
-                        run.workers[worker.id] = replace(
-                            prior,
-                            state=WorkerState.PENDING,
-                            error=str(outcome),
-                        )
-                        self._store.save(run, worker.id, "worker retry scheduled")
-                    else:
-                        run.workers[worker.id] = WorkerResult.failed(worker.id, worker.provider, str(outcome), prior.attempts)
-                        self._store.save(run, worker.id, "worker failed")
-                    self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
-                    continue
-                if outcome.state is WorkerState.FAILED and prior.attempts < worker.max_attempts:
+                    prior = run.workers[worker.id]
                     run.workers[worker.id] = replace(
                         prior,
-                        state=WorkerState.PENDING,
-                        error=outcome.error,
+                        state=WorkerState.RUNNING,
+                        attempts=prior.attempts + 1,
+                        error="",
                     )
-                    self._store.save(run, worker.id, "worker retry scheduled")
-                else:
-                    run.workers[worker.id] = self._completed_result(worker, outcome, prior.attempts)
-                    self._store.save(run, worker.id, "worker completed" if outcome.state is WorkerState.COMPLETED else "worker failed")
-                self._store.release_lease(spec.id, worker.id, self._owner_id, leases[worker.id].token)
+                    self._store.save(run, worker.id, "worker started")
+                    task = asyncio.create_task(
+                        self._execute_with_lease(
+                            worker,
+                            {
+                                dependency: run.workers[dependency]
+                                for dependency in worker.depends_on
+                            },
+                            lease,
+                        )
+                    )
+                    active[worker.id] = (worker, lease, task)
+
+                if not active:
+                    if all(
+                        result.state in {WorkerState.COMPLETED, WorkerState.FAILED, WorkerState.BLOCKED}
+                        for result in run.workers.values()
+                    ):
+                        run.state = (
+                            "completed"
+                            if all(result.state is WorkerState.COMPLETED for result in run.workers.values())
+                            else "partial_failure"
+                        )
+                        self._store.save(run, detail="workflow terminal")
+                        return run
+                    await asyncio.sleep(self._lease_poll_interval_seconds)
+                    continue
+
+                done, _pending = await asyncio.wait(
+                    [task for _worker, _lease, task in active.values()],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                interrupted: asyncio.CancelledError | None = None
+                for task in done:
+                    worker_id = next(worker_id for worker_id, item in active.items() if item[2] is task)
+                    worker, lease, _task = active.pop(worker_id)
+                    prior = run.workers[worker_id]
+                    try:
+                        outcome: WorkerResult | BaseException = task.result()
+                    except BaseException as exc:  # noqa: BLE001 - worker failures are persisted below
+                        outcome = exc
+
+                    if isinstance(outcome, asyncio.CancelledError):
+                        run.workers[worker_id] = replace(prior, state=WorkerState.PENDING)
+                        self._store.save(run, worker_id, "worker interrupted")
+                        interrupted = outcome
+                    elif isinstance(outcome, BaseException):
+                        if prior.attempts < worker.max_attempts:
+                            run.workers[worker_id] = replace(
+                                prior,
+                                state=WorkerState.PENDING,
+                                error=str(outcome),
+                            )
+                            self._store.save(run, worker_id, "worker retry scheduled")
+                        else:
+                            run.workers[worker_id] = WorkerResult.failed(
+                                worker_id,
+                                worker.provider,
+                                str(outcome),
+                                prior.attempts,
+                            )
+                            self._store.save(run, worker_id, "worker failed")
+                    elif outcome.state is WorkerState.FAILED and prior.attempts < worker.max_attempts:
+                        run.workers[worker_id] = replace(
+                            prior,
+                            state=WorkerState.PENDING,
+                            error=outcome.error,
+                        )
+                        self._store.save(run, worker_id, "worker retry scheduled")
+                    else:
+                        run.workers[worker_id] = self._completed_result(worker, outcome, prior.attempts)
+                        self._store.save(
+                            run,
+                            worker_id,
+                            "worker completed" if outcome.state is WorkerState.COMPLETED else "worker failed",
+                        )
+                    self._store.release_lease(spec.id, worker_id, self._owner_id, lease.token)
+
+                if interrupted is not None:
+                    raise interrupted
+        except asyncio.CancelledError:
+            for _worker, _lease, task in active.values():
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*(task for _worker, _lease, task in active.values()), return_exceptions=True)
+            for worker_id, (worker, lease, _task) in active.items():
+                prior = run.workers[worker_id]
+                if prior.state is WorkerState.RUNNING:
+                    run.workers[worker_id] = replace(prior, state=WorkerState.PENDING)
+                    self._store.save(run, worker_id, "worker interrupted")
+                self._store.release_lease(spec.id, worker_id, self._owner_id, lease.token)
+            self._store.save(run, detail="workflow interrupted")
+            raise
 
     async def _execute_with_lease(
         self,
