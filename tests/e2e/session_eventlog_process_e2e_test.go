@@ -207,13 +207,7 @@ func TestProductionLegacySessionImportAcrossProcessBoundary(t *testing.T) {
 			{Role: session.RoleAssistant, Content: "legacy assistant message", CreatedAt: createdAt.Add(time.Second)},
 		},
 	}
-	legacyStore := session.NewSQLiteStore(databasePath)
-	if err := legacyStore.Save(context.Background(), legacy); err != nil {
-		t.Fatalf("seed legacy session: %v", err)
-	}
-	if err := legacyStore.Close(); err != nil {
-		t.Fatalf("close legacy session store: %v", err)
-	}
+	writeLegacySessionSnapshot(t, databasePath, legacy)
 	beforeSnapshot := readLegacySnapshotPayload(t, databasePath, legacyID)
 
 	settings, err := json.Marshal(map[string]any{
@@ -645,6 +639,37 @@ func countEventType(events []session.Event, eventType string) int {
 		}
 	}
 	return count
+}
+
+func writeLegacySessionSnapshot(t *testing.T, databasePath string, current session.Session) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
+		t.Fatalf("create legacy session database directory: %v", err)
+	}
+	payload, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal legacy session snapshot: %v", err)
+	}
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open legacy session database: %v", err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  working_dir TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  payload TEXT NOT NULL
+)`); err != nil {
+		t.Fatalf("create legacy session table: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO sessions (id, working_dir, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?)`,
+		current.ID, current.WorkingDir, current.CreatedAt.UTC().Format(time.RFC3339Nano), current.UpdatedAt.UTC().Format(time.RFC3339Nano), string(payload),
+	); err != nil {
+		t.Fatalf("insert legacy session snapshot: %v", err)
+	}
 }
 
 func waitForSessionEvents(t *testing.T, databasePath string, minimum int) (string, int) {

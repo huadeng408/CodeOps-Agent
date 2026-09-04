@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -16,6 +17,7 @@ import (
 
 var ErrNotFound = errors.New("session not found")
 var ErrHistoryUnsupported = errors.New("session history operations unsupported")
+var ErrLegacySnapshotReadOnly = errors.New("legacy session snapshots are read-only")
 
 type Store interface {
 	Save(ctx context.Context, session Session) error
@@ -95,27 +97,7 @@ func NewSQLiteStore(path string) *SQLiteStore {
 }
 
 func (s *SQLiteStore) Save(ctx context.Context, session Session) error {
-	if err := s.ensure(ctx); err != nil {
-		return err
-	}
-
-	payload, err := json.Marshal(session)
-	if err != nil {
-		return fmt.Errorf("marshal session: %w", err)
-	}
-
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO sessions (id, working_dir, created_at, updated_at, payload)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-  working_dir = excluded.working_dir,
-  updated_at = excluded.updated_at,
-  payload = excluded.payload
-`, session.ID, session.WorkingDir, session.CreatedAt.UTC().Format(timeFormat), session.UpdatedAt.UTC().Format(timeFormat), string(payload))
-	if err != nil {
-		return fmt.Errorf("save session: %w", err)
-	}
-	return nil
+	return ErrLegacySnapshotReadOnly
 }
 
 func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
@@ -126,7 +108,7 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
 	var payload string
 	err := s.db.QueryRowContext(ctx, `SELECT payload FROM sessions WHERE id = ?`, id).Scan(&payload)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("load session: %w", err)
@@ -146,6 +128,9 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Session, error) {
 
 	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return []Session{}, nil
+		}
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
 	defer rows.Close()
@@ -205,20 +190,6 @@ func (s *SQLiteStore) ensure(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open sqlite session store: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  working_dir TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC);
-`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("init session store: %w", err)
-	}
-
 	s.db = db
 	return nil
 }

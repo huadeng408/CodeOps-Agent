@@ -2,6 +2,8 @@ package codeagent_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -31,6 +33,35 @@ func TestSessionPersistsActorIdentity(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreRejectsLegacySnapshotWrites(t *testing.T) {
+	store := session.NewSQLiteStore(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Save(context.Background(), session.Session{ID: "legacy-session"}); !errors.Is(err, session.ErrLegacySnapshotReadOnly) {
+		t.Fatalf("legacy snapshot write error = %v, want read-only rejection", err)
+	}
+}
+
+func TestSQLiteStoreDoesNotCreateLegacyTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.sqlite")
+	store := session.NewSQLiteStore(path)
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Load(context.Background(), "missing"); !errors.Is(err, session.ErrNotFound) {
+		t.Fatalf("load missing legacy snapshot error = %v, want ErrNotFound", err)
+	}
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open empty legacy database: %v", err)
+	}
+	defer database.Close()
+	var tableCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`).Scan(&tableCount); err != nil {
+		t.Fatalf("inspect legacy table: %v", err)
+	}
+	if tableCount != 0 {
+		t.Fatal("read-only legacy adapter created the sessions table")
+	}
+}
+
 func TestSessionManagerTracksMessages(t *testing.T) {
 	manager := session.NewManager(nil)
 	manager.NewSession(t.TempDir())
@@ -49,12 +80,11 @@ func TestSessionManagerTracksMessages(t *testing.T) {
 	}
 }
 
-func TestSQLiteStorePersistsSessions(t *testing.T) {
+func TestSQLiteStoreReadsLegacySnapshots(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sessions.sqlite")
 
-	store := session.NewSQLiteStore(path)
-	manager := session.NewManager(store)
+	manager := session.NewManager(session.NewMemoryStore())
 	workspace := t.TempDir()
 	nested := filepath.Join(workspace, "nested")
 	created := manager.NewSession(workspace)
@@ -100,9 +130,7 @@ func TestSQLiteStorePersistsSessions(t *testing.T) {
 	manager.SetWorktrees([]session.WorktreeState{
 		{Name: "agent-a", Path: filepath.Join(workspace, ".worktrees", "agent-a"), BaseRef: "main", Active: true},
 	})
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	writeLegacySnapshot(t, path, manager.Current())
 
 	reloadedStore := session.NewSQLiteStore(path)
 	reloaded := session.NewManager(reloadedStore)

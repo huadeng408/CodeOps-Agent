@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"code-agent/internal/identity"
 	"code-agent/internal/session"
@@ -291,7 +292,6 @@ func TestSQLiteEventLogRejectsInvalidSurfaceOperation(t *testing.T) {
 func TestSQLiteEventLogImportsLegacySnapshotReadOnlyAndIdempotently(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sessions.sqlite")
-	legacyStore := session.NewSQLiteStore(path)
 	legacy := session.Session{
 		ID:         "legacy-session",
 		WorkingDir: filepath.Join(t.TempDir(), "workspace"),
@@ -300,12 +300,7 @@ func TestSQLiteEventLogImportsLegacySnapshotReadOnlyAndIdempotently(t *testing.T
 			Content: "preserve this message exactly",
 		}},
 	}
-	if err := legacyStore.Save(ctx, legacy); err != nil {
-		t.Fatalf("save legacy snapshot: %v", err)
-	}
-	if err := legacyStore.Close(); err != nil {
-		t.Fatalf("close legacy store: %v", err)
-	}
+	writeLegacySnapshot(t, path, legacy)
 
 	readLegacyPayload := func() string {
 		db, openErr := sql.Open("sqlite", path)
@@ -363,14 +358,8 @@ func TestSQLiteEventLogImportsLegacySnapshotReadOnlyAndIdempotently(t *testing.T
 func TestSQLiteEventLogRejectsChangedLegacySnapshot(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sessions.sqlite")
-	legacyStore := session.NewSQLiteStore(path)
 	legacy := session.Session{ID: "legacy-session", WorkingDir: "workspace"}
-	if err := legacyStore.Save(ctx, legacy); err != nil {
-		t.Fatalf("save legacy snapshot: %v", err)
-	}
-	if err := legacyStore.Close(); err != nil {
-		t.Fatalf("close legacy store: %v", err)
-	}
+	writeLegacySnapshot(t, path, legacy)
 	log, err := session.OpenSQLiteEventLog(path)
 	if err != nil {
 		t.Fatalf("open event log: %v", err)
@@ -457,14 +446,8 @@ func TestSQLiteEventStorePersistsManagerStateOnlyInEventLog(t *testing.T) {
 func TestSQLiteEventStoreRejectsLegacySourceChangeAfterStateAdvance(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sessions.sqlite")
-	legacyStore := session.NewSQLiteStore(path)
 	legacy := session.Session{ID: "legacy-session", WorkingDir: "workspace"}
-	if err := legacyStore.Save(ctx, legacy); err != nil {
-		t.Fatalf("save legacy snapshot: %v", err)
-	}
-	if err := legacyStore.Close(); err != nil {
-		t.Fatalf("close legacy store: %v", err)
-	}
+	writeLegacySnapshot(t, path, legacy)
 
 	store := session.NewSQLiteEventStore(path)
 	manager := session.NewManager(store)
@@ -740,7 +723,6 @@ BEGIN SELECT RAISE(ABORT, 'injected fork failure'); END;`); err != nil {
 func TestSQLiteEventStoreForkMaterializesLegacySnapshotIndependently(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sessions.sqlite")
-	legacyStore := session.NewSQLiteStore(path)
 	legacy := session.Session{
 		ID:         "legacy-parent",
 		WorkingDir: "workspace",
@@ -749,12 +731,7 @@ func TestSQLiteEventStoreForkMaterializesLegacySnapshotIndependently(t *testing.
 			Content: "legacy message",
 		}},
 	}
-	if err := legacyStore.Save(ctx, legacy); err != nil {
-		t.Fatalf("save legacy source: %v", err)
-	}
-	if err := legacyStore.Close(); err != nil {
-		t.Fatalf("close legacy source: %v", err)
-	}
+	writeLegacySnapshot(t, path, legacy)
 
 	store := session.NewSQLiteEventStore(path)
 	manager := session.NewManager(store)
@@ -859,6 +836,34 @@ func sessionEvents(ctx context.Context, path, sessionID string) ([]session.Event
 	}
 	defer log.Close()
 	return log.Events(ctx, sessionID)
+}
+
+func writeLegacySnapshot(t *testing.T, path string, current session.Session) {
+	t.Helper()
+	payload, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal legacy snapshot: %v", err)
+	}
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy snapshot database: %v", err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  working_dir TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  payload TEXT NOT NULL
+)`); err != nil {
+		t.Fatalf("create legacy sessions table: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO sessions (id, working_dir, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?)`,
+		current.ID, current.WorkingDir, current.CreatedAt.UTC().Format(time.RFC3339Nano), current.UpdatedAt.UTC().Format(time.RFC3339Nano), string(payload),
+	); err != nil {
+		t.Fatalf("insert legacy snapshot: %v", err)
+	}
 }
 
 func mustSessionEvents(t *testing.T, path, sessionID string) []session.Event {
