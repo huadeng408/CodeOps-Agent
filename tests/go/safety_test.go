@@ -74,3 +74,54 @@ func TestScrubEnvironmentRemovesCredentialShapedVariables(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzerRejectsGitRepositoryEscapeAndCommandHooks(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	cases := [][]string{
+		{"status", "--git-dir", `C:\\outside\\.git`},
+		{"status", "--work-tree", `C:\\outside`},
+		{"status", "-C", `C:\\outside`},
+		{"fetch", "--upload-pack", "powershell"},
+		{"fetch", "--receive-pack=sh", "origin"},
+		{"diff", "--ext-diff"},
+		{"diff", "--no-index", `C:\\outside\\one`, `C:\\outside\\two`},
+		{"status", "--pathspec-from-file", `C:\\outside\\paths.txt`},
+	}
+	for _, args := range cases {
+		if result := analyzer.AnalyzeGit(args); result.Allowed {
+			t.Fatalf("git escape unexpectedly allowed: %#v (%+v)", args, result)
+		}
+	}
+}
+
+func TestAnalyzerRejectsMalformedGitArguments(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	if result := analyzer.AnalyzeGit([]string{"status", "ok\x00bad"}); result.Allowed {
+		t.Fatalf("NUL-containing git argument unexpectedly allowed: %+v", result)
+	}
+	if result := analyzer.AnalyzeGit([]string{"status", strings.Repeat("x", 8193)}); result.Allowed {
+		t.Fatalf("oversized git argument unexpectedly allowed: %+v", result)
+	}
+}
+
+func TestScrubGitEnvironmentRemovesGitRedirectionVariables(t *testing.T) {
+	input := []string{
+		"PATH=/bin",
+		"GIT_DIR=/outside/.git",
+		"GIT_WORK_TREE=/outside",
+		"GIT_INDEX_FILE=/outside/index",
+		"GIT_CONFIG_SYSTEM=/outside/config",
+		"GIT_SSH_COMMAND=sh -c evil",
+		"GIT_TERMINAL_PROMPT=1",
+	}
+	got := safety.ScrubGitEnvironment(input)
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatalf("safe git environment was not preserved or prompt was not disabled: %q", joined)
+	}
+	for _, needle := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_SYSTEM", "GIT_SSH_COMMAND"} {
+		if strings.Contains(joined, needle+"=") {
+			t.Fatalf("git redirection variable leaked: %q", needle)
+		}
+	}
+}

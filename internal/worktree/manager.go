@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"code-agent/internal/safety"
 )
 
 const (
@@ -119,6 +122,9 @@ func (m *Manager) SpawnAgent(ctx context.Context, request AgentSpawnRequest) (Wo
 	}
 	if baseRef == "" {
 		baseRef = "HEAD"
+	}
+	if err := validateBaseRef(baseRef); err != nil {
+		return Worktree{}, fmt.Errorf("agent base revision %q is invalid: %w", baseRef, err)
 	}
 	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", baseRef+"^{commit}"); err != nil {
 		return Worktree{}, fmt.Errorf("agent base revision %q is invalid: %w", baseRef, err)
@@ -368,7 +374,14 @@ func (m *Manager) List() []Worktree {
 }
 
 func (m *Manager) Restore(trees []Worktree) {
-	_ = m.RestoreChecked(trees)
+	valid := make([]Worktree, 0, len(trees))
+	for _, tree := range trees {
+		if _, err := normalizeName(tree.Name); err != nil {
+			continue
+		}
+		valid = append(valid, tree)
+	}
+	_ = m.RestoreChecked(valid)
 }
 
 // RestoreChecked restores persisted state only when every agent checkout is
@@ -386,7 +399,10 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 	for _, tree := range trees {
 		name, err := normalizeName(tree.Name)
 		if err != nil {
-			continue
+			return fmt.Errorf("restore worktree %q: %w", tree.Name, err)
+		}
+		if _, exists := m.trees[name]; exists {
+			return fmt.Errorf("restore worktree %q: duplicate name", name)
 		}
 		tree.Name = name
 		if strings.TrimSpace(tree.Path) == "" {
@@ -395,13 +411,36 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 		if strings.TrimSpace(tree.BaseRef) == "" {
 			tree.BaseRef = m.baseRef
 		}
+		if err := validateBaseRef(tree.BaseRef); err != nil {
+			m.trees = make(map[string]Worktree)
+			return fmt.Errorf("restore worktree %q: %w", tree.Name, err)
+		}
+		if err := ensureContainedPath(m.root, tree.Path); err != nil {
+			m.trees = make(map[string]Worktree)
+			return err
+		}
 		if tree.RequestID != "" {
-			if err := ensureContainedPath(m.root, tree.Path); err != nil {
+			if err := validateAgentSpawnRequest(AgentSpawnRequest{
+				RequestID: tree.RequestID, ParentSessionID: tree.ParentSessionID,
+				ChildSessionID: tree.ChildSessionID, WorktreeName: tree.Name,
+			}); err != nil {
 				m.trees = make(map[string]Worktree)
-				return err
+				return fmt.Errorf("restore agent worktree %q: %w", tree.Name, err)
+			}
+			if err := validateLeaseID(tree.LeaseID); err != nil {
+				m.trees = make(map[string]Worktree)
+				return fmt.Errorf("restore agent worktree %q: %w", tree.Name, err)
+			}
+			if tree.LeaseExpiresAt.IsZero() {
+				m.trees = make(map[string]Worktree)
+				return fmt.Errorf("restore agent worktree %q: lease expiry is required", tree.Name)
 			}
 			if tree.Status == "" {
 				tree.Status = AgentWorktreeActive
+			}
+			if tree.Status != AgentWorktreeActive {
+				m.trees = make(map[string]Worktree)
+				return fmt.Errorf("restore agent worktree %q: status must be active", tree.Name)
 			}
 		}
 		if tree.Active {
@@ -423,6 +462,9 @@ func (m *Manager) createGitWorktree(ctx context.Context, tree Worktree) error {
 	if err := os.MkdirAll(filepath.Dir(tree.Path), 0o755); err != nil {
 		return fmt.Errorf("create worktree base dir: %w", err)
 	}
+	if err := ensureContainedPath(m.root, tree.Path); err != nil {
+		return err
+	}
 	if _, err := gitOutput(ctx, m.root, "worktree", "add", "-b", "agent/"+tree.Name, tree.Path, tree.BaseRef); err != nil {
 		return err
 	}
@@ -433,6 +475,9 @@ func (m *Manager) resolveBaseRef(ctx context.Context) string {
 	baseRef := strings.TrimSpace(m.baseRef)
 	if baseRef == "" {
 		baseRef = "HEAD"
+	}
+	if err := validateBaseRef(baseRef); err != nil {
+		return "HEAD"
 	}
 	if !isGitRepository(ctx, m.root) {
 		return baseRef
@@ -488,6 +533,9 @@ func (m *Manager) ensureRemovable(ctx context.Context, tree Worktree, discard bo
 	}
 	if baseRef == "" {
 		baseRef = "HEAD"
+	}
+	if err := validateBaseRef(baseRef); err != nil {
+		return fmt.Errorf("worktree %s base revision is invalid: %w", tree.Name, err)
 	}
 	if _, err := gitOutput(ctx, m.root, "rev-parse", "--verify", branch); err != nil {
 		return nil
@@ -608,25 +656,98 @@ func validateAgentSpawnRequest(request AgentSpawnRequest) error {
 		if strings.ContainsRune(value, '\x00') {
 			return fmt.Errorf("agent %s contains a NUL byte", field)
 		}
+		for _, r := range value {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("agent %s contains a control character", field)
+			}
+		}
+	}
+	return nil
+}
+
+func validateBaseRef(baseRef string) error {
+	baseRef = strings.TrimSpace(baseRef)
+	if baseRef == "" {
+		return errors.New("base revision is empty")
+	}
+	if len(baseRef) > 256 || strings.HasPrefix(baseRef, "-") || strings.Contains(baseRef, "..") || strings.Contains(baseRef, "^{") || strings.ContainsAny(baseRef, "\\:*?[\x00") || strings.IndexFunc(baseRef, unicode.IsSpace) >= 0 {
+		return errors.New("base revision contains unsafe syntax")
+	}
+	for _, r := range baseRef {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("base revision contains a control character")
+		}
+	}
+	return nil
+}
+
+func validateLeaseID(leaseID string) error {
+	leaseID = strings.TrimSpace(leaseID)
+	if len(leaseID) != 38 || !strings.HasPrefix(leaseID, "lease-") {
+		return errors.New("lease id is invalid")
+	}
+	for _, r := range leaseID[len("lease-"):] {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return errors.New("lease id is invalid")
+		}
 	}
 	return nil
 }
 
 func ensureContainedPath(root, target string) error {
-	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	rootReal, err := resolvePathWithExistingParent(root)
 	if err != nil {
 		return fmt.Errorf("resolve agent worktree root: %w", err)
 	}
-	targetAbs, err := filepath.Abs(filepath.Clean(target))
-	if err != nil {
-		return fmt.Errorf("resolve agent worktree path: %w", err)
+	controlledRoot := filepath.Join(filepath.Clean(root), ".agent", "worktrees")
+	controlledReal, err := resolvePathWithExistingParent(controlledRoot)
+	if err != nil || !pathWithin(rootReal, controlledReal, true) {
+		return errors.New("agent worktree path escapes repository root")
 	}
-	controlledRoot := filepath.Join(rootAbs, ".agent", "worktrees")
-	rel, err := filepath.Rel(controlledRoot, targetAbs)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	targetReal, err := resolvePathWithExistingParent(target)
+	if err != nil || !pathWithin(controlledReal, targetReal, false) {
 		return errors.New("agent worktree path escapes repository root")
 	}
 	return nil
+}
+
+func pathWithin(root, target string, allowRoot bool) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return allowRoot || rel != "."
+}
+
+func resolvePathWithExistingParent(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	current := abs
+	suffix := make([]string, 0, 4)
+	for {
+		_, statErr := os.Lstat(current)
+		if statErr == nil {
+			real, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				real = filepath.Join(real, suffix[i])
+			}
+			return filepath.Clean(real), nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", statErr
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 func newLeaseID() (string, error) {
@@ -645,9 +766,14 @@ func isGitRepository(ctx context.Context, root string) bool {
 func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
 	cmdArgs := append([]string{"-C", root}, args...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd.Env = scrubGitEnvironment()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+func scrubGitEnvironment() []string {
+	return safety.ScrubGitEnvironment(os.Environ())
 }

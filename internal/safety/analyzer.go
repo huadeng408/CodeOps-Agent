@@ -2,7 +2,10 @@ package safety
 
 import (
 	"strings"
+	"unicode"
 )
+
+const maxGitArgumentLength = 8192
 
 type RiskLevel string
 
@@ -56,14 +59,56 @@ func (a *Analyzer) AnalyzeGit(args []string) Analysis {
 	if len(args) == 0 {
 		return Analysis{Allowed: true, Level: RiskLow, Reason: "git status-like command"}
 	}
-	subcommand := strings.ToLower(strings.TrimSpace(args[0]))
-	if isDangerousGit(args) {
+	normalized := make([]string, len(args))
+	for i, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" && i == 0 {
+			return Analysis{Allowed: false, Level: RiskMedium, Reason: "git subcommand is empty"}
+		}
+		if len(arg) > maxGitArgumentLength || strings.IndexByte(arg, 0) >= 0 || containsControl(arg) {
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "malformed git argument"}
+		}
+		normalized[i] = strings.ToLower(trimmed)
+	}
+	subcommand := normalized[0]
+	if containsGitEscape(normalized) {
+		return Analysis{Allowed: false, Level: RiskHigh, Reason: "git repository escape or external hook blocked"}
+	}
+	if isDangerousGit(normalized) {
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "destructive or shared git operation blocked"}
 	}
-	if IsSafeGitSubcommand(subcommand) && isSafeGitArgs(subcommand, args[1:]) {
+	if IsSafeGitSubcommand(subcommand) && isSafeGitArgs(subcommand, normalized[1:]) {
 		return Analysis{Allowed: true, Level: RiskLow, Reason: "safe git subcommand"}
 	}
 	return Analysis{Allowed: false, Level: RiskMedium, Reason: "unsupported git subcommand or arguments"}
+}
+
+func containsGitEscape(args []string) bool {
+	for _, arg := range args[1:] {
+		if arg == "-c" || arg == "-c=" || strings.HasPrefix(arg, "-c=") || strings.HasPrefix(arg, "-c") && len(arg) > 2 {
+			return true
+		}
+		if arg == "-C" || strings.HasPrefix(arg, "-c") && len(arg) > 2 {
+			return true
+		}
+		if arg == "--ext-diff" || arg == "--no-ext-diff" || arg == "--external-diff" {
+			return true
+		}
+		for _, prefix := range []string{
+			"--git-dir", "--work-tree", "--super-prefix", "--exec-path", "--config",
+			"--config-env", "--upload-pack", "--receive-pack", "--ssh-command",
+			"--index-file", "--object-directory", "--alternate-objects", "--namespace",
+			"--pathspec-from-file", "--pathspec-file-nul", "--output",
+		} {
+			if arg == prefix || strings.HasPrefix(arg, prefix+"=") {
+				return true
+			}
+		}
+		if arg == "--no-index" {
+			return true
+		}
+	}
+	return false
 }
 
 func isDangerousGit(args []string) bool {
@@ -200,6 +245,42 @@ func containsProcessKill(fields []string) bool {
 
 func containsForkBomb(lower string) bool {
 	return strings.Contains(lower, ":(){ :|:& };:") || strings.Contains(lower, ":(){:|:&};:")
+}
+
+func containsControl(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// ScrubGitEnvironment removes ambient Git controls that can redirect a
+// command to another repository, index, transport or executable. Git is
+// invoked with explicit -C by the Harness, so these variables are never
+// needed for a tool call.
+func ScrubGitEnvironment(env []string) []string {
+	blocked := func(key string) bool {
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if strings.HasPrefix(upper, "GIT_") {
+			return true
+		}
+		return false
+	}
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range ScrubEnvironment(env) {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || blocked(key) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "GIT_TERMINAL_PROMPT") {
+			continue
+		}
+		result = append(result, entry)
+	}
+	result = append(result, "GIT_TERMINAL_PROMPT=0")
+	return result
 }
 
 func hasAny(args []string, values ...string) bool {

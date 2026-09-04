@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -16,7 +17,11 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 		command = "status"
 	}
 	command = strings.ToLower(strings.TrimSpace(command))
-	extraArgs := stringSliceArg(args, "args", "arguments")
+	extraArgs, argErr := stringSliceArg(args, "args", "arguments")
+	if argErr != nil {
+		result := ToolResult{Name: "Git", Error: argErr.Error(), ExitCode: 1}
+		return result, argErr
+	}
 	analysisArgs := append([]string{command}, lowerArgs(extraArgs)...)
 	analysis := safety.NewAnalyzer().AnalyzeGit(analysisArgs)
 	if !analysis.Allowed {
@@ -45,6 +50,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 
 	cmdArgs := append([]string{"-C", e.Root, command}, extraArgs...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd.Env = safety.ScrubGitEnvironment(os.Environ())
 	output, err := cmd.CombinedOutput()
 	result := ToolResult{Name: "Git", Output: string(output)}
 	if err != nil {
@@ -63,7 +69,7 @@ func lowerArgs(args []string) []string {
 	return out
 }
 
-func stringSliceArg(args map[string]any, keys ...string) []string {
+func stringSliceArg(args map[string]any, keys ...string) ([]string, error) {
 	for _, key := range keys {
 		value, ok := args[key]
 		if !ok {
@@ -71,18 +77,22 @@ func stringSliceArg(args map[string]any, keys ...string) []string {
 		}
 		switch v := value.(type) {
 		case []string:
-			return append([]string(nil), v...)
+			return append([]string(nil), v...), nil
 		case []any:
 			out := make([]string, 0, len(v))
 			for _, item := range v {
-				if s, ok := item.(string); ok {
-					out = append(out, s)
+				s, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("git arguments must be strings")
 				}
+				out = append(out, s)
 			}
-			return out
+			return out, nil
+		default:
+			return nil, fmt.Errorf("git arguments must be strings")
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func exitCodeFromError(err error) int {

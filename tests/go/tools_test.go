@@ -367,6 +367,20 @@ func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
 	}
 }
 
+func TestExecutorGitRejectsNonStringArgumentItems(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Git",
+		Arguments: map[string]any{
+			"command": "status",
+			"args":    []any{"--short", 42},
+		},
+	})
+	if err == nil || !strings.Contains(result.Error, "git arguments must be strings") {
+		t.Fatalf("expected malformed git arguments to fail closed, got result=%+v err=%v", result, err)
+	}
+}
+
 func TestExecutorReadSupportsImageContentBlock(t *testing.T) {
 	root := t.TempDir()
 	pngData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}

@@ -2,6 +2,7 @@ package codeagent_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -333,6 +334,51 @@ func TestWorktreeManagerSpawnFailsClosedForNonGitAndUnsafeInputs(t *testing.T) {
 		if _, err := manager.SpawnAgent(context.Background(), request); err == nil {
 			t.Fatalf("expected unsafe spawn request to fail: %#v", request)
 		}
+	}
+}
+
+func TestWorktreeManagerRejectsUnsafeBaseRevision(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	for i, baseRef := range []string{"--help", "HEAD\x00^{commit}", "HEAD\nrefs/heads/main"} {
+		_, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+			RequestID:       fmt.Sprintf("request-unsafe-base-%d", i),
+			ParentSessionID: "parent",
+			ChildSessionID:  "child",
+			WorktreeName:    "unsafe-base",
+			BaseRef:         baseRef,
+		})
+		if err == nil || !strings.Contains(err.Error(), "base revision contains unsafe syntax") {
+			t.Fatalf("unsafe base revision unexpectedly accepted: %q (%v)", baseRef, err)
+		}
+	}
+}
+
+func TestWorktreeManagerRestoreCheckedRejectsSymlinkEscape(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	outside := t.TempDir()
+	controlled := filepath.Join(repo, ".agent", "worktrees")
+	if err := os.MkdirAll(filepath.Dir(controlled), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, controlled); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	manager := worktree.NewManager(repo, "HEAD")
+	err := manager.RestoreChecked([]worktree.Worktree{{
+		Name:            "escape",
+		Path:            filepath.Join(controlled, "escape"),
+		BaseRef:         "HEAD",
+		RequestID:       "request-symlink",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		LeaseID:         "lease-symlink",
+		Status:          worktree.AgentWorktreeActive,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+		t.Fatalf("symlink worktree escape unexpectedly accepted: %v", err)
 	}
 }
 
