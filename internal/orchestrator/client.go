@@ -119,6 +119,11 @@ type Client struct {
 	// failed Harness persistence operation cannot be reported as success.
 	OnCompaction func(update *codeagentpb.CompactionUpdate) error
 
+	// OnPlanTodoUpdate persists a complete, versioned Plan/Todo projection in
+	// the Harness. The callback runs before the public event handler so a stale
+	// revision can abort the stream instead of being rendered as committed.
+	OnPlanTodoUpdate func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error
+
 	// Tracer provides gen_ai execute_tool spans; when nil tool spans are skipped.
 	tracer genai.Tracer
 }
@@ -322,6 +327,13 @@ func (c *Client) ConverseWithPrompts(ctx context.Context, input string, eventHan
 }
 
 func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string, sessionID string, history []ConversationMessage, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
+	return c.ConverseWithHistoryAndState(ctx, input, sessionID, history, nil, eventHandler, askHandler, handlers...)
+}
+
+// ConverseWithHistoryAndState sends a request together with the Harness's
+// current Plan/Todo snapshot. Keeping this as an additive API preserves the
+// existing callers while making state recovery explicit at the protocol edge.
+func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, sessionID string, history []ConversationMessage, state *codeagentpb.PlanTodoSnapshot, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("orchestrator client is nil")
 	}
@@ -351,9 +363,10 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_UserInput{
 			UserInput: &codeagentpb.UserInput{
-				Text:      input,
-				SessionId: strings.TrimSpace(sessionID),
-				History:   historyPayload,
+				Text:          input,
+				SessionId:     strings.TrimSpace(sessionID),
+				History:       historyPayload,
+				PlanTodoState: state,
 			},
 		},
 	}); err != nil {
@@ -384,10 +397,20 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_TodoUpdate:
+			if payload.TodoUpdate != nil && c.OnPlanTodoUpdate != nil {
+				if err := c.OnPlanTodoUpdate(nil, payload.TodoUpdate); err != nil {
+					return "", fmt.Errorf("persist todo update: %w", err)
+				}
+			}
 			if eventHandler != nil {
 				eventHandler(ctx, Event{TodoUpdate: payload.TodoUpdate})
 			}
 		case *codeagentpb.OrchestratorMessage_PlanUpdate:
+			if payload.PlanUpdate != nil && c.OnPlanTodoUpdate != nil {
+				if err := c.OnPlanTodoUpdate(payload.PlanUpdate, nil); err != nil {
+					return "", fmt.Errorf("persist plan update: %w", err)
+				}
+			}
 			if eventHandler != nil {
 				eventHandler(ctx, Event{PlanUpdate: payload.PlanUpdate})
 			}

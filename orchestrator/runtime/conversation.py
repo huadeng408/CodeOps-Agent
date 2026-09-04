@@ -47,6 +47,12 @@ from orchestrator.recovery import ErrorRecoveryEngine, RecoveryStrategy
 from orchestrator.security import InjectionDetector, redact_credential_text
 from orchestrator.skills.manager import SkillManager
 from orchestrator.todo.manager import Todo, TodoManager
+from orchestrator.todo.state import (
+    PlanTodoSnapshot,
+    PlanTodoStateMachine,
+    StateConflictError,
+    StateValidationError,
+)
 from orchestrator.workflows import (
     ProviderWorkerExecutor,
     SQLiteWorkflowStore,
@@ -203,6 +209,7 @@ class ConversationRunner:
     provider_router: ProviderRouter | None = None
     hooks: HookRegistry | None = None
     commands: CommandRegistry | None = None
+    allow_parallel_todos: bool = False
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
@@ -213,6 +220,7 @@ class ConversationRunner:
     _pending_hook_context: list[str] = field(default_factory=list, init=False, repr=False)
     _hook_stop_message: str = field(default="", init=False, repr=False)
     _stopping_hook_dispatched: bool = field(default=False, init=False, repr=False)
+    _state_machine: PlanTodoStateMachine | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -271,6 +279,7 @@ class ConversationRunner:
         session_id: str = "",
         history: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
+        plan_todo_snapshot: PlanTodoSnapshot | dict[str, Any] | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -281,6 +290,30 @@ class ConversationRunner:
         self._hook_stop_message = ""
         self._stopping_hook_dispatched = False
         self._loop_last_turn = 0
+        try:
+            if plan_todo_snapshot is None:
+                legacy_todos = self.todo_manager.snapshot()
+                plan_todo_snapshot = {
+                    "schema_version": 1,
+                    "revision": 0,
+                    "plan": {"steps": [], "current_index": 0, "mode": "chat"},
+                    "todos": [
+                        {
+                            "content": item.content,
+                            "active_form": item.active_form,
+                            "status": item.status,
+                        }
+                        for item in legacy_todos
+                    ],
+                }
+            self._state_machine = PlanTodoStateMachine.from_wire(
+                plan_todo_snapshot,
+                allow_parallel=self.allow_parallel_todos,
+            )
+        except (StateConflictError, StateValidationError, TypeError, ValueError) as exc:
+            yield self._text(f"invalid plan/todo state: {type(exc).__name__}")
+            yield self._finish(session_id, False, "invalid_plan_todo_state", turn=0)
+            return
         self._emit_loop_event(
             "loop_start",
             session_id=session_id,
@@ -319,6 +352,7 @@ class ConversationRunner:
                 session_id=session_id,
                 history=history,
                 cancel_event=cancel_event,
+                plan_todo_snapshot=plan_todo_snapshot,
             )
         finally:
             self._dispatch_hook(
@@ -343,6 +377,7 @@ class ConversationRunner:
         session_id: str = "",
         history: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
+        plan_todo_snapshot: PlanTodoSnapshot | dict[str, Any] | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         if self.llm is None:
             yield from self._fallback_conversation(
@@ -355,7 +390,13 @@ class ConversationRunner:
         self._elect_llm(complexity=complexity, error_count=0, plan_mode_active=False)
         using_fast = self.llm is self.fast_llm
 
-        messages = self._initial_messages(user_text, turn=1, session_id=session_id, history=history or [])
+        messages = self._initial_messages(
+            user_text,
+            turn=1,
+            session_id=session_id,
+            history=history or [],
+            state_context=self._state_machine.prompt_context() if self._state_machine else "",
+        )
         if self._pending_hook_context:
             messages.extend(
                 ChatMessage(role="system", content=context)
@@ -792,8 +833,45 @@ class ConversationRunner:
                             metadata={"tool_name": call.name, "is_error": True},
                         )
                         continue
-                    self.todo_manager.update(todo_items)
-                    snapshot = self.todo_manager.snapshot()
+                    machine = self._state_machine or PlanTodoStateMachine()
+                    try:
+                        state = machine.replace_todos(
+                            [
+                                {
+                                    "content": item.content,
+                                    "active_form": item.active_form,
+                                    "status": item.status,
+                                }
+                                for item in todo_items
+                            ],
+                            allow_parallel=self.allow_parallel_todos,
+                        )
+                    except (StateConflictError, StateValidationError, TypeError, ValueError) as exc:
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                name=call.name,
+                                tool_call_id=call_id,
+                                content=f"Invalid TodoWrite state: {type(exc).__name__}",
+                                is_error=True,
+                            )
+                        )
+                        yield self._text(f"TodoWrite rejected: {type(exc).__name__}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
+                        continue
+                    self._state_machine = machine
+                    snapshot = state
+                    self.todo_manager.update(
+                        [
+                            Todo(item.content, item.active_form, item.status)
+                            for item in snapshot.todos
+                        ]
+                    )
                     payload = orchestrator_pb2.TodoUpdate(
                         todos=[
                             orchestrator_pb2.TodoItem(
@@ -801,8 +879,9 @@ class ConversationRunner:
                                 active_form=item.active_form,
                                 status=item.status,
                             )
-                            for item in snapshot
-                        ]
+                            for item in snapshot.todos
+                        ],
+                        revision=snapshot.revision,
                     )
                     yield orchestrator_pb2.OrchestratorMessage(todo_update=payload)
                     messages.append(
@@ -817,7 +896,7 @@ class ConversationRunner:
                                         "active_form": item.active_form,
                                         "status": item.status,
                                     }
-                                    for item in snapshot
+                                    for item in snapshot.todos
                                 ],
                                 ensure_ascii=False,
                             ),
@@ -852,11 +931,43 @@ class ConversationRunner:
                             metadata={"tool_name": call.name, "is_error": True},
                         )
                         continue
+                    machine = self._state_machine or PlanTodoStateMachine()
+                    try:
+                        state = machine.replace_plan(
+                            plan_update["steps"],
+                            current_index=int(plan_update["current_index"]),
+                            mode=str(plan_update["mode"]),
+                        )
+                    except (StateConflictError, StateValidationError, TypeError, ValueError) as exc:
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                name=call.name,
+                                tool_call_id=call_id,
+                                content=f"Invalid PlanWrite state: {type(exc).__name__}",
+                                is_error=True,
+                            )
+                        )
+                        yield self._text(f"PlanWrite rejected: {type(exc).__name__}")
+                        self._emit_loop_event(
+                            "tool_after",
+                            session_id=session_id,
+                            turn=turn,
+                            metadata={"tool_name": call.name, "is_error": True},
+                        )
+                        continue
+                    self._state_machine = machine
+                    plan_update = {
+                        "steps": list(state.plan.steps),
+                        "current_index": state.plan.current_index,
+                        "mode": state.plan.mode,
+                    }
                     yield orchestrator_pb2.OrchestratorMessage(
                         plan_update=orchestrator_pb2.PlanUpdate(
                             steps=plan_update["steps"],
                             current_index=plan_update["current_index"],
                             mode=plan_update["mode"],
+                            revision=state.revision,
                         )
                     )
                     messages.append(
@@ -869,7 +980,11 @@ class ConversationRunner:
                         )
                     )
                     plan_mode_active = True
-                    self._persist_event(session_id, "plan", plan_update)
+                    self._persist_event(
+                        session_id,
+                        "plan",
+                        {**plan_update, "revision": state.revision},
+                    )
                     self._emit_loop_event(
                         "tool_after",
                         session_id=session_id,
@@ -1320,7 +1435,14 @@ class ConversationRunner:
         yield self._session_meta(1, 0, 0, 0.0)
         yield self._finish(session_id, True, "completed", turn=1, response=text)
 
-    def _initial_messages(self, user_text: str, turn: int, session_id: str = "", history: list[dict[str, str]] | None = None) -> list[ChatMessage]:
+    def _initial_messages(
+        self,
+        user_text: str,
+        turn: int,
+        session_id: str = "",
+        history: list[dict[str, str]] | None = None,
+        state_context: str = "",
+    ) -> list[ChatMessage]:
         history = history or []
         memories = self.memory_manager.load_relevant(user_text)
         layered = ""
@@ -1351,7 +1473,14 @@ class ConversationRunner:
             "tools": self._tools_context(),
             "project": self._project_context(),
             "memory": memory_text,
-            "session": self._session_context(user_text, turn, session_id=session_id, history=history),
+            "session": "\n\n".join(
+                part
+                for part in (
+                    self._session_context(user_text, turn, session_id=session_id, history=history),
+                    state_context,
+                )
+                if part
+            ),
             "provider": provider,
         }
         system_messages = build_with_cache_breaks(sections, provider=provider)

@@ -206,6 +206,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	})
 	if app.orchestrator != nil {
 		app.orchestrator.OnCompaction = app.handleCompactionUpdate
+		app.orchestrator.OnPlanTodoUpdate = app.handlePlanTodoUpdate
 	}
 	app.input.SetWorkspaceDir(cfg.WorkingDir)
 	return app
@@ -436,6 +437,7 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 			}
 			a.orchestrator.SetTracer(a.telemetry)
 			a.orchestrator.OnCompaction = a.handleCompactionUpdate
+			a.orchestrator.OnPlanTodoUpdate = a.handlePlanTodoUpdate
 			a.renderer.PrintLine("[Orchestrator restarted. Session preserved.]")
 			reply2, err2 := a.converse(teleCtx, input)
 			if err2 == nil && strings.TrimSpace(reply2) != "" {
@@ -467,11 +469,80 @@ func (a *App) handleCompactionUpdate(update *codeagentpb.CompactionUpdate) error
 // converse runs a single orchestrator turn using the persisted session.
 func (a *App) converse(ctx context.Context, input string) (string, error) {
 	current := a.session.Current()
-	return a.orchestrator.ConverseWithHistoryAndPrompts(
+	return a.orchestrator.ConverseWithHistoryAndState(
 		ctx, input, current.ID,
 		orchestratorHistory(current.Messages, input),
+		planTodoSnapshot(current),
 		a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall,
 	)
+}
+
+func planTodoSnapshot(current session.Session) *codeagentpb.PlanTodoSnapshot {
+	mode := current.Plan.Mode
+	if strings.TrimSpace(mode) == "" {
+		mode = "chat"
+	}
+	items := make([]*codeagentpb.TodoItem, 0, len(current.Todos))
+	for _, item := range current.Todos {
+		items = append(items, &codeagentpb.TodoItem{
+			Content:    item.Content,
+			ActiveForm: item.ActiveForm,
+			Status:     item.Status,
+		})
+	}
+	return &codeagentpb.PlanTodoSnapshot{
+		SchemaVersion: 1,
+		Revision:      current.PlanTodoRevision,
+		Plan: &codeagentpb.PlanUpdate{
+			Steps:        append([]string(nil), current.Plan.Steps...),
+			CurrentIndex: int32(current.Plan.CurrentIndex),
+			Mode:         mode,
+			Revision:     current.PlanTodoRevision,
+		},
+		Todos: items,
+	}
+}
+
+// handlePlanTodoUpdate is the durable Harness boundary for Python's
+// versioned state events. Plan and Todo are applied as one projection so a
+// stale or partially written update cannot advance only half of the state.
+func (a *App) handlePlanTodoUpdate(planUpdate *codeagentpb.PlanUpdate, todoUpdate *codeagentpb.TodoUpdate) error {
+	if a == nil || a.session == nil {
+		return errors.New("session is not configured")
+	}
+	current := a.session.Current()
+	plan := current.Plan
+	todos := append([]session.TodoItem(nil), current.Todos...)
+	var revision uint64
+	if planUpdate != nil {
+		plan = session.PlanState{
+			Steps:        append([]string(nil), planUpdate.GetSteps()...),
+			CurrentIndex: int(planUpdate.GetCurrentIndex()),
+			Mode:         planUpdate.GetMode(),
+		}
+		revision = planUpdate.GetRevision()
+	}
+	if todoUpdate != nil {
+		todos = make([]session.TodoItem, 0, len(todoUpdate.GetTodos()))
+		for _, item := range todoUpdate.GetTodos() {
+			if item == nil {
+				continue
+			}
+			todos = append(todos, session.TodoItem{
+				Content:    item.GetContent(),
+				ActiveForm: item.GetActiveForm(),
+				Status:     item.GetStatus(),
+			})
+		}
+		revision = todoUpdate.GetRevision()
+	}
+	if revision == 0 {
+		return errors.New("plan/todo update has no revision")
+	}
+	if _, ok := a.session.ApplyPlanTodoState(plan, todos, revision); !ok {
+		return fmt.Errorf("stale plan/todo revision %d", revision)
+	}
+	return nil
 }
 
 // restartOrchestrator asks the process manager to tear down and relaunch the
@@ -748,7 +819,6 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 			CurrentIndex: int(event.PlanUpdate.GetCurrentIndex()),
 			Mode:         event.PlanUpdate.GetMode(),
 		}
-		a.session.SetPlan(plan)
 		a.renderer.PrintBlock("plan", formatPlanLines(plan))
 	}
 
@@ -757,7 +827,6 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 	}
 
 	items := make([]todo.Item, 0, len(event.TodoUpdate.GetTodos()))
-	sessionTodos := make([]session.TodoItem, 0, len(event.TodoUpdate.GetTodos()))
 	for _, item := range event.TodoUpdate.GetTodos() {
 		if item == nil {
 			continue
@@ -768,14 +837,8 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 			Status:     item.GetStatus(),
 		}
 		items = append(items, todoItem)
-		sessionTodos = append(sessionTodos, session.TodoItem{
-			Content:    todoItem.Content,
-			ActiveForm: todoItem.ActiveForm,
-			Status:     todoItem.Status,
-		})
 	}
 	a.todos.Update(items)
-	a.session.SetTodos(sessionTodos)
 }
 
 func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {

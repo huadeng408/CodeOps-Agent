@@ -45,6 +45,14 @@ message UserInput {
   string text = 1;
   string session_id = 2;
   repeated ConversationMessage history = 3;
+  PlanTodoSnapshot plan_todo_state = 4;
+}
+
+message PlanTodoSnapshot {
+  uint32 schema_version = 1;
+  uint64 revision = 2;
+  PlanUpdate plan = 3;
+  repeated TodoItem todos = 4;
 }
 
 message ConversationMessage {
@@ -103,10 +111,12 @@ message PlanUpdate {
   repeated string steps = 1;
   int32 current_index = 2;
   string mode = 3;
+  uint64 revision = 4;
 }
 
 message TodoUpdate {
   repeated TodoItem todos = 1;
+  uint64 revision = 2;
 }
 
 message TodoItem {

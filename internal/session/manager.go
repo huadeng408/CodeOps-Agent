@@ -80,20 +80,21 @@ type WorktreeState struct {
 }
 
 type Session struct {
-	ID            string             `json:"id"`
-	WorkingDir    string             `json:"working_dir"`
-	CreatedAt     time.Time          `json:"created_at"`
-	UpdatedAt     time.Time          `json:"updated_at"`
-	Messages      []Message          `json:"messages"`
-	Metadata      map[string]string  `json:"metadata,omitempty"`
-	Metrics       SessionMetrics     `json:"metrics,omitempty"`
-	Todos         []TodoItem         `json:"todos,omitempty"`
-	Plan          PlanState          `json:"plan,omitempty"`
-	Mode          string             `json:"mode,omitempty"`
-	Agents        []AgentSpawnRecord `json:"agents,omitempty"`
-	Undo          []UndoEntry        `json:"undo,omitempty"`
-	ApprovedTools []string           `json:"approved_tools,omitempty"`
-	Worktrees     []WorktreeState    `json:"worktrees,omitempty"`
+	ID               string             `json:"id"`
+	WorkingDir       string             `json:"working_dir"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	Messages         []Message          `json:"messages"`
+	Metadata         map[string]string  `json:"metadata,omitempty"`
+	Metrics          SessionMetrics     `json:"metrics,omitempty"`
+	Todos            []TodoItem         `json:"todos,omitempty"`
+	Plan             PlanState          `json:"plan,omitempty"`
+	PlanTodoRevision uint64             `json:"plan_todo_revision,omitempty"`
+	Mode             string             `json:"mode,omitempty"`
+	Agents           []AgentSpawnRecord `json:"agents,omitempty"`
+	Undo             []UndoEntry        `json:"undo,omitempty"`
+	ApprovedTools    []string           `json:"approved_tools,omitempty"`
+	Worktrees        []WorktreeState    `json:"worktrees,omitempty"`
 	// ApprovalHistory 持久化用户对工具调用的批准记录，用于在会话恢复后继续
 	// 推导允许规则建议。仅作为数据载体，session 包本身不解释其含义。
 	ApprovalHistory []permission.ApprovalRecord `json:"approval_history,omitempty"`
@@ -332,6 +333,7 @@ func (m *Manager) SetTodos(items []TodoItem) Session {
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Todos = cloneTodos(items)
+	m.current.PlanTodoRevision++
 	m.current.UpdatedAt = now
 	if !m.commitLocked(context.Background(), previous) {
 		return cloneSession(previous)
@@ -347,11 +349,34 @@ func (m *Manager) SetPlan(plan PlanState) Session {
 	now := time.Now()
 	m.ensureCurrentLocked(now)
 	m.current.Plan = clonePlan(plan)
+	m.current.PlanTodoRevision++
 	m.current.UpdatedAt = now
 	if !m.commitLocked(context.Background(), previous) {
 		return cloneSession(previous)
 	}
 	return cloneSession(m.current)
+}
+
+// ApplyPlanTodoState atomically replaces the plan and todo snapshots when the
+// caller presents the next expected revision. A stale or failed write leaves
+// the in-memory projection unchanged and returns ok=false.
+func (m *Manager) ApplyPlanTodoState(plan PlanState, todos []TodoItem, revision uint64) (Session, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous := cloneSession(m.current)
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	if revision == 0 || revision != m.current.PlanTodoRevision+1 {
+		return previous, false
+	}
+	m.current.Plan = clonePlan(plan)
+	m.current.Todos = cloneTodos(todos)
+	m.current.PlanTodoRevision = revision
+	m.current.UpdatedAt = now
+	if !m.commitLocked(context.Background(), previous) {
+		return previous, false
+	}
+	return cloneSession(m.current), true
 }
 
 func (m *Manager) AppendAgentSpawn(record AgentSpawnRecord) Session {

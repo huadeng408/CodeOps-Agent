@@ -159,12 +159,15 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         user_text = ""
         session_id = ""
         history: list[dict[str, str]] = []
+        plan_todo_snapshot = None
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "user_input":
                 user_input = message.user_input
                 user_text = user_input.text
                 session_id = user_input.session_id
+                if user_input.HasField("plan_todo_state"):
+                    plan_todo_snapshot = self._snapshot_from_proto(user_input.plan_todo_state)
                 history = [
                     {
                         "role": item.role,
@@ -210,6 +213,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 session_id=session_id,
                 history=history,
                 cancel_event=cancel_event,
+                plan_todo_snapshot=plan_todo_snapshot,
             )
         finally:
             # Detach the TraceContext parent so following calls on this
@@ -233,6 +237,28 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
     def _provider_router_for_request(self):
         """Snapshot current clients into one request-scoped route directory."""
         return build_provider_router(self._provider_clients_for_request())
+
+    @staticmethod
+    def _snapshot_from_proto(value) -> dict[str, object]:
+        """Convert the wire snapshot to the runner's validated mapping shape."""
+        plan = value.plan if value.HasField("plan") else None
+        return {
+            "schema_version": int(value.schema_version),
+            "revision": int(value.revision),
+            "plan": {
+                "steps": list(plan.steps) if plan is not None else [],
+                "current_index": int(plan.current_index) if plan is not None else 0,
+                "mode": plan.mode if plan is not None else "chat",
+            },
+            "todos": [
+                {
+                    "content": item.content,
+                    "active_form": item.active_form,
+                    "status": item.status,
+                }
+                for item in value.todos
+            ],
+        }
 
 
 def _build_provider_clients(default_client):
