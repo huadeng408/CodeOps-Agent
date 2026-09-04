@@ -13,6 +13,8 @@ import (
 )
 
 const defaultProbeTimeout = 5 * time.Second
+const defaultProbeAttempts = 5
+const defaultProbeRetryDelay = 500 * time.Millisecond
 
 var (
 	// ErrSandboxUnavailable is returned when no configured isolated backend can run.
@@ -86,12 +88,12 @@ func NewRoutingRunner(config Config, platform string, availability Availability)
 	return runner
 }
 
-// NewSandboxRunner probes the configured platform once and returns a runner.
-// A failed probe is a normal fail-closed state, not permission to use host
-// execution.
+// NewSandboxRunner probes the configured platform with bounded readiness
+// retries and returns a runner. A failed probe is a normal fail-closed state,
+// not permission to use host execution.
 func NewSandboxRunner(config Config) *RoutingRunner {
 	config = normalizeConfig(config)
-	availability := DetectAvailability(context.Background(), config, runtime.GOOS)
+	availability := detectAvailabilityWithRetry(context.Background(), config, runtime.GOOS, probeCommand)
 	return NewRoutingRunner(config, runtime.GOOS, availability)
 }
 
@@ -99,6 +101,60 @@ func NewSandboxRunner(config Config) *RoutingRunner {
 // Docker and WSL2. Native execution is deliberately never considered isolated.
 func DetectAvailability(ctx context.Context, config Config, platform string) Availability {
 	config = normalizeConfig(config)
+	return detectAvailabilityOnce(ctx, config, platform, probeCommand)
+}
+
+type availabilityProbe func(context.Context, time.Duration, string, ...string) bool
+
+func detectAvailabilityWithRetry(ctx context.Context, config Config, platform string, probe availabilityProbe) Availability {
+	config = normalizeConfig(config)
+	attempts := config.ProbeAttempts
+	if attempts <= 0 {
+		attempts = defaultProbeAttempts
+	}
+	delay := config.ProbeRetryDelay
+	if delay <= 0 {
+		delay = defaultProbeRetryDelay
+	}
+	var availability Availability
+	for attempt := 0; attempt < attempts; attempt++ {
+		availability = detectAvailabilityOnce(ctx, config, platform, probe)
+		if backendReady(config.Backend, platform, availability) || attempt == attempts-1 {
+			return availability
+		}
+		wait := delay
+		for i := 0; i < attempt; i++ {
+			if wait >= 30*time.Second {
+				wait = 30 * time.Second
+				break
+			}
+			wait *= 2
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return availability
+		case <-timer.C:
+		}
+	}
+	return availability
+}
+
+func backendReady(requested Backend, platform string, availability Availability) bool {
+	switch requested {
+	case BackendDocker:
+		return availability.Docker
+	case BackendWSL2:
+		return strings.EqualFold(strings.TrimSpace(platform), "windows") && availability.WSL2
+	case BackendAuto, "":
+		return availability.Docker || (strings.EqualFold(strings.TrimSpace(platform), "windows") && availability.WSL2)
+	default:
+		return false
+	}
+}
+
+func detectAvailabilityOnce(ctx context.Context, config Config, platform string, probe availabilityProbe) Availability {
 	timeout := config.ProbeTimeout
 	if timeout <= 0 {
 		timeout = defaultProbeTimeout
@@ -110,9 +166,9 @@ func DetectAvailability(ctx context.Context, config Config, platform string) Ava
 		dockerBinary = "docker.exe"
 		wslBinary = "wsl.exe"
 	}
-	result.Docker = probeCommand(ctx, timeout, dockerBinary, "version", "--format", "{{.Server.Version}}")
+	result.Docker = probe(ctx, timeout, dockerBinary, "version", "--format", "{{.Server.Version}}")
 	if strings.EqualFold(strings.TrimSpace(platform), "windows") {
-		result.WSL2 = probeCommand(ctx, timeout, wslBinary, "--distribution", config.WSLDistro, "--exec", "docker", "version", "--format", "{{.Server.Version}}")
+		result.WSL2 = probe(ctx, timeout, wslBinary, "--distribution", config.WSLDistro, "--exec", "docker", "version", "--format", "{{.Server.Version}}")
 	}
 	return result
 }
