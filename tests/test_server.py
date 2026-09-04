@@ -1512,6 +1512,10 @@ class ContextOverflowThenSuccessLLM:
         return ChatResponse(text="recovered")
 
 
+class FinalTurnContextOverflowThenSuccessLLM(ContextOverflowThenSuccessLLM):
+    """Overflow on the no-tools final request, then succeed after recovery."""
+
+
 def _runner_from_app(app, llm) -> ConversationRunner:
     return ConversationRunner(
         graph=app.graph,
@@ -1592,6 +1596,39 @@ def test_runner_recovers_from_context_overflow_after_forced_compaction(tmp_path)
     assert responses[-1].done.success is True
     assert len(llm.requests) == 2
     assert any("Compacted conversation history" in str(message.content) for message in llm.requests[1].messages)
+
+
+def test_runner_recovers_final_turn_context_overflow_after_forced_compaction(tmp_path) -> None:
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path), context_window=1_000_000))
+    llm = FinalTurnContextOverflowThenSuccessLLM()
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+        context_window=app.config.context_window,
+        max_tool_rounds=0,
+    )
+    history = [{"role": "user", "content": f"old context {index} " + "x" * 100} for index in range(6)]
+
+    responses = list(runner.run("continue", iter(()), session_id="final-overflow", history=history))
+
+    assert responses[-1].done.success is False
+    assert len(llm.requests) == 2
+    assert any(
+        response.HasField("text") and "recovered" in response.text.text
+        for response in responses
+    )
+    assert any(
+        "Compacted conversation history" in str(message.content)
+        for message in llm.requests[1].messages
+    )
 
 
 class StreamingFakeLLM:

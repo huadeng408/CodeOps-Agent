@@ -1353,40 +1353,63 @@ class ConversationRunner:
                 ),
             )
         )
-        try:
-            response_box: list[ChatResponse] = []
-            request_messages = self._compact_messages(
-                messages,
-                session_id=session_id,
-                trigger="pressure",
-                cancel_event=cancel_event,
-            )
-            yield from self._emit_compaction_updates()
-            self._emit_loop_event(
-                "model_before",
-                session_id=session_id,
-                turn=final_turn,
-                metadata={
-                    **self._route_metadata(),
-                    "message_count": len(request_messages),
-                    "allow_tools": False,
-                },
-            )
-            yield from self._stream_chat(
-                request_messages,
-                allow_tools=False,
-                response_box=response_box,
-                cancel_event=cancel_event,
-            )
-        except RequestInterrupted:
-            yield self._text("[interrupted]")
-            yield self._session_meta(
-                final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
-            )
-            yield self._finish(
-                session_id, False, "interrupted", turn=final_turn
-            )
-            return
+        final_overflow_retries = 0
+        while True:
+            try:
+                response_box: list[ChatResponse] = []
+                request_messages = self._compact_messages(
+                    messages,
+                    session_id=session_id,
+                    trigger="pressure",
+                    cancel_event=cancel_event,
+                )
+                yield from self._emit_compaction_updates()
+                self._emit_loop_event(
+                    "model_before",
+                    session_id=session_id,
+                    turn=final_turn,
+                    metadata={
+                        **self._route_metadata(),
+                        "message_count": len(request_messages),
+                        "allow_tools": False,
+                    },
+                )
+                yield from self._stream_chat(
+                    request_messages,
+                    allow_tools=False,
+                    response_box=response_box,
+                    cancel_event=cancel_event,
+                )
+                break
+            except RequestInterrupted:
+                yield self._text("[interrupted]")
+                yield self._session_meta(
+                    final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._finish(
+                    session_id, False, "interrupted", turn=final_turn
+                )
+                return
+            except Exception as exc:
+                if (
+                    not is_context_window_exceeded(exc)
+                    or final_overflow_retries >= self.max_overflow_retries
+                ):
+                    raise
+                before = self._message_fingerprint(messages)
+                compacted_messages = self._compact_messages(
+                    messages,
+                    session_id=session_id,
+                    trigger="context-overflow",
+                    force=True,
+                    cancel_event=cancel_event,
+                )
+                after = self._message_fingerprint(compacted_messages)
+                if before == after:
+                    raise
+                messages = compacted_messages
+                final_overflow_retries += 1
+                continue
         response = response_box[0]
         self._emit_loop_event(
             "model_after",
