@@ -25,15 +25,16 @@ const (
 )
 
 type Server struct {
-	Config    ServerConfig
-	State     ServerState
-	LastError string
-	StartedAt time.Time
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Reader
-	nextID    int64
-	requestMu sync.Mutex
+	Config      ServerConfig
+	State       ServerState
+	LastError   string
+	StartedAt   time.Time
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	stdout      *bufio.Reader
+	nextID      int64
+	requestMu   sync.Mutex
+	lifecycleMu sync.Mutex
 	// poisoned is set when a read timed out (ctx cancelled) and left a
 	// goroutine blocked on the OLD stdout. The next sendRequest sees it and
 	// kills+restarts the process: the resulting EOF reaps the leaked goroutine
@@ -111,6 +112,8 @@ func (m *Manager) StartContext(ctx context.Context, name string) error {
 		m.mu.Unlock()
 		return errors.New("mcp server not registered")
 	}
+	server.lifecycleMu.Lock()
+	defer server.lifecycleMu.Unlock()
 	if server.Config.Command == "" {
 		err := errors.New("mcp server command is empty")
 		server.State = ServerStopped
@@ -176,16 +179,26 @@ func (m *Manager) StartAll(ctx context.Context) []error {
 
 func (m *Manager) Stop(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	server, ok := m.servers[name]
+	m.mu.Unlock()
 	if !ok {
 		return errors.New("mcp server not registered")
 	}
+	server.lifecycleMu.Lock()
+	defer server.lifecycleMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err := stopServerProcess(server); err != nil {
 		return err
 	}
 	server.State = ServerStopped
+	server.LastError = ""
+	server.poisoned = false
+	for toolName, tool := range m.tools {
+		if tool.Server == name {
+			delete(m.tools, toolName)
+		}
+	}
 	return nil
 }
 

@@ -145,6 +145,34 @@ func TestMCPManagerSupportsCamelCaseInputSchema(t *testing.T) {
 	}
 }
 
+func TestMCPManagerStopClearsDiscoveredTools(t *testing.T) {
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{
+		Name:    "stoppable",
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestMCPHelperProcess", "--", "mcp"},
+		Env:     map[string]string{"GO_WANT_HELPER_PROCESS": "1"},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := manager.Start(ctx, "stoppable"); err != nil {
+		t.Fatalf("start fake mcp server: %v", err)
+	}
+	if len(manager.ListTools()) != 1 {
+		t.Fatalf("expected discovered tool before stop, got %#v", manager.ListTools())
+	}
+	if err := manager.Stop("stoppable"); err != nil {
+		t.Fatalf("stop fake mcp server: %v", err)
+	}
+	if tools := manager.ListTools(); len(tools) != 0 {
+		t.Fatalf("stopped server left stale tools in catalog: %#v", tools)
+	}
+	if _, err := manager.CallTool(ctx, "fake_echo", map[string]any{"text": "stale"}); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("stale tool remained callable after stop: %v", err)
+	}
+}
+
 func TestExecutorCallsDiscoveredMCPTool(t *testing.T) {
 	manager := mcp.NewManager()
 	manager.RegisterServer(mcp.ServerConfig{
