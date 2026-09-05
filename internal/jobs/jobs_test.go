@@ -25,7 +25,9 @@ func command(body string) jobs.Spec {
 
 func waitForOutput(t *testing.T, registry *jobs.Registry, id, owner, want string) jobs.ReadResult {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// The release gate runs all Go packages concurrently; a busy runner can
+	// delay a short-lived shell child even though the registry remains healthy.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		read, err := registry.Read(id, owner)
 		if err != nil {
@@ -92,7 +94,9 @@ func TestRegistryWaitTimeoutReturnsLiveStateAndKillIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	// Keep this a bounded caller wait while allowing the child process to be
+	// scheduled on a loaded CI runner before we inspect its live state.
+	waitCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	live, err := registry.Wait(waitCtx, snapshot.ID, "")
 	if err != nil {
