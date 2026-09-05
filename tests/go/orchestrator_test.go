@@ -12,9 +12,27 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/telemetry/genai"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
+
+type toolSpanContextKey struct{}
+
+type contextRecordingTracer struct{}
+
+type contextRecordingSpan struct{}
+
+func (contextRecordingTracer) StartSpan(ctx context.Context, name, _ string, _ string) (context.Context, genai.Span) {
+	return context.WithValue(ctx, toolSpanContextKey{}, name), contextRecordingSpan{}
+}
+
+func (contextRecordingTracer) Shutdown(context.Context) error    { return nil }
+func (contextRecordingSpan) End()                                {}
+func (contextRecordingSpan) SetAttributes(...attribute.KeyValue) {}
+func (contextRecordingSpan) RecordError(error)                   {}
+func (contextRecordingSpan) AddEvent(string)                     {}
 
 type testOrchestratorServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
@@ -101,12 +119,12 @@ func (s *subAgentMetadataServer) Converse(stream codeagentpb.Orchestrator_Conver
 				Kind:            "review",
 				Task:            "Review files",
 				ProtocolVersion: "agent.v1",
-					RequestId:       "spawn-1",
-					ParentSessionId: "parent",
-					ChildSessionId:  "parent:subagent:spawn-1",
-					WorktreeName:    "agent-spawn-1",
-					Isolation:        "worktree",
-				},
+				RequestId:       "spawn-1",
+				ParentSessionId: "parent",
+				ChildSessionId:  "parent:subagent:spawn-1",
+				WorktreeName:    "agent-spawn-1",
+				Isolation:       "worktree",
+			},
 		},
 	}); err != nil {
 		return err
@@ -461,6 +479,35 @@ func TestOrchestratorClientHealthAndConverse(t *testing.T) {
 	}
 }
 
+func TestOrchestratorClientPassesToolSpanContextToHandler(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &testOrchestratorServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetTracer(contextRecordingTracer{})
+
+	var observed string
+	if _, err := client.Converse(context.Background(), "trace", func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+		observed, _ = ctx.Value(toolSpanContextKey{}).(string)
+		return orchestrator.ToolResult{ToolName: call.Name, Output: "ok"}
+	}); err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if observed != "execute_tool Echo" {
+		t.Fatalf("tool handler did not receive execute_tool context: %q", observed)
+	}
+}
+
 func TestOrchestratorClientSendsSessionHistory(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -610,6 +657,38 @@ func TestOrchestratorClientHandlesToolRequestBatch(t *testing.T) {
 	}
 	if !strings.Contains(reply, "batch complete") {
 		t.Fatalf("unexpected reply: %q", reply)
+	}
+}
+
+func TestOrchestratorClientPassesDistinctToolContextsForBatch(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &batchOrchestratorServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetTracer(contextRecordingTracer{})
+
+	var mu sync.Mutex
+	observed := map[string]string{}
+	if _, err := client.Converse(context.Background(), "batch", func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+		mu.Lock()
+		observed[call.Name], _ = ctx.Value(toolSpanContextKey{}).(string)
+		mu.Unlock()
+		return orchestrator.ToolResult{ToolName: call.Name, Output: strings.ToLower(call.Name) + "-ok"}
+	}); err != nil {
+		t.Fatalf("converse failed: %v", err)
+	}
+	if observed["Read"] != "execute_tool Read" || observed["Glob"] != "execute_tool Glob" {
+		t.Fatalf("batch handlers did not receive distinct execute_tool contexts: %#v", observed)
 	}
 }
 

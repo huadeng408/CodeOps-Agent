@@ -562,9 +562,9 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 				ParametersJSON:     payload.ToolRequest.ParametersJson,
 				RequiredPermission: payload.ToolRequest.RequiredPermission,
 			}
-			_, toolSpan := c.startToolSpan(ctx, call)
+			toolCtx, toolSpan := c.startToolSpan(ctx, call)
 			emitToolProgress(ctx, eventHandler, call, "start", 1, 1, ToolResult{})
-			result := invokeToolHandler(ctx, handler, call)
+			result := invokeToolHandler(toolCtx, handler, call)
 			finishToolSpan(toolSpan, result)
 			emitToolProgress(ctx, eventHandler, call, "finish", 1, 1, result)
 			if err := sendToolResult(stream, result); err != nil {
@@ -677,6 +677,7 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 
 	results := make([]ToolResult, len(requests))
 	calls := make([]ToolCall, len(requests))
+	toolContexts := make([]context.Context, len(requests))
 	toolSpans := make([]genai.Span, len(requests))
 	for i, req := range requests {
 		calls[i] = ToolCall{
@@ -685,7 +686,7 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 			ParametersJSON:     req.GetParametersJson(),
 			RequiredPermission: req.GetRequiredPermission(),
 		}
-		_, toolSpans[i] = c.startToolSpan(ctx, calls[i])
+		toolContexts[i], toolSpans[i] = c.startToolSpan(ctx, calls[i])
 		emitToolProgress(ctx, eventHandler, calls[i], "start", i+1, len(requests), ToolResult{})
 	}
 	if batch.GetParallel() && len(requests) > 1 {
@@ -694,13 +695,13 @@ func (c *Client) handleToolRequestBatch(ctx context.Context, stream codeagentpb.
 			wg.Add(1)
 			go func(idx int, call ToolCall) {
 				defer wg.Done()
-				results[idx] = invokeToolHandler(ctx, handler, call)
+				results[idx] = invokeToolHandler(toolContexts[idx], handler, call)
 			}(i, call)
 		}
 		wg.Wait()
 	} else {
 		for i, call := range calls {
-			results[i] = invokeToolHandler(ctx, handler, call)
+			results[i] = invokeToolHandler(toolContexts[i], handler, call)
 		}
 	}
 
