@@ -30,7 +30,7 @@ class SkillManager:
             if project_root
             else None
         )
-        self._manifest_mtime_ns: int | None = None
+        self._manifest_signature: tuple[int, int] | None = None
         from .init_skill import build_skill as build_init_skill
         from .review_skill import build_skill as build_review_skill
         from .security_skill import build_skill as build_security_skill
@@ -91,9 +91,13 @@ class SkillManager:
                 for name in self._manifest_names & self._catalog_names:
                     self._skills[name] = self._catalog_defaults[name]
                 self._manifest_names.clear()
-                self._manifest_mtime_ns = None
+                self._manifest_signature = None
             return
-        if mtime_ns == self._manifest_mtime_ns:
+        try:
+            signature = (mtime_ns, path.stat().st_size)
+        except OSError:
+            return
+        if signature == self._manifest_signature:
             return
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -134,4 +138,4 @@ class SkillManager:
         for name in self._manifest_names - next_names - self._builtin_names:
             self._skills.pop(name, None)
         self._manifest_names = next_names
-        self._manifest_mtime_ns = mtime_ns
+        self._manifest_signature = signature

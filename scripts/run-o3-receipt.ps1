@@ -179,9 +179,18 @@ finally {
     $env:CODE_AGENT_O3_SERVER_EXE = $serverExe
     $env:CODE_AGENT_O3_SERVER_WORKDIR = $repoRoot
     $env:CODE_AGENT_REDACTION_HELPER = $redactionHelper
-    $serverProcess = Start-Process -FilePath $powerShellCommand -WorkingDirectory $repoRoot `
-        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serverRunner) `
-        -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -WindowStyle Hidden -PassThru
+    $startServer = @{
+        FilePath = $powerShellCommand
+        WorkingDirectory = $repoRoot
+        ArgumentList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serverRunner)
+        RedirectStandardOutput = $serverOut
+        RedirectStandardError = $serverErr
+        PassThru = $true
+    }
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $startServer.WindowStyle = "Hidden"
+    }
+    $serverProcess = Start-Process @startServer
     Wait-ForHealth -Url "$($ServerUrl.TrimEnd('/'))/healthz" -TimeoutSeconds $StartupTimeoutSeconds
 
     $evalExitCode = 0
