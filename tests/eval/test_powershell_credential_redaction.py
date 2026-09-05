@@ -18,6 +18,33 @@ def _pwsh() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
+def _write_fake_python(
+    tmp_path: Path,
+    *,
+    windows_lines: tuple[str, ...],
+    posix_lines: tuple[str, ...],
+) -> Path:
+    """Create an executable child fixture for both PowerShell platforms.
+
+    ``pwsh`` on Linux cannot execute a Windows ``.cmd`` file.  Keep the child
+    behaviour identical while using a native shell script on POSIX runners.
+    """
+    if os.name == "nt":
+        path = tmp_path / "fake-python.cmd"
+        path.write_text(
+            "@echo off\n" + "\n".join(windows_lines) + "\nexit /b 7\n",
+            encoding="utf-8",
+        )
+    else:
+        path = tmp_path / "fake-python.sh"
+        path.write_text(
+            "#!/bin/sh\n" + "\n".join(posix_lines) + "\nexit 7\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+    return path
+
+
 def test_redacted_native_command_filters_both_output_streams_and_preserves_exit_code(
     tmp_path: Path,
 ) -> None:
@@ -72,13 +99,16 @@ def test_h5_receipt_runner_redacts_child_output(tmp_path: Path) -> None:
     if powershell is None:
         pytest.skip("PowerShell is required for receipt redaction tests")
 
-    fake_python = tmp_path / "fake-python.cmd"
-    fake_python.write_text(
-        "@echo off\n"
-        "echo stdout=%LOCAL_LLM_API_KEY%\n"
-        "echo stderr=Bearer %LOCAL_LLM_API_KEY% 1>&2\n"
-        "exit /b 7\n",
-        encoding="utf-8",
+    fake_python = _write_fake_python(
+        tmp_path,
+        windows_lines=(
+            "echo stdout=%LOCAL_LLM_API_KEY%",
+            "echo stderr=Bearer %LOCAL_LLM_API_KEY% 1>&2",
+        ),
+        posix_lines=(
+            'echo "stdout=$LOCAL_LLM_API_KEY"',
+            'echo "stderr=Bearer $LOCAL_LLM_API_KEY" 1>&2',
+        ),
     )
     output_dir = tmp_path / "receipt"
     secret = "h5-redaction-test-sentinel"
@@ -152,13 +182,16 @@ def test_o3_receipt_uses_custom_loopback_port_and_redacts_children(
         "}\n",
         encoding="utf-8",
     )
-    fake_python = tmp_path / "fake-python.cmd"
-    fake_python.write_text(
-        "@echo off\n"
-        "echo python=%LOCAL_LLM_API_KEY%\n"
-        "echo python-internal=%CODE_AGENT_RAG_INTERNAL_SECRET% 1>&2\n"
-        "exit /b 7\n",
-        encoding="utf-8",
+    fake_python = _write_fake_python(
+        tmp_path,
+        windows_lines=(
+            "echo python=%LOCAL_LLM_API_KEY%",
+            "echo python-internal=%CODE_AGENT_RAG_INTERNAL_SECRET% 1>&2",
+        ),
+        posix_lines=(
+            'echo "python=$LOCAL_LLM_API_KEY"',
+            'echo "python-internal=$CODE_AGENT_RAG_INTERNAL_SECRET" 1>&2',
+        ),
     )
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -259,13 +292,16 @@ def test_background_receipt_runner_redacts_log_files(
     helper_root.mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / script_name, script_root / script_name)
     shutil.copy2(REDACTION_HELPER, helper_root / REDACTION_HELPER.name)
-    fake_python = tmp_path / "fake-python.cmd"
-    fake_python.write_text(
-        "@echo off\n"
-        "echo stdout=%LOCAL_LLM_API_KEY%%TAU2_RECEIPT_API_KEY%\n"
-        "echo stderr=Bearer %LOCAL_LLM_API_KEY%%TAU2_RECEIPT_API_KEY% 1>&2\n"
-        "exit /b 7\n",
-        encoding="utf-8",
+    fake_python = _write_fake_python(
+        tmp_path,
+        windows_lines=(
+            "echo stdout=%LOCAL_LLM_API_KEY%%TAU2_RECEIPT_API_KEY%",
+            "echo stderr=Bearer %LOCAL_LLM_API_KEY%%TAU2_RECEIPT_API_KEY% 1>&2",
+        ),
+        posix_lines=(
+            'echo "stdout=$LOCAL_LLM_API_KEY$TAU2_RECEIPT_API_KEY"',
+            'echo "stderr=Bearer $LOCAL_LLM_API_KEY$TAU2_RECEIPT_API_KEY" 1>&2',
+        ),
     )
     run_id = "redaction-" + uuid.uuid4().hex[:12]
     output_dir = tmp_path / "eval_results" / result_folder / run_id

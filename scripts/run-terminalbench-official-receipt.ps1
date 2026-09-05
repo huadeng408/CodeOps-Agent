@@ -308,17 +308,36 @@ $env:TERMINALBENCH_INSTANCE_ID = "break-filter-js-from-html"
 $env:TERMINALBENCH_OUTPUT_DIR = $upstreamRoot
 $env:TERMINALBENCH_RECEIPT_ROOT = $runRoot
 if ($VerifierProxy) {
-    $env:TERMINALBENCH_RECEIPT_VERIFIER_PROXY = $VerifierProxy
+$env:TERMINALBENCH_RECEIPT_VERIFIER_PROXY = $VerifierProxy
 } else {
     Remove-Item Env:TERMINALBENCH_RECEIPT_VERIFIER_PROXY -ErrorAction SilentlyContinue
 }
 
-$process = Start-Process -FilePath "powershell.exe" `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath, "-DriverPath", $driverPath, "-ExitPath", $exitPath, "-PhoenixUrl", $PhoenixUrl) `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -WindowStyle Hidden `
-    -PassThru
+$isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+$powerShellPath = if ($isWindowsHost) {
+    "powershell.exe"
+} else {
+    (Get-Command pwsh -ErrorAction Stop).Source
+}
+$startProcess = @{
+    FilePath = $powerShellPath
+    ArgumentList = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath,
+        "-DriverPath", $driverPath, "-ExitPath", $exitPath, "-PhoenixUrl", $PhoenixUrl
+    )
+    RedirectStandardOutput = $stdoutPath
+    RedirectStandardError = $stderrPath
+    PassThru = $true
+}
+if ($isWindowsHost) {
+    $startProcess.WindowStyle = "Hidden"
+} else {
+    # POSIX pwsh closes asynchronous redirection handles when the parent exits
+    # before the child flushes.  Wait only on POSIX so receipt logs are durable;
+    # Windows retains the intended background behaviour.
+    $startProcess.Wait = $true
+}
+$process = Start-Process @startProcess
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
 
 Write-Output "Started Terminal-Bench official receipt: $RunId"

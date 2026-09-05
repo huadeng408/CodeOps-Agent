@@ -61,16 +61,22 @@ class TestRepoRelativePaths:
     """Relative paths stay repo-anchored (the original, legitimate case)."""
 
     def test_relative_path_is_anchored_to_repo_root(self):
+        from eval.benchmarks import swebench as mod
+
         got = _to_wsl_path("eval_results/run/predictions.jsonl")
-        assert got == "/mnt/d/vscode/localcode/eval_results/run/predictions.jsonl"
+        assert got == f"{_to_wsl_path(mod._REPO_ROOT)}/eval_results/run/predictions.jsonl"
 
     def test_relative_path_with_backslashes(self):
+        from eval.benchmarks import swebench as mod
+
         got = _to_wsl_path(r"eval_results\run\predictions.jsonl")
-        assert got == "/mnt/d/vscode/localcode/eval_results/run/predictions.jsonl"
+        assert got == f"{_to_wsl_path(mod._REPO_ROOT)}/eval_results/run/predictions.jsonl"
 
     def test_dot_prefixed_relative_path(self):
+        from eval.benchmarks import swebench as mod
+
         got = _to_wsl_path("./eval_results/run/predictions.jsonl")
-        assert got == "/mnt/d/vscode/localcode/eval_results/run/predictions.jsonl"
+        assert got == f"{_to_wsl_path(mod._REPO_ROOT)}/eval_results/run/predictions.jsonl"
 
     def test_relative_path_uses_the_actual_checkout_location(self, monkeypatch):
         from eval.benchmarks import swebench as mod

@@ -415,7 +415,9 @@ def test_official_benchmark_driver_invokes_benchmark_solve_not_generic_driver() 
     result = bridge.solve_instance(instance, "C:/temporary-workspace")
 
     assert result.answer == "official"
-    assert calls == [(instance, "C:\\temporary-workspace", generic_driver)]
+    assert calls == [
+        (instance, str(Path("C:/temporary-workspace")), generic_driver)
+    ]
 
 
 @pytest.mark.parametrize(

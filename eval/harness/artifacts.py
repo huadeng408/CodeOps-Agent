@@ -60,11 +60,11 @@ class RunArtifacts:
         # short evaluation deadline.  The same immutable metadata is reused by
         # every artifact finalization in this process.
         _environment_payload()
-        base_root = Path(root).resolve()
+        base_root = _normalise_resolved(Path(root).resolve())
         run_path = _validated_relative_path(run_id, label="run_id")
         if len(run_path.parts) != 1:
             raise ValueError("run_id must name exactly one run directory")
-        self.root = (base_root / run_path).resolve()
+        self.root = _normalise_resolved((base_root / run_path).resolve())
         if not _is_within(self.root, base_root):
             raise ValueError("run_id must stay within the artifact root")
         self.root.mkdir(parents=True, exist_ok=True)
@@ -72,7 +72,7 @@ class RunArtifacts:
 
     def _artifact_path(self, name: str | Path) -> Path:
         relative = _validated_relative_path(name, label="artifact path")
-        path = (self.root / relative).resolve()
+        path = _normalise_resolved((self.root / relative).resolve())
         if not _is_within(path, self.root):
             raise ValueError("artifact path must stay within the run root")
         return path
@@ -345,13 +345,28 @@ def _is_within(path: Path, root: Path) -> bool:
 
 def _comparison_path(path: Path) -> Path:
     """Return a platform-normalized path suitable for containment checks."""
-    value = os.path.normcase(str(path))
-    if os.name == "nt":
-        if value.startswith("\\\\?\\unc\\"):
-            value = "\\\\" + value[len("\\\\?\\unc\\") :]
-        elif value.startswith("\\\\?\\"):
-            value = value[len("\\\\?\\") :]
+    value = _strip_extended_prefix(str(path))
+    value = os.path.normcase(value)
     return Path(os.path.normpath(value))
+
+
+def _strip_extended_prefix(value: str) -> str:
+    """Remove a Windows extended-length prefix on any host.
+
+    Tests and mixed-host artifact producers can hand us ``\\\\?\\``-prefixed
+    paths even when the checking process is running on Linux.  Treating the
+    prefix as a literal directory makes a valid path look outside its root.
+    """
+    if value.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[len("\\\\?\\unc\\") :]
+    if value.startswith("\\\\?\\"):
+        return value[len("\\\\?\\") :]
+    return value
+
+
+def _normalise_resolved(path: Path) -> Path:
+    """Return a resolved path with alternate Windows prefixes canonicalized."""
+    return Path(_strip_extended_prefix(str(path)))
 
 
 def _manifest_path_key(relative_path: str) -> str:

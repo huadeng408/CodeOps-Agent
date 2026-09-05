@@ -40,7 +40,7 @@ import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 __all__ = [
     "EMPTY_SET_SHA256",
@@ -504,17 +504,30 @@ def normalize_repo_path(raw: str | Path) -> str | None:
     if not text:
         return None
 
-    # Absolute with a drive letter: resolve against the real repo root.
+    # Windows absolute paths need explicit parsing on POSIX runners: pathlib's
+    # host-native resolver would otherwise treat ``C:/...`` as a relative
+    # filename.  Only accept it when it names this repository.
     if len(text) >= 2 and text[1] == ":":
-        try:
-            resolved = Path(text).resolve()
-        except OSError:
+        windows_path = PureWindowsPath(text)
+        repo_windows = PureWindowsPath(str(REPO_ROOT))
+        if windows_path.drive.lower() != repo_windows.drive.lower():
             return None
         try:
-            rel = resolved.relative_to(REPO_ROOT)
+            rel = windows_path.relative_to(repo_windows)
         except ValueError:
             return None
-        return rel.as_posix() if rel.parts else None
+        return rel.as_posix() or None
+
+    # A native POSIX absolute path that is inside the checkout (as in a Linux
+    # CI container) must be converted to the same repo-relative spelling.
+    if text.startswith("/"):
+        try:
+            resolved = Path(text).resolve()
+            rel = resolved.relative_to(REPO_ROOT.resolve())
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            return rel.as_posix() or None
 
     # A single leading "/" is read as repo-root-anchored, not filesystem root.
     text = text.lstrip("/")

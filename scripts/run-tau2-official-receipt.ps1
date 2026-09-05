@@ -250,11 +250,31 @@ $env:TAU2_RECEIPT_USER = $User
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
-$process = Start-Process -FilePath "powershell.exe" `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath, "-DriverPath", $driverPath, "-ExitPath", $exitPath, "-PhoenixUrl", $PhoenixUrl) `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -PassThru
+$isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+$powerShellPath = if ($isWindowsHost) {
+    "powershell.exe"
+} else {
+    (Get-Command pwsh -ErrorAction Stop).Source
+}
+$startProcess = @{
+    FilePath = $powerShellPath
+    ArgumentList = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $finalizerPath,
+        "-DriverPath", $driverPath, "-ExitPath", $exitPath, "-PhoenixUrl", $PhoenixUrl
+    )
+    RedirectStandardOutput = $stdoutPath
+    RedirectStandardError = $stderrPath
+    PassThru = $true
+}
+if ($isWindowsHost) {
+    $startProcess.WindowStyle = "Hidden"
+} else {
+    # POSIX pwsh closes asynchronous redirection handles when the parent exits
+    # before the child flushes.  Wait only on POSIX so receipt logs are durable;
+    # Windows retains the intended background behaviour.
+    $startProcess.Wait = $true
+}
+$process = Start-Process @startProcess
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
 
 Write-Output "Started tau2 official receipt: $RunId"

@@ -256,7 +256,17 @@ def select_files(spec: dict, source_dir: Path) -> list[Path]:
         )
 
     selected: list[Path] = []
-    for path in sorted(source_dir.rglob("*")):
+    # Go's corpus importer presents paths in a stable, case-insensitive order
+    # on Windows.  Use the same ordering on every host so the selected file
+    # sequence and resulting receipts do not depend on the runner OS.
+    candidates = list(source_dir.rglob("*"))
+    candidates.sort(
+        key=lambda path: (
+            path.relative_to(source_dir).as_posix().lower(),
+            path.relative_to(source_dir).as_posix(),
+        )
+    )
+    for path in candidates:
         if not path.is_file():
             continue
         relative_path = path.relative_to(source_dir).as_posix()
