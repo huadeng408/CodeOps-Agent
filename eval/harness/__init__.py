@@ -4,6 +4,8 @@ from eval.harness.budget import (
     Budget,
     BudgetExceeded,
     BudgetUsage,
+    budget_contract,
+    budget_contract_sha256,
     build_run_budget,
     check_budget,
 )
@@ -13,6 +15,8 @@ __all__ = [
     "Budget",
     "BudgetExceeded",
     "BudgetUsage",
+    "budget_contract",
+    "budget_contract_sha256",
     "HarnessRun",
     "RunArtifacts",
     "ScorerError",

@@ -36,7 +36,14 @@ from typing import Any, Protocol
 
 from eval.adapter import AgentAdapter, EvalInstance, EvalResult
 from eval.harness.artifacts import RunArtifacts
-from eval.harness.budget import Budget, BudgetExceeded, BudgetUsage, check_budget
+from eval.harness.budget import (
+    Budget,
+    BudgetExceeded,
+    BudgetUsage,
+    budget_contract,
+    budget_contract_sha256,
+    check_budget,
+)
 from eval.harness.pin_contract import evaluate_pins, system_prompt_pin
 from eval.harness.redaction import redact_credential_text
 from eval.harness.trace_capture import TraceCapture
@@ -238,6 +245,9 @@ class HarnessRun:
     def __post_init__(self) -> None:
         self._completed: set[str] = set()
         self._global_usage = BudgetUsage()
+        self._budget_contract = budget_contract(self.budget)
+        self._budget_contract_sha256 = budget_contract_sha256(self.budget)
+        self._instance_count = 0
         # O2: set by run(); holds the spans this run produced.  ``None`` means
         # capture was disabled or unavailable, which _finalize records honestly
         # rather than treating as "no spans were expected".
@@ -283,6 +293,8 @@ class HarnessRun:
             "version": CHECKPOINT_VERSION,
             "run_id": self.run_id,
             "budget": {
+                "contract": self._budget_contract,
+                "contract_sha256": self._budget_contract_sha256,
                 "wall_clock_seconds": budget.wall_clock_seconds,
                 "instance_wall_clock_seconds": getattr(
                     budget, "instance_wall_clock_seconds", None
@@ -504,6 +516,8 @@ class HarnessRun:
         dict
             ``{"summary": {...}, "summary_path": "..."}``.
         """
+        self._assert_fixed_budget_contract()
+        self._instance_count = len(instances)
         summary: dict[str, Any] = {
             "run_id": self.run_id,
             "total": len(instances),
@@ -516,6 +530,12 @@ class HarnessRun:
                 ERROR_AGENT: 0,
                 ERROR_SCORER: 0,
                 ERROR_BUDGET: 0,
+            },
+            "budget": {
+                "contract": self._budget_contract,
+                "contract_sha256": self._budget_contract_sha256,
+                "instance_count": self._instance_count,
+                "usage": self._global_usage.snapshot(),
             },
         }
 
@@ -540,9 +560,26 @@ class HarnessRun:
         summary["ok"] = summary["completed"]
         summary["failed"] = sum(summary["by_category"].values())
         summary["skipped"] = summary["resumed_skipped"]
+        summary["budget"]["usage"] = self._global_usage.snapshot()
 
         path = _finalize(self, summary)
         return {"summary": summary, "summary_path": path}
+
+    def _assert_fixed_budget_contract(self) -> None:
+        """Reject caller-provided budget claims that disagree with the run.
+
+        A benchmark may carry a precomputed contract in its manifest config,
+        but it must describe the immutable :class:`Budget` owned by this
+        HarnessRun. The check happens before traces, workspaces, or adapters
+        are started so a mismatched evaluation cannot leave a misleading
+        receipt behind.
+        """
+        declared = self.config.get("budget_contract")
+        if declared is not None and declared != self._budget_contract:
+            raise ValueError("budget contract does not match HarnessRun budget")
+        declared_sha = self.config.get("budget_contract_sha256")
+        if declared_sha is not None and str(declared_sha) != self._budget_contract_sha256:
+            raise ValueError("budget contract sha256 does not match HarnessRun budget")
 
     def _run_span_attributes(self) -> dict[str, Any]:
         """Join attributes for the ``eval.run`` root span (§9.2).
@@ -728,17 +765,28 @@ class HarnessRun:
                 error="no adapter configured",
             )
 
-        # Feed budget from result
+        # Feed budget from result. Output is measured in UTF-8 bytes so the
+        # limit is stable across platforms and catches both patch and answer
+        # payloads before they reach artifacts or the official scorer.
         usage.record_tokens(result.tokens_in + result.tokens_out)
         usage.record_cost(result.cost)
+        usage.record_output(
+            len(result.model_patch.encode("utf-8"))
+            + len(result.answer.encode("utf-8"))
+        )
         # Wall clock is auto-captured by BudgetUsage.started_at
+
+        # Account for the attempted result before checking limits. A receipt
+        # must show the resource that caused a run to stop, rather than hiding
+        # the over-budget attempt from its own usage snapshot.
+        self._global_usage.record_tokens(usage.tokens)
+        self._global_usage.record_cost(usage.cost)
+        self._global_usage.record_output(usage.output_bytes)
 
         # Post-solve budget check
         check_budget(self.budget, usage)
+        check_budget(self.budget, self._global_usage)
         self._remaining_instance_wall_clock_seconds(usage)
-        # Update global usage for pre-start checks on next instances
-        self._global_usage.record_tokens(usage.tokens)
-        self._global_usage.record_cost(usage.cost)
 
         # An adapter error is a failed attempt even if it also returned a
         # patch/answer. Never let the scorer or predictions turn an explicit
@@ -805,11 +853,40 @@ class HarnessRun:
                 # output under this reserved key.  It is persisted under
                 # scorer/ (so checksums.sha256 pins it) instead of being
                 # inlined into the prediction row, which is one JSON
-                # line per instance and must stay readable.
+                # line per instance and must stay readable.  Both the raw
+                # content and the structured fields merged into the
+                # prediction are output for budget purposes.  Account for
+                # the complete attempt before checking limits or writing
+                # any scorer artifact so an over-budget run remains an
+                # accurate, side-effect-free receipt.
                 raw_outputs = scorer_result.pop(SCORER_RAW_OUTPUT_KEY, None)
+                raw_payloads: list[tuple[str, str, int]] = []
                 if isinstance(raw_outputs, dict):
                     for name, content in raw_outputs.items():
-                        self.artifacts.record_scorer_output(name, str(content))
+                        text = str(content)
+                        raw_payloads.append((str(name), text, len(text.encode("utf-8"))))
+
+                structured_output_bytes = 0
+                if scorer_result:
+                    structured_output_bytes = len(
+                        json.dumps(
+                            scorer_result,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                scorer_output_bytes = structured_output_bytes + sum(
+                    size for _, _, size in raw_payloads
+                )
+                usage.record_output(scorer_output_bytes)
+                self._global_usage.record_output(scorer_output_bytes)
+                check_budget(self.budget, usage)
+                check_budget(self.budget, self._global_usage)
+
+                # Only write scorer evidence after both budget checks pass;
+                # an over-budget attempt must not leave partial raw files.
+                for name, text, _ in raw_payloads:
+                    self.artifacts.record_scorer_output(name, text)
                 _set_attribute(
                     scorer_span, "eval.scorer_keys", ",".join(sorted(scorer_result))
                 )
@@ -1023,6 +1100,27 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
     manifest so a reader can audit them instead of trusting this docstring.
     """
     config = harness.config
+    budget_obj = harness.budget
+    contract = getattr(harness, "_budget_contract", budget_contract(budget_obj))
+    contract_sha = getattr(
+        harness, "_budget_contract_sha256", budget_contract_sha256(budget_obj)
+    )
+    instance_count = getattr(harness, "_instance_count", summary.get("total", 0))
+    budget_summary = summary.get("budget")
+    usage = budget_summary.get("usage") if isinstance(budget_summary, dict) else None
+    if usage is None:
+        global_usage = getattr(harness, "_global_usage", None)
+        usage = (
+            global_usage.snapshot()
+            if global_usage is not None
+            else {
+                "wall_clock_seconds": 0.0,
+                "tokens": 0,
+                "cost": 0.0,
+                "output_bytes": 0,
+                "active_processes": 0,
+            }
+        )
     capabilities = config.get("trace_capabilities")
     pin_values = {
         "git_sha": config.get("git_sha", ""),
@@ -1072,7 +1170,14 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
         "index_mapping_hash": config.get("index_mapping_hash", ""),
         "dataset_pin": config.get("dataset_pin", {}),
         "evaluation_subset": config.get("evaluation_subset", {}),
+        "budget_contract": contract,
+        "budget_contract_sha256": contract_sha,
+        "budget_instance_count": instance_count,
+        "budget_usage": usage,
         "budgets": {
+            "contract": contract,
+            "contract_sha256": contract_sha,
+            "instance_count": instance_count,
             "wall_clock_seconds": harness.budget.wall_clock_seconds,
             "instance_wall_clock_seconds": (
                 getattr(harness.budget, "instance_wall_clock_seconds", None)
@@ -1084,6 +1189,7 @@ def _build_manifest(harness: HarnessRun, summary: dict[str, Any]) -> dict[str, A
             "max_cost": harness.budget.max_cost,
             "max_output_bytes": harness.budget.max_output_bytes,
             "max_processes": harness.budget.max_processes,
+            "usage": usage,
         },
         "seed": config.get("seed", 42),
         # Which arm of a paired experiment produced this artifact. Without it the

@@ -7,11 +7,13 @@ accordingly (timeout, infra, budget).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import math
 
 DEFAULT_INSTANCE_WALL_CLOCK_SECONDS = 900.0
 MAX_DEFAULT_SCORER_RESERVE_SECONDS = 240.0
@@ -57,6 +59,55 @@ class BudgetUsage:
 
     def wall_clock(self) -> float:
         return time.perf_counter() - self.started_at
+
+    def snapshot(self) -> dict[str, float | int]:
+        """Return bounded runtime consumption for a receipt or summary."""
+        return {
+            "wall_clock_seconds": self.wall_clock(),
+            "tokens": self.tokens,
+            "cost": self.cost,
+            "output_bytes": self.output_bytes,
+            "active_processes": self.active_processes,
+        }
+
+
+def budget_contract(budget: Budget) -> dict[str, object]:
+    """Return the canonical, provider-independent fixed budget contract.
+
+    The contract contains limits only. Runtime consumption is recorded
+    separately so two runs with the same budget remain comparable even when
+    one finishes early.
+    """
+    return {
+        "version": 1,
+        "scope": "run",
+        "limits": {
+            "wall_clock_seconds": float(budget.wall_clock_seconds),
+            "instance_wall_clock_seconds": (
+                None
+                if getattr(budget, "instance_wall_clock_seconds", None) is None
+                else float(getattr(budget, "instance_wall_clock_seconds"))
+            ),
+            "scorer_reserve_seconds": float(
+                getattr(budget, "scorer_reserve_seconds", 0.0)
+            ),
+            "max_tokens": int(getattr(budget, "max_tokens")),
+            "max_cost": float(getattr(budget, "max_cost")),
+            "max_output_bytes": int(getattr(budget, "max_output_bytes")),
+            "max_processes": int(getattr(budget, "max_processes")),
+        },
+    }
+
+
+def budget_contract_sha256(budget: Budget) -> str:
+    """Hash the canonical fixed contract with stable JSON encoding."""
+    payload = json.dumps(
+        budget_contract(budget),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class BudgetExceeded(Exception):
