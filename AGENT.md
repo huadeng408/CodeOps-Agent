@@ -89,6 +89,12 @@
 
 - Docker Desktop may be started hidden for Docker-backed tests; do not delete
   containers, volumes, indexes or business data.
+- Windows Docker-backed scripts must dot-source
+  `scripts/rag-agent-e2e-runtime.ps1` and call `Wait-DockerDaemonReady` before
+  any Docker or Compose command. The shared helper selects the
+  `desktop-linux` context and removes stale inherited `DOCKER_HOST` values so a
+  healthy Docker Desktop is not misreported as unavailable. Do not add
+  per-script Docker readiness probes or bypass this helper.
 - If network access is unavailable or slow, retry the individual command with
   `HTTP_PROXY`/`HTTPS_PROXY` set to `http://127.0.0.1:7890`; do not change the
   Windows system proxy.

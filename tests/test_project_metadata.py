@@ -13,16 +13,18 @@ def test_rag_extra_declares_runtime_imports() -> None:
     required_prefixes = (
         "fastapi",
         "httpx",
-        "langchain-core",
         "langchain-openai",
         "langchain-text-splitters",
-        "langgraph",
         "pydantic",
         "typing-extensions",
         "uvicorn",
     )
     for prefix in required_prefixes:
         assert any(item.lower().startswith(prefix) for item in dependencies), prefix
+
+    core_dependencies = project["project"]["dependencies"]
+    for prefix in ("langchain-core", "langgraph"):
+        assert any(item.lower().startswith(prefix) for item in core_dependencies), prefix
 
 
 def test_visual_eval_extra_declares_late_interaction_runtime_imports() -> None:

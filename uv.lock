@@ -600,6 +600,8 @@ source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
     { name = "grpcio-tools" },
+    { name = "langchain-core" },
+    { name = "langgraph" },
     { name = "protobuf" },
 ]
 
@@ -613,10 +615,8 @@ eval = [
 rag = [
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "langchain-core" },
     { name = "langchain-openai" },
     { name = "langchain-text-splitters" },
-    { name = "langgraph" },
     { name = "openpyxl" },
     { name = "pydantic" },
     { name = "python-docx" },
@@ -657,10 +657,10 @@ requires-dist = [
     { name = "grpcio-tools", specifier = ">=1.71,<2" },
     { name = "httpx", marker = "extra == 'rag'", specifier = ">=0.27,<1" },
     { name = "jsonschema", marker = "extra == 'test'", specifier = ">=4.23,<5" },
-    { name = "langchain-core", marker = "extra == 'rag'", specifier = ">=0.3,<1" },
+    { name = "langchain-core", specifier = ">=0.3,<1" },
     { name = "langchain-openai", marker = "extra == 'rag'", specifier = ">=0.2,<1" },
     { name = "langchain-text-splitters", marker = "extra == 'rag'", specifier = ">=0.3,<1" },
-    { name = "langgraph", marker = "extra == 'rag'", specifier = ">=0.2,<1" },
+    { name = "langgraph", specifier = ">=0.2,<1" },
     { name = "numpy", marker = "extra == 'eval'", specifier = ">=1.26,<2" },
     { name = "openpyxl", marker = "extra == 'rag'", specifier = ">=3.1,<4" },
     { name = "opentelemetry-api", marker = "extra == 'trace-e2e'", specifier = ">=1.30,<2" },

@@ -70,6 +70,39 @@ function Start-DockerDesktopIfNeeded {
     }
 }
 
+function Use-DockerDesktopLinuxContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerCli
+    )
+
+    if ($env:OS -ne 'Windows_NT') {
+        return $null
+    }
+
+    # Docker Desktop exposes the Linux engine as a named context. Inherited
+    # DOCKER_HOST/TLS variables take precedence over that context and can point
+    # at a stale named pipe or missing certificate directory, which makes a
+    # healthy Desktop daemon look unavailable. Temporarily clear them while
+    # discovering contexts, and restore them if Desktop is not present.
+    $previous = @{}
+    foreach ($name in @('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')) {
+        $previous[$name] = Get-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+    }
+    $contextNames = @(& $DockerCli context ls --format '{{.Name}}' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $contextNames -notcontains 'desktop-linux') {
+        foreach ($name in $previous.Keys) {
+            if ($null -ne $previous[$name]) {
+                Set-Item -LiteralPath ("Env:{0}" -f $name) -Value $previous[$name].Value
+            }
+        }
+        return $null
+    }
+    $env:DOCKER_CONTEXT = 'desktop-linux'
+    return 'desktop-linux'
+}
+
 function Wait-DockerDaemonReady {
     [CmdletBinding()]
     param(
@@ -91,9 +124,14 @@ function Wait-DockerDaemonReady {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastFailure = "unknown error"
     Start-DockerDesktopIfNeeded
+    $dockerContext = Use-DockerDesktopLinuxContext -DockerCli $dockerCli
     do {
         try {
-            & $dockerCli info --format '{{.ServerVersion}}' 1>$null 2>$null
+            $probeArguments = @('info', '--format', '{{.ServerVersion}}')
+            if (-not [string]::IsNullOrWhiteSpace($dockerContext)) {
+                $probeArguments = @('--context', $dockerContext) + $probeArguments
+            }
+            & $dockerCli @probeArguments 1>$null 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "ready: Docker daemon"
                 return

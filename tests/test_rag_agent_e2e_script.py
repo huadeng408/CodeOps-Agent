@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -46,7 +48,7 @@ def test_e2e_waits_for_docker_desktop_readiness_with_a_shared_helper() -> None:
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     assert "Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds" in source
     assert "function Wait-DockerDaemonReady" in runtime
-    assert "& $dockerCli info --format '{{.ServerVersion}}' 1>$null 2>$null" in runtime
+    assert "& $dockerCli @probeArguments 1>$null 2>$null" in runtime
     assert "Start-Sleep -Seconds 2" in runtime
     assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
 
@@ -58,9 +60,44 @@ def test_runtime_resolves_and_starts_docker_desktop_before_readiness_poll() -> N
     assert "Docker\\Docker\\resources\\bin\\docker.exe" in runtime
     assert "function Start-DockerDesktopIfNeeded" in runtime
     assert "Start-Process -FilePath $desktop -WindowStyle Hidden" in runtime
-    assert "& $dockerCli info --format '{{.ServerVersion}}'" in runtime
+    assert "$probeArguments = @('info', '--format', '{{.ServerVersion}}')" in runtime
     assert "rag-agent-e2e-runtime.ps1" in snapshot
     assert "Wait-DockerDaemonReady -TimeoutSeconds 60" in snapshot
+
+
+def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
+    powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
+    environment = os.environ.copy()
+    environment["DOCKER_HOST"] = "npipe:////./pipe/code-agent-stale-docker"
+    environment["DOCKER_CONTEXT"] = "default"
+    environment["DOCKER_TLS_VERIFY"] = "1"
+    environment["DOCKER_CERT_PATH"] = r"C:\missing-docker-certs"
+    command = (
+        f". '{ROOT / 'scripts' / 'rag-agent-e2e-runtime.ps1'}'; "
+        "Wait-DockerDaemonReady -TimeoutSeconds 10; "
+        "Write-Output ('context=' + $env:DOCKER_CONTEXT); "
+        "Write-Output ('host=' + [string]$env:DOCKER_HOST)"
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        timeout=20,
+        check=False,
+    )
+    if result.returncode != 0 and "Docker CLI was not found" in result.stderr:
+        pytest.skip("Docker CLI is unavailable")
+    assert result.returncode == 0, result.stderr
+    assert "ready: Docker daemon" in result.stdout
+    assert "context=desktop-linux" in result.stdout
+    assert "host=" in result.stdout
+    assert "code-agent-stale-docker" not in result.stdout
 
 
 def test_e2e_defaults_to_isolated_go_and_python_ports() -> None:
