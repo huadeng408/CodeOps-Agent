@@ -145,6 +145,12 @@ function Stop-ProcessTree {
         foreach ($childPid in @($seen)) {
             & $killPath -KILL $childPid 2>$null | Out-Null
         }
+        # The wrapper owns the redaction pipeline. Give it a short window to
+        # observe child EOF and flush captured records before terminating it.
+        try {
+            if ($Process.WaitForExit(1000)) { return }
+        }
+        catch { }
     }
     if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT -and
         $null -ne (Get-Command taskkill.exe -ErrorAction SilentlyContinue)) {

@@ -34,3 +34,7 @@ tests/fixtures/**/*.pdf   -text
 *.yaml text eol=lf
 *.yml  text eol=lf
 *.proto text eol=lf
+
+# Terminal-Bench production inputs are hashed byte-for-byte by the official
+# receipt boundary. Keep their checked-in LF bytes unchanged on Windows.
+eval/benchmark_data/terminalbench/** -text
