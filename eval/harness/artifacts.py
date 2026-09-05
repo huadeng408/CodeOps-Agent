@@ -34,10 +34,32 @@ from eval.harness.redaction import redact_credential_text, redact_credential_val
 #: Name of the SHA-256 manifest written at the end of every run (H3).
 CHECKSUM_FILENAME = "checksums.sha256"
 
+_ENVIRONMENT_PAYLOAD: dict[str, str] | None = None
+_ENVIRONMENT_LOCK = threading.Lock()
+
+
+def _environment_payload() -> dict[str, str]:
+    """Cache platform probes so run deadlines exclude one-time WMI latency."""
+    global _ENVIRONMENT_PAYLOAD
+    if _ENVIRONMENT_PAYLOAD is None:
+        with _ENVIRONMENT_LOCK:
+            if _ENVIRONMENT_PAYLOAD is None:
+                _ENVIRONMENT_PAYLOAD = {
+                    "platform": platform.platform(),
+                    "python": platform.python_version(),
+                    "machine": platform.machine(),
+                    "processor": platform.processor(),
+                }
+    return dict(_ENVIRONMENT_PAYLOAD)
+
 
 class RunArtifacts:
     def __init__(self, run_id: str, root: str | Path) -> None:
         self.run_id = run_id
+        # Warm the Windows platform probe before the caller starts measuring a
+        # short evaluation deadline.  The same immutable metadata is reused by
+        # every artifact finalization in this process.
+        _environment_payload()
         base_root = Path(root).resolve()
         run_path = _validated_relative_path(run_id, label="run_id")
         if len(run_path.parts) != 1:
@@ -186,13 +208,7 @@ class RunArtifacts:
         secret/configuration disclosure surface, even when known key values
         are redacted.
         """
-        payload = {
-            "platform": platform.platform(),
-            "python": platform.python_version(),
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-        }
-        return self.write("environment.txt", payload)
+        return self.write("environment.txt", _environment_payload())
 
     def _iter_artifact_files(self) -> list[Path]:
         """Every artifact file in the run tree, recursively, sorted by rel path.

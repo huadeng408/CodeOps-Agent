@@ -625,9 +625,12 @@ class TerminalBenchAdapter(AgentBenchmark):
         trial = results.results[0]
         resolved = bool(trial.is_resolved)
         failure_mode = _json_safe_failure_mode(getattr(trial, "failure_mode", None))
+        # ``resolved=False`` is an official measurement: the task ran and the
+        # verifier determined that the agent did not solve it.  Keep it on the
+        # score sidecar so ``score()`` can merge the real false verdict into
+        # the prediction; reserve ``EvalResult.error`` for runner/setup faults
+        # that mean no official verdict exists.
         error = ""
-        if not resolved:
-            error = f"unresolved (failure_mode={failure_mode})"
         eval_result = EvalResult(
             instance_id=trial.task_id or task_id,
             error=error,
@@ -671,43 +674,43 @@ class TerminalBenchAdapter(AgentBenchmark):
         """Return the official resolution embedded in :meth:`solve`.
 
         Reads the per-run ``workspace/score.json`` sidecar written by
-        :meth:`solve` from the official trial.  Missing sidecar means no
-        official evidence -> fail-closed ``resolved: False`` (the official
-        scorer is never faked).
+        :meth:`solve` from the official trial.  Missing or malformed sidecar
+        means no official evidence and raises so the unified Harness records a
+        scorer failure instead of inventing ``resolved: False``.
         """
         del timeout_s
         workspace = Path(workspace)
         sidecar_path = workspace / "score.json"
-        if sidecar_path.exists():
-            try:
-                raw_sidecar = sidecar_path.read_text(encoding="utf-8")
-                sidecar = json.loads(raw_sidecar)
-                payload = {
-                    "resolved": bool(sidecar.get("resolved", False)),
-                    "scorer": _SCORER_NAME,
-                    "failure_mode": sidecar.get("failure_mode"),
-                    "scorer_status": "official: score embedded in solve()",
-                }
-                payload[SCORER_RAW_OUTPUT_KEY] = {
-                    f"{instance.instance_id}-score.json": raw_sidecar
-                }
-                official_dir = workspace / "tb_runs" / f"tb-adapter-{self._task_id(instance)}"
-                for filename in ("results.json", "run_metadata.json"):
-                    official_path = official_dir / filename
-                    if official_path.exists():
-                        artifact_name = filename.replace("_", "-")
-                        payload[SCORER_RAW_OUTPUT_KEY][
-                            f"{instance.instance_id}-{artifact_name}"
-                        ] = official_path.read_text(encoding="utf-8")
-                return payload
-            except (json.JSONDecodeError, OSError):
-                pass
-        return {
-            "resolved": False,
+        if not sidecar_path.is_file():
+            raise RuntimeError(
+                f"official trial record missing: {sidecar_path}"
+            )
+        try:
+            raw_sidecar = sidecar_path.read_text(encoding="utf-8")
+            sidecar = json.loads(raw_sidecar)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError(
+                f"official trial record invalid: {sidecar_path}"
+            ) from exc
+
+        payload = {
+            "resolved": bool(sidecar.get("resolved", False)),
             "scorer": _SCORER_NAME,
-            "failure_mode": None,
-            "scorer_status": "no official trial record (sidecar missing)",
+            "failure_mode": sidecar.get("failure_mode"),
+            "scorer_status": "official: score embedded in solve()",
         }
+        payload[SCORER_RAW_OUTPUT_KEY] = {
+            f"{instance.instance_id}-score.json": raw_sidecar
+        }
+        official_dir = workspace / "tb_runs" / f"tb-adapter-{self._task_id(instance)}"
+        for filename in ("results.json", "run_metadata.json"):
+            official_path = official_dir / filename
+            if official_path.exists():
+                artifact_name = filename.replace("_", "-")
+                payload[SCORER_RAW_OUTPUT_KEY][
+                    f"{instance.instance_id}-{artifact_name}"
+                ] = official_path.read_text(encoding="utf-8")
+        return payload
 
     # ------------------------------------------------------------------
     # Pins

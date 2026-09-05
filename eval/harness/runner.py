@@ -127,21 +127,23 @@ def _exclusive_checkpoint_lock(path: Path) -> Iterator[None]:
     """Serialize checkpoint upgrades/appends across threads and processes."""
     lock_path = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + CHECKPOINT_LOCK_TIMEOUT_SECONDS
-    fd: int | None = None
-    while fd is None:
+    acquired = False
+    while not acquired:
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            # A directory is the lock token.  Unlike an O_EXCL file, releasing
+            # it with rmdir cannot race with a contender that creates the next
+            # token: there is no open file descriptor to unlink on Windows.
+            lock_path.mkdir()
+            acquired = True
         except FileExistsError:
             if time.monotonic() >= deadline:
                 raise TimeoutError("checkpoint lock acquisition timed out")
             time.sleep(0.01)
     try:
-        os.write(fd, str(os.getpid()).encode("ascii", errors="replace"))
         yield
     finally:
-        os.close(fd)
         try:
-            lock_path.unlink()
+            lock_path.rmdir()
         except FileNotFoundError:
             pass
 
@@ -244,6 +246,18 @@ class HarnessRun:
 
     def __post_init__(self) -> None:
         self._completed: set[str] = set()
+        # Importing the optional OTel SDK can take roughly 0.2s on a cold
+        # interpreter.  Do that constructor-side, before the run timer starts,
+        # so a short instance deadline measures agent work rather than a
+        # one-time dependency import.
+        if self.config.get("trace_capture", True):
+            try:
+                from opentelemetry import trace as trace_api
+                from opentelemetry.sdk.trace import TracerProvider  # noqa: F401
+
+                trace_api.get_tracer_provider()
+            except Exception:  # noqa: BLE001 - telemetry is optional
+                pass
         self._global_usage = BudgetUsage()
         self._budget_contract = budget_contract(self.budget)
         self._budget_contract_sha256 = budget_contract_sha256(self.budget)
