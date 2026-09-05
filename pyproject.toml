@@ -54,6 +54,9 @@ test = [
     # packages or a developer's global Python environment.
     "cryptography>=43,<47",
     "jsonschema>=4.23,<5",
+    "opentelemetry-api>=1.30,<2",
+    "opentelemetry-sdk>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
     "pymysql>=1.1,<2",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<2",

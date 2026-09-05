@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -32,7 +33,11 @@ def _evidence(sha: str, run_id: str = "run") -> dict:
         "status": "VERIFIED",
         "run_id": run_id,
         "trace_id": "trace-1",
-        "source_pin": {"git_sha": sha, "dirty_hash": "0" * 64, "untracked_files": 0},
+        "source_pin": {
+            "git_sha": sha,
+            "dirty_hash": hashlib.sha256(b"").hexdigest(),
+            "untracked_files": 0,
+        },
         "raw_evidence": {"artifact_root": "eval_results/ignored", "checksum_manifest_sha256": "a" * 64},
         "failures": [],
     }
@@ -141,6 +146,23 @@ def test_release_gate_rejects_receipt_pin_after_a_non_evidence_commit(tmp_path: 
     assert any(check.name == "evidence.workflow" and check.status == "BLOCKED" for check in report.checks)
 
 
+def test_release_gate_rejects_receipt_generated_from_dirty_source(tmp_path: Path, monkeypatch) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    receipt_path = next((repo / "data" / "eval" / "workflow" / "receipts").glob("*.json"))
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["source_pin"]["dirty_hash"] = "a" * 64
+    receipt_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    subprocess.run(["git", "add", str(receipt_path)], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "dirty source receipt"], cwd=repo, check=True)
+    monkeypatch.setattr("eval.release_gate._git_head", lambda _: source_sha)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert any(check.name == "evidence.workflow" and check.status == "BLOCKED" for check in report.checks)
+
+
 def test_release_gate_rejects_smoke_swebench_and_bad_skill_fingerprint(tmp_path: Path, monkeypatch) -> None:
     repo, sha = _git_repo(tmp_path)
     _passing_receipts(repo, sha)
@@ -168,3 +190,28 @@ def test_release_gate_test_command_failure_is_fail_closed(tmp_path: Path, monkey
     report = evaluate_release(repo, run_tests=True, test_commands=(("python", "-c", "raise SystemExit(7)"),))
     assert report.status is GateStatus.BLOCKED
     assert any(check.name == "tests.1" and check.status == "BLOCKED" for check in report.checks)
+
+
+def test_release_gate_test_failure_detail_is_short_and_redacted(tmp_path: Path, monkeypatch) -> None:
+    repo, sha = _git_repo(tmp_path)
+    _passing_receipts(repo, sha)
+    monkeypatch.setattr("eval.release_gate._git_head", lambda _: sha)
+
+    report = evaluate_release(
+        repo,
+        run_tests=True,
+        test_commands=(
+            (
+                "python",
+                "-c",
+                "import sys; print('OPENAI_API_KEY=fixture-secret-value', file=sys.stderr); print('Bearer bearer-secret-value'); print('failure marker'); raise SystemExit(7)",
+            ),
+        ),
+    )
+
+    check = next(check for check in report.checks if check.name == "tests.1")
+    assert check.detail.startswith("exit_code=7; failure_tail=")
+    assert "failure marker" in check.detail
+    assert "fixture-secret-value" not in check.detail
+    assert "bearer-secret-value" not in check.detail
+    assert "<redacted>" in check.detail

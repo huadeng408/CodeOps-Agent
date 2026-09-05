@@ -22,8 +22,11 @@ artifact root and SHA-256 evidence pin. The source pin may equal `HEAD`, or it
 may equal the direct parent of `HEAD` when the checked-in commit contains only
 curated JSON receipts under `data/eval/*/receipts/`. `SMOKE_PASS`, missing
 fingerprints, missing official scorer output, stale source pins and malformed
-receipts are refusals. The command never prints receipt payloads or subprocess
-output, so credentials cannot be promoted through the gate report.
+receipts are refusals. The pinned source tree must also have an empty dirty hash
+and zero untracked files. The command never prints receipt payloads or raw
+subprocess output; failed test checks may include a short, credential-redacted
+tail so the gate report identifies the failing boundary without promoting
+secrets.
 
 Exit codes:
 

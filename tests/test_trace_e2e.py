@@ -376,6 +376,15 @@ def test_trace_e2e_extra_declares_python_telemetry_dependencies():
         dependency.startswith("opentelemetry-exporter-otlp-proto-http")
         for dependency in trace_e2e
     )
+    # The release-gate workflow imports telemetry during ordinary test
+    # collection, so the clean ``.[test,rag,eval]`` install must include OTel.
+    test_extra = pyproject["project"]["optional-dependencies"]["test"]
+    assert any(dependency.startswith("opentelemetry-api") for dependency in test_extra)
+    assert any(dependency.startswith("opentelemetry-sdk") for dependency in test_extra)
+    assert any(
+        dependency.startswith("opentelemetry-exporter-otlp-proto-http")
+        for dependency in test_extra
+    )
 
 
 def test_runner_preflights_python_telemetry_dependencies():

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 )
@@ -45,23 +46,23 @@ func BuildWSLDockerCommand(platform string, config Config, request Request) (str
 	if strings.TrimSpace(config.WSLDistro) == "" || strings.ContainsAny(config.WSLDistro, "\r\n") {
 		return "", nil, fmt.Errorf("wsl2 distribution is invalid")
 	}
-	workspace, err := absolutePath(request.Workspace)
+	workspace, err := absoluteWindowsPath(request.Workspace)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve sandbox workspace: %w", err)
 	}
-	if err := validateTrustRoot(config.TrustRoot, workspace); err != nil {
+	if err := validateWindowsTrustRoot(config.TrustRoot, workspace); err != nil {
 		return "", nil, err
 	}
 	workingDir := request.WorkingDir
 	if strings.TrimSpace(workingDir) == "" {
 		workingDir = workspace
 	}
-	workingDir, err = absolutePath(workingDir)
+	workingDir, err = absoluteWindowsPath(workingDir)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve sandbox working directory: %w", err)
 	}
-	rel, err := filepath.Rel(workspace, workingDir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, err := windowsRelativePath(workspace, workingDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
 		return "", nil, fmt.Errorf("sandbox working directory is outside workspace: %s", workingDir)
 	}
 	wslWorkspace, err := windowsPathToWSL(workspace)
@@ -82,19 +83,87 @@ func BuildWSLDockerCommand(platform string, config Config, request Request) (str
 }
 
 func windowsPathToWSL(path string) (string, error) {
-	path = filepath.Clean(path)
-	volume := filepath.VolumeName(path)
-	if len(volume) != 2 || volume[1] != ':' {
+	normalized, err := absoluteWindowsPath(path)
+	if err != nil {
 		return "", fmt.Errorf("sandbox workspace must use a local Windows drive: %s", path)
 	}
-	drive := strings.ToLower(string(volume[0]))
-	rest := strings.TrimPrefix(path, volume)
-	rest = strings.ReplaceAll(rest, "\\", "/")
+	drive := strings.ToLower(string(normalized[0]))
+	return "/mnt/" + drive + normalized[2:], nil
+}
+
+// absoluteWindowsPath normalizes a Windows drive path without relying on the
+// host OS. CI exercises this Windows command builder on Linux.
+func absoluteWindowsPath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	if len(value) < 2 || value[1] != ':' {
+		return "", fmt.Errorf("path must use a local Windows drive: %s", raw)
+	}
+	rest := value[2:]
 	if rest == "" {
 		rest = "/"
 	}
 	if !strings.HasPrefix(rest, "/") {
-		rest = "/" + rest
+		return "", fmt.Errorf("path must be absolute: %s", raw)
 	}
-	return "/mnt/" + drive + filepath.ToSlash(rest), nil
+	rest = pathpkg.Clean(rest)
+	if rest == "." {
+		rest = "/"
+	}
+	return strings.ToUpper(value[:1]) + ":" + rest, nil
+}
+
+func windowsRelativePath(base, target string) (string, error) {
+	base, err := absoluteWindowsPath(base)
+	if err != nil {
+		return "", err
+	}
+	target, err = absoluteWindowsPath(target)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(base[:2], target[:2]) {
+		return "", fmt.Errorf("paths use different Windows drives")
+	}
+	baseParts := windowsPathParts(base)
+	targetParts := windowsPathParts(target)
+	common := 0
+	for common < len(baseParts) && common < len(targetParts) &&
+		strings.EqualFold(baseParts[common], targetParts[common]) {
+		common++
+	}
+	parts := make([]string, 0, len(baseParts)-common+len(targetParts)-common)
+	for i := common; i < len(baseParts); i++ {
+		parts = append(parts, "..")
+	}
+	for i := common; i < len(targetParts); i++ {
+		parts = append(parts, strings.ToLower(targetParts[i]))
+	}
+	if len(parts) == 0 {
+		return ".", nil
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func windowsPathParts(value string) []string {
+	value = strings.TrimPrefix(value[2:], "/")
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "/")
+}
+
+func validateWindowsTrustRoot(root, workspace string) error {
+	trusted, err := absoluteWindowsPath(root)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrTrustRootRequired, err)
+	}
+	rel, err := windowsRelativePath(trusted, workspace)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("sandbox workspace is outside trust root: %s", workspace)
+	}
+	return nil
 }

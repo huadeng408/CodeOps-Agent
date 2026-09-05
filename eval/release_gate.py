@@ -9,6 +9,7 @@ repository; only the redacted receipt surface is considered here.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -18,8 +19,11 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
+from orchestrator.security.credentials import redact_credential_text
+
 SHA256_LENGTH = 64
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EMPTY_DIRTY_HASH = hashlib.sha256(b"").hexdigest()
 RELEASE_BLOCKED_EXIT_CODE = 3
 RELEASE_ERROR_EXIT_CODE = 2
 
@@ -176,6 +180,8 @@ def _receipt_base(
         repo_root, str(source_pin.get("git_sha", "")), current_sha
     ):
         return False, "source_pin.git_sha is not current HEAD or an evidence-only commit parent"
+    if source_pin.get("dirty_hash") != EMPTY_DIRTY_HASH or source_pin.get("untracked_files") != 0:
+        return False, "source_pin records a dirty or untracked source tree"
     run_id = payload.get("run_id")
     trace_id = payload.get("trace_id")
     if not isinstance(run_id, str) or not run_id:
@@ -280,6 +286,17 @@ def _swebench_predicate(payload: dict[str, Any]) -> None:
         raise ValueError("official SWE-bench result must be at least 18/20")
 
 
+def _redacted_failure_tail(stdout: str, stderr: str, *, max_chars: int = 600) -> str:
+    lines = [line.strip() for line in (stdout + "\n" + stderr).splitlines() if line.strip()]
+    if not lines:
+        return ""
+    summary = " | ".join(lines[-4:])
+    summary = " ".join(redact_credential_text(summary).split())
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3].rstrip() + "..."
+    return summary
+
+
 def _test_check(name: str, command: Sequence[str], repo_root: Path, timeout: float) -> GateCheck:
     try:
         result = subprocess.run(
@@ -294,7 +311,12 @@ def _test_check(name: str, command: Sequence[str], repo_root: Path, timeout: flo
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _check(name, False, f"test command unavailable or timed out: {type(exc).__name__}")
-    return _check(name, result.returncode == 0, f"exit_code={result.returncode}")
+    detail = f"exit_code={result.returncode}"
+    if result.returncode != 0:
+        summary = _redacted_failure_tail(result.stdout, result.stderr)
+        if summary:
+            detail += f"; failure_tail={summary}"
+    return _check(name, result.returncode == 0, detail)
 
 
 def evaluate_release(

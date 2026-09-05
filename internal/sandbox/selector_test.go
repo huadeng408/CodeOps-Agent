@@ -9,12 +9,12 @@ import (
 )
 
 func TestBuildWSLDockerCommandConvertsWindowsWorkspaceAndUsesRestrictedDocker(t *testing.T) {
-	workspace := filepath.Join("C:\\", "work", "repo")
+	workspace := `C:\work\repo`
 	binary, args, err := BuildWSLDockerCommand("windows", Config{
 		Backend:   BackendWSL2,
 		WSLDistro: "Ubuntu-24.04",
-		TrustRoot: filepath.Join("C:\\", "work"),
-	}, Request{Workspace: workspace, WorkingDir: filepath.Join(workspace, "pkg"), Command: "printf ok"})
+		TrustRoot: `C:\work`,
+	}, Request{Workspace: workspace, WorkingDir: `C:\work\repo\pkg`, Command: "printf ok"})
 	if err != nil {
 		t.Fatalf("BuildWSLDockerCommand() error = %v", err)
 	}
