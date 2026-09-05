@@ -162,6 +162,20 @@ function Stop-ProcessTree {
     try { $Process.WaitForExit(10000) | Out-Null } catch { }
 }
 
+function Protect-ReceiptLogFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowEmptyCollection()][string[]]$Secrets = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    $raw = [IO.File]::ReadAllText($Path)
+    $protected = Protect-CredentialText -Text $raw -Secrets $Secrets
+    [IO.File]::WriteAllText($Path, $protected, [Text.UTF8Encoding]::new($false))
+}
+
 Push-Location $repoRoot
 try {
     if ([string]::IsNullOrWhiteSpace($env:LOCAL_LLM_API_KEY)) {
@@ -201,7 +215,12 @@ try {
         -ExitCode ([ref]$buildExitCode)
     if ($buildExitCode -ne 0) { throw "Go RAG server build failed" }
 
-    @'
+    $env:CODE_AGENT_O3_SERVER_EXE = $serverExe
+    $env:CODE_AGENT_O3_SERVER_WORKDIR = $repoRoot
+    $env:CODE_AGENT_REDACTION_HELPER = $redactionHelper
+    $onWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ($onWindows) {
+        @'
 $ErrorActionPreference = "Stop"
 . $env:CODE_AGENT_REDACTION_HELPER
 Push-Location $env:CODE_AGENT_O3_SERVER_WORKDIR
@@ -221,19 +240,27 @@ finally {
     Pop-Location
 }
 '@ | Set-Content -LiteralPath $serverRunner -Encoding utf8
-    $env:CODE_AGENT_O3_SERVER_EXE = $serverExe
-    $env:CODE_AGENT_O3_SERVER_WORKDIR = $repoRoot
-    $env:CODE_AGENT_REDACTION_HELPER = $redactionHelper
-    $startServer = @{
-        FilePath = $powerShellCommand
-        WorkingDirectory = $repoRoot
-        ArgumentList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serverRunner)
-        RedirectStandardOutput = $serverOut
-        RedirectStandardError = $serverErr
-        PassThru = $true
+        $startServer = @{
+            FilePath = $powerShellCommand
+            WorkingDirectory = $repoRoot
+            ArgumentList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serverRunner)
+            RedirectStandardOutput = $serverOut
+            RedirectStandardError = $serverErr
+            PassThru = $true
+            WindowStyle = "Hidden"
+        }
     }
-    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
-        $startServer.WindowStyle = "Hidden"
+    else {
+        # POSIX PowerShell does not reliably carry a nested pipeline through
+        # Start-Process redirection. Start the Go child directly, then redact
+        # its bounded log files after shutdown in the parent runner.
+        $startServer = @{
+            FilePath = $serverExe
+            WorkingDirectory = $repoRoot
+            RedirectStandardOutput = $serverOut
+            RedirectStandardError = $serverErr
+            PassThru = $true
+        }
     }
     $serverProcess = Start-Process @startServer
     Wait-ForHealth -Url "$($ServerUrl.TrimEnd('/'))/healthz" -TimeoutSeconds $StartupTimeoutSeconds
@@ -251,6 +278,8 @@ finally {
         Stop-ProcessTree $serverProcess
         $serverProcess.Dispose()
     }
+    Protect-ReceiptLogFile -Path $serverOut -Secrets @($key, $secret)
+    Protect-ReceiptLogFile -Path $serverErr -Secrets @($key, $secret)
     Remove-Item -LiteralPath $serverExe, $serverRunner -Force -ErrorAction SilentlyContinue
     Restore-Environment
     Pop-Location
