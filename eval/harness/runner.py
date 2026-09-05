@@ -164,6 +164,11 @@ def classify_error(exc: BaseException) -> str:
             # they were drained by instances 1-6, so the failure says nothing
             # about instance 7's agent. See ERROR_BUDGET.
             return ERROR_BUDGET
+        if exc.kind not in ("processes",):
+            # Unknown resource kinds are Harness-side budget failures.  Keep
+            # them out of the model denominator until the taxonomy is updated
+            # deliberately; silently calling them agent errors is fail-open.
+            return ERROR_BUDGET
         # Everything else, notably "processes": a per-instance, instantaneous cap
         # that the agent's own behaviour hit. Attributing that to the agent is
         # correct — it really did try to spawn past the limit.
@@ -854,6 +859,8 @@ class HarnessRun:
                         usage,
                         reserve_scorer_time=False,
                     )
+                    if not isinstance(scorer_result, dict):
+                        raise TypeError("official scorer must return a mapping")
                     check_budget(self.budget, self._global_usage)
                     self._remaining_instance_wall_clock_seconds(usage)
                 except (BudgetExceeded, TimeoutError, subprocess.TimeoutExpired):

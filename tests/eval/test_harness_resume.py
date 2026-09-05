@@ -346,6 +346,34 @@ def test_scorer_exception_becomes_error_scorer(tmp_path: Path) -> None:
     assert len(scorer_failures) >= 1, f"Expected scorer failures, got: {failures}"
 
 
+def test_malformed_scorer_result_is_error_scorer(tmp_path: Path) -> None:
+    """A scorer contract violation must not become an agent verdict."""
+    artifacts = RunArtifacts("run-1", tmp_path)
+
+    def bad_scorer(
+        result: EvalResult,
+        instance: EvalInstance,
+        workspace: Path,
+        *,
+        timeout_s: float,
+    ) -> object:
+        del result, instance, workspace, timeout_s
+        return ["not", "a", "mapping"]
+
+    harness = HarnessRun(
+        run_id="run-1",
+        artifacts=artifacts,
+        adapter=FakeAgentAdapter(),
+        scorer=bad_scorer,
+        config=_pinned_config(),
+    )
+    harness.run([EvalInstance(instance_id="bad-scorer", task_description="")])
+
+    summary = json.loads((artifacts.root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["by_category"][ERROR_SCORER] == 1
+    assert summary["by_category"][ERROR_AGENT] == 0
+
+
 def test_workspace_preserved_on_failure(tmp_path: Path) -> None:
     """Workspace directory survives after instance failure."""
     artifacts = RunArtifacts("run-1", tmp_path)

@@ -51,6 +51,11 @@ def test_process_cap_stays_with_the_agent():
     assert classify_error(BudgetExceeded("processes", "5 > 1")) == ERROR_AGENT
 
 
+def test_unknown_budget_kind_fails_closed_as_budget_error():
+    """A new Harness resource must not be misreported as model failure."""
+    assert classify_error(BudgetExceeded("unknown-resource", "1 > 0")) == ERROR_BUDGET
+
+
 def test_wall_clock_is_still_a_timeout():
     assert classify_error(BudgetExceeded("wall-clock", "10s > 5s")) == ERROR_TIMEOUT
 
