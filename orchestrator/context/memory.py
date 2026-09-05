@@ -7,13 +7,13 @@ read model that exposes cheap summaries first and raw files only on demand.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import threading
-import codecs
 import uuid
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -73,10 +73,7 @@ def _decode_bounded_utf8(data: bytes, max_bytes: int) -> str:
     """Decode a bounded prefix without emitting replacement characters."""
     prefix = data[:max_bytes]
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
-    try:
-        return decoder.decode(prefix, final=False)
-    except UnicodeDecodeError as exc:
-        return prefix[: exc.start].decode("utf-8")
+    return decoder.decode(prefix, final=False)
 
 
 def _redact(value: Any, key: str = "") -> Any:

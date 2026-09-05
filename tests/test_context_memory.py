@@ -352,6 +352,20 @@ def test_layered_context_preserves_utf8_when_raw_budget_splits_character(tmp_pat
     store.close()
 
 
+def test_layered_context_omits_invalid_utf8_instead_of_silently_truncating(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "binary.dat"
+    source.write_bytes(b"valid-prefix\xffinvalid-suffix")
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path, max_raw_bytes=64)
+
+    summary = context.load("session-1", raw_paths=["binary.dat"])
+
+    assert summary.p3["binary.dat"] == "[binary file omitted]"
+    store.close()
+
+
 def test_layered_context_marks_unreadable_explicit_file_without_dropping_p0(
     tmp_path: Path, monkeypatch
 ) -> None:
