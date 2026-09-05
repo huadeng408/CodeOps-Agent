@@ -30,8 +30,18 @@ $serverProcess = $null
 $runToken = [guid]::NewGuid().ToString("N")
 $serverExe = Join-Path $repoRoot ".tmp\o3-receipt-server-$runToken.exe"
 $serverRunner = Join-Path $repoRoot ".tmp\o3-receipt-server-$runToken.ps1"
-$serverOut = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.$runToken.stdout.log"
-$serverErr = Join-Path ([IO.Path]::GetTempPath()) "codeagent-o3-server.$runToken.stderr.log"
+$receiptTempRoot = [IO.Path]::GetTempPath()
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    foreach ($candidate in @($env:TMPDIR, $env:TEMP, $env:TMP)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+            (Test-Path -LiteralPath $candidate -PathType Container)) {
+            $receiptTempRoot = $candidate
+            break
+        }
+    }
+}
+$serverOut = Join-Path $receiptTempRoot "codeagent-o3-server.$runToken.stdout.log"
+$serverErr = Join-Path $receiptTempRoot "codeagent-o3-server.$runToken.stderr.log"
 $powerShellCommand = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $trackedNames = @(
     "LOCAL_LLM_BASE_URL", "LOCAL_LLM_API_KEY", "LOCAL_LLM_MODEL",
