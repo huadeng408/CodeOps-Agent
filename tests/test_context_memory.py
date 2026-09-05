@@ -132,6 +132,34 @@ def test_memory_manager_rejects_sensitive_name_from_disk(tmp_path: Path) -> None
         MemoryManager(str(memory_dir))
 
 
+def test_memory_manager_rejects_sensitive_filename_fallback(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "api-key.md").write_text(
+        "---\n"
+        "id: memory-1\n"
+        "tags: workflow\n"
+        "created_at: 2026-09-05T00:00:00+00:00\n"
+        "updated_at: 2026-09-05T00:00:00+00:00\n"
+        "---\n"
+        "ordinary implementation note\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sensitive name"):
+        MemoryManager(str(memory_dir))
+
+
+def test_memory_manager_allows_ordinary_credential_discussion_names(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+
+    for name in ("password-rotation-discussion", "secret-design-notes"):
+        saved = manager.save(
+            Memory(id="", name=name, content="Document the implementation tradeoffs.")
+        )
+        assert saved.name == name
+
+
 def test_memory_manager_accepts_absolute_paths_in_ordinary_notes(tmp_path: Path) -> None:
     manager = MemoryManager(str(tmp_path / "memory"))
 

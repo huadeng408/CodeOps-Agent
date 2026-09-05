@@ -39,7 +39,7 @@ type Manager struct {
 
 var (
 	memoryCredentialPattern    = regexp.MustCompile(`(?i)(?:\b(?:openai|anthropic|deepseek|azure)?[_-]?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret)\b\s*[:=]\s*(?:['"][^'"\r\n]+['"]|[^\s,;]+)|\bauthorization\b\s*[:=]\s*(?:['"][^'"\r\n]+['"]|[^\s,;]+)|\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b(?:bearer\s+|sk-)[A-Za-z0-9][A-Za-z0-9._~+/=-]{5,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|-----BEGIN [^-]+-----)`)
-	memorySensitiveNamePattern = regexp.MustCompile(`(?i)(?:^|[-_])(?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|authorization|private[-_]?key)(?:$|[-_])`)
+	memorySensitiveNamePattern = regexp.MustCompile(`(?i)^(?:(?:openai|anthropic|deepseek|azure|aws|github|gitlab|db|database|mysql|postgres|redis)[-_])?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|authorization(?:[-_]token)?|private[-_]?key|password|passwd|secret|credential|credentials)(?:$|[-_](?:token|key|value|credential|credentials))$`)
 )
 
 func NewManager(dir string) *Manager {
@@ -232,6 +232,9 @@ func (m *Manager) load() error {
 		}
 		if item.Name == "" {
 			item.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			if err := validateMemoryFields(item.Name, item.Content, item.Tags); err != nil {
+				return err
+			}
 		}
 		items = append(items, item)
 	}
@@ -445,15 +448,19 @@ func validateMemoryFields(name, content string, tags []string) error {
 	if memoryCredentialPattern.MatchString(content) {
 		return errors.New("sensitive memory content is not allowed")
 	}
-	if strings.TrimSpace(name) != "" && memorySensitiveNamePattern.MatchString(name) {
+	if isSensitiveMemoryName(name) {
 		return errors.New("sensitive memory name is not allowed")
 	}
 	for _, tag := range tags {
-		if memorySensitiveNamePattern.MatchString(tag) {
+		if isSensitiveMemoryName(tag) {
 			return errors.New("sensitive memory tag is not allowed")
 		}
 	}
 	return nil
+}
+
+func isSensitiveMemoryName(value string) bool {
+	return memorySensitiveNamePattern.MatchString(strings.ToLower(strings.TrimSpace(value)))
 }
 
 func queryTokens(query string) []string {

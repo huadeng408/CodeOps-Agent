@@ -247,6 +247,11 @@ func (a *App) Run(ctx context.Context) error {
 			_ = a.executor.Close()
 		}
 	}()
+	if a.memory != nil {
+		if err := a.memory.Err(); err != nil {
+			return fmt.Errorf("memory initialization failed: %w", err)
+		}
+	}
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	if a.orchestratorPM != nil {

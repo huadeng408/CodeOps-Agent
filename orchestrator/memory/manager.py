@@ -8,8 +8,10 @@ import threading
 
 from orchestrator.security.credentials import redact_credential_shapes
 
-_SENSITIVE_TAG = re.compile(
-    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|private[_-]?key)",
+_SENSITIVE_NAME = re.compile(
+    r"^(?:(?:openai|anthropic|deepseek|azure|aws|github|gitlab|db|database|mysql|postgres|redis)[_-])?"
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization(?:[_-]?token)?|private[_-]?key|password|passwd|secret|credential|credentials)"
+    r"(?:$|[_-](?:token|key|value|credential|credentials))",
     re.IGNORECASE,
 )
 
@@ -247,21 +249,22 @@ def _validate_memory_fields(
     name: str, content: str, tags: list[str]
 ) -> tuple[str, list[str]]:
     safe_name = str(name).strip()
-    if safe_name and (
-        _SENSITIVE_TAG.search(safe_name)
-        or redact_credential_shapes(safe_name) != safe_name
-    ):
+    if _is_sensitive_memory_name(safe_name) or redact_credential_shapes(safe_name) != safe_name:
         raise ValueError("sensitive name is not allowed in memory")
     safe_content = str(content).strip()
     if redact_credential_shapes(safe_content) != safe_content:
         raise ValueError("sensitive content is not allowed in memory")
     normalized_tags = _normalize_tags(tags)
     if any(
-        _SENSITIVE_TAG.search(tag) or redact_credential_shapes(tag) != tag
+        _is_sensitive_memory_name(tag) or redact_credential_shapes(tag) != tag
         for tag in normalized_tags
     ):
         raise ValueError("sensitive tags are not allowed in memory")
     return safe_content, normalized_tags
+
+
+def _is_sensitive_memory_name(value: str) -> bool:
+    return bool(_SENSITIVE_NAME.fullmatch(str(value).strip()))
 
 
 def _clone_memory(item: Memory) -> Memory:

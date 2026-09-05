@@ -137,3 +137,31 @@ func TestMemoryManagerRejectsDsnCredentials(t *testing.T) {
 		t.Fatal("DSN credentials should be rejected")
 	}
 }
+
+func TestMemoryManagerRejectsSensitiveFilenameFallback(t *testing.T) {
+	dir := t.TempDir()
+	content := "---\n" +
+		"id: memory-1\n" +
+		"tags: project\n" +
+		"created_at: 2026-09-05T00:00:00Z\n" +
+		"updated_at: 2026-09-05T00:00:00Z\n" +
+		"---\n" +
+		"ordinary implementation note\n"
+	if err := os.WriteFile(filepath.Join(dir, "api-key.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := memory.NewManager(dir)
+	if manager.Err() == nil {
+		t.Fatal("sensitive filename fallback should fail closed")
+	}
+}
+
+func TestMemoryManagerAllowsOrdinaryCredentialDiscussionNames(t *testing.T) {
+	manager := memory.NewManager(t.TempDir())
+	for _, name := range []string{"password-rotation-discussion", "secret-design-notes"} {
+		if _, err := manager.Save(memory.Memory{Name: name, Content: "Document the implementation tradeoffs."}); err != nil {
+			t.Fatalf("ordinary discussion name %q was rejected: %v", name, err)
+		}
+	}
+}

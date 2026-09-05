@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +156,9 @@ func TestProbePlanTodoPythonRuntimeHasHardTimeout(t *testing.T) {
 	if !strings.Contains(source, "exec.CommandContext(ctx, candidate.executable, args...)") {
 		t.Fatal("Python capability probe must be cancellable")
 	}
+	if !strings.Contains(source, "taskkill") {
+		t.Fatal("Windows Python capability probe must reap the process tree after timeout")
+	}
 }
 
 type planTodoPythonRuntime struct {
@@ -209,7 +213,16 @@ func probePlanTodoPythonRuntimeWithTimeout(candidate planTodoPythonRuntime, root
 	cmd := exec.CommandContext(ctx, candidate.executable, args...)
 	cmd.Dir = root
 	cmd.Env = planTodoPythonEnv(root)
-	return cmd.Run() == nil
+	err := cmd.Run()
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil && runtime.GOOS == "windows" && cmd.Process != nil {
+		killCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(killCtx, "taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F").Run()
+	}
+	return false
 }
 
 func planTodoPythonEnv(root string) []string {
