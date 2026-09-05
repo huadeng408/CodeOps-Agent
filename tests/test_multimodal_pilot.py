@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -351,11 +352,14 @@ def test_powershell_wrapper_retains_redacted_logs_only_on_failure() -> None:
 
 def test_powershell_wrapper_returns_nonzero_without_environment_secret(tmp_path: Path) -> None:
     wrapper = Path(__file__).parents[1] / "scripts" / "multimodal-rag-pilot.ps1"
+    powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
     env = os.environ.copy()
     env.pop("CODE_AGENT_RAG_INTERNAL_SECRET", None)
     result = subprocess.run(
         [
-            "powershell.exe",
+            powershell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",

@@ -191,9 +191,12 @@ def test_e2e_retries_busy_kafka_group_deletion_until_success() -> None:
 
 
 def test_e2e_script_fails_nonzero_after_cleanup() -> None:
+    powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
     result = subprocess.run(
         [
-            "powershell.exe",
+            powershell,
             "-NoProfile",
             "-File",
             str(SCRIPT),
