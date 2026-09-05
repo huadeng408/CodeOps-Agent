@@ -75,6 +75,13 @@ def test_runtime_allows_a_long_cold_start_but_keeps_explicit_probe_budgets() -> 
     assert "Callers can still pass a shorter budget" in runtime
 
 
+def test_release_gate_pins_setup_python_for_go_subprocess_e2e() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'PYTHON_EXECUTABLE=${pythonLocation}/bin/python' in workflow
+
+
 def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
     powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
     if not powershell:

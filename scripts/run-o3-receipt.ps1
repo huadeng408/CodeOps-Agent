@@ -81,6 +81,32 @@ function Wait-ForHealth {
     throw "timed out waiting for short-lived O3 RAG server"
 }
 
+function Test-LocalPortListening {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    # ``Get-NetTCPConnection`` is only shipped with the Windows networking
+    # module.  The receipt runner also executes under PowerShell 7 on Linux
+    # CI, so use the cross-platform .NET socket table first and retain the
+    # cmdlet as a Windows fallback for older hosts.
+    try {
+        $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+        if (@($listeners | Where-Object { $_.Port -eq $Port }).Count -gt 0) {
+            return $true
+        }
+        return $false
+    }
+    catch {
+        $netTcp = Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue
+        if ($null -eq $netTcp) {
+            return $false
+        }
+        return @(
+            Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        ).Count -gt 0
+    }
+}
+
 function Stop-ProcessTree {
     param([System.Diagnostics.Process]$Process)
 
@@ -117,7 +143,7 @@ try {
     $env:OTEL_EXPORTER_OTLP_ENDPOINT = $PhoenixUrl.TrimEnd('/')
     $env:OTEL_SERVICE_NAME = "code-agent-o3-rag"
 
-    if (Get-NetTCPConnection -LocalPort $serverPort -State Listen -ErrorAction SilentlyContinue) {
+    if (Test-LocalPortListening -Port $serverPort) {
         throw "refusing to reuse an existing process on :$serverPort"
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $serverExe) -Force | Out-Null
