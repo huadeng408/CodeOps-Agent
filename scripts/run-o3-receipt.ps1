@@ -113,7 +113,13 @@ function Stop-ProcessTree {
     if ($null -eq $Process -or $Process.HasExited) {
         return
     }
-    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT -and
+        $null -ne (Get-Command taskkill.exe -ErrorAction SilentlyContinue)) {
+        & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+    }
+    else {
+        try { $Process.Kill() } catch { }
+    }
     try { $Process.WaitForExit(10000) | Out-Null } catch { }
 }
 

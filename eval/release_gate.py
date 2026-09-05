@@ -290,7 +290,20 @@ def _redacted_failure_tail(stdout: str, stderr: str, *, max_chars: int = 600) ->
     lines = [line.strip() for line in (stdout + "\n" + stderr).splitlines() if line.strip()]
     if not lines:
         return ""
-    summary = " | ".join(lines[-4:])
+    # Preserve pytest/Go failure identifiers when a long test run emits a
+    # summary followed by plugin diagnostics.  The final lines alone often
+    # contain only framework noise (or dependency download messages).
+    signal = [
+        line
+        for line in lines
+        if "FAILED" in line
+        or "FAIL:" in line
+        or line.startswith("--- FAIL")
+        or line.startswith("FAIL\t")
+        or "short test summary" in line.lower()
+    ]
+    summary_lines = (signal[-3:] if signal else lines[-4:])
+    summary = " | ".join(summary_lines)
     summary = " ".join(redact_credential_text(summary).split())
     if len(summary) > max_chars:
         summary = summary[: max_chars - 3].rstrip() + "..."
