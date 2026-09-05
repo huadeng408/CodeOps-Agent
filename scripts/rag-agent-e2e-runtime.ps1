@@ -216,7 +216,10 @@ function Invoke-DockerProbe {
 function Wait-DockerDaemonReady {
     [CmdletBinding()]
     param(
-        [int]$TimeoutSeconds = 60
+        # Docker Desktop may need several minutes for a cold WSL2 engine start.
+        # Callers can still pass a shorter budget when they intentionally want
+        # a bounded probe (for example, a negative-path contract test).
+        [int]$TimeoutSeconds = 300
     )
 
     if ($TimeoutSeconds -le 0) {

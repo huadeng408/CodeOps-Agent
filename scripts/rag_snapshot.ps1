@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PWD ("rag-snapshot-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss")))
+    [string]$OutputPath = (Join-Path $PWD ("rag-snapshot-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))),
+    [int]$DockerTimeoutSeconds = 300
 )
 
 . (Join-Path $PSScriptRoot 'rag-agent-e2e-runtime.ps1')
-Wait-DockerDaemonReady -TimeoutSeconds 60
+Wait-DockerDaemonReady -TimeoutSeconds $DockerTimeoutSeconds
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"

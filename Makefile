@@ -1,4 +1,4 @@
-.PHONY: test test-go test-python fmt proto run
+.PHONY: test test-go test-python release-gate fmt proto run
 
 test: test-go test-python
 
@@ -7,6 +7,9 @@ test-go:
 
 test-python:
 	pytest -q
+
+release-gate:
+	python -m eval.release_gate
 
 fmt:
 	gofmt -w cmd internal tests/go

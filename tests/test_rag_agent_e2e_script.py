@@ -65,7 +65,14 @@ def test_runtime_resolves_and_starts_docker_desktop_before_readiness_poll() -> N
     assert "Start-Process -FilePath $desktop -WindowStyle Hidden" in runtime
     assert "$probeArguments = @('info', '--format', '{{.ServerVersion}}')" in runtime
     assert "rag-agent-e2e-runtime.ps1" in snapshot
-    assert "Wait-DockerDaemonReady -TimeoutSeconds 60" in snapshot
+    assert "[int]$DockerTimeoutSeconds = 300" in snapshot
+    assert "Wait-DockerDaemonReady -TimeoutSeconds $DockerTimeoutSeconds" in snapshot
+
+
+def test_runtime_allows_a_long_cold_start_but_keeps_explicit_probe_budgets() -> None:
+    runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
+    assert "[int]$TimeoutSeconds = 300" in runtime
+    assert "Callers can still pass a shorter budget" in runtime
 
 
 def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
