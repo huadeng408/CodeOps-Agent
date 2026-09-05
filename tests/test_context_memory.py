@@ -337,6 +337,21 @@ def test_layered_context_reads_only_bounded_raw_bytes_and_skips_symlink(tmp_path
     store.close()
 
 
+def test_layered_context_preserves_utf8_when_raw_budget_splits_character(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("你好世界", encoding="utf-8")
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    context = LayeredContext(store, tmp_path, max_raw_bytes=5)
+
+    summary = context.load("session-1", raw_paths=["source.txt"])
+
+    raw = summary.p3["source.txt"]
+    assert "你" in raw
+    assert "\ufffd" not in raw
+    assert "[raw content truncated]" in raw
+    store.close()
+
+
 def test_layered_context_marks_unreadable_explicit_file_without_dropping_p0(
     tmp_path: Path, monkeypatch
 ) -> None:

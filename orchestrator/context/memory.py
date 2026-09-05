@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import threading
+import codecs
 import uuid
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -66,6 +67,16 @@ def _estimate_tokens(value: str) -> int:
 
 def _redact_text(value: str) -> str:
     return redact_credential_text(value)
+
+
+def _decode_bounded_utf8(data: bytes, max_bytes: int) -> str:
+    """Decode a bounded prefix without emitting replacement characters."""
+    prefix = data[:max_bytes]
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        return decoder.decode(prefix, final=False)
+    except UnicodeDecodeError as exc:
+        return prefix[: exc.start].decode("utf-8")
 
 
 def _redact(value: Any, key: str = "") -> Any:
@@ -556,7 +567,7 @@ class LayeredContext:
                 with path.open("rb") as handle:
                     data = handle.read(self.max_raw_bytes + 1)
                 truncated = len(data) > self.max_raw_bytes
-                text = _redact_text(data[: self.max_raw_bytes].decode("utf-8"))
+                text = _redact_text(_decode_bounded_utf8(data, self.max_raw_bytes))
                 if truncated:
                     text += "\n[raw content truncated]"
                 p3[relative] = text
