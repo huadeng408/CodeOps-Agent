@@ -94,6 +94,39 @@ func TestAnalyzerRejectsGitRepositoryEscapeAndCommandHooks(t *testing.T) {
 	}
 }
 
+func TestAnalyzerRejectsGitExecutableAliasesThroughShell(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	for _, command := range []string{
+		"git.exe reset --hard HEAD",
+		"/usr/bin/git push --force origin main",
+		`C:\\Tools\\git.exe clean -fd`,
+	} {
+		if result := analyzer.AnalyzeCommand(command); result.Allowed {
+			t.Fatalf("git executable alias unexpectedly allowed: %q (%+v)", command, result)
+		}
+	}
+}
+
+func TestAnalyzerDoesNotTreatGitMentionInPromptAsCommand(t *testing.T) {
+	analyzer := safety.NewAnalyzer()
+	for _, command := range []string{
+		"Review the Git changes and explain the status",
+		"env GIT_PAGER=cat git status --short",
+		"command git.exe log --oneline -5",
+	} {
+		result := analyzer.AnalyzeCommand(command)
+		if command == "Review the Git changes and explain the status" && !result.Allowed {
+			t.Fatalf("natural-language Git mention was blocked: %q (%+v)", command, result)
+		}
+		if strings.Contains(command, "git") && strings.HasPrefix(command, "env") && !result.Allowed {
+			t.Fatalf("safe env-wrapped git query was blocked: %q (%+v)", command, result)
+		}
+		if strings.HasPrefix(command, "command") && !result.Allowed {
+			t.Fatalf("safe command-wrapped git query was blocked: %q (%+v)", command, result)
+		}
+	}
+}
+
 func TestAnalyzerRejectsGitReferenceMutationAndUnsafeFetchOptions(t *testing.T) {
 	analyzer := safety.NewAnalyzer()
 	cases := [][]string{
@@ -207,6 +240,25 @@ func TestScrubGitEnvironmentRemovesGitRedirectionVariables(t *testing.T) {
 	for _, needle := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_SYSTEM", "GIT_SSH_COMMAND"} {
 		if strings.Contains(joined, needle+"=") {
 			t.Fatalf("git redirection variable leaked: %q", needle)
+		}
+	}
+}
+
+func TestHardenedGitArgsDisableRepositorySideEffects(t *testing.T) {
+	args := safety.HardenedGitArgs(`C:\workspace`, "diff", []string{"--stat"})
+	joined := strings.Join(args, "\x00")
+	for _, required := range []string{
+		"-c\x00alias.diff=",
+		"-c\x00core.hooksPath=",
+		"-c\x00diff.external=",
+		"-c\x00core.fsmonitor=false",
+		"-c\x00credential.helper=",
+		"-c\x00protocol.ext.allow=never",
+		"-C\x00C:\\workspace",
+		"diff\x00--no-ext-diff\x00--stat",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("hardened git args missing %q: %#v", required, args)
 		}
 	}
 }

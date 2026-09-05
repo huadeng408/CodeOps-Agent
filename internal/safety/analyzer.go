@@ -1,6 +1,8 @@
 package safety
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 )
@@ -48,8 +50,15 @@ func (a *Analyzer) AnalyzeCommand(command string) Analysis {
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad permission or ownership change blocked"}
 	case containsProcessKill(fields):
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad process termination blocked"}
-	case len(fields) > 0 && fields[0] == "git":
-		return a.AnalyzeGit(fields[1:])
+	case len(fields) > 0:
+		if gitIndex := findGitExecutable(fields); gitIndex >= 0 {
+			gitArgs := fields[gitIndex+1:]
+			if end := gitShellBoundary(gitArgs); end >= 0 {
+				gitArgs = gitArgs[:end]
+			}
+			return a.AnalyzeGit(gitArgs)
+		}
+		return Analysis{Allowed: true, Level: RiskLow, Reason: "no obvious risk detected"}
 	default:
 		return Analysis{Allowed: true, Level: RiskLow, Reason: "no obvious risk detected"}
 	}
@@ -81,6 +90,86 @@ func (a *Analyzer) AnalyzeGit(args []string) Analysis {
 		return Analysis{Allowed: true, Level: RiskLow, Reason: "safe git subcommand"}
 	}
 	return Analysis{Allowed: false, Level: RiskMedium, Reason: "unsupported git subcommand or arguments"}
+}
+
+// findGitExecutable locates a git executable token at the command position,
+// including git.exe, absolute paths, and a small set of shell wrappers. It
+// deliberately does not scan arbitrary prose for the word "git": prompts sent
+// to the agent commonly mention Git without being shell commands.
+func findGitExecutable(fields []string) int {
+	if len(fields) == 0 {
+		return -1
+	}
+	indices := []int{0}
+	switch fields[0] {
+	case "env", "command", "sudo":
+		for i := 1; i < len(fields) && i <= 8; i++ {
+			if fields[i] == "--" {
+				indices = append(indices, i+1)
+				break
+			}
+			if strings.Contains(fields[i], "=") || strings.HasPrefix(fields[i], "-") {
+				continue
+			}
+			indices = append(indices, i)
+			break
+		}
+	}
+	for _, i := range indices {
+		if i < 0 || i >= len(fields) {
+			continue
+		}
+		field := fields[i]
+		field = strings.Trim(field, "\"'")
+		field = strings.ReplaceAll(field, "\\", "/")
+		base := field
+		if slash := strings.LastIndexByte(base, '/'); slash >= 0 {
+			base = base[slash+1:]
+		}
+		if base == "git" || base == "git.exe" {
+			return i
+		}
+	}
+	return -1
+}
+
+func gitShellBoundary(args []string) int {
+	for i, arg := range args {
+		switch arg {
+		case ";", "&&", "||", "|":
+			return i
+		}
+	}
+	return -1
+}
+
+// HardenedGitArgs constructs every Git invocation issued by the Harness. The
+// command-level settings neutralize repository configuration that could invoke
+// aliases, hooks, external diff programs, fsmonitor helpers, or credential
+// helpers. The caller still supplies the validated user arguments unchanged.
+func HardenedGitArgs(root, command string, args []string) []string {
+	command = strings.ToLower(strings.TrimSpace(command))
+	hooksPath := filepath.Join(os.DevNull, "codeops-agent-hooks-disabled")
+	result := []string{
+		"-c", "alias." + command + "=",
+		"-c", "core.hooksPath=" + hooksPath,
+		"-c", "diff.external=",
+		"-c", "core.fsmonitor=false",
+		"-c", "credential.helper=",
+		"-c", "protocol.ext.allow=never",
+		"-c", "safe.directory=" + root,
+	}
+	if strings.TrimSpace(root) != "" {
+		result = append(result, "-C", root)
+	}
+	result = append(result, command)
+	if command == "diff" {
+		// diff.external is an executable setting; an empty -c value still
+		// makes Git try to spawn it. This flag is the reliable per-invocation
+		// opt-out across Git versions and platforms.
+		result = append(result, "--no-ext-diff")
+	}
+	return append(result, args...)
 }
 
 func containsGitEscape(args []string) bool {
@@ -381,7 +470,12 @@ func ScrubGitEnvironment(env []string) []string {
 		}
 		result = append(result, entry)
 	}
-	result = append(result, "GIT_TERMINAL_PROMPT=0")
+	result = append(result,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_TERMINAL_PROMPT=0",
+	)
 	return result
 }
 

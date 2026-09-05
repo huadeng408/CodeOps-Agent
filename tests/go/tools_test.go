@@ -454,6 +454,42 @@ func TestExecutorGitSafetyBlocksReferenceAndWorktreeMutations(t *testing.T) {
 	}
 }
 
+func TestExecutorGitDisablesRepositoryExternalDiff(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "config", "diff.external", "echo EXTERNAL_DIFF")
+
+	result, err := tools.NewExecutor(repo).Execute(context.Background(), tools.ToolRequest{
+		Name: "Git", Arguments: map[string]any{"command": "diff"},
+	})
+	if err != nil {
+		t.Fatalf("safe git diff unexpectedly failed: result=%+v err=%v", result, err)
+	}
+	if strings.Contains(result.Output, "EXTERNAL_DIFF") {
+		t.Fatalf("repository diff.external command was executed: %q", result.Output)
+	}
+}
+
+func TestExecutorGitIgnoresRepositoryAlias(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	marker := filepath.Join(repo, "alias-ran.txt")
+	runGit(t, repo, "config", "alias.status", "!touch "+marker)
+
+	result, err := tools.NewExecutor(repo).Execute(context.Background(), tools.ToolRequest{
+		Name: "Git", Arguments: map[string]any{"command": "status", "args": []any{"--short"}},
+	})
+	if err != nil {
+		t.Fatalf("safe git status unexpectedly failed: result=%+v err=%v", result, err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("repository git alias executed, stat err=%v", statErr)
+	}
+}
+
 func TestExecutorGitRejectsNonStringArgumentItems(t *testing.T) {
 	executor := tools.NewExecutor(t.TempDir())
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{

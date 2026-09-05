@@ -30,7 +30,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 	}
 
 	if runner := e.sandboxRunner(); runner != nil {
-		requestArgs := append([]string{"-c", "safe.directory=/workspace", "-C", "/workspace", command}, extraArgs...)
+		requestArgs := safety.HardenedGitArgs("/workspace", command, extraArgs)
 		sandboxResult, sandboxErr := runner.Run(ctx, sandbox.Request{
 			Workspace:  e.Root,
 			WorkingDir: e.Root,
@@ -48,7 +48,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 		return result, nil
 	}
 
-	cmdArgs := append([]string{"-C", e.Root, command}, extraArgs...)
+	cmdArgs := safety.HardenedGitArgs(e.Root, command, extraArgs)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Env = safety.ScrubGitEnvironment(os.Environ())
 	output, err := cmd.CombinedOutput()

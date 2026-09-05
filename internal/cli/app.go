@@ -1455,8 +1455,12 @@ func (a *App) renderCommitSuggestion(message string, local bool) {
 
 // runGit 在 root 目录下执行只读 git 子命令并返回合并后的输出。
 func runGit(ctx context.Context, root string, args ...string) (string, error) {
-	cmdArgs := append([]string{"-C", root}, args...)
+	if len(args) == 0 {
+		return "", errors.New("git command is required")
+	}
+	cmdArgs := safety.HardenedGitArgs(root, args[0], args[1:])
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd.Env = safety.ScrubGitEnvironment(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

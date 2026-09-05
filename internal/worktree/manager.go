@@ -764,7 +764,10 @@ func isGitRepository(ctx context.Context, root string) bool {
 }
 
 func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
-	cmdArgs := append([]string{"-C", root}, args...)
+	if len(args) == 0 {
+		return "", errors.New("git command is required")
+	}
+	cmdArgs := safety.HardenedGitArgs(root, args[0], args[1:])
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Env = scrubGitEnvironment()
 	out, err := cmd.CombinedOutput()
