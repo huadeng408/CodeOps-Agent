@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"code-agent/internal/jobs"
 	"code-agent/internal/mcp"
@@ -513,10 +514,21 @@ func normalizeOutput(output string, maxLines, maxBytes int) (string, bool) {
 	}
 	// 2) 字节截断兜底：行截断后仍超字节上限，则按字节硬截断。
 	if maxBytes > 0 && len(output) > maxBytes {
-		output = output[:maxBytes] + fmt.Sprintf("\n\n[Output truncated at %s]", byteCapLabel(maxBytes))
+		output = validUTF8Prefix(output, maxBytes) + fmt.Sprintf("\n\n[Output truncated at %s]", byteCapLabel(maxBytes))
 		truncated = true
 	}
 	return output, truncated
+}
+
+func validUTF8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	prefix := value[:maxBytes]
+	for len(prefix) > 0 && !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix
 }
 
 // byteCapLabel 把字节上限渲染为人类可读的提示后缀（>=1000 用 KB，否则用字节）。

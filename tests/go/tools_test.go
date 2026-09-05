@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"code-agent/internal/tools"
 )
@@ -731,6 +732,24 @@ func TestExecutorTruncateOutputHonorsLineAndByteLimits(t *testing.T) {
 			t.Fatalf("expected byte-capped output to be smaller than input: %d vs %d", len(out), len(big))
 		}
 	})
+}
+
+func TestExecutorTruncateOutputPreservesUTF8AtByteBoundary(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	executor.MaxOutputLines = 0
+	executor.MaxOutputBytes = 5
+
+	out, truncated := executor.TruncateOutput("你好世界")
+	if !truncated {
+		t.Fatal("expected multibyte output to be truncated")
+	}
+	prefix := strings.SplitN(out, "\n\n[Output truncated", 2)[0]
+	if !utf8.ValidString(prefix) {
+		t.Fatalf("byte truncation split a UTF-8 sequence: %q (% x)", prefix, []byte(prefix))
+	}
+	if len(prefix) > executor.MaxOutputBytes {
+		t.Fatalf("UTF-8 prefix exceeds byte budget: %d > %d", len(prefix), executor.MaxOutputBytes)
+	}
 }
 
 func TestExecutorSpillsLongReadOutputWithRedactedContent(t *testing.T) {
