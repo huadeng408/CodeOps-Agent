@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"code-agent/internal/extensions"
 	"code-agent/internal/jobs"
 	"code-agent/internal/mcp"
 	"code-agent/internal/rag"
@@ -67,6 +68,7 @@ type Executor struct {
 	httpAllowPrivate bool
 	tracer           genai.Tracer
 	jobs             *jobs.Registry
+	extensions       *extensions.Registry
 }
 
 func NewExecutor(root string) *Executor {
@@ -112,6 +114,20 @@ func (e *Executor) SetMCPManager(manager *mcp.Manager) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.mcp = manager
+}
+
+// SetExtensionRegistry installs the Harness-owned attachment, code-runtime,
+// and LSP registry. A registry without an audit sink remains fail-closed.
+func (e *Executor) SetExtensionRegistry(registry *extensions.Registry) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.extensions = registry
+}
+
+func (e *Executor) ExtensionRegistry() *extensions.Registry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.extensions
 }
 
 // SetRAGSearcher configures the knowledge search backend used by SearchKnowledge.
@@ -222,6 +238,8 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 		result, err = e.executeSearchKnowledge(ctx, req.Arguments)
 	case "Skill":
 		result, err = e.executeSkill(ctx, req.Arguments)
+	case "Extension", "Attachment", "CodeRuntime", "LSP":
+		result, err = e.executeExtension(ctx, req)
 	case "ReadSpill":
 		result, err = e.executeReadSpill(ctx, req.Arguments)
 	default:

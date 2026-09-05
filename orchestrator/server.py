@@ -28,6 +28,7 @@ from .runtime import (
     AgentLoopPluginRegistry,
     CommandRegistry,
     ConversationRunner,
+    ExtensionRegistry,
     HookRegistry,
     ToolRegistry,
 )
@@ -75,6 +76,9 @@ class OrchestratorServer:
         self.context_store = SQLiteContextStore(Path(self.project_root) / ".agent" / "context.sqlite")
         self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
+        self.extensions = ExtensionRegistry.from_manifest(
+            Path(self.project_root) / ".agent" / "extensions.json"
+        )
         self.actor_registry = ActorSessionRegistry()
         self.session_operations = SessionOperationCoordinator()
         self.token_budget = TokenBudget(
@@ -157,6 +161,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             provider_router=self._provider_router_for_request(),
             hooks=self.app.hooks,
             commands=self.app.commands,
+            extensions=self.app.extensions,
             require_harness_worktree=os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower()
             in {"1", "true", "yes", "on"},
         )

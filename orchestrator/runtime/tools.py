@@ -39,6 +39,9 @@ class ToolRegistry:
         self._skills_manifest_path = (
             self._project_root / ".agent" / "skills.json" if self._project_root else None
         )
+        self._extensions_manifest_path = (
+            self._project_root / ".agent" / "extensions.json" if self._project_root else None
+        )
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tool_names: set[str] = set()
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
@@ -55,15 +58,18 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         self._refresh_mcp_tools()
         self._refresh_skills_catalog()
+        self._refresh_extensions_catalog()
         return self._tools.get(name)
 
     def list(self) -> list[ToolSpec]:
         self._refresh_mcp_tools()
         self._refresh_skills_catalog()
+        self._refresh_extensions_catalog()
         return sorted(self._tools.values(), key=lambda tool: tool.name.lower())
 
     def openai_schemas(self) -> list[dict[str, Any]]:
         self._refresh_mcp_tools()
+        self._refresh_extensions_catalog()
         return [tool.to_openai_schema() for tool in self.list()]
 
     def permission_for(self, name: str) -> int:
@@ -152,6 +158,39 @@ class ToolRegistry:
             description=description,
             parameters=skill_tool.parameters,
             permission=skill_tool.permission,
+        )
+
+    def _refresh_extensions_catalog(self) -> None:
+        extension_tool = self._tools.get("Extension")
+        if extension_tool is None or self._extensions_manifest_path is None:
+            return
+        try:
+            payload = json.loads(self._extensions_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        raw_extensions = payload.get("extensions", []) if isinstance(payload, dict) else []
+        entries: list[str] = []
+        for raw in raw_extensions:
+            if not isinstance(raw, dict):
+                continue
+            extension_id = str(raw.get("id", "")).strip()
+            kind = str(raw.get("kind", "")).strip()
+            description = str(raw.get("description", "")).strip()
+            version = str(raw.get("version", "")).strip()
+            if not extension_id or not kind or not description or not version:
+                continue
+            entries.append(f"{extension_id} ({kind}@{version}): {description}")
+        description = (
+            "Invoke an attachment, code runtime, or LSP extension through the Go Harness. "
+            "The extension must be registered and audited; this tool never executes a local process directly."
+        )
+        if entries:
+            description += " Available extensions: " + "; ".join(sorted(entries)) + "."
+        self._tools["Extension"] = ToolSpec(
+            name=extension_tool.name,
+            description=description,
+            parameters=extension_tool.parameters,
+            permission=extension_tool.permission,
         )
 
     @staticmethod
@@ -687,6 +726,37 @@ class ToolRegistry:
                         "query": {"type": "string"},
                     },
                     "required": ["query"],
+                },
+            ),
+            ToolSpec(
+                name="Extension",
+                description=(
+                    "Invoke an attachment, code runtime, or LSP extension through the Go Harness. "
+                    "The extension must be registered and audited; this tool never executes a local process directly."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "extension_id": {
+                            "type": "string",
+                            "description": "Registered extension identifier.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["attachment", "code_runtime", "lsp"],
+                        },
+                        "version": {"type": "string"},
+                        "operation": {
+                            "type": "string",
+                            "description": "Operation declared by the extension metadata.",
+                        },
+                        "payload": {
+                            "description": "Bounded JSON or text payload for the Harness adapter.",
+                        },
+                    },
+                    "required": ["extension_id", "operation"],
+                    "additionalProperties": False,
                 },
             ),
             ToolSpec(

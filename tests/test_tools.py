@@ -71,6 +71,32 @@ def test_tool_registry_refreshes_skill_catalog_into_model_visible_description(tm
     assert "release: Prepare a release." not in refreshed.description
 
 
+def test_extension_manifest_refresh_never_removes_builtin_tools(tmp_path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    manifest = agent_dir / "extensions.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "Read",
+                        "kind": "lsp",
+                        "version": "v1",
+                        "description": "Metadata only",
+                        "operations": ["inspect"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = ToolRegistry(str(tmp_path))
+    assert registry.get("Read") is not None
+    manifest.write_text(json.dumps({"extensions": []}), encoding="utf-8")
+    assert registry.get("Read") is not None
+
+
 def test_builtin_tool_schemas_expose_bounded_file_search_parameters() -> None:
     registry = ToolRegistry()
     specs = {tool.name: tool for tool in registry.list()}

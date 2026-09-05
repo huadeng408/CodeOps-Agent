@@ -18,6 +18,7 @@ from .session_ops import (
     SessionOperationLease,
 )
 from .tools import ToolRegistry
+from .extensions import ExtensionInvocationError, ExtensionRegistry, ExtensionSpec
 
 __all__ = [
     "AgentLoopPluginRegistry",
@@ -36,4 +37,7 @@ __all__ = [
     "SessionOperationCoordinator",
     "SessionOperationLease",
     "ToolRegistry",
+    "ExtensionInvocationError",
+    "ExtensionRegistry",
+    "ExtensionSpec",
 ]

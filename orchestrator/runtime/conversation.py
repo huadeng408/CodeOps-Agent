@@ -69,6 +69,7 @@ from orchestrator.workflows import (
 from .tools import ToolRegistry
 from .agent_loop import AgentLoopPluginRegistry, LoopEvent
 from .hooks import CommandRegistry, HookEvent, HookRegistry, HookDispatchResult
+from .extensions import ExtensionInvocationError, ExtensionRegistry
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.0025, 0.01),
@@ -236,6 +237,7 @@ class ConversationRunner:
     provider_router: ProviderRouter | None = None
     hooks: HookRegistry | None = None
     commands: CommandRegistry | None = None
+    extensions: ExtensionRegistry | None = None
     allow_parallel_todos: bool = False
     sub_agent_executor: ProcessAgentExecutor | None = None
     legacy_sub_agent_manager: DeepAgentManager | None = None
@@ -282,6 +284,8 @@ class ConversationRunner:
             object.__setattr__(self, "hooks", HookRegistry())
         if self.commands is None:
             object.__setattr__(self, "commands", CommandRegistry())
+        if self.extensions is None:
+            object.__setattr__(self, "extensions", ExtensionRegistry())
         if os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower() in {"1", "true", "yes", "on"}:
             self.require_harness_worktree = True
 
@@ -1248,6 +1252,27 @@ class ConversationRunner:
                             "is_error": workflow_result["state"] != "completed",
                         },
                     )
+                    continue
+
+                extension_error = self._extension_validation_error(call, session_id)
+                if extension_error is not None:
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            name=call.name,
+                            tool_call_id=call_id,
+                            content=f"Extension rejected: {extension_error}",
+                            is_error=True,
+                        )
+                    )
+                    yield self._text(f"Extension rejected: {extension_error}")
+                    self._emit_loop_event(
+                        "tool_after",
+                        session_id=session_id,
+                        turn=turn,
+                        metadata={"tool_name": call.name, "is_error": True},
+                    )
+                    consecutive_errors += 1
                     continue
 
                 request = self._tool_request(call, self._call_arguments_json(call))
@@ -2222,6 +2247,35 @@ class ConversationRunner:
             content=message_content,
             is_error=bool(result.error) if result is not None else False,
         )
+
+    def _extension_validation_error(self, call: ToolCall, session_id: str) -> str | None:
+        if call.name not in {"Extension", "Attachment", "CodeRuntime", "LSP"}:
+            return None
+        try:
+            arguments = json.loads(self._call_arguments_json(call) or "{}")
+            if not isinstance(arguments, dict):
+                return "payload must be an object"
+            payload_value = arguments.get("payload", {})
+            if isinstance(payload_value, str):
+                payload = payload_value.encode("utf-8")
+            else:
+                payload = json.dumps(payload_value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            alias_kind = {
+                "Attachment": "attachment",
+                "CodeRuntime": "code_runtime",
+                "LSP": "lsp",
+            }.get(call.name, "")
+            self.extensions.validate(
+                str(arguments.get("extension_id", arguments.get("id", arguments.get("name", "")))),
+                session_id,
+                str(arguments.get("operation", "")),
+                payload,
+                kind=str(arguments.get("kind", "")) or alias_kind,
+                version=str(arguments.get("version", "")),
+            )
+        except (ExtensionInvocationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return str(exc) or type(exc).__name__
+        return None
 
     @staticmethod
     def _tool_result_failed(result) -> bool:
