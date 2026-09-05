@@ -35,13 +35,14 @@ type notebookCell struct {
 
 // executeNotebookEdit 对 .ipynb 文件做单元格级别的编辑，支持 insert/replace/delete
 // 三种模式。单元格可通过 cell_id 定位，未提供时回退到 cell_index（数字）。该方法
-// 复用 workspacePath 做工作区校验，并通过 TruncateOutput 限制输出体积。
+// 复用 secureFilePath 做工作区校验，并通过原子写入和统一结果处理器
+// 保证 symlink 安全及有界输出。
 func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (ToolResult, error) {
 	path, ok := stringArg(args, "path", "file")
 	if !ok || path == "" {
 		return ToolResult{Name: "NotebookEdit", Error: "path is required"}, fmt.Errorf("path is required")
 	}
-	abs, err := workspacePath(e.Root, path)
+	abs, err := secureFilePath(e.Root, path)
 	if err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
@@ -136,7 +137,11 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 	if err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
-	if err := os.WriteFile(abs, encoded, 0o644); err != nil {
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(abs); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := atomicWriteFile(abs, encoded, mode); err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
 	return ToolResult{

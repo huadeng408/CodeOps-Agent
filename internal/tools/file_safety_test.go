@@ -160,6 +160,42 @@ func TestFileToolsRejectSymlinkAliasInsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestNotebookEditRejectsSymlinkAliasInsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real.ipynb")
+	original := `{"cells":[{"cell_type":"code","id":"cell-1","source":["before\n"],"metadata":{},"outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}`
+	if err := os.WriteFile(realPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write notebook fixture: %v", err)
+	}
+	alias := filepath.Join(root, "alias.ipynb")
+	if err := os.Symlink(realPath, alias); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating Windows symlink requires an enabled symlink policy: %v", err)
+		}
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	_, err := NewExecutor(root).Execute(context.Background(), ToolRequest{
+		Name: "NotebookEdit",
+		Arguments: map[string]any{
+			"path":       "alias.ipynb",
+			"edit_mode":  "replace",
+			"cell_index": 0,
+			"source":     "blocked\n",
+		},
+	})
+	if err == nil {
+		t.Fatal("NotebookEdit through an in-workspace symlink unexpectedly succeeded")
+	}
+	data, readErr := os.ReadFile(realPath)
+	if readErr != nil {
+		t.Fatalf("read notebook after rejected edit: %v", readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("symlink target changed after rejected NotebookEdit: %q", string(data))
+	}
+}
+
 func TestFileToolsAtomicWritesLeaveNoTemporaryFiles(t *testing.T) {
 	root := t.TempDir()
 	executor := NewExecutor(root)
