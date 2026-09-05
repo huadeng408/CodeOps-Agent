@@ -76,27 +76,18 @@ function Use-DockerDesktopLinuxContext {
         [Parameter(Mandatory = $true)][string]$DockerCli
     )
 
-    if ($env:OS -ne 'Windows_NT') {
-        return $null
-    }
-
     # Docker Desktop exposes the Linux engine as a named context. Inherited
     # DOCKER_HOST/TLS variables take precedence over that context and can point
     # at a stale named pipe or missing certificate directory, which makes a
-    # healthy Desktop daemon look unavailable. Temporarily clear them while
-    # discovering contexts, and restore them if Desktop is not present.
-    $previous = @{}
+    # healthy Desktop daemon look unavailable. Clear them on every platform:
+    # PowerShell 7 on Linux is a supported runner and has the same precedence
+    # rules as Windows PowerShell. Keep them cleared for the probe when no
+    # Desktop context exists so the default Unix socket can be used.
     foreach ($name in @('DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')) {
-        $previous[$name] = Get-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
     }
     $contextNames = @(& $DockerCli context ls --format '{{.Name}}' 2>$null)
     if ($LASTEXITCODE -ne 0 -or $contextNames -notcontains 'desktop-linux') {
-        foreach ($name in $previous.Keys) {
-            if ($null -ne $previous[$name]) {
-                Set-Item -LiteralPath ("Env:{0}" -f $name) -Value $previous[$name].Value
-            }
-        }
         return $null
     }
     $env:DOCKER_CONTEXT = 'desktop-linux'

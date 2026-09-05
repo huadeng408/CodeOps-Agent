@@ -178,6 +178,14 @@ func selectPlanTodoPython(candidates []planTodoPythonRuntime, probe func(planTod
 func discoverPlanTodoPythonRuntimes(root string) []planTodoPythonRuntime {
 	candidates := make([]planTodoPythonRuntime, 0, 4)
 	if configured := strings.TrimSpace(os.Getenv("PYTHON_EXECUTABLE")); configured != "" {
+		// setup-python publishes an absolute interpreter path. Keep it first,
+		// but normalize a relative override against the repository so Go's
+		// package working directory cannot change what the child executes.
+		if !filepath.IsAbs(configured) {
+			if absolute, err := filepath.Abs(filepath.Join(root, configured)); err == nil {
+				configured = absolute
+			}
+		}
 		candidates = append(candidates, planTodoPythonRuntime{executable: configured})
 	}
 	if runtime.GOOS == "windows" {
@@ -202,7 +210,10 @@ func discoverPlanTodoPythonRuntimes(root string) []planTodoPythonRuntime {
 }
 
 func probePlanTodoPythonRuntime(candidate planTodoPythonRuntime, root string) bool {
-	return probePlanTodoPythonRuntimeWithTimeout(candidate, root, 10*time.Second)
+	// Importing LangGraph can be cold on a freshly provisioned hosted runner.
+	// Keep a hard bound, but allow enough time for one uncached capability
+	// probe before falling back to another interpreter.
+	return probePlanTodoPythonRuntimeWithTimeout(candidate, root, 30*time.Second)
 }
 
 func probePlanTodoPythonRuntimeWithTimeout(candidate planTodoPythonRuntime, root string, timeout time.Duration) bool {
@@ -234,6 +245,10 @@ func planTodoPythonEnv(root string) []string {
 		}
 		result = append(result, entry)
 	}
+	// Preserve the setup-python site-packages while making the checkout itself
+	// importable. Replacing PYTHONPATH (rather than appending an empty value)
+	// avoids stale developer paths, and PYTHONNOUSERSITE keeps user-level
+	// packages from changing the probe result.
 	result = append(result, "PYTHONPATH="+root, "PYTHONNOUSERSITE=1", "PYTHONUTF8=1")
 	return result
 }

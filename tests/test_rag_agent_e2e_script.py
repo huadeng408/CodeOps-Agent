@@ -112,7 +112,27 @@ def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
         pytest.skip("Docker CLI is unavailable")
     assert result.returncode == 0, result.stderr
     assert "ready: Docker daemon" in result.stdout
-    assert "context=desktop-linux" in result.stdout
+    # Docker Desktop exposes desktop-linux on Windows/WSL. Hosted Linux
+    # runners use the default Unix-socket context, but must still clear the
+    # stale host/TLS variables before probing it.
+    context_probe_env = {
+        key: value
+        for key, value in environment.items()
+        if key not in {"DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"}
+    }
+    context_probe = subprocess.run(
+        ["docker", "context", "ls", "--format", "{{.Name}}"],
+        env=context_probe_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_context = (
+        "desktop-linux"
+        if "desktop-linux" in context_probe.stdout.splitlines()
+        else environment.get("DOCKER_CONTEXT", "default")
+    )
+    assert f"context={expected_context}" in result.stdout
     assert "host=" in result.stdout
     assert "code-agent-stale-docker" not in result.stdout
 

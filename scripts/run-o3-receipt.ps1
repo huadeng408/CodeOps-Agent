@@ -113,6 +113,39 @@ function Stop-ProcessTree {
     if ($null -eq $Process -or $Process.HasExited) {
         return
     }
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        # Start-Process does not create a process group on POSIX. Kill direct
+        # descendants first so the wrapper's merged stdout/stderr pipeline
+        # observes EOF and flushes the final redacted records before it exits.
+        $psPath = if (Test-Path -LiteralPath '/bin/ps') { '/bin/ps' } else { 'ps' }
+        $killPath = if (Test-Path -LiteralPath '/bin/kill') { '/bin/kill' } else { 'kill' }
+        $rows = @(& $psPath -eo 'pid=,ppid=' 2>$null)
+        $children = @{}
+        foreach ($row in $rows) {
+            $parts = ([string]$row).Trim() -split '\s+'
+            if ($parts.Count -lt 2) { continue }
+            $childPid = 0
+            $parentPid = 0
+            if ([int]::TryParse($parts[0], [ref]$childPid) -and
+                [int]::TryParse($parts[1], [ref]$parentPid)) {
+                if (-not $children.ContainsKey($parentPid)) { $children[$parentPid] = @() }
+                $children[$parentPid] += $childPid
+            }
+        }
+        $pending = [System.Collections.Generic.Queue[int]]::new()
+        $seen = [System.Collections.Generic.HashSet[int]]::new()
+        $pending.Enqueue($Process.Id)
+        while ($pending.Count -gt 0) {
+            $parentPid = $pending.Dequeue()
+            if (-not $children.ContainsKey($parentPid)) { continue }
+            foreach ($childPid in $children[$parentPid]) {
+                if ($seen.Add($childPid)) { $pending.Enqueue($childPid) }
+            }
+        }
+        foreach ($childPid in @($seen)) {
+            & $killPath -KILL $childPid 2>$null | Out-Null
+        }
+    }
     if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT -and
         $null -ne (Get-Command taskkill.exe -ErrorAction SilentlyContinue)) {
         & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null

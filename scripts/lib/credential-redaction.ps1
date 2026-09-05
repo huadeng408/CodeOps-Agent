@@ -48,7 +48,12 @@ function Invoke-RedactedNativeCommand {
     )
 
     & $FilePath @ArgumentList 2>&1 | ForEach-Object {
-        Write-Output (Protect-CredentialText -Text $_ -Secrets $Secrets)
+        # Start-Process may host this helper without a console (notably on
+        # POSIX CI). Write directly to the redirected stream and flush each
+        # record so a parent can terminate the wrapper without losing the
+        # child's final diagnostic lines.
+        [Console]::Out.WriteLine((Protect-CredentialText -Text $_ -Secrets $Secrets))
+        [Console]::Out.Flush()
     }
     $ExitCode.Value = $LASTEXITCODE
 }

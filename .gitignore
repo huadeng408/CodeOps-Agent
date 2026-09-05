@@ -102,7 +102,15 @@ results/
 /eval_checkpoint_*.json
 /eval_results_*.jsonl
 /eval_results_*.json
-/eval/benchmark_data/
+# Benchmark run outputs and downloaded datasets are ignored by default. The
+# checked-in Terminal-Bench production pin is a small, fixed input and is
+# explicitly re-included below.
+/eval/benchmark_data/*
+!/eval/benchmark_data/terminalbench/
+!/eval/benchmark_data/terminalbench/**
+/eval/benchmark_data/terminalbench/_test_output/
+/eval/benchmark_data/terminalbench/**/__pycache__/
+/eval/benchmark_data/terminalbench/**/*.py[cod]
 
 # Go build caches (multiple audit copies, ~3.2 GB total)
 .tmp-go-cache-*/
