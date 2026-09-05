@@ -46,9 +46,21 @@ def test_e2e_waits_for_docker_desktop_readiness_with_a_shared_helper() -> None:
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     assert "Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds" in source
     assert "function Wait-DockerDaemonReady" in runtime
-    assert "docker info --format '{{.ServerVersion}}' 1>$null 2>$null" in runtime
+    assert "& $dockerCli info --format '{{.ServerVersion}}' 1>$null 2>$null" in runtime
     assert "Start-Sleep -Seconds 2" in runtime
     assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
+
+
+def test_runtime_resolves_and_starts_docker_desktop_before_readiness_poll() -> None:
+    runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
+    snapshot = (ROOT / "scripts" / "rag_snapshot.ps1").read_text(encoding="utf-8")
+    assert "function Resolve-DockerCli" in runtime
+    assert "Docker\\Docker\\resources\\bin\\docker.exe" in runtime
+    assert "function Start-DockerDesktopIfNeeded" in runtime
+    assert "Start-Process -FilePath $desktop -WindowStyle Hidden" in runtime
+    assert "& $dockerCli info --format '{{.ServerVersion}}'" in runtime
+    assert "rag-agent-e2e-runtime.ps1" in snapshot
+    assert "Wait-DockerDaemonReady -TimeoutSeconds 60" in snapshot
 
 
 def test_e2e_defaults_to_isolated_go_and_python_ports() -> None:

@@ -20,6 +20,56 @@ function Invoke-WithOrchestratorSharedSecret {
     }
 }
 
+function Resolve-DockerCli {
+    [CmdletBinding()]
+    param()
+
+    $command = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        $command = Get-Command docker -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $command -and $command.CommandType -eq 'Application') {
+        return $command.Source
+    }
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $candidates += Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
+    }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $candidates += Join-Path ${env:ProgramFiles(x86)} 'Docker\Docker\resources\bin\docker.exe'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $candidates += Join-Path $env:LOCALAPPDATA 'Docker\wsl\docker.exe'
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+    throw 'Docker CLI was not found in PATH or a standard Docker Desktop installation path'
+}
+
+function Start-DockerDesktopIfNeeded {
+    [CmdletBinding()]
+    param()
+
+    if ($env:OS -ne 'Windows_NT') {
+        return
+    }
+    $running = Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue
+    if ($null -ne $running) {
+        return
+    }
+    $desktop = Join-Path ${env:ProgramFiles} 'Docker\Docker\Docker Desktop.exe'
+    if (-not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
+        $desktop = Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'
+    }
+    if (Test-Path -LiteralPath $desktop -PathType Leaf) {
+        Start-Process -FilePath $desktop -WindowStyle Hidden | Out-Null
+    }
+}
+
 function Wait-DockerDaemonReady {
     [CmdletBinding()]
     param(
@@ -30,11 +80,20 @@ function Wait-DockerDaemonReady {
         throw "Docker readiness timeout must be greater than zero"
     }
 
+    $dockerCli = Resolve-DockerCli
+    $dockerDirectory = Split-Path -Parent $dockerCli
+    $pathSeparator = [IO.Path]::PathSeparator
+    $pathEntries = @($env:PATH -split [regex]::Escape([string]$pathSeparator))
+    if ($pathEntries -notcontains $dockerDirectory) {
+        $env:PATH = "$dockerDirectory$pathSeparator$env:PATH"
+    }
+
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastFailure = "unknown error"
+    Start-DockerDesktopIfNeeded
     do {
         try {
-            & docker info --format '{{.ServerVersion}}' 1>$null 2>$null
+            & $dockerCli info --format '{{.ServerVersion}}' 1>$null 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "ready: Docker daemon"
                 return

@@ -3,6 +3,9 @@ param(
     [string]$OutputPath = (Join-Path $PWD ("rag-snapshot-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss")))
 )
 
+. (Join-Path $PSScriptRoot 'rag-agent-e2e-runtime.ps1')
+Wait-DockerDaemonReady -TimeoutSeconds 60
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
