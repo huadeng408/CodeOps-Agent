@@ -152,6 +152,8 @@ func TestProductionAgentSessionSurvivesProcessTermination(t *testing.T) {
 	}
 
 	receipt := map[string]any{
+		"status":               "VERIFIED",
+		"exit_code":            0,
 		"kind":                 "production-session-process-recovery",
 		"git_sha":              productionGitSHA(t, repositoryRoot),
 		"command":              "CODE_AGENT_RUN_SESSION_E2E=1 go test ./tests/e2e -run TestProductionAgentSessionSurvivesProcessTermination -count=1",
@@ -336,6 +338,7 @@ func TestProductionLegacySessionImportAcrossProcessBoundary(t *testing.T) {
 
 	receipt := map[string]any{
 		"status":                 "VERIFIED",
+		"exit_code":              0,
 		"kind":                   "production-legacy-session-import",
 		"git_sha":                productionGitSHA(t, repositoryRoot),
 		"command":                "CODE_AGENT_RUN_SESSION_E2E=1 go test ./tests/e2e -run TestProductionLegacySessionImportAcrossProcessBoundary -count=1",
@@ -500,6 +503,8 @@ func TestProductionAgentForkAndRewindSurviveProcessBoundary(t *testing.T) {
 
 foundRewind:
 	receipt := map[string]any{
+		"status":                     "VERIFIED",
+		"exit_code":                  0,
 		"kind":                       "production-session-fork-rewind",
 		"git_sha":                    productionGitSHA(t, repositoryRoot),
 		"command":                    "CODE_AGENT_RUN_SESSION_E2E=1 go test ./tests/e2e -run TestProductionAgentForkAndRewindSurviveProcessBoundary -count=1",
