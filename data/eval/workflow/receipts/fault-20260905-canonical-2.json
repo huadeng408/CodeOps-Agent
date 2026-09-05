@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REAL_PROCESS_SQLITE_WORKFLOW_RECOVERY",
+  "limitations": [
+    "The workload uses deterministic 80 ms worker tasks and does not call an external model provider.",
+    "VERIFIED applies only to the fixed process-fault recovery lane, not the full project Goal."
+  ],
+  "run_id": "fault-20260905-canonical-2",
+  "trace_id": "a69548ba49404d8ea9d54d6c7c800435",
+  "source_pin": {
+    "git_sha": "c55864da9304247706b89473fbf149df6901e7cb",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_manifest_sha256": "29f81b05a62779b162d371f859fffafc4536b322e7ddd045c47376c6c94f0f39"
+  },
+  "model_pin": "deterministic-workflow-executor-v1",
+  "budget": {
+    "worker_count": 8,
+    "task_count": 200,
+    "fault_count": 30,
+    "task_duration_s": 0.08,
+    "fault_interval_s": 0.04,
+    "lease_ttl_s": 0.5,
+    "timeout_s": 300.0,
+    "canonical": true,
+    "canonical_target": {
+      "worker_count": 8,
+      "task_count": 200,
+      "fault_count": 30
+    }
+  },
+  "fault_injection": {
+    "requested": 30,
+    "applied": 30,
+    "events": 30
+  },
+  "recovery": {
+    "denominator": 200,
+    "successes": 200,
+    "failures": 0,
+    "success_rate": 1.0,
+    "incomplete_task_ids": []
+  },
+  "processes": {
+    "started": 38,
+    "injected_terminations": 30
+  },
+  "sqlite": {
+    "integrity_check": "ok",
+    "workflow_count": 200,
+    "event_count": 905,
+    "state_counts": {
+      "completed": 454,
+      "pending": 12,
+      "running": 439
+    }
+  },
+  "failures": [],
+  "checksum_verification": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": ".runtime/fault-injection/fault-20260905-canonical-2",
+    "checksum_manifest_sha256": "73550d06c5c3cac08e6f69081ef3b683d348bff112cadafb2921b6540142b736",
+    "source_receipt_sha256": "cf4d75cdd191f7390886b52205e7db67d6da4946e5d0e69d55ff8640898e617f",
+    "run_manifest_sha256": "aeb99dcfa3acc03c1e2f787fcc445a2654510b7c5278e7385ee6382514382319",
+    "task_manifest_file_sha256": "217672f85c628e57d968439b0884fde2f36765f04d0652ad9c7b3e50e3fbdb79",
+    "fault_events_sha256": "ee44076fe0aaa36fbecb9a3d7e8f401f976602882ad56da368545b6836600cdc",
+    "process_exits_sha256": "1aa0e15a8061bf4805b591bf7228d3b40e6e8fb57fc1b3db4a2e50a7f589e1c5",
+    "process_logs_sha256": "d4da98c0f75ee4453122b367f8f8008948c3a41542e31428fb45699619d4bac9",
+    "sqlite_events_sha256": "e7836037a94189d1459115c45d30a3693cf600eeb2d292108f43bef6c1ff9628",
+    "workflow_sqlite_sha256": "59aac9c353e2c1708c70d2ed04b8f6e15209320cadd60d74959236746796aaa0"
+  }
+}
