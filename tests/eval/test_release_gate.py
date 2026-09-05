@@ -114,6 +114,33 @@ def test_release_gate_passes_only_when_all_lanes_are_current_and_passing(tmp_pat
     }
 
 
+def test_release_gate_accepts_receipt_commit_bound_to_its_source_parent(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.ELIGIBLE
+    assert all(
+        check.detail == "source-bound receipt satisfies the lane contract"
+        for check in report.checks
+        if check.name.startswith("evidence.")
+    )
+
+
+def test_release_gate_rejects_receipt_pin_after_a_non_evidence_commit(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    (repo / "tracked.txt").write_text("source changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "source change"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert any(check.name == "evidence.workflow" and check.status == "BLOCKED" for check in report.checks)
+
+
 def test_release_gate_rejects_smoke_swebench_and_bad_skill_fingerprint(tmp_path: Path, monkeypatch) -> None:
     repo, sha = _git_repo(tmp_path)
     _passing_receipts(repo, sha)

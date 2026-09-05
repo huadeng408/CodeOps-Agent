@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 SHA256_LENGTH = 64
@@ -83,6 +83,54 @@ def _check(name: str, ok: bool, detail: str) -> GateCheck:
     return GateCheck(name=name, status="PASS" if ok else GateStatus.BLOCKED.value, detail=detail)
 
 
+def _source_pin_matches_head(repo_root: Path, source_sha: str, current_sha: str) -> bool:
+    """Accept HEAD or the parent of a commit that only adds curated receipts.
+
+    Evaluation runs finish before their redacted receipt is committed. The
+    receipt therefore cannot pin the commit that contains itself. A narrow
+    exception keeps the source binding intact: the current commit must have
+    exactly one parent equal to the pinned source, and every changed path must
+    be a curated JSON receipt.
+    """
+
+    if source_sha == current_sha:
+        return True
+    try:
+        parents = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-list", "--parents", "-n", "1", current_sha],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout.strip().split()[1:]
+        if parents != [source_sha]:
+            return False
+        changed_paths = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                current_sha,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return bool(changed_paths) and all(
+        PurePosixPath(path.replace("\\", "/")).match("data/eval/*/receipts/*.json")
+        for path in changed_paths
+    )
+
+
 def _read_receipts(data_root: Path, lane: str) -> tuple[list[dict[str, Any]], GateCheck | None]:
     receipt_dir = data_root / lane / "receipts"
     if not receipt_dir.is_dir():
@@ -117,14 +165,17 @@ def _read_receipts(data_root: Path, lane: str) -> tuple[list[dict[str, Any]], Ga
 def _receipt_base(
     payload: dict[str, Any],
     *,
+    repo_root: Path,
     current_sha: str,
     require_verified: bool = True,
 ) -> tuple[bool, str]:
     if require_verified and payload.get("status") != "VERIFIED":
         return False, f"status is {payload.get('status', '<missing>')!r}"
     source_pin = payload.get("source_pin")
-    if not isinstance(source_pin, dict) or source_pin.get("git_sha") != current_sha:
-        return False, "source_pin.git_sha is not the current HEAD"
+    if not isinstance(source_pin, dict) or not _source_pin_matches_head(
+        repo_root, str(source_pin.get("git_sha", "")), current_sha
+    ):
+        return False, "source_pin.git_sha is not current HEAD or an evidence-only commit parent"
     run_id = payload.get("run_id")
     trace_id = payload.get("trace_id")
     if not isinstance(run_id, str) or not run_id:
@@ -145,12 +196,13 @@ def _receipt_base(
 def _find_lane_receipt(
     receipts: Sequence[dict[str, Any]],
     *,
+    repo_root: Path,
     current_sha: str,
     predicate,
 ) -> tuple[dict[str, Any] | None, str]:
     reasons: list[str] = []
     for payload in receipts:
-        ok, reason = _receipt_base(payload, current_sha=current_sha)
+        ok, reason = _receipt_base(payload, repo_root=repo_root, current_sha=current_sha)
         if not ok:
             reasons.append(f"{Path(str(payload.get('__path', 'receipt'))).name}: {reason}")
             continue
@@ -159,7 +211,7 @@ def _find_lane_receipt(
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             reasons.append(f"{Path(str(payload.get('__path', 'receipt'))).name}: {exc}")
             continue
-        return payload, "current-HEAD receipt satisfies the lane contract"
+        return payload, "source-bound receipt satisfies the lane contract"
     return None, "; ".join(reasons) if reasons else "no receipt satisfies the lane contract"
 
 
@@ -291,8 +343,10 @@ def evaluate_release(
         if loading_check is not None:
             checks.append(loading_check)
             continue
-        _, detail = _find_lane_receipt(receipts, current_sha=current_sha, predicate=predicate)
-        checks.append(_check(f"evidence.{lane}", "current-HEAD receipt" in detail, detail))
+        _, detail = _find_lane_receipt(
+            receipts, repo_root=root, current_sha=current_sha, predicate=predicate
+        )
+        checks.append(_check(f"evidence.{lane}", "source-bound receipt" in detail, detail))
 
     status = GateStatus.ELIGIBLE if all(check.status == "PASS" for check in checks) else GateStatus.BLOCKED
     return GateReport(status=status, checks=tuple(checks), git_sha=current_sha)
