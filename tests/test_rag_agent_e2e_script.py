@@ -5,6 +5,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "rag-agent-e2e.ps1"
@@ -48,7 +50,8 @@ def test_e2e_waits_for_docker_desktop_readiness_with_a_shared_helper() -> None:
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     assert "Wait-DockerDaemonReady -TimeoutSeconds $StartupTimeoutSeconds" in source
     assert "function Wait-DockerDaemonReady" in runtime
-    assert "& $dockerCli @probeArguments 1>$null 2>$null" in runtime
+    assert "Invoke-DockerProbe" in runtime
+    assert "-ProbeTimeoutMilliseconds $probeTimeoutMilliseconds" in runtime
     assert "Start-Sleep -Seconds 2" in runtime
     assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
 
@@ -98,6 +101,47 @@ def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
     assert "context=desktop-linux" in result.stdout
     assert "host=" in result.stdout
     assert "code-agent-stale-docker" not in result.stdout
+
+
+def test_runtime_bounds_each_docker_probe_and_reaps_hung_process() -> None:
+    runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function Invoke-DockerProbe" in runtime
+    assert "WaitForExit($ProbeTimeoutMilliseconds)" in runtime
+    assert "Stop-ProcessTree $process" in runtime
+    assert "docker probe timed out" in runtime
+    assert "$Process.WaitForExit()" not in runtime
+
+
+def test_runtime_reaps_a_hung_docker_probe_within_its_timeout() -> None:
+    powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
+    runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").as_posix()
+    runtime_literal = runtime.replace("'", "''")
+    powershell_literal = powershell.replace("'", "''")
+    command = (
+        f". '{runtime_literal}'; "
+        f"$result = Invoke-DockerProbe -DockerCli '{powershell_literal}' "
+        "-ProbeArguments @('-NoProfile','-Command','Start-Sleep -Seconds 30') "
+        "-ProbeTimeoutMilliseconds 250; "
+        "Write-Output ('timed_out=' + $result.TimedOut)"
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "timed_out=True" in result.stdout
 
 
 def test_e2e_defaults_to_isolated_go_and_python_ports() -> None:

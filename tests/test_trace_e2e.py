@@ -341,6 +341,8 @@ def test_runner_waits_for_docker_daemon_before_compose_probe():
     assert "rag-agent-e2e-runtime.ps1" in script
     assert "Wait-DockerDaemonReady -TimeoutSeconds $PhoenixStartupTimeoutSeconds" in script
     assert "function Wait-DockerDaemonReady" in runtime
+    assert "function ConvertTo-NativeArgument" not in script
+    assert "function Stop-ProcessTree" not in script
 
 
 def test_runner_uses_basic_parsing_for_windows_powershell_readiness_probe():

@@ -6,6 +6,13 @@ from pathlib import Path
 import re
 import threading
 
+from orchestrator.security.credentials import redact_credential_shapes
+
+_SENSITIVE_TAG = re.compile(
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|private[_-]?key)",
+    re.IGNORECASE,
+)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -48,11 +55,12 @@ class MemoryManager:
     def add(self, content: str, tags: list[str] | None = None) -> Memory:
         with self._lock:
             now = _now()
+            safe_content, safe_tags = _validate_memory_fields("", content, tags or [])
             item = Memory(
                 id=now.strftime("%Y%m%dT%H%M%S.%f"),
-                name=self._unique_name(content, now),
-                content=content.strip(),
-                tags=_normalize_tags(tags or []),
+                name=self._unique_name(safe_content, now),
+                content=safe_content,
+                tags=safe_tags,
                 created_at=now,
                 updated_at=now,
             )
@@ -62,19 +70,22 @@ class MemoryManager:
     def save(self, memory: Memory) -> Memory:
         with self._lock:
             now = _now()
+            safe_content, safe_tags = _validate_memory_fields(
+                memory.name, memory.content, memory.tags
+            )
             if not memory.id:
                 memory.id = now.strftime("%Y%m%dT%H%M%S.%f")
             if not memory.name:
-                memory.name = self._unique_name(memory.content, now)
+                memory.name = self._unique_name(safe_content, now)
             else:
                 memory.name = _slugify(memory.name)
                 if not memory.name:
-                    memory.name = self._unique_name(memory.content, now)
+                    memory.name = self._unique_name(safe_content, now)
             if memory.created_at is None:
                 memory.created_at = now
             memory.updated_at = now
-            memory.content = memory.content.strip()
-            memory.tags = _normalize_tags(memory.tags)
+            memory.content = safe_content
+            memory.tags = safe_tags
             self._save_locked(memory)
             return memory
 
@@ -134,6 +145,11 @@ class MemoryManager:
         self._items = _sort_memories(items)
 
     def _save_locked(self, item: Memory) -> None:
+        safe_content, safe_tags = _validate_memory_fields(
+            item.name, item.content, item.tags
+        )
+        item.content = safe_content
+        item.tags = safe_tags
         _write_memory_file(self.memory_dir / f"{item.name}.md", item)
         for index, existing in enumerate(self._items):
             if existing.name == item.name or existing.id == item.id:
@@ -186,12 +202,16 @@ def _read_memory_file(path: Path) -> Memory:
             meta[key.strip()] = value.strip()
     if body_start == 0:
         raise ValueError(f"memory file missing closing frontmatter: {path}")
+    name = meta.get("name", path.stem)
     content = "\n".join(lines[body_start:]).strip()
+    content, tags = _validate_memory_fields(
+        name, content, meta.get("tags", "").split(",")
+    )
     return Memory(
         id=meta.get("id", ""),
-        name=meta.get("name", path.stem),
+        name=name,
         content=content,
-        tags=_normalize_tags(meta.get("tags", "").split(",")),
+        tags=tags,
         created_at=_parse_datetime(meta.get("created_at", "")),
         updated_at=_parse_datetime(meta.get("updated_at", "")),
     )
@@ -221,6 +241,27 @@ def _normalize_tags(tags: list[str]) -> list[str]:
         seen.add(value)
         values.append(value)
     return values
+
+
+def _validate_memory_fields(
+    name: str, content: str, tags: list[str]
+) -> tuple[str, list[str]]:
+    safe_name = str(name).strip()
+    if safe_name and (
+        _SENSITIVE_TAG.search(safe_name)
+        or redact_credential_shapes(safe_name) != safe_name
+    ):
+        raise ValueError("sensitive name is not allowed in memory")
+    safe_content = str(content).strip()
+    if redact_credential_shapes(safe_content) != safe_content:
+        raise ValueError("sensitive content is not allowed in memory")
+    normalized_tags = _normalize_tags(tags)
+    if any(
+        _SENSITIVE_TAG.search(tag) or redact_credential_shapes(tag) != tag
+        for tag in normalized_tags
+    ):
+        raise ValueError("sensitive tags are not allowed in memory")
+    return safe_content, normalized_tags
 
 
 def _clone_memory(item: Memory) -> Memory:

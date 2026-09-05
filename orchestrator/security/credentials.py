@@ -29,8 +29,8 @@ _ABSOLUTE_PATH_PATTERN = re.compile(
 )
 
 
-def redact_credential_text(text: str, secrets: Iterable[str] = ()) -> str:
-    """Replace explicit secret values and common provider credential shapes."""
+def redact_credential_shapes(text: str, secrets: Iterable[str] = ()) -> str:
+    """Replace explicit secret values without treating ordinary paths as secrets."""
     protected = text
     for secret in secrets:
         if secret and not secret.isspace():
@@ -42,6 +42,12 @@ def redact_credential_text(text: str, secrets: Iterable[str] = ()) -> str:
     protected = _ASSIGNMENT_PATTERN.sub(r"\1<redacted>", protected)
     protected = _AUTHORIZATION_PATTERN.sub(r"\1<redacted>", protected)
     protected = _PRIVATE_KEY_PATTERN.sub("<redacted>", protected)
+    return protected
+
+
+def redact_credential_text(text: str, secrets: Iterable[str] = ()) -> str:
+    """Replace credentials and path-shaped values in exported text."""
+    protected = redact_credential_shapes(text, secrets)
     return _ABSOLUTE_PATH_PATTERN.sub("<redacted-path>", protected)
 
 
@@ -58,4 +64,8 @@ def redact_credential_value(value: Any) -> Any:
     return value
 
 
-__all__ = ["redact_credential_text", "redact_credential_value"]
+__all__ = [
+    "redact_credential_shapes",
+    "redact_credential_text",
+    "redact_credential_value",
+]

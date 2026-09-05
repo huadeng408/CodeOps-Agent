@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ func TestPlanTodoStateSurvivesPythonProcessRestart(t *testing.T) {
 	addr := freePortAddr(t)
 
 	manager := session.NewManager(session.NewSQLiteEventStore(filepath.Join(project, "session.sqlite")))
+	t.Cleanup(func() { _ = manager.Close() })
 	created := manager.NewSession(project)
 	applyUpdate := func(planUpdate *codeagentpb.PlanUpdate, todoUpdate *codeagentpb.TodoUpdate) error {
 		current := manager.Current()
@@ -114,16 +116,128 @@ func TestPlanTodoStateSurvivesPythonProcessRestart(t *testing.T) {
 	}
 }
 
+func TestSelectPlanTodoPythonSkipsRuntimeWithoutRequiredPackages(t *testing.T) {
+	candidates := []planTodoPythonRuntime{
+		{executable: "path-python"},
+		{executable: "healthy-python", prefixArgs: []string{"-3"}},
+	}
+	probed := []string{}
+
+	selected, err := selectPlanTodoPython(candidates, func(candidate planTodoPythonRuntime) bool {
+		probed = append(probed, candidate.executable)
+		return candidate.executable == "healthy-python"
+	})
+
+	if err != nil {
+		t.Fatalf("select Python runtime: %v", err)
+	}
+	if selected.executable != "healthy-python" || len(selected.prefixArgs) != 1 || selected.prefixArgs[0] != "-3" {
+		t.Fatalf("selected runtime = %+v, want healthy launcher", selected)
+	}
+	if strings.Join(probed, ",") != "path-python,healthy-python" {
+		t.Fatalf("probed runtimes = %v, want ordered capability probes", probed)
+	}
+}
+
+func TestProbePlanTodoPythonRuntimeHasHardTimeout(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve current test source")
+	}
+	sourceBytes, err := os.ReadFile(currentFile)
+	if err != nil {
+		t.Fatalf("read current test source: %v", err)
+	}
+	source := string(sourceBytes)
+	if !strings.Contains(source, "context.WithTimeout(context.Background(), timeout)") {
+		t.Fatal("Python capability probe must use a hard timeout")
+	}
+	if !strings.Contains(source, "exec.CommandContext(ctx, candidate.executable, args...)") {
+		t.Fatal("Python capability probe must be cancellable")
+	}
+}
+
+type planTodoPythonRuntime struct {
+	executable string
+	prefixArgs []string
+}
+
+func selectPlanTodoPython(candidates []planTodoPythonRuntime, probe func(planTodoPythonRuntime) bool) (planTodoPythonRuntime, error) {
+	for _, candidate := range candidates {
+		if probe(candidate) {
+			return candidate, nil
+		}
+	}
+	return planTodoPythonRuntime{}, fmt.Errorf("no Python runtime provides the required E2E packages")
+}
+
+func discoverPlanTodoPythonRuntimes(root string) []planTodoPythonRuntime {
+	candidates := make([]planTodoPythonRuntime, 0, 4)
+	if configured := strings.TrimSpace(os.Getenv("PYTHON_EXECUTABLE")); configured != "" {
+		candidates = append(candidates, planTodoPythonRuntime{executable: configured})
+	}
+	if runtime.GOOS == "windows" {
+		projectPython := filepath.Join(root, ".venv", "Scripts", "python.exe")
+		if _, err := os.Stat(projectPython); err == nil {
+			if absolute, err := filepath.Abs(projectPython); err == nil {
+				candidates = append(candidates, planTodoPythonRuntime{executable: absolute})
+			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if launcher, err := exec.LookPath("py"); err == nil {
+			candidates = append(candidates, planTodoPythonRuntime{executable: launcher, prefixArgs: []string{"-3"}})
+		}
+	}
+	for _, name := range []string{"python", "python3"} {
+		if executable, err := exec.LookPath(name); err == nil {
+			candidates = append(candidates, planTodoPythonRuntime{executable: executable})
+		}
+	}
+	return candidates
+}
+
+func probePlanTodoPythonRuntime(candidate planTodoPythonRuntime, root string) bool {
+	return probePlanTodoPythonRuntimeWithTimeout(candidate, root, 10*time.Second)
+}
+
+func probePlanTodoPythonRuntimeWithTimeout(candidate planTodoPythonRuntime, root string, timeout time.Duration) bool {
+	args := append([]string{}, candidate.prefixArgs...)
+	args = append(args, "-c", "import grpc, langchain_core, langgraph, orchestrator.server")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, candidate.executable, args...)
+	cmd.Dir = root
+	cmd.Env = planTodoPythonEnv(root)
+	return cmd.Run() == nil
+}
+
+func planTodoPythonEnv(root string) []string {
+	result := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(key, "PYTHONPATH") || strings.EqualFold(key, "PYTHONNOUSERSITE") || strings.EqualFold(key, "PYTHONUTF8")) {
+			continue
+		}
+		result = append(result, entry)
+	}
+	result = append(result, "PYTHONPATH="+root, "PYTHONNOUSERSITE=1", "PYTHONUTF8=1")
+	return result
+}
+
 func startPlanTodoServer(t *testing.T, root, project, addr string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
-	python, err := exec.LookPath("python")
+	candidates := discoverPlanTodoPythonRuntimes(root)
+	python, err := selectPlanTodoPython(candidates, func(candidate planTodoPythonRuntime) bool {
+		return probePlanTodoPythonRuntime(candidate, root)
+	})
 	if err != nil {
-		t.Fatalf("python is required for cross-process E2E: %v", err)
+		t.Fatalf("Python runtime is required for cross-process E2E: %v", err)
 	}
 	port := addr[strings.LastIndex(addr, ":")+1:]
 	output := &bytes.Buffer{}
-	cmd := exec.Command(
-		python,
+	args := append([]string{}, python.prefixArgs...)
+	args = append(args,
 		filepath.Join(root, "tests", "e2e", "plan_todo_state_server.py"),
 		"--host", "127.0.0.1",
 		"--port", port,
@@ -131,13 +245,21 @@ func startPlanTodoServer(t *testing.T, root, project, addr string) (*exec.Cmd, *
 		"--working-dir", project,
 		"--memory-dir", filepath.Join(project, "memory"),
 	)
+	cmd := exec.Command(python.executable, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+root, "PYTHONUTF8=1")
+	cmd.Env = planTodoPythonEnv(root)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start Python state server: %v", err)
 	}
+	t.Cleanup(func() {
+		if cmd.ProcessState != nil || cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
 	return cmd, output
 }
 

@@ -191,6 +191,36 @@ def test_unexpected_exit_does_not_claim_stale_progress_task(tmp_path: Path) -> N
     assert failures[0]["task_id"] == ""
 
 
+def test_progress_for_process_matches_launch_token_across_windows_launcher(
+    tmp_path: Path,
+) -> None:
+    progress_root = tmp_path / "progress"
+    progress_root.mkdir()
+    (progress_root / "worker-0.json").write_text(
+        json.dumps(
+            {
+                "slot": 0,
+                "pid": 999,
+                "process_token": "launch-token",
+                "task_id": "task-0001",
+                "state": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = fault_injection._ProcessRecord(
+        process_id="launcher-process",
+        slot=0,
+        pid=111,
+        started_at=time.time(),
+        process_token="launch-token",
+    )
+
+    progress = fault_injection._progress_for_process(progress_root, 0, record)
+
+    assert progress["task_id"] == "task-0001"
+
+
 def test_deadline_drain_records_process_that_already_exited_nonzero(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -257,3 +287,27 @@ def test_process_log_redacts_secret_before_tail_truncation(tmp_path: Path) -> No
 
     assert secret[-128:] not in captured
     assert "Bearer <redacted>" in captured
+
+
+def test_progress_replace_retries_transient_windows_permission_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress_path = tmp_path / "progress" / "worker-0.json"
+    real_replace = fault_injection.os.replace
+    attempts = 0
+
+    def replace_with_transient_lock(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError(5, "access denied")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(fault_injection.os, "replace", replace_with_transient_lock)
+
+    fault_injection._write_progress(
+        progress_path, {"slot": 0, "pid": 123, "task_id": "task-0001", "state": "running"}
+    )
+
+    assert attempts == 2
+    assert fault_injection._read_json(progress_path)["task_id"] == "task-0001"

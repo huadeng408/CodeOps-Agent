@@ -72,6 +72,7 @@ class _ProcessRecord:
     slot: int
     pid: int
     started_at: float
+    process_token: str = ""
     injected: bool = False
     task_at_injection: str = ""
     ended_at: float | None = None
@@ -356,6 +357,7 @@ def _launch_child(
     crash_marker: Path,
 ) -> tuple[subprocess.Popen[bytes], _ProcessRecord]:
     root = Path(__file__).resolve().parents[2]
+    process_token = uuid.uuid4().hex
     command = [
         sys.executable,
         "-m",
@@ -373,6 +375,8 @@ def _launch_child(
         str(task_duration_s),
         "--lease-ttl",
         str(lease_ttl_s),
+        "--process-token",
+        process_token,
     ]
     if crash_once_task_id:
         command.extend(["--crash-task", crash_once_task_id, "--crash-marker", str(crash_marker)])
@@ -385,6 +389,7 @@ def _launch_child(
         slot=slot,
         pid=process.pid,
         started_at=time.time(),
+        process_token=process_token,
         log_path=log_path,
         log_handle=log_handle,
     )
@@ -430,11 +435,22 @@ def _progress_for_process(
 ) -> dict[str, Any]:
     progress = _read_json(progress_root / f"worker-{slot}.json")
     try:
-        progress_pid = int(progress.get("pid", 0))
         progress_slot = int(progress.get("slot", -1))
     except (TypeError, ValueError):
         return {}
-    if progress_pid != record.pid or progress_slot != slot:
+    if progress_slot != slot:
+        return {}
+    if record.process_token:
+        if progress.get("process_token") != record.process_token:
+            return {}
+    else:
+        try:
+            progress_pid = int(progress.get("pid", 0))
+        except (TypeError, ValueError):
+            return {}
+        if progress_pid != record.pid:
+            return {}
+    if progress.get("state") not in {"running", "completed"}:
         return {}
     return progress
 
@@ -552,7 +568,17 @@ def _write_progress(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=True)
-        os.replace(temporary, path)
+        # Windows can briefly deny replacing a file while another process has
+        # just finished reading it. Retry the atomic swap without hiding a
+        # persistent permission failure.
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -575,13 +601,23 @@ async def _run_child(
     progress_path: Path,
     duration: float,
     lease_ttl_s: float,
+    process_token: str = "",
     crash_task_id: str | None = None,
     crash_marker: Path | None = None,
 ) -> None:
     store = SQLiteWorkflowStore(db_path)
     try:
         for task_id in task_ids:
-            _write_progress(path=progress_path, payload={"slot": slot, "pid": os.getpid(), "task_id": task_id, "state": "running"})
+            _write_progress(
+                path=progress_path,
+                payload={
+                    "slot": slot,
+                    "pid": os.getpid(),
+                    "process_token": process_token,
+                    "task_id": task_id,
+                    "state": "running",
+                },
+            )
             if crash_task_id == task_id and crash_marker is not None and _claim_once_marker(crash_marker):
                 raise RuntimeError(f"simulated unexpected child failure for {task_id}")
 
@@ -598,7 +634,16 @@ async def _run_child(
                 workers=[WorkerSpec(id="worker", title=f"Long task {task_id}", objective="checkpoint and recover")],
             )
             await WorkflowEngine(store, execute, max_concurrency=1, lease_ttl_seconds=lease_ttl_s).run(spec)
-            _write_progress(path=progress_path, payload={"slot": slot, "pid": os.getpid(), "task_id": task_id, "state": "completed"})
+            _write_progress(
+                path=progress_path,
+                payload={
+                    "slot": slot,
+                    "pid": os.getpid(),
+                    "process_token": process_token,
+                    "task_id": task_id,
+                    "state": "completed",
+                },
+            )
     finally:
         store.close()
 
@@ -612,6 +657,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--progress", type=Path)
     parser.add_argument("--task-duration", type=float, default=0.08)
     parser.add_argument("--lease-ttl", type=float, default=0.5)
+    parser.add_argument("--process-token", default="")
     parser.add_argument("--crash-task", default=None)
     parser.add_argument("--crash-marker", type=Path, default=None)
     parser.add_argument("--run-id", default=None)
@@ -639,6 +685,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.progress,
                 args.task_duration,
                 args.lease_ttl,
+                args.process_token,
                 args.crash_task,
                 args.crash_marker,
             )

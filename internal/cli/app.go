@@ -1953,6 +1953,10 @@ func (a *App) memorySummary() string {
 }
 
 func (a *App) handleMemoryCommand(raw string, fields []string) {
+	if err := a.memory.Err(); err != nil {
+		a.renderer.PrintLine("memory unavailable: " + err.Error())
+		return
+	}
 	if len(fields) == 1 {
 		lines := []string{a.memorySummary()}
 		items := a.memory.List()
@@ -1975,7 +1979,11 @@ func (a *App) handleMemoryCommand(raw string, fields []string) {
 			a.renderer.PrintLine("usage: /memory add <content> [#tag...]")
 			return
 		}
-		item := a.memory.Add(content, tags...)
+		item, err := a.memory.Add(content, tags...)
+		if err != nil {
+			a.renderer.PrintLine("memory rejected: " + err.Error())
+			return
+		}
 		a.renderer.PrintLine("saved memory: " + item.Name)
 	case "list":
 		items := a.memory.List()

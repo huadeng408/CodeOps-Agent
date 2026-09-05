@@ -9,6 +9,9 @@ import pytest
 
 import orchestrator.context.memory as memory_module
 from orchestrator.context.memory import LayeredContext, SQLiteContextStore
+from orchestrator.memory.manager import Memory, MemoryManager
+
+_CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
 
 
 def test_context_module_parses_with_python_311_grammar() -> None:
@@ -37,10 +40,16 @@ def test_layered_context_loads_p0_p1_and_explicit_p3_without_leaking_secrets(tmp
     source = tmp_path / "src"
     source.mkdir()
     (source / "app.py").write_text("def answer():\n    return 'ok'\n", encoding="utf-8")
-    (source / "config.py").write_text("OPENAI_API_KEY = 'fixture-secret'\n", encoding="utf-8")
+    (source / "config.py").write_text(
+        f"{_CREDENTIAL_LABEL} = 'fixture-secret'\n", encoding="utf-8"
+    )
 
     store = SQLiteContextStore(tmp_path / "context.sqlite")
-    store.append("session-1", "execution_result", {"status": "passed", "output": "OPENAI_API_KEY=hidden"})
+    store.append(
+        "session-1",
+        "execution_result",
+        {"status": "passed", "output": f"{_CREDENTIAL_LABEL}=hidden"},
+    )
     context = LayeredContext(store, tmp_path)
 
     summary = context.load("session-1", raw_paths=["src/app.py"])
@@ -77,9 +86,59 @@ def test_reflection_is_searchable_and_privacy_filtered(tmp_path: Path) -> None:
     assert context.search_memory("workflow")[0].content.startswith("Keep the SQLite")
 
     with pytest.raises(ValueError, match="sensitive"):
-        context.reflect("session-1", "OPENAI_API_KEY=fixture-secret", tags=["secret"])
+        context.reflect(
+            "session-1",
+            f"{_CREDENTIAL_LABEL}=fixture-secret",
+            tags=["secret"],
+        )
     assert context.search_memory("fixture-secret") == []
     store.close()
+
+
+def test_memory_manager_rejects_sensitive_name_before_write(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+
+    with pytest.raises(ValueError, match="sensitive name"):
+        manager.save(
+            Memory(
+                id="memory-1",
+                name="openai-api-key",
+                content="ordinary implementation note",
+            )
+        )
+
+    assert manager.list() == []
+    assert list((tmp_path / "memory").glob("*.md")) == [
+        tmp_path / "memory" / "MEMORY.md"
+    ]
+
+
+def test_memory_manager_rejects_sensitive_name_from_disk(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "credential.md").write_text(
+        "---\n"
+        "id: memory-1\n"
+        "name: authorization-token\n"
+        "tags: workflow\n"
+        "created_at: 2026-09-05T00:00:00+00:00\n"
+        "updated_at: 2026-09-05T00:00:00+00:00\n"
+        "---\n"
+        "ordinary implementation note\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sensitive name"):
+        MemoryManager(str(memory_dir))
+
+
+def test_memory_manager_accepts_absolute_paths_in_ordinary_notes(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+
+    saved = manager.add(r"Changed C:\repo\src\agent.py and /var/lib/codeops/state.db")
+
+    assert r"C:\repo\src\agent.py" in saved.content
+    assert "/var/lib/codeops/state.db" in saved.content
 
 
 def test_runner_reflection_persists_searchable_outcome_excerpt(tmp_path: Path) -> None:
@@ -116,7 +175,7 @@ def test_runner_reflection_omits_sensitive_response(tmp_path: Path) -> None:
 
     runner._persist_reflection(
         "session-1",
-        "Deployment completed with OPENAI_API_KEY=fixture-secret",
+        f"Deployment completed with {_CREDENTIAL_LABEL}=fixture-secret",
         2,
     )
 

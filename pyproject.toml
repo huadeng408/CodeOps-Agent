@@ -12,6 +12,7 @@ dependencies = [
     "protobuf>=5.26,<6",          # required by grpcio-tools 1.71+ codegen (runtime_version)
     "grpcio>=1.60,<2",
     "langgraph>=0.2,<1",
+    "langgraph-checkpoint-sqlite>=2,<4",
     "grpcio-tools>=1.71,<2",      # protoc 29.0 embedded → generates protobuf 5.x API
     "langchain-core>=0.3,<1",
 ]

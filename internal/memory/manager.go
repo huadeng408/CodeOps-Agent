@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -33,7 +34,13 @@ type Manager struct {
 	dir       string
 	indexFile string
 	items     []Memory
+	initErr   error
 }
+
+var (
+	memoryCredentialPattern    = regexp.MustCompile(`(?i)(?:\b(?:openai|anthropic|deepseek|azure)?[_-]?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret)\b\s*[:=]\s*(?:['"][^'"\r\n]+['"]|[^\s,;]+)|\bauthorization\b\s*[:=]\s*(?:['"][^'"\r\n]+['"]|[^\s,;]+)|\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b(?:bearer\s+|sk-)[A-Za-z0-9][A-Za-z0-9._~+/=-]{5,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|-----BEGIN [^-]+-----)`)
+	memorySensitiveNamePattern = regexp.MustCompile(`(?i)(?:^|[-_])(?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|authorization|private[-_]?key)(?:$|[-_])`)
+)
 
 func NewManager(dir string) *Manager {
 	if dir == "" {
@@ -43,33 +50,62 @@ func NewManager(dir string) *Manager {
 		dir:       dir,
 		indexFile: filepath.Join(dir, "MEMORY.md"),
 	}
-	_ = os.MkdirAll(dir, 0o755)
-	_ = manager.load()
-	_ = manager.writeIndex()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		manager.initErr = err
+		return manager
+	}
+	if err := manager.load(); err != nil {
+		manager.initErr = err
+		return manager
+	}
+	if err := manager.writeIndex(); err != nil {
+		manager.initErr = err
+	}
 	return manager
 }
 
-func (m *Manager) Add(content string, tags ...string) Memory {
+// Err reports an initialization failure without changing the historical
+// constructor shape. Callers must treat a non-nil error as fail-closed.
+func (m *Manager) Err() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initErr
+}
+
+func (m *Manager) Add(content string, tags ...string) (Memory, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.initErr != nil {
+		return Memory{}, m.initErr
+	}
+	content = strings.TrimSpace(content)
+	tags = normalizeTags(tags)
+	if err := validateMemoryFields("", content, tags); err != nil {
+		return Memory{}, err
+	}
 	now := time.Now().UTC()
 	item := Memory{
 		ID:        nextID(now),
 		Name:      m.uniqueName(content, now),
-		Content:   strings.TrimSpace(content),
-		Tags:      normalizeTags(tags),
+		Content:   content,
+		Tags:      tags,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	_ = m.saveLocked(item)
-	return item
+	if err := m.saveLocked(item); err != nil {
+		return Memory{}, err
+	}
+	return item, nil
 }
 
 func (m *Manager) Save(item Memory) (Memory, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.initErr != nil {
+		return Memory{}, m.initErr
+	}
 	now := time.Now().UTC()
 	if item.ID == "" {
 		item.ID = nextID(now)
@@ -80,6 +116,9 @@ func (m *Manager) Save(item Memory) (Memory, error) {
 	item.UpdatedAt = now
 	item.Content = strings.TrimSpace(item.Content)
 	item.Tags = normalizeTags(item.Tags)
+	if err := validateMemoryFields(item.Name, item.Content, item.Tags); err != nil {
+		return Memory{}, err
+	}
 	if strings.TrimSpace(item.Name) == "" {
 		item.Name = m.uniqueName(item.Content, now)
 	} else {
@@ -99,6 +138,9 @@ func (m *Manager) Delete(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.initErr != nil {
+		return m.initErr
+	}
 	needle := strings.TrimSpace(name)
 	name = slugify(needle)
 	for i, item := range m.items {
@@ -199,6 +241,9 @@ func (m *Manager) load() error {
 }
 
 func (m *Manager) saveLocked(item Memory) error {
+	if err := validateMemoryFields(item.Name, item.Content, item.Tags); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
@@ -312,14 +357,18 @@ func readMemoryFile(path string) (Memory, error) {
 
 	createdAt, _ := time.Parse(time.RFC3339, meta["created_at"])
 	updatedAt, _ := time.Parse(time.RFC3339, meta["updated_at"])
-	return Memory{
+	item := Memory{
 		ID:        meta["id"],
 		Name:      meta["name"],
 		Content:   strings.TrimSpace(strings.Join(bodyLines, "\n")),
 		Tags:      splitTags(meta["tags"]),
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
-	}, nil
+	}
+	if err := validateMemoryFields(item.Name, item.Content, item.Tags); err != nil {
+		return Memory{}, err
+	}
+	return item, nil
 }
 
 func writeMemoryFile(path string, item Memory) error {
@@ -390,6 +439,21 @@ func splitTags(value string) []string {
 		return nil
 	}
 	return normalizeTags(strings.Split(value, ","))
+}
+
+func validateMemoryFields(name, content string, tags []string) error {
+	if memoryCredentialPattern.MatchString(content) {
+		return errors.New("sensitive memory content is not allowed")
+	}
+	if strings.TrimSpace(name) != "" && memorySensitiveNamePattern.MatchString(name) {
+		return errors.New("sensitive memory name is not allowed")
+	}
+	for _, tag := range tags {
+		if memorySensitiveNamePattern.MatchString(tag) {
+			return errors.New("sensitive memory tag is not allowed")
+		}
+	}
+	return nil
 }
 
 func queryTokens(query string) []string {

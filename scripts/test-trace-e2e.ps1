@@ -92,56 +92,6 @@ function Get-FreeTcpPort {
     }
 }
 
-function ConvertTo-NativeArgument {
-    param([AllowEmptyString()][string]$Argument)
-
-    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
-        return $Argument
-    }
-
-    $builder = [System.Text.StringBuilder]::new()
-    $null = $builder.Append('"')
-    $backslashes = 0
-    foreach ($character in $Argument.ToCharArray()) {
-        if ($character -eq '\') {
-            $backslashes++
-            continue
-        }
-        if ($character -eq '"') {
-            $escaped = ('\' * ($backslashes * 2 + 1)) -join ''
-            $null = $builder.Append($escaped)
-            $null = $builder.Append('"')
-            $backslashes = 0
-            continue
-        }
-        if ($backslashes -gt 0) {
-            $literal = ('\' * $backslashes) -join ''
-            $null = $builder.Append($literal)
-            $backslashes = 0
-        }
-        $null = $builder.Append($character)
-    }
-    if ($backslashes -gt 0) {
-        $trailing = ('\' * ($backslashes * 2)) -join ''
-        $null = $builder.Append($trailing)
-    }
-    $null = $builder.Append('"')
-    return $builder.ToString()
-}
-
-function Stop-ProcessTree {
-    param([System.Diagnostics.Process]$Process)
-
-    if ($null -eq $Process -or $Process.HasExited) {
-        return
-    }
-    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
-    if (-not $Process.WaitForExit(10000)) {
-        $Process.Kill()
-        $Process.WaitForExit()
-    }
-}
-
 function Invoke-CapturedProcess {
     param(
         [Parameter(Mandatory)][string]$FilePath,

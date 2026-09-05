@@ -13,7 +13,10 @@ func TestMemoryManagerPersistsMarkdownMemories(t *testing.T) {
 	dir := t.TempDir()
 	manager := memory.NewManager(dir)
 
-	item := manager.Add("Prefer Markdown memory files for project facts.", "project", "#memory")
+	item, err := manager.Add("Prefer Markdown memory files for project facts.", "project", "#memory")
+	if err != nil {
+		t.Fatalf("add memory: %v", err)
+	}
 	if item.Name == "" {
 		t.Fatal("memory name should be assigned")
 	}
@@ -45,7 +48,10 @@ func TestMemoryManagerPersistsMarkdownMemories(t *testing.T) {
 func TestMemoryManagerDeletesMemories(t *testing.T) {
 	dir := t.TempDir()
 	manager := memory.NewManager(dir)
-	item := manager.Add("Temporary note to delete.")
+	item, err := manager.Add("Temporary note to delete.")
+	if err != nil {
+		t.Fatalf("add memory: %v", err)
+	}
 
 	if err := manager.Delete(item.Name); err != nil {
 		t.Fatalf("delete memory: %v", err)
@@ -55,5 +61,79 @@ func TestMemoryManagerDeletesMemories(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, item.Name+".md")); !os.IsNotExist(err) {
 		t.Fatalf("memory file should be removed, got err=%v", err)
+	}
+}
+
+func TestMemoryManagerRejectsSensitiveFieldsWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	manager := memory.NewManager(dir)
+	secretAssignment := "OPENAI_" + "API_KEY=fixture-secret"
+
+	if _, err := manager.Add("Do not persist "+secretAssignment, "project"); err == nil {
+		t.Fatal("sensitive memory content should be rejected")
+	}
+	if _, err := manager.Add("A safe note", "api_"+"key"); err == nil {
+		t.Fatal("sensitive memory tag should be rejected")
+	}
+	if _, err := manager.Save(memory.Memory{Name: "api_" + "key", Content: "A safe note"}); err == nil {
+		t.Fatal("sensitive memory name should be rejected")
+	}
+
+	entries, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || filepath.Base(entries[0]) != "MEMORY.md" {
+		t.Fatalf("unexpected memory files after rejection: %v", entries)
+	}
+}
+
+func TestMemoryManagerDoesNotLoadSensitiveMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	secretAssignment := "OPENAI_" + "API_KEY=fixture-secret"
+	content := "---\n" +
+		"id: leaked\n" +
+		"name: safe-name\n" +
+		"tags: project\n" +
+		"created_at: 2026-09-05T00:00:00Z\n" +
+		"updated_at: 2026-09-05T00:00:00Z\n" +
+		"---\n" + secretAssignment + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "leaked.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := memory.NewManager(dir)
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("sensitive markdown should not be loaded: %+v", got)
+	}
+}
+
+func TestMemoryManagerReportsLoadErrorsWithoutOverwritingIndex(t *testing.T) {
+	dir := t.TempDir()
+	index := []byte("# existing index\n")
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), index, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.md"), []byte("not frontmatter\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := memory.NewManager(dir)
+	if manager.Err() == nil {
+		t.Fatal("memory load error should be observable")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(index) {
+		t.Fatalf("index was overwritten after load failure: %q", got)
+	}
+}
+
+func TestMemoryManagerRejectsDsnCredentials(t *testing.T) {
+	manager := memory.NewManager(t.TempDir())
+	if _, err := manager.Add("Do not persist postgres://user:password@db.example/app"); err == nil {
+		t.Fatal("DSN credentials should be rejected")
 	}
 }

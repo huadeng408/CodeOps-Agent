@@ -14,6 +14,8 @@ from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 
+_CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
+
 
 class FakeLLM:
     model = "fake"
@@ -760,6 +762,41 @@ def test_markdown_memory_manager_persists_and_searches(tmp_path) -> None:
     assert len(matches) == 1
     assert matches[0].content == "Prefer Markdown memory files for durable project facts."
     assert matches[0].tags == ["project", "memory"]
+
+
+def test_markdown_memory_manager_rejects_sensitive_content_without_writing(tmp_path) -> None:
+    manager = MemoryManager(str(tmp_path))
+
+    with pytest.raises(ValueError, match="sensitive"):
+        manager.add(f"Keep {_CREDENTIAL_LABEL}=fixture-secret out of memory.", ["project"])
+
+    assert list(tmp_path.glob("*.md")) == [tmp_path / "MEMORY.md"]
+
+
+def test_markdown_memory_manager_rejects_sensitive_tags_without_writing(tmp_path) -> None:
+    manager = MemoryManager(str(tmp_path))
+
+    with pytest.raises(ValueError, match="sensitive"):
+        manager.add("A safe project note.", ["api_key"])
+
+    assert list(tmp_path.glob("*.md")) == [tmp_path / "MEMORY.md"]
+
+
+def test_markdown_memory_manager_rejects_sensitive_memory_loaded_from_disk(tmp_path) -> None:
+    (tmp_path / "leaked.md").write_text(
+        "---\n"
+        "id: leaked\n"
+        "name: leaked\n"
+        "tags: project\n"
+        "created_at: 2026-09-05T00:00:00+00:00\n"
+        "updated_at: 2026-09-05T00:00:00+00:00\n"
+        "---\n"
+        f"{_CREDENTIAL_LABEL}=fixture-secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sensitive"):
+        MemoryManager(str(tmp_path))
 
 
 def test_relevant_memory_is_added_to_llm_prompt(monkeypatch, tmp_path) -> None:
