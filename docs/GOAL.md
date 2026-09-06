@@ -21,6 +21,11 @@ Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool S
 可用 Docker daemon 或 WSL2 内 Docker，因此该路径只有契约和本地回归证据，不能标为
 真实 Docker/WSL2 E2E。
 
+本快照再次通过仓库统一 helper 隐藏启动 Docker Desktop，并执行
+`Wait-DockerDaemonReady -TimeoutSeconds 60`；探测在 60 秒后超时，`Ubuntu-24.04`
+与 `docker-desktop` 仍为 stopped。该结果是新鲜的环境阻塞证据，未启动或清理任何
+容器、卷或业务数据。
+
 使用用户提供的 provider 配置完成了一次最小真实 Anthropic-compatible 流式 smoke，
 结果为 `OK`，流序列包含 `text -> usage -> done`，响应侧返回了 `reported_model` 和
 `response_id`。provider 未返回不可变 revision，因此该结果仍标记为
