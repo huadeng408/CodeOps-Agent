@@ -4,8 +4,8 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为 `e32435fa`。P0/P1/P2 的代码路径已完成定向验证：Python
-上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2220 passed, 16 skipped`；Go
+本轮代码验证基线为 `092e06fd`。P0/P1/P2 的代码路径已完成定向验证：Python
+上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2224 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
 Go/Python 跨进程 E2E 的 Agent Loop、Extension、Background Job、Session
@@ -28,8 +28,15 @@ Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool S
 E2E 或发布级评测；脱敏 receipt 保存在被忽略的
 `.runtime/e2e/provider-live-stream-smoke.json`。
 
-以下发布指标仍保持 `BLOCKED`，不能由上述 deterministic provider 或 fixture
-替代：真实外部 provider 跨进程调用、Docker/WSL2 受限执行、Phoenix live trace、
+在本快照中又完成了一次显式 opt-in 的真实 provider 跨进程 smoke：生产 Go Agent
+通过 gRPC 到达独立 Python Orchestrator，再调用 Anthropic-compatible endpoint，
+返回 `REAL_PROVIDER_ROUTE_OK`，并在独立 route receipt 中记录 `reported_model`、
+`response_id`、Go/Python 进程边界和退出码。该结果为 `SMOKE_PASS` 且保留
+`non_release_dev_smoke=true`；provider 未返回不可变 revision，故
+`identity_verified=false`，不能替代发布级 provider、Docker/WSL2 或官方 scorer 证据。
+
+以下发布指标仍保持 `BLOCKED`，不能由上述 deterministic provider、fixture 或开发
+smoke 替代：发布级真实外部 provider 跨进程证据、Docker/WSL2 受限执行、Phoenix live trace、
 官方 SWE-bench/Terminal-Bench scorer，以及 8 Worker/200 任务/30 次真实进程
 故障的恢复率基准。Docker daemon 不可用时，相关 E2E 必须记录为 `BLOCKED`。
 
