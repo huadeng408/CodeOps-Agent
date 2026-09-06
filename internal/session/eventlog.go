@@ -89,6 +89,7 @@ type EventLog interface {
 	Fork(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64) error
 	Rewind(ctx context.Context, sessionID string, targetSeq int64) (Event, error)
 	Events(ctx context.Context, sessionID string) ([]Event, error)
+	EventsAfter(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]Event, error)
 	Surface(ctx context.Context, sessionID string) ([]Event, error)
 	Verify(ctx context.Context, sessionID string) error
 	Close() error
@@ -611,6 +612,72 @@ FROM session_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate session events: %w", err)
+	}
+	return events, nil
+}
+
+// EventsAfter returns the verified suffix after an inclusive sequence cursor.
+// It is intended for reconnecting consumers that already persisted the last
+// observed sequence and avoids replaying the entire session history.
+func (l *SQLiteEventLog) EventsAfter(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]Event, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, errors.New("session event session_id is required")
+	}
+	if afterSeq < -1 {
+		return nil, errors.New("session event cursor is invalid")
+	}
+	if err := l.ensure(ctx); err != nil {
+		return nil, err
+	}
+	query := `SELECT session_id, seq, event_id, version, type, created_at, payload, surface_op, prev_checksum, checksum
+FROM session_events WHERE session_id = ? AND seq > ? ORDER BY seq ASC`
+	args := []any{sessionID, afterSeq}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("read session event suffix: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]Event, 0)
+	for rows.Next() {
+		var event Event
+		var createdAt, payload, surfaceOp string
+		if err := rows.Scan(&event.SessionID, &event.Seq, &event.EventID, &event.Version, &event.Type, &createdAt, &payload, &surfaceOp, &event.PrevChecksum, &event.Checksum); err != nil {
+			return nil, fmt.Errorf("scan session event suffix: %w", err)
+		}
+		event.CreatedAt, err = time.Parse(eventTimeFormat, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse session event suffix time: %w", err)
+		}
+		event.Payload = json.RawMessage(payload)
+		if surfaceOp != "" {
+			var operation SurfaceOperation
+			if err := json.Unmarshal([]byte(surfaceOp), &operation); err != nil {
+				return nil, fmt.Errorf("%w: invalid surface operation at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			event.SurfaceOp = &operation
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session event suffix: %w", err)
+	}
+	if len(events) == 0 {
+		return events, nil
+	}
+	var previous string
+	if err := l.db.QueryRowContext(ctx, `SELECT checksum FROM session_events WHERE session_id = ? AND seq = ?`, sessionID, events[0].Seq-1).Scan(&previous); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("read session event suffix anchor: %w", err)
+	}
+	for _, event := range events {
+		if event.SessionID != sessionID || event.Version != eventSchemaVersion || event.Seq < 0 || !json.Valid(event.Payload) || event.PrevChecksum != previous || event.Checksum != checksumEvent(event) {
+			return nil, fmt.Errorf("%w: invalid event suffix at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		previous = event.Checksum
 	}
 	return events, nil
 }

@@ -99,6 +99,54 @@ def _redact(value: Any, key: str = "") -> Any:
     return value
 
 
+def _memory_metadata(
+    source_type: Any,
+    source_id: Any,
+    source_revision: Any,
+    revision: Any,
+    expires_at: Any,
+    ttl_seconds: Any,
+) -> tuple[str, str, str, int, str]:
+    normalized_type = str(source_type or "").strip()
+    normalized_id = str(source_id or "").strip()
+    normalized_revision = str(source_revision or "").strip()
+    try:
+        normalized_number = int(revision)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("memory revision must be a positive integer") from exc
+    if normalized_number < 1:
+        raise ValueError("memory revision must be a positive integer")
+    normalized_expiry = str(expires_at or "").strip()
+    if ttl_seconds is not None:
+        try:
+            ttl = float(ttl_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("memory ttl_seconds must be positive") from exc
+        if ttl <= 0:
+            raise ValueError("memory ttl_seconds must be positive")
+        normalized_expiry = datetime.fromtimestamp(
+            datetime.now(UTC).timestamp() + ttl, UTC
+        ).isoformat()
+    if normalized_expiry:
+        try:
+            datetime.fromisoformat(normalized_expiry)
+        except ValueError as exc:
+            raise ValueError("memory expires_at must be an ISO-8601 timestamp") from exc
+    return normalized_type, normalized_id, normalized_revision, normalized_number, normalized_expiry
+
+
+def _expired(expires_at: str) -> bool:
+    if not expires_at:
+        return False
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=UTC)
+    return expiry <= datetime.now(UTC)
+
+
 def _session_id(value: str) -> str:
     session_id = value.strip()
     if not session_id:
@@ -137,15 +185,29 @@ def _canonical_memory(
     content: str,
     tags: tuple[str, ...],
     created_at: str,
+    source_type: str = "",
+    source_id: str = "",
+    source_revision: str = "",
+    revision: int = 1,
+    expires_at: str = "",
 ) -> str:
-    return json.dumps(
-        {
+    payload = {
             "id": memory_id,
             "session_id": session_id,
             "content": content,
             "tags": tags,
             "created_at": created_at,
-        },
+    }
+    if source_type or source_id or source_revision or revision != 1 or expires_at:
+        payload.update({
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_revision": source_revision,
+            "revision": revision,
+            "expires_at": expires_at,
+        })
+    return json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -172,6 +234,11 @@ class LongTermMemory:
     tags: tuple[str, ...]
     created_at: str
     checksum: str
+    source_type: str = ""
+    source_id: str = ""
+    source_revision: str = ""
+    revision: int = 1
+    expires_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +304,21 @@ class SQLiteContextStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS context_events_event_id "
                 "ON context_events(event_id) WHERE event_id IS NOT NULL"
             )
+            memory_columns = {
+                str(row["name"])
+                for row in self._connection.execute("PRAGMA table_info(long_term_memory)")
+            }
+            for name, definition in (
+                ("source_type", "TEXT NOT NULL DEFAULT ''"),
+                ("source_id", "TEXT NOT NULL DEFAULT ''"),
+                ("source_revision", "TEXT NOT NULL DEFAULT ''"),
+                ("revision", "INTEGER NOT NULL DEFAULT 1"),
+                ("expires_at", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in memory_columns:
+                    self._connection.execute(
+                        f"ALTER TABLE long_term_memory ADD COLUMN {name} {definition}"
+                    )
 
     def append(self, session_id: str, kind: str, payload: dict[str, Any]) -> ContextEvent:
         session_id = _session_id(session_id)
@@ -380,7 +462,19 @@ class SQLiteContextStore:
         else:
             self._connection.commit()
 
-    def add_memory(self, session_id: str, content: str, tags: Iterable[str] = ()) -> LongTermMemory:
+    def add_memory(
+        self,
+        session_id: str,
+        content: str,
+        tags: Iterable[str] = (),
+        *,
+        source_type: str = "",
+        source_id: str = "",
+        source_revision: str = "",
+        revision: int = 1,
+        expires_at: str = "",
+        ttl_seconds: float | None = None,
+    ) -> LongTermMemory:
         session_id = _session_id(session_id)
         safe_content = _redact_text(content.strip())
         if safe_content != content.strip():
@@ -390,22 +484,26 @@ class SQLiteContextStore:
         normalized = tuple(dict.fromkeys(tag.strip().lower().lstrip("#") for tag in tags if tag.strip()))
         if any(_redact_text(tag) != tag for tag in normalized):
             raise ValueError("sensitive tags are not allowed in long-term memory")
+        source_type, source_id, source_revision, revision, expires_at = _memory_metadata(
+            source_type, source_id, source_revision, revision, expires_at, ttl_seconds
+        )
         created_at = _now()
         memory_id = uuid.uuid4().hex
         checksum = hashlib.sha256(
             _canonical_memory(
-                memory_id, session_id, safe_content, normalized, created_at
+                memory_id, session_id, safe_content, normalized, created_at,
+                source_type, source_id, source_revision, revision, expires_at,
             ).encode("utf-8")
         ).hexdigest()
         with self._lock, self._write_transaction():
             self._connection.execute(
-                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum) VALUES (?, ?, ?, ?, ?, ?)",
-                (memory_id, session_id, safe_content, json.dumps(normalized), created_at, checksum),
+                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (memory_id, session_id, safe_content, json.dumps(normalized), created_at, checksum, source_type, source_id, source_revision, revision, expires_at),
             )
-        return LongTermMemory(memory_id, session_id, safe_content, normalized, created_at, checksum)
+        return LongTermMemory(memory_id, session_id, safe_content, normalized, created_at, checksum, source_type, source_id, source_revision, revision, expires_at)
 
     def add_reflection(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory:
         session_id = _session_id(session_id)
         safe_content = _redact_text(content.strip())
@@ -416,18 +514,23 @@ class SQLiteContextStore:
         normalized = tuple(dict.fromkeys(tag.strip().lower().lstrip("#") for tag in tags if tag.strip()))
         if any(_redact_text(tag) != tag for tag in normalized):
             raise ValueError("sensitive tags are not allowed in long-term memory")
+        source_type, source_id, source_revision, revision, expires_at = _memory_metadata(
+            metadata.get("source_type", ""), metadata.get("source_id", ""),
+            metadata.get("source_revision", ""), metadata.get("revision", 1),
+            metadata.get("expires_at", ""), metadata.get("ttl_seconds"),
+        )
         memory_id = uuid.uuid4().hex
         created_at = _now()
         checksum = hashlib.sha256(
             _canonical_memory(
-                memory_id, session_id, safe_content, normalized, created_at
+                memory_id, session_id, safe_content, normalized, created_at,
+                source_type, source_id, source_revision, revision, expires_at,
             ).encode("utf-8")
         ).hexdigest()
         with self._lock, self._write_transaction():
             self._connection.execute(
-                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (memory_id, session_id, safe_content, json.dumps(normalized), created_at, checksum),
+                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (memory_id, session_id, safe_content, json.dumps(normalized), created_at, checksum, source_type, source_id, source_revision, revision, expires_at),
             )
             self._append_locked(
                 session_id,
@@ -435,26 +538,33 @@ class SQLiteContextStore:
                 {"memory_id": memory_id, "tags": list(normalized)},
                 created_at,
             )
-        return LongTermMemory(memory_id, session_id, safe_content, normalized, created_at, checksum)
+        return LongTermMemory(memory_id, session_id, safe_content, normalized, created_at, checksum, source_type, source_id, source_revision, revision, expires_at)
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
         tokens = [token.casefold() for token in re.split(r"\W+", query) if len(token) >= 2]
         phrase = " ".join(str(query).casefold().split())
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id, session_id, content, tags_json, created_at, checksum FROM long_term_memory "
+                "SELECT id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at FROM long_term_memory "
                 "ORDER BY created_at DESC, id DESC",
             ).fetchall()
         ranked: list[tuple[int, str, str, LongTermMemory]] = []
         for row in rows:
             tags = tuple(str(item) for item in json.loads(str(row["tags_json"])))
+            source_type = str(row["source_type"] or "")
+            source_id = str(row["source_id"] or "")
+            source_revision = str(row["source_revision"] or "")
+            revision = int(row["revision"] or 1)
+            expires_at = str(row["expires_at"] or "")
+            if _expired(expires_at):
+                continue
             expected = hashlib.sha256(
                 _canonical_memory(
                     str(row["id"]),
                     str(row["session_id"]),
                     str(row["content"]),
                     tags,
-                    str(row["created_at"]),
+                    str(row["created_at"]), source_type, source_id, source_revision, revision, expires_at,
                 ).encode("utf-8")
             ).hexdigest()
             if expected != str(row["checksum"]):
@@ -481,7 +591,7 @@ class SQLiteContextStore:
                 content,
                 tags,
                 str(row["created_at"]),
-                str(row["checksum"]),
+                str(row["checksum"]), source_type, source_id, source_revision, revision, expires_at,
             )
             ranked.append((score, str(row["created_at"]), str(row["id"]), memory))
         ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
@@ -599,8 +709,14 @@ class LayeredContext:
             estimated_baseline_tokens=max(1, (baseline_bytes + 3) // 4),
         )
 
-    def reflect(self, session_id: str, content: str, tags: Iterable[str] = ()) -> LongTermMemory:
-        return self.store.add_reflection(session_id, content, tags)
+    def reflect(
+        self,
+        session_id: str,
+        content: str,
+        tags: Iterable[str] = (),
+        **metadata: Any,
+    ) -> LongTermMemory:
+        return self.store.add_reflection(session_id, content, tags, **metadata)
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
         return self.store.search_memory(query, limit)

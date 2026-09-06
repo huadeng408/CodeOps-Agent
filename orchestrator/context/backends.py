@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
+from datetime import UTC, datetime, timedelta
 
 from .memory import (
     _EVENT_KINDS,
@@ -46,11 +47,11 @@ class ContextStore(Protocol):
     ) -> list[ContextEvent]: ...
 
     def add_memory(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory: ...
 
     def add_reflection(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory: ...
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]: ...
@@ -80,17 +81,64 @@ def _memory_parts(
     return session_id, _normalise_tags(tags)
 
 
-def _new_memory(session_id: str, content: str, tags: Iterable[str]) -> LongTermMemory:
+def _memory_metadata(metadata: Mapping[str, Any]) -> tuple[str, str, str, int, str]:
+    source_type = str(metadata.get("source_type", "") or "").strip()
+    source_id = str(metadata.get("source_id", "") or "").strip()
+    source_revision = str(metadata.get("source_revision", "") or "").strip()
+    try:
+        revision = int(metadata.get("revision", 1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("memory revision must be a positive integer") from exc
+    if revision < 1:
+        raise ValueError("memory revision must be a positive integer")
+    expires_at = str(metadata.get("expires_at", "") or "").strip()
+    if metadata.get("ttl_seconds") is not None:
+        try:
+            ttl = float(metadata["ttl_seconds"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("memory ttl_seconds must be positive") from exc
+        if ttl <= 0:
+            raise ValueError("memory ttl_seconds must be positive")
+        expires_at = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat()
+    if expires_at:
+        try:
+            datetime.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise ValueError("memory expires_at must be an ISO-8601 timestamp") from exc
+    return source_type, source_id, source_revision, revision, expires_at
+
+
+def _expired(expires_at: str) -> bool:
+    if not expires_at:
+        return False
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=UTC)
+    return expiry <= datetime.now(UTC)
+
+
+def _new_memory(
+    session_id: str,
+    content: str,
+    tags: Iterable[str],
+    metadata: Mapping[str, Any] | None = None,
+) -> LongTermMemory:
     session_id, normalized = _memory_parts(session_id, content, tags)
+    source_type, source_id, source_revision, revision, expires_at = _memory_metadata(metadata or {})
     created_at = _now()
     memory_id = uuid.uuid4().hex
     checksum = hashlib.sha256(
-        _canonical_memory(
-            memory_id, session_id, content.strip(), normalized, created_at
+            _canonical_memory(
+            memory_id, session_id, content.strip(), normalized, created_at,
+            source_type, source_id, source_revision, revision, expires_at,
         ).encode("utf-8")
     ).hexdigest()
     return LongTermMemory(
-        memory_id, session_id, content.strip(), normalized, created_at, checksum
+        memory_id, session_id, content.strip(), normalized, created_at, checksum,
+        source_type, source_id, source_revision, revision, expires_at,
     )
 
 
@@ -107,10 +155,16 @@ def _verify_memory(row: Mapping[str, Any]) -> LongTermMemory:
         tags,
         str(row["created_at"]),
         str(row["checksum"]),
+        str(row.get("source_type", "") or ""),
+        str(row.get("source_id", "") or ""),
+        str(row.get("source_revision", "") or ""),
+        int(row.get("revision", 1) or 1),
+        str(row.get("expires_at", "") or ""),
     )
     expected = hashlib.sha256(
         _canonical_memory(
-            memory.id, memory.session_id, memory.content, memory.tags, memory.created_at
+            memory.id, memory.session_id, memory.content, memory.tags, memory.created_at,
+            memory.source_type, memory.source_id, memory.source_revision, memory.revision, memory.expires_at,
         ).encode("utf-8")
     ).hexdigest()
     if expected != memory.checksum:
@@ -126,6 +180,8 @@ def _rank_memories(
     ranked: list[tuple[int, str, str, LongTermMemory]] = []
     for row in rows:
         memory = _verify_memory(row)
+        if _expired(memory.expires_at):
+            continue
         haystack = " ".join((memory.content, *memory.tags)).casefold()
         if tokens and not any(token in haystack for token in tokens):
             continue
@@ -323,9 +379,9 @@ class RedisContextStore:
         return selected
 
     def _add_memory(
-        self, session_id: str, content: str, tags: Iterable[str], *, reflection: bool
+        self, session_id: str, content: str, tags: Iterable[str], *, reflection: bool, metadata: Mapping[str, Any] | None = None
     ) -> LongTermMemory:
-        memory = _new_memory(session_id, content, tags)
+        memory = _new_memory(session_id, content, tags, metadata)
         wire = json.dumps(
             {
                 "id": memory.id,
@@ -334,6 +390,11 @@ class RedisContextStore:
                 "tags": list(memory.tags),
                 "created_at": memory.created_at,
                 "checksum": memory.checksum,
+                "source_type": memory.source_type,
+                "source_id": memory.source_id,
+                "source_revision": memory.source_revision,
+                "revision": memory.revision,
+                "expires_at": memory.expires_at,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -351,14 +412,14 @@ class RedisContextStore:
         return memory
 
     def add_memory(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory:
-        return self._add_memory(session_id, content, tags, reflection=False)
+        return self._add_memory(session_id, content, tags, reflection=False, metadata=metadata)
 
     def add_reflection(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory:
-        return self._add_memory(session_id, content, tags, reflection=True)
+        return self._add_memory(session_id, content, tags, reflection=True, metadata=metadata)
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
         raw = self.client.lrange(self._memory_key(), 0, -1)
@@ -420,6 +481,11 @@ class MySQLContextStore:
                     tags_json TEXT NOT NULL,
                     created_at VARCHAR(64) NOT NULL,
                     checksum CHAR(64) NOT NULL UNIQUE,
+                    source_type VARCHAR(128) NOT NULL DEFAULT '',
+                    source_id VARCHAR(255) NOT NULL DEFAULT '',
+                    source_revision VARCHAR(255) NOT NULL DEFAULT '',
+                    revision BIGINT NOT NULL DEFAULT 1,
+                    expires_at VARCHAR(64) NOT NULL DEFAULT '',
                     INDEX long_term_memory_session (session_id, created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
             )
@@ -544,7 +610,7 @@ class MySQLContextStore:
             cursor = self.connection.cursor()
         try:
             cursor.execute(
-                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum) VALUES (%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     memory.id,
                     memory.session_id,
@@ -552,6 +618,11 @@ class MySQLContextStore:
                     json.dumps(memory.tags),
                     memory.created_at,
                     memory.checksum,
+                    memory.source_type,
+                    memory.source_id,
+                    memory.source_revision,
+                    memory.revision,
+                    memory.expires_at,
                 ),
             )
         finally:
@@ -559,9 +630,9 @@ class MySQLContextStore:
                 cursor.close()
 
     def add_memory(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory:
-        memory = _new_memory(session_id, content, tags)
+        memory = _new_memory(session_id, content, tags, metadata)
         with self._lock:
             try:
                 self._insert_memory(memory)
@@ -572,9 +643,9 @@ class MySQLContextStore:
         return memory
 
     def add_reflection(
-        self, session_id: str, content: str, tags: Iterable[str] = ()
+        self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory:
-        memory = _new_memory(session_id, content, tags)
+        memory = _new_memory(session_id, content, tags, metadata)
         with self._lock:
             try:
                 with self.connection.cursor() as cursor:
@@ -595,7 +666,7 @@ class MySQLContextStore:
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
         with self._lock, self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id, session_id, content, tags_json, created_at, checksum FROM long_term_memory ORDER BY created_at DESC, id DESC"
+                "SELECT id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at FROM long_term_memory ORDER BY created_at DESC, id DESC"
             )
             rows = list(cursor.fetchall())
         mappings = [
@@ -606,6 +677,11 @@ class MySQLContextStore:
                 "tags": row[3],
                 "created_at": row[4],
                 "checksum": row[5],
+                "source_type": row[6],
+                "source_id": row[7],
+                "source_revision": row[8],
+                "revision": row[9],
+                "expires_at": row[10],
             }
             for row in rows
         ]

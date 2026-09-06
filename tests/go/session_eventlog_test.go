@@ -66,6 +66,30 @@ func TestSQLiteEventLogAppendsDurableHashChainedEvents(t *testing.T) {
 	}
 }
 
+func TestSQLiteEventLogReadsVerifiedEventsAfterCursor(t *testing.T) {
+	log, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	ctx := context.Background()
+	for index := 0; index < 4; index++ {
+		if _, err := log.Append(ctx, "incremental", int64(index), "plan", map[string]any{"index": index}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := log.EventsAfter(ctx, "incremental", 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].Seq != 2 || page[1].Seq != 3 {
+		t.Fatalf("unexpected incremental page: %+v", page)
+	}
+	if page[0].PrevChecksum == "" || page[1].PrevChecksum != page[0].Checksum {
+		t.Fatalf("incremental page lost hash-chain links: %+v", page)
+	}
+}
+
 func TestSQLiteEventLogRejectsStaleSequenceWithoutWriting(t *testing.T) {
 	ctx := context.Background()
 	log, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))

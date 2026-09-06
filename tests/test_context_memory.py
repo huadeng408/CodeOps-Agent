@@ -343,6 +343,42 @@ def test_search_memory_ranks_multi_token_matches_before_recent_noise(tmp_path: P
     store.close()
 
 
+def test_memory_provenance_revision_and_expiry_are_persisted_and_indexed(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    record = store.add_memory(
+        "session-1",
+        "pin the deployment rollback procedure",
+        ["release"],
+        source_type="workflow",
+        source_id="deploy-42",
+        source_revision="r7",
+        revision=3,
+        ttl_seconds=3600,
+    )
+
+    assert record.source_type == "workflow"
+    assert record.source_id == "deploy-42"
+    assert record.source_revision == "r7"
+    assert record.revision == 3
+    assert record.expires_at
+    assert store.search_memory("rollback")[0].id == record.id
+    store.close()
+
+
+def test_expired_memory_is_excluded_from_search(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    store.add_memory(
+        "session-1",
+        "temporary incident note",
+        source_type="incident",
+        source_id="inc-1",
+        expires_at="2020-01-01T00:00:00+00:00",
+    )
+
+    assert store.search_memory("incident note") == []
+    store.close()
+
+
 def test_initial_messages_bound_long_term_memory_injection(tmp_path: Path) -> None:
     from orchestrator.graph.main_graph import build_graph
     from orchestrator.memory.manager import MemoryManager
