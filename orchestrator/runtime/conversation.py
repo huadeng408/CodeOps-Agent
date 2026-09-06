@@ -2105,13 +2105,40 @@ class ConversationRunner:
         for item in history:
             role = str(item.get("role", "")).strip().lower()
             content = str(item.get("content", "")).strip()
-            if not content:
-                continue
             if role not in {"user", "assistant", "system", "tool"}:
                 role = "system"
             if len(content) > MAX_HISTORY_MESSAGE_CHARS:
                 content = content[:MAX_HISTORY_MESSAGE_CHARS].rstrip() + "\n[history message truncated]"
-            cleaned.append(ChatMessage(role=role, content=content))
+            raw_calls = item.get("tool_calls", [])
+            calls: list[ToolCall] = []
+            if isinstance(raw_calls, list):
+                for raw_call in raw_calls:
+                    if not isinstance(raw_call, dict):
+                        continue
+                    call_id = str(raw_call.get("id", "")).strip()
+                    name = str(raw_call.get("name", "")).strip()
+                    if not call_id or not name:
+                        continue
+                    arguments_json = str(raw_call.get("arguments_json", "") or "")
+                    try:
+                        arguments = json.loads(arguments_json) if arguments_json else {}
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    if not isinstance(arguments, dict):
+                        arguments = {}
+                    calls.append(ToolCall(id=call_id, name=name, arguments=arguments, arguments_json=arguments_json or json.dumps(arguments, separators=(",", ":"))))
+            if not content and not calls and role != "tool":
+                continue
+            cleaned.append(
+                ChatMessage(
+                    role=role,
+                    content=content,
+                    name=str(item.get("name", "")).strip() or None,
+                    tool_call_id=str(item.get("tool_call_id", "")).strip() or None,
+                    tool_calls=calls,
+                    is_error=bool(item.get("is_error", False)),
+                )
+            )
 
         selected: list[ChatMessage] = []
         used_chars = 0

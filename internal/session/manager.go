@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,13 +23,49 @@ const (
 	RoleTool      Role = "tool"
 )
 
+const ConversationMessageSchemaVersion uint32 = 1
+
+type ToolCall struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ArgumentsJSON string `json:"arguments_json,omitempty"`
+}
+
+type InvocationStatus string
+
+const (
+	InvocationPrepared   InvocationStatus = "prepared"
+	InvocationDispatched InvocationStatus = "dispatched"
+	InvocationCommitted  InvocationStatus = "result_committed"
+	InvocationUnknown    InvocationStatus = "unknown"
+)
+
+type InvocationRecord struct {
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	ArgumentsJSON string           `json:"arguments_json,omitempty"`
+	Status        InvocationStatus `json:"status"`
+	Output        string           `json:"output,omitempty"`
+	Error         string           `json:"error,omitempty"`
+	ExitCode      int              `json:"exit_code"`
+	ModifiedFiles []string         `json:"modified_files,omitempty"`
+	CreatedAt     time.Time        `json:"created_at"`
+	CompletedAt   time.Time        `json:"completed_at,omitempty"`
+}
+
 type Message struct {
-	Role      Role      `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	Role          Role       `json:"role"`
+	Content       string     `json:"content"`
+	CreatedAt     time.Time  `json:"created_at"`
+	SchemaVersion uint32     `json:"schema_version,omitempty"`
+	Name          string     `json:"name,omitempty"`
+	ToolCallID    string     `json:"tool_call_id,omitempty"`
+	ToolCalls     []ToolCall `json:"tool_calls,omitempty"`
+	IsError       bool       `json:"is_error,omitempty"`
 }
 
 type ToolResultRecord struct {
+	ToolCallID    string
 	Name          string
 	ExitCode      int
 	Error         string
@@ -113,6 +150,7 @@ type Session struct {
 	CreatedAt        time.Time           `json:"created_at"`
 	UpdatedAt        time.Time           `json:"updated_at"`
 	Messages         []Message           `json:"messages"`
+	Invocations      []InvocationRecord  `json:"invocations,omitempty"`
 	Metadata         map[string]string   `json:"metadata,omitempty"`
 	Metrics          SessionMetrics      `json:"metrics,omitempty"`
 	Todos            []TodoItem          `json:"todos,omitempty"`
@@ -222,15 +260,135 @@ func (m *Manager) Append(role Role, content string) Session {
 
 	now := time.Now()
 	m.current.Messages = append(m.current.Messages, Message{
-		Role:      role,
-		Content:   content,
-		CreatedAt: now,
+		Role: role, Content: content, CreatedAt: now,
+		SchemaVersion: ConversationMessageSchemaVersion,
 	})
 	m.current.UpdatedAt = now
 	if !m.commitLocked(context.Background(), previous) {
 		return cloneSession(previous)
 	}
 	return cloneSession(m.current)
+}
+
+// BeginInvocation records a tool call before any external side effect occurs.
+// A committed or dispatched record is returned unchanged so callers can avoid
+// executing an invocation twice after a transport retry.
+func (m *Manager) BeginInvocation(id, name, argumentsJSON string) (InvocationRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	if id == "" || name == "" {
+		return InvocationRecord{}, fmt.Errorf("invocation id and name are required")
+	}
+	for _, existing := range m.current.Invocations {
+		if existing.ID == id {
+			return existing, nil
+		}
+	}
+	previous := cloneSession(m.current)
+	now := time.Now()
+	m.ensureCurrentLocked(now)
+	record := InvocationRecord{ID: id, Name: name, ArgumentsJSON: argumentsJSON, Status: InvocationPrepared, CreatedAt: now}
+	m.current.Invocations = append(m.current.Invocations, record)
+	m.current.Messages = append(m.current.Messages, Message{
+		Role: RoleAssistant, CreatedAt: now, SchemaVersion: ConversationMessageSchemaVersion,
+		ToolCalls: []ToolCall{{ID: id, Name: name, ArgumentsJSON: argumentsJSON}},
+	})
+	m.current.UpdatedAt = now
+	if !m.commitLocked(context.Background(), previous) {
+		return InvocationRecord{}, errors.New("persist prepared invocation")
+	}
+	return record, nil
+}
+
+// MarkInvocationDispatched makes the handoff to the external executor
+// durable. The operation is idempotent for an existing invocation ID.
+func (m *Manager) MarkInvocationDispatched(id string) (InvocationRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for index := range m.current.Invocations {
+		if m.current.Invocations[index].ID != strings.TrimSpace(id) {
+			continue
+		}
+		if m.current.Invocations[index].Status == InvocationCommitted {
+			return m.current.Invocations[index], nil
+		}
+		previous := cloneSession(m.current)
+		m.current.Invocations[index].Status = InvocationDispatched
+		m.current.UpdatedAt = time.Now()
+		if !m.commitLocked(context.Background(), previous) {
+			return InvocationRecord{}, errors.New("persist dispatched invocation")
+		}
+		return m.current.Invocations[index], nil
+	}
+	return InvocationRecord{}, ErrNotFound
+}
+
+type InvocationResult struct {
+	ID            string
+	Name          string
+	Output        string
+	Error         string
+	ExitCode      int
+	ModifiedFiles []string
+}
+
+// CommitInvocation durably appends the paired tool result. Committed IDs are
+// returned without appending a second result, which makes retry safe.
+func (m *Manager) CommitInvocation(result InvocationResult) (InvocationRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := strings.TrimSpace(result.ID)
+	for index := range m.current.Invocations {
+		if m.current.Invocations[index].ID != id {
+			continue
+		}
+		existing := m.current.Invocations[index]
+		if existing.Status == InvocationCommitted {
+			return existing, nil
+		}
+		previous := cloneSession(m.current)
+		now := time.Now()
+		existing.Status = InvocationCommitted
+		existing.Output, existing.Error, existing.ExitCode, existing.CompletedAt = result.Output, result.Error, result.ExitCode, now
+		existing.ModifiedFiles = mergeFiles(existing.ModifiedFiles, result.ModifiedFiles)
+		m.current.Metrics.ToolCalls++
+		m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, result.ModifiedFiles)
+		m.current.Invocations[index] = existing
+		m.current.Messages = append(m.current.Messages, Message{
+			Role: RoleTool, Name: result.Name, ToolCallID: id, Content: result.Output, IsError: result.Error != "", CreatedAt: now,
+			SchemaVersion: ConversationMessageSchemaVersion,
+		})
+		m.current.UpdatedAt = now
+		if !m.commitLocked(context.Background(), previous) {
+			return InvocationRecord{}, errors.New("persist committed invocation")
+		}
+		return existing, nil
+	}
+	return InvocationRecord{}, ErrNotFound
+}
+
+// MarkInvocationUnknown records that execution may have happened but its
+// result could not be durably acknowledged. Recovery can reconcile this state
+// without blindly repeating a non-idempotent operation.
+func (m *Manager) MarkInvocationUnknown(id, reason string) (InvocationRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for index := range m.current.Invocations {
+		if m.current.Invocations[index].ID != strings.TrimSpace(id) {
+			continue
+		}
+		previous := cloneSession(m.current)
+		m.current.Invocations[index].Status = InvocationUnknown
+		m.current.Invocations[index].Error = strings.TrimSpace(reason)
+		m.current.UpdatedAt = time.Now()
+		if !m.commitLocked(context.Background(), previous) {
+			return InvocationRecord{}, errors.New("persist unknown invocation")
+		}
+		return m.current.Invocations[index], nil
+	}
+	return InvocationRecord{}, ErrNotFound
 }
 
 func (m *Manager) commitLocked(ctx context.Context, previous Session) bool {
@@ -358,9 +516,10 @@ func (m *Manager) AppendToolResult(record ToolResultRecord) Session {
 	m.current.Metrics.ToolCalls++
 	m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, record.ModifiedFiles)
 	m.current.Messages = append(m.current.Messages, Message{
-		Role:      RoleTool,
-		Content:   formatToolResult(record),
-		CreatedAt: now,
+		Role: RoleTool, Content: formatToolResult(record), CreatedAt: now,
+		SchemaVersion: ConversationMessageSchemaVersion,
+		Name:          record.Name, ToolCallID: record.ToolCallID,
+		IsError: record.ExitCode != 0 || strings.TrimSpace(record.Error) != "",
 	})
 	m.current.UpdatedAt = now
 	if !m.commitLocked(context.Background(), previous) {
@@ -864,7 +1023,13 @@ func cloneSession(session Session) Session {
 	out.Actor.Roles = append([]string(nil), session.Actor.Roles...)
 	if len(session.Messages) > 0 {
 		out.Messages = make([]Message, len(session.Messages))
-		copy(out.Messages, session.Messages)
+		for index, message := range session.Messages {
+			out.Messages[index] = message
+			out.Messages[index].ToolCalls = append([]ToolCall(nil), message.ToolCalls...)
+		}
+	}
+	if len(session.Invocations) > 0 {
+		out.Invocations = append([]InvocationRecord(nil), session.Invocations...)
 	}
 	if session.Metadata != nil {
 		out.Metadata = make(map[string]string, len(session.Metadata))

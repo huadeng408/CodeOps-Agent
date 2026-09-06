@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"code-agent/internal/config"
 	"code-agent/internal/identity"
@@ -18,6 +19,16 @@ import (
 	"code-agent/internal/worktree"
 	_ "modernc.org/sqlite"
 )
+
+func TestOrchestratorHistoryKeepsEmptyAssistantToolCall(t *testing.T) {
+	history := orchestratorHistory([]session.Message{
+		{Role: session.RoleAssistant, SchemaVersion: session.ConversationMessageSchemaVersion, ToolCalls: []session.ToolCall{{ID: "call-1", Name: "Read", ArgumentsJSON: `{"path":"README.md"}`}}, CreatedAt: time.Unix(1, 0)},
+		{Role: session.RoleTool, SchemaVersion: session.ConversationMessageSchemaVersion, ToolCallID: "call-1", Name: "Read", Content: "content", CreatedAt: time.Unix(2, 0)},
+	}, "")
+	if len(history) != 2 || len(history[0].ToolCalls) != 1 || history[0].ToolCalls[0].ID != "call-1" || history[1].ToolCallID != "call-1" {
+		t.Fatalf("structured tool history was dropped: %#v", history)
+	}
+}
 
 func TestNewAppPersistsSessionInEventLedger(t *testing.T) {
 	root := t.TempDir()

@@ -78,6 +78,39 @@ func TestHandleToolCallPersistsApprovalAuditRecord(t *testing.T) {
 	}
 }
 
+func TestHandleToolCallReplaysCommittedInvocationWithoutExecutingAgain(t *testing.T) {
+	root := t.TempDir()
+	app, _ := newPermissionTestApp(root, "y\n")
+	call := orchestrator.ToolCall{
+		ID:             "call-write-once",
+		Name:           "Write",
+		ParametersJSON: `{"path":"once.txt","content":"first"}`,
+	}
+
+	first := app.handleToolCall(context.Background(), call)
+	if first.ExitCode != 0 || first.Error != "" {
+		t.Fatalf("first invocation failed: %+v", first)
+	}
+
+	retry := call
+	retry.ParametersJSON = `{"path":"once.txt","content":"second"}`
+	second := app.handleToolCall(context.Background(), retry)
+	if second.ExitCode != first.ExitCode || second.Error != first.Error || second.Output != first.Output {
+		t.Fatalf("retry did not replay committed result: first=%+v second=%+v", first, second)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "once.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "first" {
+		t.Fatalf("retry executed the write again: %q", string(content))
+	}
+	current := app.session.Current()
+	if len(current.Invocations) != 1 || current.Invocations[0].Status != session.InvocationCommitted {
+		t.Fatalf("unexpected invocation receipts: %+v", current.Invocations)
+	}
+}
+
 func TestRestorePermissionsRestoresApprovalAuditHistory(t *testing.T) {
 	root := t.TempDir()
 	app, _ := newPermissionTestApp(root, "")

@@ -17,6 +17,40 @@ from orchestrator.server import OrchestratorServer, OrchestratorService, ServerC
 _CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
 
 
+def test_history_preserves_tool_call_pairing_for_provider_requests() -> None:
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "name": "Read", "arguments_json": '{"path":"README.md"}'}
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "Read",
+            "tool_call_id": "call-1",
+            "content": "content",
+        },
+    ]
+    messages = ConversationRunner._history_messages(history)
+
+    assert len(messages) == 2
+    assert messages[0].tool_calls[0].id == "call-1"
+    assert messages[1].tool_call_id == "call-1"
+
+    from orchestrator.llm.providers.anthropic import AnthropicClient
+    from orchestrator.llm.providers.openai import OpenAIClient
+
+    openai_payload = OpenAIClient._request_messages(messages)
+    assert openai_payload[0]["tool_calls"][0]["id"] == "call-1"
+    assert openai_payload[1]["tool_call_id"] == "call-1"
+    _, anthropic_messages = AnthropicClient._convert_messages(messages)
+    anthropic_payload = anthropic_messages[0]
+    assert anthropic_payload["content"][0]["id"] == "call-1"
+    assert anthropic_messages[1]["content"][0]["tool_use_id"] == "call-1"
+
+
 class FakeLLM:
     model = "fake"
 

@@ -230,6 +230,14 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                         "role": item.role,
                         "content": item.content,
                         "created_at": item.created_at,
+                        "schema_version": item.schema_version,
+                        "name": item.name,
+                        "tool_call_id": item.tool_call_id,
+                        "tool_calls": [
+                            {"id": call.id, "name": call.name, "arguments_json": call.arguments_json}
+                            for call in item.tool_calls
+                        ],
+                        "is_error": item.is_error,
                     }
                     for item in user_input.history
                 ]

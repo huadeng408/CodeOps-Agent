@@ -772,6 +772,28 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		}
 	}
 
+	var prepared session.InvocationRecord
+	if strings.TrimSpace(call.ID) != "" {
+		prepared, err = a.session.BeginInvocation(call.ID, call.Name, call.ParametersJSON)
+		if err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation persistence failed: " + err.Error(), ExitCode: 1}
+		}
+		if prepared.Status == session.InvocationCommitted {
+			return invocationToolResult(prepared)
+		}
+		if prepared.Status != session.InvocationPrepared {
+			return orchestrator.ToolResult{
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Error:      fmt.Sprintf("invocation %s is %s; reconcile before retry", call.ID, prepared.Status),
+				ExitCode:   1,
+			}
+		}
+		if _, err = a.session.MarkInvocationDispatched(call.ID); err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed: " + err.Error(), ExitCode: 1}
+		}
+	}
+
 	var result tools.ToolResult
 	if call.Name == "SessionFork" || call.Name == "SessionRewind" {
 		result = a.executeSessionControl(ctx, call.Name, params)
@@ -803,7 +825,12 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		result.Output = strings.TrimSpace(result.Output + "\n" + hookMessages(postResults))
 	}
 	a.recordUndo(call, result)
-	a.recordToolResult(ctx, call, result)
+	if recordErr := a.recordToolResult(ctx, call, result); recordErr != nil {
+		if strings.TrimSpace(call.ID) != "" {
+			_, _ = a.session.MarkInvocationUnknown(call.ID, recordErr.Error())
+		}
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: "tool result persistence failed: " + recordErr.Error(), ExitCode: 1}
+	}
 	a.recordToolWorkingDir(call, result)
 	if err != nil {
 		return orchestrator.ToolResult{
@@ -1520,19 +1547,19 @@ func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {
 	a.session.SetUndo(sessionUndoEntries(a.undo.List()))
 }
 
-func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, result tools.ToolResult) {
+func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, result tools.ToolResult) error {
 	modifiedFiles := modifiedFilesFromToolCall(call, result)
-	a.session.AppendToolResult(session.ToolResultRecord{
-		Name:          call.Name,
-		ExitCode:      result.ExitCode,
-		Error:         result.Error,
-		Output:        result.Output,
-		Truncated:     result.Truncated,
-		SpillLocator:  spillLocator(result.Spill),
-		SpillSHA256:   spillSHA256(result.Spill),
-		SpillBytes:    spillBytes(result.Spill),
-		ModifiedFiles: modifiedFiles,
-	})
+	if strings.TrimSpace(call.ID) != "" {
+		if _, err := a.session.CommitInvocation(session.InvocationResult{ID: call.ID, Name: call.Name, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode, ModifiedFiles: modifiedFiles}); err != nil {
+			return err
+		}
+	} else {
+		a.session.AppendToolResult(session.ToolResultRecord{
+			ToolCallID: call.ID, Name: call.Name, ExitCode: result.ExitCode, Error: result.Error,
+			Output: result.Output, Truncated: result.Truncated, SpillLocator: spillLocator(result.Spill),
+			SpillSHA256: spillSHA256(result.Spill), SpillBytes: spillBytes(result.Spill), ModifiedFiles: modifiedFiles,
+		})
+	}
 
 	values := map[string]string{
 		"last_tool":           call.Name,
@@ -1548,7 +1575,13 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 	a.session.MergeMetadata(values)
 	if err := a.session.AutoSave(ctx); err != nil {
 		a.renderer.PrintLine("autosave failed: " + err.Error())
+		return err
 	}
+	return nil
+}
+
+func invocationToolResult(record session.InvocationRecord) orchestrator.ToolResult {
+	return orchestrator.ToolResult{ToolCallID: record.ID, ToolName: record.Name, Output: record.Output, Error: record.Error, ExitCode: int32(record.ExitCode)}
 }
 
 func spillLocator(ref *tools.SpillRef) string {
@@ -1908,16 +1941,24 @@ func orchestratorHistory(messages []session.Message, currentInput string) []orch
 	out := make([]orchestrator.ConversationMessage, 0, len(messages))
 	for idx, message := range messages {
 		content := strings.TrimSpace(message.Content)
-		if content == "" {
+		if content == "" && len(message.ToolCalls) == 0 && strings.TrimSpace(message.ToolCallID) == "" {
 			continue
 		}
 		if idx == len(messages)-1 && message.Role == session.RoleUser && content == currentInput {
 			continue
 		}
 		out = append(out, orchestrator.ConversationMessage{
-			Role:      string(message.Role),
-			Content:   message.Content,
-			CreatedAt: message.CreatedAt.UTC().Format(time.RFC3339Nano),
+			Role: string(message.Role), Content: message.Content,
+			CreatedAt:     message.CreatedAt.UTC().Format(time.RFC3339Nano),
+			SchemaVersion: message.SchemaVersion, Name: message.Name,
+			ToolCallID: message.ToolCallID, IsError: message.IsError,
+			ToolCalls: func() []orchestrator.ConversationToolCall {
+				calls := make([]orchestrator.ConversationToolCall, 0, len(message.ToolCalls))
+				for _, call := range message.ToolCalls {
+					calls = append(calls, orchestrator.ConversationToolCall{ID: call.ID, Name: call.Name, ArgumentsJSON: call.ArgumentsJSON})
+				}
+				return calls
+			}(),
 		})
 	}
 	return out

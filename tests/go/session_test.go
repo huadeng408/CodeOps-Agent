@@ -503,6 +503,52 @@ func TestAppendToolResultStoresSpillAuditMetadata(t *testing.T) {
 	}
 }
 
+func TestSessionPersistsStructuredToolCallAndResultPair(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession("workspace")
+	if _, err := manager.BeginInvocation("call-1", "Read", `{"path":"README.md"}`); err != nil {
+		t.Fatalf("begin invocation: %v", err)
+	}
+	if _, err := manager.CommitInvocation(session.InvocationResult{
+		ID:       "call-1",
+		Name:     "Read",
+		Output:   "content",
+		ExitCode: 0,
+	}); err != nil {
+		t.Fatalf("commit invocation: %v", err)
+	}
+	current := manager.Current()
+	if len(current.Messages) != 2 {
+		t.Fatalf("message count = %d, want structured assistant/tool pair", len(current.Messages))
+	}
+	if current.Messages[0].Role != session.RoleAssistant || len(current.Messages[0].ToolCalls) != 1 || current.Messages[0].ToolCalls[0].ID != "call-1" {
+		t.Fatalf("assistant tool call was not persisted: %+v", current.Messages[0])
+	}
+	if current.Messages[1].Role != session.RoleTool || current.Messages[1].ToolCallID != "call-1" {
+		t.Fatalf("tool result pairing was not persisted: %+v", current.Messages[1])
+	}
+	if len(current.Invocations) != 1 || current.Invocations[0].Status != session.InvocationCommitted {
+		t.Fatalf("invocation receipt was not committed: %+v", current.Invocations)
+	}
+	replayed, err := manager.BeginInvocation("call-1", "Read", `{"path":"README.md"}`)
+	if err != nil || replayed.Status != session.InvocationCommitted || replayed.Output != "content" {
+		t.Fatalf("committed invocation was not replayable: %+v, %v", replayed, err)
+	}
+	if _, err := manager.MarkInvocationDispatched("call-2"); err == nil {
+		t.Fatal("unknown invocation should not be dispatchable")
+	}
+	if _, err := manager.BeginInvocation("call-2", "Write", `{"path":"x"}`); err != nil {
+		t.Fatalf("begin second invocation: %v", err)
+	}
+	if _, err := manager.MarkInvocationDispatched("call-2"); err != nil {
+		t.Fatalf("mark second invocation dispatched: %v", err)
+	}
+	uncertain, err := manager.BeginInvocation("call-2", "Write", `{"path":"x"}`)
+	if err != nil || uncertain.Status != session.InvocationDispatched {
+		t.Fatalf("dispatched invocation was not retained for reconciliation: %+v, %v", uncertain, err)
+	}
+}
+
 func TestManagerAutoSaveRequiresCurrentSession(t *testing.T) {
 	manager := session.NewManager(session.NewMemoryStore())
 

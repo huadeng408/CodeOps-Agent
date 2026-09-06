@@ -89,6 +89,17 @@ message ConversationMessage {
   string role = 1;
   string content = 2;
   string created_at = 3;
+  uint32 schema_version = 4;
+  string name = 5;
+  string tool_call_id = 6;
+  repeated ConversationToolCall tool_calls = 7;
+  bool is_error = 8;
+}
+
+message ConversationToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments_json = 3;
 }
 
 message CompactRequest {

@@ -23,9 +23,20 @@ import (
 )
 
 type ConversationMessage struct {
-	Role      string
-	Content   string
-	CreatedAt string
+	Role          string
+	Content       string
+	CreatedAt     string
+	SchemaVersion uint32
+	Name          string
+	ToolCallID    string
+	ToolCalls     []ConversationToolCall
+	IsError       bool
+}
+
+type ConversationToolCall struct {
+	ID            string
+	Name          string
+	ArgumentsJSON string
 }
 
 // ActorIdentity is the versioned, non-secret caller identity propagated to
@@ -393,9 +404,9 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
 	for _, item := range trimConversationHistory(history) {
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
-			Role:      item.Role,
-			Content:   item.Content,
-			CreatedAt: item.CreatedAt,
+			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
+			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
+			ToolCalls: conversationToolCalls(item.ToolCalls),
 		})
 	}
 	update, err := c.client.Compact(ctx, &codeagentpb.CompactRequest{
@@ -458,9 +469,9 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
 	for _, item := range trimConversationHistory(history) {
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
-			Role:      item.Role,
-			Content:   item.Content,
-			CreatedAt: item.CreatedAt,
+			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
+			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
+			ToolCalls: conversationToolCalls(item.ToolCalls),
 		})
 	}
 
@@ -601,6 +612,17 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	}
 
 	return strings.TrimSpace(strings.Join(parts, "")), nil
+}
+
+func conversationToolCalls(calls []ConversationToolCall) []*codeagentpb.ConversationToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]*codeagentpb.ConversationToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, &codeagentpb.ConversationToolCall{Id: call.ID, Name: call.Name, ArgumentsJson: call.ArgumentsJSON})
+	}
+	return out
 }
 
 func trimConversationHistory(history []ConversationMessage) []ConversationMessage {
