@@ -4,7 +4,7 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为 `af8f4dc1`。P0/P1/P2 的代码路径已完成定向验证：Python
+本轮代码验证基线为当前 `HEAD` `0ddee62b`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2224 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
@@ -50,6 +50,14 @@ E2E 或发布级评测；脱敏 receipt 保存在被忽略的
 smoke 替代：发布级真实外部 provider 跨进程证据、Docker/WSL2 受限执行、Phoenix live trace，
 以及官方 SWE-bench/Terminal-Bench scorer。Docker daemon 不可用时，相关 E2E 必须记录为
 `BLOCKED`。
+
+当前 HEAD 又完成两条 provider 评测。上下文 Token 对照运行
+`context-token-current-20260907`，两臂任务结果均通过，输入 Token 降幅为
+`0.9644355046`；provider 未返回稳定 fingerprint，按契约状态为 `BLOCKED`。
+Skill 选择运行 `skill-selection-current-20260907`，固定 40 个 Skill、1,000 个案例，
+结果为 `573/1000`（`0.573`）；`363` 个案例触发 provider integrity 失败，且
+provider fingerprint 缺失，因此状态为 `BLOCKED`。两份完整 receipt 与 checkpoint
+均保存在被忽略的 `.tmp/eval-results/` 下，未进入版本控制。
 
 本项目的验收标准来自当前任务的 active Goal。历史设计地图、进展日志、
 外部记忆和旧计划只用于追溯，不是启动入口或执行权威。
