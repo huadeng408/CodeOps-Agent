@@ -258,6 +258,13 @@ class ChatRequest:
     # http_call_with_retry so an in-flight request can be aborted by the
     # harness when the user interrupts the turn (design 22.8).
     cancel_event: threading.Event | None = None
+    # Provider-neutral tool routing hints. OpenAI-compatible providers accept
+    # the structured ``tool_choice`` form to force one named function; a
+    # ``None`` value preserves the provider's default automatic selection.
+    # These fields are appended after the original fields so existing
+    # positional callers keep their pre-routing meaning.
+    tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
 
 
 @dataclass(slots=True)

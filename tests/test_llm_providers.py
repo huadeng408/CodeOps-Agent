@@ -222,6 +222,229 @@ def test_openai_client_sends_configured_output_token_budget(monkeypatch) -> None
         server.server_close()
 
 
+def test_openai_client_sends_explicit_single_tool_choice() -> None:
+    server, captured = _json_server(
+        {
+            "id": "response-tool-choice",
+            "model": "locked-model",
+            "system_fingerprint": "revision-1",
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+        }
+    )
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="locked-model",
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="locked-model",
+                    messages=[ChatMessage(role="user", content="choose")],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "Skill",
+                                "description": "Select one skill.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                        }
+                    ],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "Skill"},
+                    },
+                    parallel_tool_calls=False,
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "Skill"},
+        }
+        assert body["parallel_tool_calls"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_chat_request_preserves_legacy_positional_field_order() -> None:
+    cancel_event = threading.Event()
+
+    request = ChatRequest(
+        "legacy-model",
+        [],
+        [],
+        0.7,
+        True,
+        2048,
+        "high",
+        "compaction",
+        False,
+        cancel_event,
+    )
+
+    assert request.temperature == 0.7
+    assert request.thinking_enabled is True
+    assert request.thinking_budget == 2048
+    assert request.reasoning_effort == "high"
+    assert request.purpose == "compaction"
+    assert request.allow_tools is False
+    assert request.cancel_event is cancel_event
+    assert request.tool_choice is None
+    assert request.parallel_tool_calls is None
+
+
+def test_deepseek_forced_tool_choice_disables_thinking() -> None:
+    server, captured = _json_server(
+        {
+            "id": "response-deepseek-tool-choice",
+            "model": "deepseek-v4-pro",
+            "system_fingerprint": "revision-1",
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+        }
+    )
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="deepseek-v4-pro",
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="deepseek-v4-pro",
+                    messages=[ChatMessage(role="user", content="choose")],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "Skill",
+                                "description": "Select one skill.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                    "required": ["name"],
+                                },
+                            },
+                        }
+                    ],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "Skill"},
+                    },
+                    parallel_tool_calls=False,
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body["thinking"] == {"type": "disabled"}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_deepseek_forced_tool_choice_does_not_send_reasoning_effort() -> None:
+    server, captured = _json_server(
+        {
+            "id": "response-deepseek-forced-tool-no-effort",
+            "model": "deepseek-v4-pro",
+            "system_fingerprint": "revision-1",
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+        }
+    )
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="deepseek-v4-pro",
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="deepseek-v4-pro",
+                    messages=[ChatMessage(role="user", content="choose")],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "Skill",
+                                "description": "Select one skill.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                    "required": ["name"],
+                                },
+                            },
+                        }
+                    ],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "Skill"},
+                    },
+                    thinking_enabled=True,
+                    reasoning_effort="low",
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_deepseek_reasoning_effort_is_serialized_when_thinking() -> None:
+    server, captured = _json_server(
+        {
+            "id": "response-deepseek-effort",
+            "model": "deepseek-v4-pro",
+            "system_fingerprint": "revision-1",
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+        }
+    )
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="deepseek-v4-pro",
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="deepseek-v4-pro",
+                    messages=[ChatMessage(role="user", content="choose")],
+                    thinking_enabled=True,
+                    reasoning_effort="low",
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body["thinking"] == {"type": "enabled"}
+        assert body["reasoning_effort"] == "low"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_openai_stream_payload_sends_configured_output_token_budget() -> None:
     client = OpenAIClient(
         api_key="test-key",

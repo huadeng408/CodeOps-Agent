@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -20,6 +21,9 @@ from eval.harness.artifacts import RunArtifacts
 import eval.harness.skill_selection_eval as skill_selection_module
 from eval.harness.skill_selection_eval import (
     SkillSelectionEvalConfig,
+    _load_catalog,
+    _run_case,
+    _selection_system_prompt,
     load_skill_selection_dataset,
     run_skill_selection_eval,
 )
@@ -263,6 +267,71 @@ def test_dataset_expands_locked_denominator_and_requires_catalog_coverage(
     assert all("expected_skill" not in case.prompt for case in dataset.cases)
 
 
+def test_skill_tool_schema_enumerates_registered_names(tmp_path: Path) -> None:
+    manifest_path, _ = _write_inputs(tmp_path)
+
+    catalog = _load_catalog(manifest_path)
+
+    assert catalog.tool_schema["function"]["parameters"]["properties"]["name"]["enum"] == [
+        "debug",
+        "inspect",
+    ]
+
+
+def test_skill_selection_prompt_exposes_catalog_as_structured_metadata(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _ = _write_inputs(tmp_path)
+
+    prompt = _selection_system_prompt(_load_catalog(manifest_path))
+
+    assert "- debug: diagnose a reproducible failure" in prompt
+    assert "- inspect: inspect repository structure and relevant files" in prompt
+    assert "expected_skill" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_deepseek_selection_enables_thinking_without_forced_tool_choice(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    dataset = load_skill_selection_dataset(dataset_path, manifest_path)
+    server, state = _provider_server()
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="deepseek-v4-pro",
+        timeout=10.0,
+        max_retries=0,
+    )
+    try:
+        result = await _run_case(
+            client,
+            replace(
+                _config(
+                    tmp_path,
+                    manifest_path,
+                    dataset_path,
+                    run_id="skill-selection-deepseek-wire",
+                    required_case_count=4,
+                ),
+                model="deepseek-v4-pro",
+            ),
+            _load_catalog(manifest_path),
+            dataset.cases[0],
+            asyncio.Semaphore(1),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.call_completed is True
+    request = state.requests[0]
+    assert request["thinking"] == {"type": "enabled"}
+    assert "tool_choice" not in request
+    assert "parallel_tool_calls" not in request
+
+
 def test_cli_accepts_anthropic_compatible_client(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -373,6 +442,11 @@ async def test_provider_tool_selection_writes_gold_free_smoke_receipt(
         user_message = request["messages"][-1]
         assert set(user_message) == {"role", "content"}
         assert "expected_skill" not in user_message["content"]
+        assert request["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "Skill"},
+        }
+        assert request["parallel_tool_calls"] is False
     results_text = (
         tmp_path / "eval_results" / "skill-selection-smoke" / "selections.jsonl"
     ).read_text(encoding="utf-8")

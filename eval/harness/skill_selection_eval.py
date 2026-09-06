@@ -79,6 +79,7 @@ class SkillSelectionEvalConfig:
 @dataclass(frozen=True, slots=True)
 class _Catalog:
     names: frozenset[str]
+    descriptions: tuple[tuple[str, str], ...]
     sha256: str
     tool_schema: dict[str, Any]
 
@@ -163,6 +164,7 @@ def _load_catalog(path: str | Path) -> _Catalog:
     payload = json.loads(raw.decode("utf-8"))
     raw_skills = payload.get("skills", []) if isinstance(payload, dict) else []
     names: set[str] = set()
+    descriptions: dict[str, str] = {}
     for item in raw_skills:
         if not isinstance(item, dict):
             raise TypeError("skill manifest entries must be objects")
@@ -173,17 +175,40 @@ def _load_catalog(path: str | Path) -> _Catalog:
         if name in names:
             raise ValueError(f"duplicate skill name: {name}")
         names.add(name)
+        descriptions[name] = description
     if not names:
         raise ValueError("skill manifest must not be empty")
     registry = ToolRegistry(str(manifest_path.parent.parent), allowed_tools={"Skill"})
     skill_tool = registry.get("Skill")
     if skill_tool is None:
         raise ValueError("runtime Skill tool is unavailable")
+    # The runtime Skill tool accepts a free-form string for normal agent use.
+    # For the fixed selection contract, expose the same registry as a closed
+    # enum so providers cannot invent names or spend output on invalid values.
+    tool_schema = skill_tool.to_openai_schema()
+    parameters = tool_schema["function"]["parameters"]
+    properties = parameters.setdefault("properties", {})
+    name_schema = dict(properties.get("name") or {})
+    name_schema["type"] = "string"
+    name_schema["enum"] = sorted(names)
+    properties["name"] = name_schema
     return _Catalog(
         names=frozenset(names),
+        descriptions=tuple(sorted(descriptions.items())),
         sha256=_sha256_bytes(raw),
-        tool_schema=skill_tool.to_openai_schema(),
+        tool_schema=tool_schema,
     )
+
+
+def _selection_system_prompt(catalog: _Catalog) -> str:
+    """Build a readable registry view without adding evaluation labels."""
+    lines = [
+        _SYSTEM_PROMPT,
+        "Choose the Skill whose registered description best matches the request.",
+        "Registered Skill catalog:",
+    ]
+    lines.extend(f"- {name}: {description}" for name, description in catalog.descriptions)
+    return "\n".join(lines)
 
 
 def load_skill_selection_dataset(
@@ -296,7 +321,7 @@ def _evidence_scope(client: LLMClient) -> tuple[str, str, dict[str, str]]:
 
 def _prompt_pins(catalog: _Catalog) -> dict[str, str]:
     return {
-        "system_sha256": _sha256_text(_SYSTEM_PROMPT),
+        "system_sha256": _sha256_text(_selection_system_prompt(catalog)),
         "tool_schema_sha256": _sha256_bytes(
             json.dumps(
                 catalog.tool_schema,
@@ -408,6 +433,11 @@ def _selected_skill(response: ChatResponse, catalog: _Catalog) -> tuple[str, str
     return selected, ""
 
 
+def _uses_deepseek_selection_mode(client: LLMClient, model: str) -> bool:
+    endpoint = _endpoint_pin(client)
+    return model.lower().startswith("deepseek-") or endpoint["host"] == "api.deepseek.com"
+
+
 async def _run_case(
     client: LLMClient,
     config: SkillSelectionEvalConfig,
@@ -417,17 +447,40 @@ async def _run_case(
 ) -> _SelectionResult:
     async with semaphore:
         try:
+            deepseek_mode = _uses_deepseek_selection_mode(client, config.model)
+            request_options: dict[str, Any] = {
+                "temperature": 0.0,
+                "thinking_enabled": deepseek_mode,
+            }
+            if deepseek_mode:
+                # DeepSeek rejects tool_choice while thinking is enabled. Its
+                # automatic tool policy still emits the requested Skill call;
+                # _selected_skill keeps the exact-one-call contract strict.
+                request_options["parallel_tool_calls"] = None
+                request_options["reasoning_effort"] = "low"
+            else:
+                request_options.update(
+                    {
+                        "tool_choice": {
+                            "type": "function",
+                            "function": {"name": "Skill"},
+                        },
+                        "parallel_tool_calls": False,
+                    }
+                )
             response = await asyncio.wait_for(
                 client.chat(
                     ChatRequest(
                         model=config.model,
                         messages=[
-                            ChatMessage(role="system", content=_SYSTEM_PROMPT),
+                            ChatMessage(
+                                role="system",
+                                content=_selection_system_prompt(catalog),
+                            ),
                             ChatMessage(role="user", content=case.prompt),
                         ],
                         tools=[catalog.tool_schema],
-                        temperature=0.0,
-                        thinking_enabled=False,
+                        **request_options,
                     )
                 ),
                 timeout=config.timeout_s,

@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from orchestrator.config import is_thinking_enabled, read_env
 
@@ -25,6 +26,7 @@ from ..client import (
 
 # Reasoning models that accept the "reasoning_effort" parameter.
 _REASONING_MODEL_PATTERN = re.compile(r"^(o1|o3|o4|gpt-5)", re.IGNORECASE)
+_DEEPSEEK_MODEL_PATTERN = re.compile(r"^deepseek-", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -65,6 +67,14 @@ class OpenAIClient(LLMClient):
         }
         if request.tools:
             payload["tools"] = request.tools
+        if request.tool_choice is not None:
+            payload["tool_choice"] = request.tool_choice
+        if request.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = request.parallel_tool_calls
+        thinking_payload = self._deepseek_thinking_payload(
+            request, model=request.model or self.model
+        )
+        payload.update(thinking_payload)
         if self.max_tokens > 0:
             payload["max_tokens"] = self.max_tokens
         model = request.model or self.model
@@ -72,7 +82,10 @@ class OpenAIClient(LLMClient):
             request.thinking_enabled
             and request.reasoning_effort
             and is_thinking_enabled()
-            and OpenAIClient._is_reasoning_model(model)
+            and OpenAIClient._supports_reasoning_effort(
+                model, request.reasoning_effort
+            )
+            and thinking_payload.get("thinking", {}).get("type") != "disabled"
         ):
             payload["reasoning_effort"] = request.reasoning_effort
 
@@ -233,6 +246,14 @@ class OpenAIClient(LLMClient):
         }
         if request.tools:
             payload["tools"] = request.tools
+        if request.tool_choice is not None:
+            payload["tool_choice"] = request.tool_choice
+        if request.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = request.parallel_tool_calls
+        thinking_payload = self._deepseek_thinking_payload(
+            request, model=request.model or self.model
+        )
+        payload.update(thinking_payload)
         if self.max_tokens > 0:
             payload["max_tokens"] = self.max_tokens
         model = request.model or self.model
@@ -240,7 +261,10 @@ class OpenAIClient(LLMClient):
             request.thinking_enabled
             and request.reasoning_effort
             and is_thinking_enabled()
-            and OpenAIClient._is_reasoning_model(model)
+            and OpenAIClient._supports_reasoning_effort(
+                model, request.reasoning_effort
+            )
+            and thinking_payload.get("thinking", {}).get("type") != "disabled"
         ):
             payload["reasoning_effort"] = request.reasoning_effort
         return payload
@@ -276,6 +300,28 @@ class OpenAIClient(LLMClient):
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
 
+    def _deepseek_thinking_payload(
+        self, request: ChatRequest, *, model: str
+    ) -> dict[str, Any]:
+        """Serialize DeepSeek's explicit thinking policy.
+
+        DeepSeek defaults to thinking mode for V4 models, but its API rejects
+        ``tool_choice`` while thinking is enabled.  The skill-selection lane
+        deliberately requests one named tool, so an explicit disabled policy
+        is required even though the shared request model represents that as
+        ``thinking_enabled=False``.  Other OpenAI-compatible endpoints must
+        not receive this provider-specific field.
+        """
+        endpoint_host = (urlparse(self.base_url).hostname or "").lower()
+        is_deepseek = bool(_DEEPSEEK_MODEL_PATTERN.match(model)) or endpoint_host == "api.deepseek.com"
+        if not is_deepseek:
+            return {}
+        if request.tool_choice is not None or request.purpose == "session-title":
+            return {"thinking": {"type": "disabled"}}
+        if not request.thinking_enabled:
+            return {"thinking": {"type": "disabled"}}
+        return {"thinking": {"type": "enabled"}}
+
     @staticmethod
     def _is_reasoning_model(model: str) -> bool:
         """Return True when *model* accepts the ``reasoning_effort`` parameter.
@@ -283,6 +329,15 @@ class OpenAIClient(LLMClient):
         Reasoning models: o1 / o3 / o4 / gpt-5 family (prefix match).
         """
         return bool(model and _REASONING_MODEL_PATTERN.match(model))
+
+    @staticmethod
+    def _supports_reasoning_effort(model: str, effort: str) -> bool:
+        if OpenAIClient._is_reasoning_model(model):
+            return True
+        return bool(
+            _DEEPSEEK_MODEL_PATTERN.match(model)
+            and effort in {"low", "high", "max"}
+        )
 
     @staticmethod
     def _message_payload(message: ChatMessage) -> dict[str, Any]:
