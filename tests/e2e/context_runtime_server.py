@@ -14,9 +14,25 @@ from orchestrator.llm.client import (
 )
 from orchestrator.server import OrchestratorServer, ServerConfig, build_parser
 from orchestrator.runtime.hooks import HookResult
+from orchestrator.llm.providers.anthropic import AnthropicClient
 
 _MARKER_PATH = "runtime/context-recovery.txt"
 _TOOL_CALL_ID = "context-write-1"
+
+
+def build_e2e_llm() -> LLMClient:
+    """Build the deterministic double or an explicitly requested real client."""
+    mode = os.environ.get("CODE_AGENT_E2E_PROVIDER", "deterministic").strip().lower()
+    if mode in {"", "deterministic", "fake"}:
+        return DeterministicContextLLM()
+    if mode in {"anthropic", "real"}:
+        client = AnthropicClient.from_env()
+        if client is None:
+            raise RuntimeError(
+                "real provider credentials are required for CODE_AGENT_E2E_PROVIDER=anthropic"
+            )
+        return client
+    raise ValueError(f"unsupported CODE_AGENT_E2E_PROVIDER: {mode!r}")
 
 
 class DeterministicContextLLM(LLMClient):
@@ -160,19 +176,26 @@ def main() -> None:
     route_receipt = os.environ.get("CODE_AGENT_PROVIDER_ROUTE_E2E_RECEIPT", "").strip()
     if route_receipt:
         route_path = Path(route_receipt).resolve()
+        real_route = os.environ.get("CODE_AGENT_E2E_PROVIDER", "").strip().lower() in {
+            "anthropic",
+            "real",
+        }
 
         def record_route(event) -> None:
-            if event.phase != "model_before" or route_path.exists():
+            should_record = event.phase == "model_before" and not route_path.exists()
+            if real_route and event.phase == "model_after":
+                should_record = True
+            if not should_record:
                 return
-            route_path.write_text(
-                json.dumps(
-                    {"phase": event.phase, **event.metadata},
-                    ensure_ascii=False,
-                    sort_keys=True,
+            with route_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(
+                    json.dumps(
+                        {"phase": event.phase, **event.metadata},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
                 )
-                + "\n",
-                encoding="utf-8",
-            )
 
         app.loop_plugins.register("e2e-route-recorder", record_route)
     hook_receipt = os.environ.get("CODE_AGENT_HOOK_E2E_RECEIPT", "").strip()
@@ -195,13 +218,13 @@ def main() -> None:
         app.hooks.register("e2e-hook-post-tool", "post_tool", record_hook)
         app.hooks.register("e2e-hook-stopping", "turn_stopping", record_hook)
         app.hooks.register("e2e-hook-session-end", "session_end", record_hook)
-    deterministic = DeterministicContextLLM()
-    app.llm = deterministic
-    app.fast_llm = deterministic
+    llm = build_e2e_llm()
+    app.llm = llm
+    app.fast_llm = llm
     app.provider_clients = (
-        {"route-e2e": deterministic}
+        {"route-e2e": llm}
         if route_receipt
-        else {"default": deterministic}
+        else {"default": llm}
     )
     app.serve()
 

@@ -713,6 +713,7 @@ class ConversationRunner:
                     **self._route_metadata(),
                     "text_length": len(response.text),
                     "tool_call_count": len(response.tool_calls),
+                    "model_identity": dict(response.model_identity),
                 },
             )
             self._write_graph_checkpoint(

@@ -152,3 +152,47 @@ def test_runner_dispatches_ordered_lifecycle_and_contains_plugin_failure(tmp_pat
     ) * len(observed)
     assert all("private marker" not in str(error) for error in runner.loop_plugin_errors)
     assert llm.calls == 2
+
+
+def test_runner_emits_provider_identity_on_model_after(tmp_path):
+    class IdentityLLM(_PluginLoopLLM):
+        async def chat(self, request):
+            self.calls += 1
+            return ChatResponse(
+                text="IDENTITY_OK",
+                usage=Usage(input_tokens=2, output_tokens=1),
+                model_identity={
+                    "requested_model": "relay-model",
+                    "reported_model": "relay-model-build",
+                    "response_id": "response-123",
+                    "system_fingerprint": "fp-123",
+                    "identity_verified": True,
+                },
+            )
+
+    observed = []
+    registry = AgentLoopPluginRegistry()
+    registry.register("recorder", lambda event: observed.append(event))
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=IdentityLLM(),
+        tool_registry=ToolRegistry(),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        loop_plugins=registry,
+    )
+
+    responses = list(runner.run("identity", iter([]), session_id="identity-session"))
+
+    assert responses[-1].done.success is True
+    model_after = next(event for event in observed if event.phase == "model_after")
+    assert model_after.metadata["model_identity"] == {
+        "requested_model": "relay-model",
+        "reported_model": "relay-model-build",
+        "response_id": "response-123",
+        "system_fingerprint": "fp-123",
+        "identity_verified": True,
+    }
