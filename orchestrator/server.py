@@ -66,7 +66,8 @@ class OrchestratorServer:
         self._otel_shutdown = configure_otel()
         self.project_root = str(Path(self.config.project_root).resolve())
         self.working_dir = str(Path(self.config.working_dir).resolve())
-        self.graph = build_graph()
+        checkpoint_path = Path(self.project_root) / ".agent" / "checkpoints.sqlite"
+        self.graph = build_graph(checkpoint_path=checkpoint_path)
         self.llm = build_default_client()
         self.provider_clients = _build_provider_clients(self.llm)
         self.provider_router = build_provider_router(self.provider_clients)
@@ -100,6 +101,7 @@ class OrchestratorServer:
             if self._closed:
                 return
             self._closed = True
+            self.graph.close()
             self.context_store.close()
             self._otel_shutdown()
 

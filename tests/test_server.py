@@ -1144,6 +1144,19 @@ def test_compact_forwards_structured_tool_history(monkeypatch, tmp_path) -> None
         server.stop(grace=0)
 
 
+def test_server_persists_langgraph_checkpoint_in_project_agent_dir(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(
+        ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory"))
+    )
+    try:
+        checkpoint = tmp_path / ".agent" / "checkpoints.sqlite"
+        assert checkpoint.exists()
+        assert app.graph._checkpointer is not None
+    finally:
+        app.close()
+
+
 def test_converse_waits_while_same_session_is_compacting(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
