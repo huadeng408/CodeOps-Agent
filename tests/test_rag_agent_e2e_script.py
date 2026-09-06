@@ -110,6 +110,8 @@ def test_runtime_ignores_stale_docker_host_for_desktop_linux() -> None:
     )
     if result.returncode != 0 and "Docker CLI was not found" in result.stderr:
         pytest.skip("Docker CLI is unavailable")
+    if result.returncode != 0 and "timed out waiting for Docker daemon" in result.stderr:
+        pytest.skip("Docker daemon is unavailable")
     assert result.returncode == 0, result.stderr
     assert "ready: Docker daemon" in result.stdout
     # Docker Desktop exposes desktop-linux on Windows/WSL. Hosted Linux

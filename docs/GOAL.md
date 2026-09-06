@@ -1,6 +1,20 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-02 快照）
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-07 当前快照）
+
+## 当前验证快照（2026-09-07）
+
+当前 `HEAD` 为 `c59d8805`。P0/P1/P2 的代码路径已完成定向验证：Python
+上下文、记忆、工作流、工具和 Agent Loop 测试 `68 passed, 1 skipped`；生产
+Go/Python 跨进程 E2E 的 Agent Loop、Extension、Background Job、Session
+Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool Spill
+共 `8 passed`。Session Control 恢复测试同时修复了一个由进程终止前在途事件
+追加造成的计数竞态，并继续校验 hash chain、连续序列和 surface projection。
+
+以下发布指标仍保持 `BLOCKED`，不能由上述 deterministic provider 或 fixture
+替代：真实外部 provider 跨进程调用、Docker/WSL2 受限执行、Phoenix live trace、
+官方 SWE-bench/Terminal-Bench scorer，以及 8 Worker/200 任务/30 次真实进程
+故障的恢复率基准。Docker daemon 不可用时，相关 E2E 必须记录为 `BLOCKED`。
 
 本项目的验收标准来自当前任务的 active Goal。历史设计地图、进展日志、
 外部记忆和旧计划只用于追溯，不是启动入口或执行权威。

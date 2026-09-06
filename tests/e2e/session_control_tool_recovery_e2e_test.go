@@ -114,7 +114,11 @@ func TestProductionSessionControlToolsRecoverAcrossProcessTermination(t *testing
 	if err != nil {
 		t.Fatalf("read child events: %v", err)
 	}
-	if len(parentEvents) != parentEventCount || len(childEvents) < 10 {
+	// The first agent may durably append the fork receipt after the initial
+	// session/state poll returns and before the process is terminated. Recovery
+	// must retain every event observed at the poll boundary, so an exact count
+	// here would turn that valid in-flight append into a race.
+	if len(parentEvents) < parentEventCount || len(childEvents) < 10 {
 		t.Fatalf("recovered event counts parent=%d/%d child=%d", len(parentEvents), parentEventCount, len(childEvents))
 	}
 	if err := log.Verify(context.Background(), parentID); err != nil {
