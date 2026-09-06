@@ -4,8 +4,8 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为 `787b720dbd486a654cb2e24860b2a05e64c4e8b0`。P0/P1/P2 的代码路径已完成定向验证：Python
-上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2214 passed, 16 skipped`；Go
+本轮代码验证基线为 `912ec3e8`。P0/P1/P2 的代码路径已完成定向验证：Python
+上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2220 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
 Go/Python 跨进程 E2E 的 Agent Loop、Extension、Background Job、Session
@@ -15,7 +15,9 @@ Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool S
 
 本轮将 `JobStart` 接入可选的 `sandbox.StreamingRunner`：Docker/WSL2 后台作业
 沿用受限 workspace、网络和资源边界，并保留增量 stdout/stderr、stdin、取消与回收；
-仅在配置了同步 sandbox 而没有 streaming 能力时继续 fail-closed。当前机器仍未提供
+仅在配置了同步 sandbox 而没有 streaming 能力时继续 fail-closed。模型流式响应现在
+同时记录 provider model identity、response ID 和 fingerprint，避免 receipt 与实际
+模型漂移脱节。当前机器仍未提供
 可用 Docker daemon 或 WSL2 内 Docker，因此该路径只有契约和本地回归证据，不能标为
 真实 Docker/WSL2 E2E。
 
