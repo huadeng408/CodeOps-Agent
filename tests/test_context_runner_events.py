@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -217,6 +221,61 @@ def test_normal_conversation_resumes_pending_checkpoint_turn(tmp_path: Path) -> 
     assert resumed[0].payload["resume_turn"] == 3
     assert "continue" not in repr(resumed[0].payload)
     app.close()
+
+
+def test_normal_conversation_checkpoint_survives_python_process_restart(tmp_path: Path) -> None:
+    script = Path(__file__).parent / "e2e" / "conversation_checkpoint_process.py"
+    environment = os.environ.copy()
+    repository_root = Path(__file__).resolve().parents[1]
+    environment["PYTHONPATH"] = str(repository_root)
+    marker = tmp_path / "checkpoint.marker"
+
+    first = subprocess.Popen(
+        [
+            sys.executable,
+            str(script),
+            "--root",
+            str(tmp_path / "project"),
+            "--marker",
+            str(marker),
+        ],
+        cwd=repository_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not marker.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), first.stderr.read() if first.poll() is not None else ""
+    finally:
+        if first.poll() is None:
+            first.kill()
+        first.wait(timeout=10)
+
+    resumed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--root",
+            str(tmp_path / "project"),
+            "--marker",
+            str(marker),
+            "--resume",
+        ],
+        cwd=repository_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+
+    assert resumed.stdout.strip().splitlines()[-1] == (
+        '{"checkpoint_phase": "model_after", "done": true, "turn": 3}'
+    )
 
 
 def test_managed_grpc_server_closes_context_store_on_stop(tmp_path: Path) -> None:
