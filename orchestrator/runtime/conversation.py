@@ -2732,11 +2732,11 @@ class ConversationRunner:
 
     @staticmethod
     def _next_tool_results(request_iterator, expected_ids: list[str]):
-        expected_ids = [tool_call_id for tool_call_id in expected_ids if tool_call_id]
+        expected_ids = list(dict.fromkeys(tool_call_id for tool_call_id in expected_ids if tool_call_id))
         if not expected_ids:
             return None
+        expected_set = set(expected_ids)
         results: dict[str, object] = {}
-        fallback_index = 0
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "tool_result":
@@ -2745,9 +2745,13 @@ class ConversationRunner:
                     continue
                 tool_call_id = str(getattr(tool_result, "tool_call_id", "") or "").strip()
                 if not tool_call_id:
-                    if fallback_index < len(expected_ids):
-                        tool_call_id = expected_ids[fallback_index]
-                        fallback_index += 1
+                    tool_call_id = next(
+                        (expected_id for expected_id in expected_ids if expected_id not in results),
+                        "",
+                    )
+                elif tool_call_id not in expected_set or tool_call_id in results:
+                    # A late or foreign result must not satisfy another call.
+                    continue
                 if not tool_call_id:
                     continue
                 results[tool_call_id] = tool_result

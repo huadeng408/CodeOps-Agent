@@ -174,6 +174,26 @@ def test_memory_manager_allows_ordinary_credential_discussion_names(tmp_path: Pa
         assert saved.name == name
 
 
+def test_memory_manager_renaming_removes_stale_file_after_restart(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    manager = MemoryManager(str(memory_dir))
+
+    saved = manager.save(
+        Memory(id="memory-1", name="original-note", content="Keep one durable note.")
+    )
+    renamed = manager.save(
+        Memory(id=saved.id, name="renamed-note", content=saved.content, created_at=saved.created_at)
+    )
+
+    assert not (memory_dir / "original-note.md").exists()
+    assert (memory_dir / "renamed-note.md").exists()
+    assert [item.name for item in manager.list()] == ["renamed-note"]
+
+    restarted = MemoryManager(str(memory_dir))
+    assert [item.name for item in restarted.list()] == ["renamed-note"]
+    assert restarted.get(saved.id).name == "renamed-note"
+
+
 def test_memory_manager_accepts_absolute_paths_in_ordinary_notes(tmp_path: Path) -> None:
     manager = MemoryManager(str(tmp_path / "memory"))
 

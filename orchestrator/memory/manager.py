@@ -152,13 +152,20 @@ class MemoryManager:
         )
         item.content = safe_content
         item.tags = safe_tags
+        stale_paths = {
+            self.memory_dir / f"{existing.name}.md"
+            for existing in self._items
+            if existing.id == item.id and existing.name != item.name
+        }
         _write_memory_file(self.memory_dir / f"{item.name}.md", item)
-        for index, existing in enumerate(self._items):
-            if existing.name == item.name or existing.id == item.id:
-                self._items[index] = item
-                break
-        else:
-            self._items.append(item)
+        for path in stale_paths:
+            path.unlink(missing_ok=True)
+        self._items = [
+            existing
+            for existing in self._items
+            if existing.name != item.name and existing.id != item.id
+        ]
+        self._items.append(item)
         self._items = _sort_memories(self._items)
         self._write_index()
 

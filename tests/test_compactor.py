@@ -293,6 +293,29 @@ def test_select_compaction_range_keeps_parallel_tool_calls_together() -> None:
     assert [message["tool_call_id"] for message in retained[1:4:2]] == ["call-1", "call-2"]
 
 
+def test_tool_result_batch_maps_anonymous_results_to_unresolved_calls() -> None:
+    messages = iter(
+        [
+            orchestrator_pb2.HarnessMessage(
+                tool_result=orchestrator_pb2.ToolResult(
+                    tool_name="Read", tool_call_id="call-1", output="first"
+                )
+            ),
+            orchestrator_pb2.HarnessMessage(
+                tool_result=orchestrator_pb2.ToolResult(
+                    tool_name="Grep", output="second"
+                )
+            ),
+        ]
+    )
+
+    results = ConversationRunner._next_tool_results(messages, ["call-1", "call-2"])
+
+    assert results is not None
+    assert set(results) == {"call-1", "call-2"}
+    assert results["call-2"].output == "second"
+
+
 def test_forced_compaction_honors_explicit_retain_ratio() -> None:
     compactor = Compactor(context_window=1_000, retain_ratio=0.16)
     messages = [

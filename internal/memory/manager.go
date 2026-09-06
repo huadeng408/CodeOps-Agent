@@ -250,21 +250,29 @@ func (m *Manager) saveLocked(item Memory) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
+	stalePaths := make([]string, 0)
+	for _, existing := range m.items {
+		if existing.ID == item.ID && existing.Name != item.Name {
+			stalePaths = append(stalePaths, m.pathFor(existing.Name))
+		}
+	}
 	if err := writeMemoryFile(m.pathFor(item.Name), item); err != nil {
 		return err
 	}
-
-	replaced := false
-	for i, existing := range m.items {
-		if existing.Name == item.Name || existing.ID == item.ID {
-			m.items[i] = item
-			replaced = true
-			break
+	for _, path := range stalePaths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(m.pathFor(item.Name))
+			return err
 		}
 	}
-	if !replaced {
-		m.items = append(m.items, item)
+	filtered := m.items[:0]
+	for _, existing := range m.items {
+		if existing.Name == item.Name || existing.ID == item.ID {
+			continue
+		}
+		filtered = append(filtered, existing)
 	}
+	m.items = append(filtered, item)
 	sortMemories(m.items)
 	return m.writeIndex()
 }

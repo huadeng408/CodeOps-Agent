@@ -45,6 +45,34 @@ func TestMemoryManagerPersistsMarkdownMemories(t *testing.T) {
 	}
 }
 
+func TestMemoryManagerRenamingRemovesStaleFileAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	manager := memory.NewManager(dir)
+
+	saved, err := manager.Save(memory.Memory{ID: "memory-1", Name: "original-note", Content: "Keep one durable note."})
+	if err != nil {
+		t.Fatalf("save original memory: %v", err)
+	}
+	if _, err := manager.Save(memory.Memory{ID: saved.ID, Name: "renamed-note", Content: saved.Content, CreatedAt: saved.CreatedAt}); err != nil {
+		t.Fatalf("save renamed memory: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "original-note.md")); !os.IsNotExist(err) {
+		t.Fatalf("stale memory file should be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "renamed-note.md")); err != nil {
+		t.Fatalf("renamed memory file missing: %v", err)
+	}
+	if got := manager.List(); len(got) != 1 || got[0].Name != "renamed-note" {
+		t.Fatalf("expected one renamed memory, got %+v", got)
+	}
+
+	reloaded := memory.NewManager(dir)
+	if got := reloaded.List(); len(got) != 1 || got[0].Name != "renamed-note" {
+		t.Fatalf("expected one renamed memory after restart, got %+v", got)
+	}
+}
+
 func TestMemoryManagerDeletesMemories(t *testing.T) {
 	dir := t.TempDir()
 	manager := memory.NewManager(dir)
