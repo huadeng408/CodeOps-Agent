@@ -16,6 +16,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # The release gate accepts a receipt produced on the immediate
+          # parent when the current commit only promotes curated evidence.
+          # Keep history available so that source-pin validation is identical
+          # locally and on the hosted runner.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
