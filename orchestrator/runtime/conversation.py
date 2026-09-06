@@ -25,6 +25,7 @@ from orchestrator.context import (
     load_git_diff_context,
 )
 from orchestrator.graph.main_graph import MainGraph
+from orchestrator.graph.nodes import GraphState
 from orchestrator.identity import ActorIdentity, ActorIdentityError
 from orchestrator.llm.client import (
     COMPLEXITY_FAST_THRESHOLD,
@@ -570,6 +571,14 @@ class ConversationRunner:
                         "allow_tools": True,
                     },
                 )
+                self._write_graph_checkpoint(
+                    session_id,
+                    phase="model_before",
+                    turn=turn,
+                    done=False,
+                    tool_rounds=turn - 1,
+                    tool_request_count=0,
+                )
                 yield from self._stream_chat(
                     request_messages,
                     response_box=response_box,
@@ -613,6 +622,15 @@ class ConversationRunner:
                     "text_length": len(response.text),
                     "tool_call_count": len(response.tool_calls),
                 },
+            )
+            self._write_graph_checkpoint(
+                session_id,
+                phase="model_after",
+                turn=turn,
+                done=not response.tool_calls,
+                tool_rounds=turn - 1,
+                tool_request_count=len(response.tool_calls),
+                response=response.text,
             )
             post_model = self._dispatch_hook(
                 "post_model",
@@ -875,6 +893,16 @@ class ConversationRunner:
                         return
                     messages.append(self._tool_result_message(call_id, call.name, result))
                     self._persist_tool_result(session_id, call, result)
+                    self._write_graph_checkpoint(
+                        session_id,
+                        phase="tool_after",
+                        turn=turn,
+                        done=False,
+                        tool_rounds=turn,
+                        tool_request_count=1,
+                        tool_result_status="failed" if result.error else "completed",
+                        tool_call_id=call_id,
+                    )
                     self._emit_loop_event(
                         "tool_after",
                         session_id=session_id,
@@ -1332,6 +1360,16 @@ class ConversationRunner:
                 tool_message = self._tool_result_message(call_id, call.name, result)
                 messages.append(tool_message)
                 self._persist_tool_result(session_id, call, result)
+                self._write_graph_checkpoint(
+                    session_id,
+                    phase="tool_after",
+                    turn=turn,
+                    done=False,
+                    tool_rounds=turn,
+                    tool_request_count=1,
+                    tool_result_status="failed" if result.error else "completed",
+                    tool_call_id=call_id,
+                )
                 self._persist_file_change(session_id, call, result)
                 self._emit_loop_event(
                     "tool_after",
@@ -1563,6 +1601,20 @@ class ConversationRunner:
         yield self._tool_request(fallback_call, self._call_arguments_json(fallback_call))
         tool_result = self._next_tool_result(request_iterator, self._tool_call_id(fallback_call))
         self._persist_tool_result(session_id, fallback_call, tool_result)
+        self._write_graph_checkpoint(
+            session_id,
+            phase="tool_after",
+            turn=1,
+            done=False,
+            tool_rounds=1,
+            tool_request_count=1,
+            tool_result_status=(
+                "missing"
+                if tool_result is None
+                else ("failed" if tool_result.error else "completed")
+            ),
+            tool_call_id=self._tool_call_id(fallback_call),
+        )
         post_tool = self._dispatch_hook(
             "post_tool",
             session_id=session_id,
@@ -2377,6 +2429,16 @@ class ConversationRunner:
                     return consecutive_errors, True
                 tool_message = self._tool_result_message(call_id, call.name, result)
                 self._persist_tool_result(session_id, call, result)
+                self._write_graph_checkpoint(
+                    session_id,
+                    phase="tool_after",
+                    turn=turn,
+                    done=False,
+                    tool_rounds=turn,
+                    tool_request_count=len(request_calls),
+                    tool_result_status="failed" if result.error else "completed",
+                    tool_call_id=call_id,
+                )
                 self._persist_file_change(session_id, call, result)
                 key = self._tool_cache_key(call)
                 if key:
@@ -2634,6 +2696,45 @@ class ConversationRunner:
             self.layered_context.store.append(session_id, kind, payload)
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             self._context_persistence_error = type(exc).__name__
+
+    def _write_graph_checkpoint(
+        self,
+        session_id: str,
+        *,
+        phase: str,
+        turn: int,
+        done: bool,
+        tool_rounds: int,
+        tool_request_count: int,
+        response: str = "",
+        tool_result_status: str = "",
+        tool_call_id: str = "",
+    ) -> None:
+        """Persist the typed conversation lifecycle state for recovery."""
+
+        if not session_id.strip():
+            return
+        state = GraphState(
+            metadata={
+                "session_id": session_id,
+                "phase": phase,
+                "turn": int(turn),
+                "model": str(getattr(self.llm, "model", "")),
+                "response_sha256": self._digest_value(response) if response else "",
+                "tool_request_count": int(tool_request_count),
+                "tool_result_status": tool_result_status,
+                "tool_call_id": tool_call_id,
+            },
+            tool_rounds=max(0, int(tool_rounds)),
+            done=bool(done),
+            next_node="done" if done else "route",
+        )
+        try:
+            self.graph.write_checkpoint(state, thread_id=session_id)
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            # Checkpointing is supplementary to the event store.  A failed
+            # graph write must not turn a usable model response into a crash.
+            return
 
     def _persist_tool_call(self, session_id: str, call: ToolCall) -> None:
         self._persist_event(

@@ -80,6 +80,24 @@ class MainGraph:
             return None
         return _coerce_state(snapshot.values)
 
+    def write_checkpoint(self, state: GraphState, *, thread_id: str) -> None:
+        """Persist a typed state snapshot without executing graph nodes.
+
+        ConversationRunner has a richer model/tool lifecycle than the small
+        built-in graph.  This adapter lets that lifecycle share the same
+        durable LangGraph checkpoint store while keeping checkpoint writes
+        side-effect free.
+        """
+
+        if self._checkpointer is None:
+            raise RuntimeError("graph checkpointing is not configured")
+        if not thread_id.strip():
+            raise ValueError("thread_id is required for graph checkpoints")
+        self._compiled.update_state(
+            {"configurable": {"thread_id": thread_id}},
+            asdict(state),
+        )
+
     def close(self) -> None:
         if self._connection is not None:
             self._connection.close()

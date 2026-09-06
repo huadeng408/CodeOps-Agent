@@ -145,6 +145,34 @@ def test_conversation_runner_persists_plan_tool_diff_and_final_events(tmp_path: 
     app.context_store.close()
 
 
+def test_normal_conversation_writes_typed_graph_checkpoint(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    responses = list(runner.run("hello", iter(()), session_id="graph-session"))
+
+    assert responses[-1].done.success is True
+    checkpoint = app.graph.get_checkpoint("graph-session")
+    assert checkpoint is not None
+    assert checkpoint.metadata["session_id"] == "graph-session"
+    assert checkpoint.metadata["phase"] == "model_after"
+    assert checkpoint.done is True
+    app.close()
+
+
 def test_managed_grpc_server_closes_context_store_on_stop(tmp_path: Path) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
