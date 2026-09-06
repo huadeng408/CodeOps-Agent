@@ -387,21 +387,20 @@ class RedisContextStore:
     ) -> list[ContextEvent]:
         session_id = _session_id(session_id)
         cursor = max(0, int(after_sequence))
-        raw = list(self.client.lrange(self._events_key(session_id), 0, -1))
-        all_events = [
-            _event_from_wire(value, fallback_sequence=index + 1)
-            for index, value in enumerate(raw)
-        ]
-        selected = [event for event in all_events if event.sequence > cursor]
-        if limit is not None:
-            selected = selected[: max(1, int(limit))]
+        start = cursor
+        end = -1 if limit is None else cursor + max(1, int(limit)) - 1
+        raw = list(self.client.lrange(self._events_key(session_id), start, end))
+        selected: list[ContextEvent] = []
+        for index, value in enumerate(raw):
+            event = _event_from_wire(value, fallback_sequence=start + index + 1)
+            if event.sequence > cursor:
+                selected.append(event)
         anchor = ""
         if selected:
-            predecessor = next(
-                (event for event in all_events if event.sequence == selected[0].sequence - 1),
-                None,
+            previous_raw = self.client.lrange(
+                self._events_key(session_id), selected[0].sequence - 2, selected[0].sequence - 2
             )
-            anchor = predecessor.checksum if predecessor is not None else ""
+            anchor = _event_from_wire(previous_raw[0]).checksum if previous_raw else ""
         _verify_event_chain(selected, anchor=anchor)
         return selected
 
