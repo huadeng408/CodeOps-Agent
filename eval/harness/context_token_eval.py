@@ -116,6 +116,10 @@ def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _safe_relative_path(value: str) -> Path:
     path = Path(value)
     if (
@@ -539,6 +543,15 @@ async def run_context_token_eval(
             "outcome_regressed": outcome_regressed,
         },
         "failures": failures,
+        "raw_evidence": {
+            "storage_scope": "LOCAL_IGNORED",
+            "artifact_root": f"{Path(config.artifact_root).as_posix().rstrip('/')}/{config.run_id}",
+            "task_sha256": task.sha256,
+            "corpus_sha256": corpus_sha256,
+            "arm_results_sha256": _sha256_file(artifacts.root / "arm-results.json"),
+            "context_database_sha256": _sha256_file(artifacts.root / "context.sqlite"),
+            "run_manifest_sha256": _sha256_file(artifacts.root / "run-manifest.json"),
+        },
         "artifacts": {
             "arm_results": "arm-results.json",
             "checksum_file": "checksums.sha256",

@@ -49,6 +49,8 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     assert len(receipt["trace_id"]) == 32
     assert receipt["exit_code"] == 2
     assert receipt["run_id"] == "fault-test"
+    assert receipt["raw_evidence"]["artifact_root"]
+    assert receipt["raw_evidence"]["task_manifest_sha256"] == receipt["data_pin"]["task_manifest_sha256"]
     assert receipt["budget"]["worker_count"] == 2
     assert receipt["budget"]["task_count"] == 6
     assert receipt["budget"]["lease_ttl_s"] == 0.5

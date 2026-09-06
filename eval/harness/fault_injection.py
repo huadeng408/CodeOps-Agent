@@ -307,6 +307,16 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             },
             "sqlite": sqlite_summary,
             "failures": failures,
+            "raw_evidence": {
+                "storage_scope": "LOCAL_IGNORED",
+                "artifact_root": f"{Path(config.artifact_root).as_posix().rstrip('/')}/{config.run_id}",
+                "task_manifest_sha256": data_pin,
+                "task_manifest_file_sha256": _sha256_file(artifacts.root / "task-manifest.json"),
+                "fault_events_sha256": _sha256_file(artifacts.root / "fault-events.json"),
+                "process_exits_sha256": _sha256_file(artifacts.root / "process-exits.json"),
+                "sqlite_events_sha256": _sha256_file(artifacts.root / "sqlite-events.json"),
+                "workflow_sqlite_sha256": _sha256_file(artifacts.root / "workflow.sqlite"),
+            },
             "artifacts": {"checksum_file": "checksums.sha256", "sqlite_file": "workflow.sqlite"},
         }
         artifacts.write("receipt.json", receipt)
@@ -332,6 +342,10 @@ def verify_receipt(receipt_root: str | Path) -> list[str]:
         return artifacts.verify_checksums()
     except (OSError, ValueError) as exc:
         return [f"invalid:{exc}"]
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _assign_tasks(task_ids: list[str], worker_count: int) -> dict[int, list[str]]:

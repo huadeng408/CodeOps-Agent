@@ -304,6 +304,9 @@ def test_cli_compares_provider_reported_tokens_with_locked_inputs(
     assert receipt["comparison"]["outcome_regressed"] is False
     assert receipt["data_pin"]["task_sha256"]
     assert receipt["data_pin"]["corpus_sha256"]
+    assert receipt["raw_evidence"]["artifact_root"]
+    assert receipt["raw_evidence"]["task_sha256"] == receipt["data_pin"]["task_sha256"]
+    assert receipt["raw_evidence"]["corpus_sha256"] == receipt["data_pin"]["corpus_sha256"]
     assert receipt["prompt_pins"]["task_sha256"]
     serialized_receipt = json.dumps(receipt, sort_keys=True)
     assert '"expected"' not in serialized_receipt
