@@ -275,6 +275,7 @@ class ConversationRunner:
     _stopping_hook_dispatched: bool = field(default=False, init=False, repr=False)
     _state_machine: PlanTodoStateMachine | None = field(default=None, init=False, repr=False)
     _active_actor: ActorIdentity | None = field(default=None, init=False, repr=False)
+    _active_history_digest: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -330,7 +331,12 @@ class ConversationRunner:
             for item in self._loop_plugin_metadata
         )
 
-    def load_checkpoint(self, session_id: str) -> ConversationCheckpoint | None:
+    def load_checkpoint(
+        self,
+        session_id: str,
+        *,
+        history_digest: str = "",
+    ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
         Message bodies are deliberately not reconstructed here.  They belong
@@ -352,6 +358,9 @@ class ConversationRunner:
         checkpoint_session = str(metadata.get("session_id", "")).strip()
         if checkpoint_session and checkpoint_session != session_id:
             raise ValueError("checkpoint session id does not match request")
+        expected_history_digest = str(metadata.get("history_sha256", "")).strip()
+        if expected_history_digest and history_digest and expected_history_digest != history_digest:
+            raise ValueError("checkpoint history does not match request")
         phase = str(metadata.get("phase", "")).strip()
         if phase not in {"model_before", "model_after", "tool_after"}:
             return ConversationCheckpoint(
@@ -523,6 +532,7 @@ class ConversationRunner:
                 for context in self._pending_hook_context
             )
             self._pending_hook_context.clear()
+        self._active_history_digest = self._digest_value(history or [])
         if self.layered_context is not None and session_id.strip():
             self._persist_event(
                 session_id,
@@ -532,7 +542,10 @@ class ConversationRunner:
                     "request_sha256": self._digest_value(user_text),
                 },
             )
-        checkpoint = self.load_checkpoint(session_id)
+        checkpoint = self.load_checkpoint(
+            session_id,
+            history_digest=self._active_history_digest,
+        )
         start_turn = 1
         if checkpoint is not None and checkpoint.resumable:
             start_turn = min(self.max_tool_rounds, checkpoint.next_turn)
@@ -2798,6 +2811,7 @@ class ConversationRunner:
                 "tool_request_count": int(tool_request_count),
                 "tool_result_status": tool_result_status,
                 "tool_call_id": tool_call_id,
+                "history_sha256": self._active_history_digest,
             },
             tool_rounds=max(0, int(tool_rounds)),
             done=bool(done),

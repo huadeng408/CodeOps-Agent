@@ -223,6 +223,50 @@ def test_normal_conversation_resumes_pending_checkpoint_turn(tmp_path: Path) -> 
     app.close()
 
 
+def test_normal_conversation_rejects_checkpoint_from_different_history(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "mismatched-session",
+                "phase": "model_before",
+                "turn": 1,
+                "history_sha256": ConversationRunner._digest_value(
+                    [{"role": "user", "content": "original"}]
+                ),
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="mismatched-session",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint history does not match request"):
+        list(
+            runner.run(
+                "continue",
+                iter(()),
+                session_id="mismatched-session",
+                history=[{"role": "user", "content": "different"}],
+            )
+        )
+    app.close()
+
+
 def test_normal_conversation_checkpoint_survives_python_process_restart(tmp_path: Path) -> None:
     script = Path(__file__).parent / "e2e" / "conversation_checkpoint_process.py"
     environment = os.environ.copy()
