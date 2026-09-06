@@ -18,12 +18,14 @@ def _provider_server(
     *,
     provider: str = "openai",
     input_token_values: tuple[int, int] = (1_000, 200),
+    cached_input_token_values: tuple[int, int] = (0, 0),
     output_values: tuple[dict[str, object], dict[str, object]] | None = None,
     reported_models: tuple[str, str] = ("locked-model", "locked-model"),
     fail_from_request: int | None = None,
 ):
     requests: list[dict[str, object]] = []
     input_tokens = iter(input_token_values)
+    cached_input_tokens = iter(cached_input_token_values)
     outputs = iter(
         output_values
         or (
@@ -57,6 +59,7 @@ def _provider_server(
                     ],
                     "usage": {
                         "input_tokens": next(input_tokens),
+                        "cache_read_input_tokens": next(cached_input_tokens),
                         "output_tokens": 8,
                     },
                 }
@@ -310,6 +313,42 @@ def test_cli_compares_provider_reported_tokens_with_locked_inputs(
     assert (
         RunArtifacts("context-token-test", tmp_path / "eval_results").verify_checksums()
         == []
+    )
+
+
+def test_context_comparison_counts_cached_input_tokens(tmp_path: Path) -> None:
+    """Provider cache hits remain part of the context sent to the model."""
+    server, _ = _provider_server(
+        provider="anthropic",
+        input_token_values=(142, 708),
+        cached_input_token_values=(21_248, 0),
+    )
+    try:
+        completed = _run_cli(
+            tmp_path,
+            server,
+            provider="anthropic",
+            run_id="context-token-cached-input",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0, completed.stderr
+    receipt = json.loads(
+        (
+            tmp_path
+            / "eval_results"
+            / "context-token-cached-input"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["arms"]["baseline"]["provider_input_tokens"] == 142
+    assert receipt["arms"]["baseline"]["cached_input_tokens"] == 21_248
+    assert receipt["comparison"]["baseline_input_token_denominator"] == 21_390
+    assert receipt["comparison"]["layered_input_token_denominator"] == 708
+    assert receipt["comparison"]["input_token_reduction"] == pytest.approx(
+        (21_390 - 708) / 21_390
     )
 
 

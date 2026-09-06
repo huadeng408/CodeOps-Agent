@@ -84,6 +84,12 @@ class _ArmResult:
     response_id_sha256: str
     system_fingerprint: str
 
+    @property
+    def effective_input_tokens(self) -> int:
+        """Count both uncached and provider-cache-hit input tokens."""
+
+        return self.provider_input_tokens + self.cached_input_tokens
+
     def receipt_value(self) -> dict[str, Any]:
         return {
             "call_completed": self.call_completed,
@@ -453,9 +459,10 @@ async def run_context_token_eval(
         if both_calls_completed and "" not in fingerprints and len(fingerprints) == 1
         else "MODEL_IDENTITY_UNVERIFIED"
     )
-    baseline_tokens = baseline.provider_input_tokens
+    baseline_tokens = baseline.effective_input_tokens
+    layered_tokens = layered.effective_input_tokens
     reduction = (
-        (baseline_tokens - layered.provider_input_tokens) / baseline_tokens
+        (baseline_tokens - layered_tokens) / baseline_tokens
         if baseline_tokens > 0
         else 0.0
     )
@@ -525,8 +532,8 @@ async def run_context_token_eval(
         },
         "comparison": {
             "baseline_input_token_denominator": baseline_tokens,
-            "layered_input_token_denominator": layered.provider_input_tokens,
-            "saved_input_tokens": baseline_tokens - layered.provider_input_tokens,
+            "layered_input_token_denominator": layered_tokens,
+            "saved_input_tokens": baseline_tokens - layered_tokens,
             "input_token_reduction": reduction,
             "minimum_required_reduction": config.minimum_reduction,
             "outcome_regressed": outcome_regressed,
