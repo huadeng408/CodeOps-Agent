@@ -156,6 +156,42 @@ def _session_id(value: str) -> str:
     return session_id
 
 
+def _verify_context_event(event: ContextEvent) -> None:
+    if event.event_id:
+        canonical = _canonical_payload(
+            event.event_id,
+            event.kind,
+            event.session_id,
+            event.payload,
+            event.created_at,
+            event.previous_checksum,
+        )
+    else:
+        canonical = json.dumps(
+            {
+                "kind": event.kind,
+                "session_id": event.session_id,
+                "payload": event.payload,
+                "created_at": event.created_at,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if expected != event.checksum:
+        raise ValueError(f"context event checksum mismatch at sequence {event.sequence}")
+
+
+def _verify_context_event_chain(events: list[ContextEvent], anchor: str = "") -> None:
+    previous = anchor
+    for event in events:
+        _verify_context_event(event)
+        if event.event_id and event.previous_checksum != previous:
+            raise ValueError(f"context event chain mismatch at sequence {event.sequence}")
+        previous = event.checksum
+
+
 def _canonical_payload(
     event_id: str,
     kind: str,
@@ -403,6 +439,56 @@ class SQLiteContextStore:
                     previous_checksum=previous_checksum,
                 )
             )
+        return result
+
+    def events_after(
+        self, session_id: str, after_sequence: int, limit: int | None = None
+    ) -> list[ContextEvent]:
+        """Return a verified event suffix after an inclusive cursor.
+
+        Only the requested suffix is decoded.  The predecessor checksum is
+        fetched as an anchor so a caller cannot skip over a forged event while
+        consuming an incremental snapshot.
+        """
+        session_id = _session_id(session_id)
+        after = max(0, int(after_sequence))
+        query = (
+            "SELECT sequence, event_id, session_id, kind, payload_json, created_at, "
+            "checksum, previous_checksum FROM context_events "
+            "WHERE session_id = ? AND sequence > ? ORDER BY sequence"
+        )
+        parameters: tuple[object, ...] = (session_id, after)
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters += (max(1, int(limit)),)
+        with self._lock:
+            rows = self._connection.execute(query, parameters).fetchall()
+            anchor_checksum = ""
+            if rows:
+                anchor = self._connection.execute(
+                    "SELECT checksum FROM context_events WHERE session_id = ? AND sequence < ? "
+                    "ORDER BY sequence DESC LIMIT 1",
+                    (session_id, int(rows[0]["sequence"])),
+                ).fetchone()
+                anchor_checksum = str(anchor["checksum"]) if anchor else ""
+        result: list[ContextEvent] = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                raise TypeError(f"invalid context payload at sequence {row['sequence']}")
+            result.append(
+                ContextEvent(
+                    event_id=str(row["event_id"] or ""),
+                    session_id=str(row["session_id"]),
+                    sequence=int(row["sequence"]),
+                    kind=str(row["kind"]),
+                    payload=payload,
+                    created_at=str(row["created_at"]),
+                    checksum=str(row["checksum"]),
+                    previous_checksum=str(row["previous_checksum"] or ""),
+                )
+            )
+        _verify_context_event_chain(result, anchor_checksum)
         return result
 
     def _append_locked(

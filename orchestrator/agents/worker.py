@@ -49,7 +49,9 @@ def main() -> int:
         print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
         return 0
     except Exception as exc:
-        print(json.dumps({"status": "failed", "error": type(exc).__name__}), flush=True)
+        message = str(exc)
+        error_code = "required_artifact_missing" if message.startswith("required artifact missing:") else "child_execution_failed"
+        print(json.dumps({"status": "failed", "error": type(exc).__name__, "error_code": error_code}), flush=True)
         return 1
 
 

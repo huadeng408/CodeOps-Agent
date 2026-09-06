@@ -75,6 +75,10 @@ def test_redis_context_store_round_trips_events_and_memory() -> None:
     assert store.search_memory("workflow")[0].id == memory.id
     assert second.checksum != first.checksum
 
+    page = store.events_after("session-1", first.sequence, limit=1)
+    assert [event.sequence for event in page] == [second.sequence]
+    assert page[0].previous_checksum == first.checksum
+
     store.close()
 
 

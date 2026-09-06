@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,9 @@ class DeepAgent:
                 findings.append("missing files: " + ", ".join(missing))
         if task.context:
             findings.append("context: " + json.dumps(task.context, ensure_ascii=False, sort_keys=True))
+        required = _required_artifacts(task.context)
+        if required:
+            findings.extend(_artifact_receipts(required, working_dir))
         if not findings:
             findings.append("no additional context supplied")
         return findings
@@ -85,3 +89,28 @@ def _context_files(context: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item) for item in raw if str(item).strip()]
+
+
+def _required_artifacts(context: dict[str, Any]) -> list[str]:
+    raw = context.get("required_artifacts", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError("required_artifacts must be a list")
+    return [str(item).strip() for item in raw if str(item).strip()][:32]
+
+
+def _artifact_receipts(paths: list[str], working_dir: str) -> list[str]:
+    root = Path(working_dir).resolve()
+    receipts: list[str] = []
+    for value in paths:
+        candidate = (root / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+        try:
+            relative = candidate.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"required artifact path outside workspace: {value}") from exc
+        if not candidate.is_file():
+            raise RuntimeError(f"required artifact missing: {relative}")
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        receipts.append(f"artifact: {relative} (bytes={candidate.stat().st_size}, sha256={digest})")
+    return receipts

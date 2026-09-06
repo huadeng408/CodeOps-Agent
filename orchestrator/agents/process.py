@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,9 +42,12 @@ class ProcessAgentExecutor:
         child_session_id: str,
         worktree_path: str | Path | None = None,
         require_worktree: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> AgentResult:
         if self.timeout <= 0:
             raise ValueError("sub-agent timeout must be positive")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("sub-agent process canceled")
         effective_working_dir = Path(worktree_path or self.working_dir).resolve()
         if require_worktree:
             project_root = Path(self.project_root).resolve()
@@ -83,14 +88,34 @@ class ProcessAgentExecutor:
             text=True,
         )
         try:
-            stdout, stderr = process.communicate(request_json + "\n", timeout=self.timeout)
-        except subprocess.TimeoutExpired as exc:
+            process.stdin.write(request_json + "\n")
+            process.stdin.close()
+            deadline = time.monotonic() + self.timeout
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    raise RuntimeError("sub-agent process canceled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    raise TimeoutError("sub-agent process timed out")
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BrokenPipeError as exc:
             process.kill()
             process.communicate()
-            raise TimeoutError("sub-agent process timed out") from exc
+            raise RuntimeError("sub-agent process failed before accepting request") from exc
 
         if process.returncode != 0:
             detail = (stderr or "").strip().splitlines()[-1:] or ["unknown child failure"]
+            response = _decode_response(stdout) if stdout.strip() else {}
+            if response.get("error_code") == "required_artifact_missing":
+                raise RuntimeError("sub-agent required artifact missing")
             raise RuntimeError(f"sub-agent process failed with exit code {process.returncode}: {detail[0]}")
         response = _decode_response(stdout)
         for key in ("request_id", "parent_session_id", "child_session_id"):

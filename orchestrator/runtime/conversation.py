@@ -1124,6 +1124,7 @@ class ConversationRunner:
                         request_id=request_id,
                         parent_session_id=parent_session_id,
                         child_session_id=child_session_id,
+                        cancel_event=cancel_event,
                     )
                     if self.require_harness_worktree:
                         lifecycle_status = str(agent_result.get("status", "failed"))
@@ -3224,6 +3225,7 @@ class ConversationRunner:
         request_id: str = "compat-request",
         parent_session_id: str = "compat-parent",
         child_session_id: str = "compat-child",
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         context_payload = json.loads(str(spawn.get("context_json") or "{}"))
         if not isinstance(context_payload, dict):
@@ -3256,6 +3258,7 @@ class ConversationRunner:
                         child_session_id=child_session_id,
                         worktree_path=worktree_path,
                         require_worktree=True,
+                        cancel_event=cancel_event,
                     )
                 else:
                     result = executor.run(
@@ -3266,6 +3269,7 @@ class ConversationRunner:
                         request_id=request_id,
                         parent_session_id=parent_session_id,
                         child_session_id=child_session_id,
+                        cancel_event=cancel_event,
                     )
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                 return {

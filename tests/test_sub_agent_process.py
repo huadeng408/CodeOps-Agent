@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,54 @@ def test_process_agent_executor_accepts_harness_assigned_worktree(tmp_path: Path
 
     assert result.status == "completed"
     assert any("child.txt" in artifact for artifact in result.artifacts)
+
+
+def test_process_agent_executor_requires_declared_child_artifacts(tmp_path: Path) -> None:
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="required artifact"):
+        executor.run(
+            kind="general",
+            title="Produce report",
+            objective="write the report",
+            context={"required_artifacts": ["report.md"]},
+            request_id="request-artifact-missing",
+            parent_session_id="session-artifact",
+            child_session_id="session-artifact/subagent/request-artifact-missing",
+        )
+
+
+def test_process_agent_executor_returns_declared_artifact_receipt(tmp_path: Path) -> None:
+    (tmp_path / "report.md").write_text("completed", encoding="utf-8")
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+
+    result = executor.run(
+        kind="general",
+        title="Verify report",
+        objective="inspect the report",
+        context={"required_artifacts": ["report.md"]},
+        request_id="request-artifact-present",
+        parent_session_id="session-artifact",
+        child_session_id="session-artifact/subagent/request-artifact-present",
+    )
+
+    assert result.status == "completed"
+    assert any("artifact: report.md" in artifact for artifact in result.artifacts)
+
+
+def test_process_agent_executor_rejects_canceled_parent_before_spawn(tmp_path: Path) -> None:
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+    canceled = threading.Event()
+    canceled.set()
+
+    with pytest.raises(RuntimeError, match="sub-agent process canceled"):
+        executor.run(
+            kind="general",
+            title="Canceled task",
+            objective="do not start",
+            context={},
+            request_id="request-canceled",
+            parent_session_id="session-canceled",
+            child_session_id="session-canceled/subagent/request-canceled",
+            cancel_event=canceled,
+        )

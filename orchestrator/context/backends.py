@@ -46,6 +46,10 @@ class ContextStore(Protocol):
         self, session_id: str, limit: int | None = None
     ) -> list[ContextEvent]: ...
 
+    def events_after(
+        self, session_id: str, after_sequence: int, limit: int | None = None
+    ) -> list[ContextEvent]: ...
+
     def add_memory(
         self, session_id: str, content: str, tags: Iterable[str] = (), **metadata: Any
     ) -> LongTermMemory: ...
@@ -378,6 +382,29 @@ class RedisContextStore:
         _verify_event_chain(selected, anchor=anchor)
         return selected
 
+    def events_after(
+        self, session_id: str, after_sequence: int, limit: int | None = None
+    ) -> list[ContextEvent]:
+        session_id = _session_id(session_id)
+        cursor = max(0, int(after_sequence))
+        raw = list(self.client.lrange(self._events_key(session_id), 0, -1))
+        all_events = [
+            _event_from_wire(value, fallback_sequence=index + 1)
+            for index, value in enumerate(raw)
+        ]
+        selected = [event for event in all_events if event.sequence > cursor]
+        if limit is not None:
+            selected = selected[: max(1, int(limit))]
+        anchor = ""
+        if selected:
+            predecessor = next(
+                (event for event in all_events if event.sequence == selected[0].sequence - 1),
+                None,
+            )
+            anchor = predecessor.checksum if predecessor is not None else ""
+        _verify_event_chain(selected, anchor=anchor)
+        return selected
+
     def _add_memory(
         self, session_id: str, content: str, tags: Iterable[str], *, reflection: bool, metadata: Mapping[str, Any] | None = None
     ) -> LongTermMemory:
@@ -489,6 +516,26 @@ class MySQLContextStore:
                     INDEX long_term_memory_session (session_id, created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
             )
+            # Existing installations may have been created before the
+            # provenance and hash-chain columns were introduced.  ALTER is
+            # intentionally additive and duplicate-column errors are safe to
+            # ignore, so startup upgrades the same tables in place.
+            for table, column, definition in (
+                ("context_events", "event_id", "VARCHAR(64) NULL"),
+                ("context_events", "previous_checksum", "CHAR(64) NOT NULL DEFAULT ''"),
+                ("long_term_memory", "source_type", "VARCHAR(128) NOT NULL DEFAULT ''"),
+                ("long_term_memory", "source_id", "VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("long_term_memory", "source_revision", "VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("long_term_memory", "revision", "BIGINT NOT NULL DEFAULT 1"),
+                ("long_term_memory", "expires_at", "VARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                    )
+                except Exception as exc:
+                    if "duplicate" not in str(exc).lower() and "exists" not in str(exc).lower():
+                        raise
         self.connection.commit()
 
     def append(
@@ -599,6 +646,42 @@ class MySQLContextStore:
                 str(row[7] or ""),
             )
             result.append(event)
+        _verify_event_chain(result, anchor=anchor)
+        return result
+
+    def events_after(
+        self, session_id: str, after_sequence: int, limit: int | None = None
+    ) -> list[ContextEvent]:
+        session_id = _session_id(session_id)
+        after = max(0, int(after_sequence))
+        query = (
+            "SELECT event_id, session_id, sequence, kind, payload_json, created_at, "
+            "checksum, previous_checksum FROM context_events "
+            "WHERE session_id=%s AND sequence>%s ORDER BY sequence"
+        )
+        params: tuple[Any, ...] = (session_id, after)
+        if limit is not None:
+            query += " LIMIT %s"
+            params += (max(1, int(limit)),)
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(query, params)
+            rows = list(cursor.fetchall())
+            anchor = ""
+            if rows:
+                cursor.execute(
+                    "SELECT checksum FROM context_events WHERE session_id=%s AND sequence<%s ORDER BY sequence DESC LIMIT 1",
+                    (session_id, rows[0][2]),
+                )
+                anchor_row = cursor.fetchone()
+                anchor = str(anchor_row[0]) if anchor_row else ""
+        result = []
+        for row in rows:
+            result.append(
+                ContextEvent(
+                    str(row[0]), str(row[1]), int(row[2]), str(row[3]),
+                    json.loads(str(row[4])), str(row[5]), str(row[6]), str(row[7] or ""),
+                )
+            )
         _verify_event_chain(result, anchor=anchor)
         return result
 

@@ -36,6 +36,20 @@ def test_context_events_replay_after_process_restart(tmp_path: Path) -> None:
     restarted.close()
 
 
+def test_context_events_after_cursor_returns_verified_increment(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    first = store.append("session-1", "plan", {"step": 1})
+    second = store.append("session-1", "tool_call", {"tool": "Read"})
+    third = store.append("session-1", "execution_result", {"status": "ok"})
+
+    page = store.events_after("session-1", first.sequence, limit=1)
+
+    assert [event.sequence for event in page] == [second.sequence]
+    assert page[0].previous_checksum == first.checksum
+    assert store.events_after("session-1", third.sequence) == []
+    store.close()
+
+
 def test_layered_context_loads_p0_p1_and_explicit_p3_without_leaking_secrets(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()
