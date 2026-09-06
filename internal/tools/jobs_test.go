@@ -33,9 +33,9 @@ func jobCommand(body string) string {
 func TestExecutorBackgroundJobToolsRunAndWaitForRealProcess(t *testing.T) {
 	root := t.TempDir()
 	executor := tools.NewExecutor(root)
-	body := "Write-Output first; Start-Sleep -Milliseconds 60; Write-Output second"
+	body := "Write-Output first; Start-Sleep -Milliseconds 250; Write-Output second"
 	if runtime.GOOS != "windows" {
-		body = "printf 'first\\n'; sleep 0.06; printf 'second\\n'"
+		body = "printf 'first\\n'; sleep 0.25; printf 'second\\n'"
 	}
 	started, err := executor.Execute(context.Background(), tools.ToolRequest{
 		Name:           "JobStart",
@@ -56,7 +56,7 @@ func TestExecutorBackgroundJobToolsRunAndWaitForRealProcess(t *testing.T) {
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{
 		Name:           "JobOutput",
 		OwnerSessionID: "session-a",
-		Arguments:      map[string]any{"job_id": startView.ID, "wait": true, "timeout_ms": 3000},
+		Arguments:      map[string]any{"job_id": startView.ID, "wait": true, "timeout_ms": 5000},
 	})
 	if err != nil {
 		t.Fatalf("JobOutput wait: %v", err)

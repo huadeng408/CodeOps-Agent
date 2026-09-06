@@ -48,7 +48,7 @@ func TestRegistryRunsBackgroundProcessAndReadsOutputIncrementally(t *testing.T) 
 
 	body := "Write-Output first; Start-Sleep -Milliseconds 80; Write-Output second"
 	if runtime.GOOS != "windows" {
-		body = "printf 'first\\n'; sleep 0.08; printf 'second\\n'"
+		body = "printf 'first\\n'; sleep 0.2; printf 'second\\n'"
 	}
 	spec := command(body)
 	spec.Owner = "session-a"

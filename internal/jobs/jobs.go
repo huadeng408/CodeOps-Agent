@@ -445,9 +445,12 @@ func (r *Registry) capture(job *trackedJob, stdout, stderr io.ReadCloser) {
 	stderrDone := make(chan struct{})
 	go r.copyOutput(job, stdout, stdoutDone)
 	go r.copyOutput(job, stderr, stderrDone)
-	err := job.cmd.Wait()
+	// Let the readers drain the OS pipes before Wait closes them.  Under a
+	// loaded POSIX runner, waiting first can discard the final buffered records
+	// even though the child exits successfully.
 	<-stdoutDone
 	<-stderrDone
+	err := job.cmd.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if isTerminal(job.status) {
