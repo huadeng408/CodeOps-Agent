@@ -553,6 +553,12 @@ class ConversationRunner:
                     trigger="pressure",
                     cancel_event=cancel_event,
                 )
+                # Compaction is a surface transformation. Keep the reduced
+                # message list as the source for the next tool/model turn;
+                # otherwise the next request silently reintroduces the old
+                # context and can overflow again.
+                if request_messages != candidate_messages:
+                    messages = request_messages
                 yield from self._emit_compaction_updates()
                 self._emit_loop_event(
                     "model_before",
@@ -1388,6 +1394,8 @@ class ConversationRunner:
                     trigger="pressure",
                     cancel_event=cancel_event,
                 )
+                if request_messages != messages:
+                    messages = request_messages
                 yield from self._emit_compaction_updates()
                 self._emit_loop_event(
                     "model_before",
@@ -2459,8 +2467,9 @@ class ConversationRunner:
     def _invalidate_tool_cache_after(self, tool_cache: dict[str, CachedToolResult], call: ToolCall, result) -> None:
         if self._tool_cache_key(call):
             return
-        if self._tool_result_failed(result):
-            return
+        # A failed mutating operation can still have changed the workspace
+        # before reporting its error. Drop observations after every
+        # non-read-only tool so a later Read/Glob/Grep cannot reuse stale data.
         tool_cache.clear()
 
     @staticmethod

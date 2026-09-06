@@ -549,6 +549,49 @@ func TestSessionPersistsStructuredToolCallAndResultPair(t *testing.T) {
 	}
 }
 
+func TestUnknownInvocationRequiresExplicitReconcile(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession(t.TempDir())
+	if _, err := manager.BeginInvocation("call-unknown", "Write", `{"path":"x"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkInvocationDispatched("call-unknown"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkInvocationUnknown("call-unknown", "result acknowledgement lost"); err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := manager.BeginInvocation("call-unknown", "Write", `{"path":"x"}`)
+	if err != nil || unknown.Status != session.InvocationUnknown {
+		t.Fatalf("unknown invocation was not retained for explicit reconciliation: %+v, %v", unknown, err)
+	}
+	reconciled, err := manager.ReconcileInvocation(session.InvocationResult{ID: "call-unknown", Name: "Write", Output: "verified", ExitCode: 0})
+	if err != nil || reconciled.Status != session.InvocationCommitted {
+		t.Fatalf("reconcile failed: %+v, %v", reconciled, err)
+	}
+	if _, err := manager.ReconcileInvocation(session.InvocationResult{ID: "call-unknown", Name: "Write", Output: "again"}); err == nil {
+		t.Fatal("committed invocation must not be reconciled twice")
+	}
+	if _, err := manager.MarkInvocationUnknown("call-unknown", "late transport error"); err == nil {
+		t.Fatal("committed invocation must not be downgraded to unknown")
+	}
+}
+
+func TestMarkInvocationUnknownIsIdempotent(t *testing.T) {
+	manager := session.NewManager(session.NewMemoryStore())
+	manager.NewSession(t.TempDir())
+	if _, err := manager.BeginInvocation("call-retry", "Read", `{"path":"x"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkInvocationUnknown("call-retry", "ack lost"); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := manager.MarkInvocationUnknown("call-retry", "same uncertainty")
+	if err != nil || repeated.Status != session.InvocationUnknown {
+		t.Fatalf("unknown mark should be idempotent: %+v, %v", repeated, err)
+	}
+}
+
 func TestManagerAutoSaveRequiresCurrentSession(t *testing.T) {
 	manager := session.NewManager(session.NewMemoryStore())
 

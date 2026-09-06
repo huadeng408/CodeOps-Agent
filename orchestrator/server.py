@@ -13,6 +13,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 
 from .config import configure_otel, load_dotenv, read_env
 from .context import LayeredContext, TokenBudget, build_context_store
+from .context.compaction import LLMCompactionSummarizer
 from .graph.main_graph import build_graph
 from .identity import ActorIdentity, ActorIdentityError, ActorSessionRegistry
 from .llm.providers import (
@@ -148,6 +149,16 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         raise AssertionError("context.abort must terminate the RPC")
 
     def _new_runner(self) -> ConversationRunner:
+        # Auxiliary summaries use the configured provider but never inherit
+        # executable tools. This keeps compaction on the same model boundary
+        # as normal turns while making the path explicit in production.
+        compaction_summarizer = None
+        if self.app.llm is not None:
+            compaction_summarizer = LLMCompactionSummarizer(
+                client=self.app.llm,
+                provider="default",
+                model=str(getattr(self.app.llm, "model", "")),
+            )
         return ConversationRunner(
             graph=self.app.graph,
             llm=self.app.llm,
@@ -168,6 +179,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             hooks=self.app.hooks,
             commands=self.app.commands,
             extensions=self.app.extensions,
+            compaction_summarizer=compaction_summarizer,
             require_harness_worktree=os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower()
             in {"1", "true", "yes", "on"},
         )
@@ -183,6 +195,18 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 "role": item.role,
                 "content": item.content,
                 "created_at": item.created_at,
+                "schema_version": item.schema_version,
+                "name": item.name,
+                "tool_call_id": item.tool_call_id,
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments_json": call.arguments_json,
+                    }
+                    for call in item.tool_calls
+                ],
+                "is_error": item.is_error,
             }
             for item in request.history
         ]

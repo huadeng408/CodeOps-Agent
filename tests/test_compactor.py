@@ -4,10 +4,11 @@ import threading
 
 import pytest
 
+from codeagent import orchestrator_pb2
 from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
 from orchestrator.context.compactor import Compactor
 from orchestrator.graph.main_graph import build_graph
-from orchestrator.llm.client import ChatMessage, RequestInterrupted, StreamDelta, ToolCall
+from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall
 from orchestrator.llm.router import ModelInfo, ProviderRouter
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
@@ -63,6 +64,87 @@ def test_conversation_runner_compacts_before_chat(tmp_path) -> None:
     assert "[Compacted conversation history]" in compacted[1].content
     assert "internal/tools/read.go" in compacted[1].content
     assert len(compacted) < len(messages)
+
+
+def test_conversation_reuses_compacted_surface_on_follow_up_turn(tmp_path) -> None:
+    class OneShotCompactor:
+        def __init__(self):
+            self.calls = 0
+            self.compaction_retries = 0
+
+        def should_compact(self, messages, **_kwargs):
+            should = self.calls == 0
+            self.calls += 1
+            return should
+
+        def select_compaction_range(self, messages, **_kwargs):
+            return (1, 1)
+
+        def estimate_tokens(self, messages):
+            return sum(len(str(getattr(message, "content", message))) for message in messages)
+
+        def compact_history(self, messages, **_kwargs):
+            return "[Compacted conversation history]\nSURFACE_MARKER"
+
+        def prune_tool_results(self, messages):
+            return messages
+
+    class ToolThenText:
+        model = "fake"
+
+        def __init__(self):
+            self.requests = []
+
+        async def chat(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ChatResponse(
+                    tool_calls=[ToolCall(id="read-1", name="Read", arguments={"path": "README.md"}, arguments_json='{"path":"README.md"}')]
+                )
+            return ChatResponse(text="done")
+
+    llm = ToolThenText()
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=llm,
+        tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        compactor=OneShotCompactor(),
+    )
+    runner.compactor.calls = 0
+    responses = list(
+        runner.run(
+            "continue",
+            iter([
+                orchestrator_pb2.HarnessMessage(
+                    tool_result=orchestrator_pb2.ToolResult(
+                        tool_name="Read", tool_call_id="read-1", output="ok"
+                    )
+                )
+            ]),
+        )
+    )
+
+    assert responses[-1].done.success is True
+    assert len(llm.requests) == 2
+    assert "SURFACE_MARKER" in "\n".join(str(message.content) for message in llm.requests[1].messages)
+
+
+def test_failed_mutating_tool_invalidates_read_cache() -> None:
+    runner = ConversationRunner.__new__(ConversationRunner)
+    cache = {
+        "Read:{\"path\":\"README.md\"}": type("Cached", (), {"content": "old", "is_error": False})()
+    }
+    call = ToolCall(id="write-1", name="Write", arguments={"path": "README.md"})
+    result = type("Result", (), {"error": "write failed", "exit_code": 1})()
+
+    runner._invalidate_tool_cache_after(cache, call, result)
+
+    assert cache == {}
 
 
 def test_token_pressure_uses_context_window_and_provider_override() -> None:

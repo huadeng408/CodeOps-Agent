@@ -43,4 +43,8 @@ class ProviderWorkerExecutor:
                 messages=[ChatMessage(role="user", content=prompt)],
             )
         )
+        if not response.text.strip():
+            if response.tool_calls:
+                raise RuntimeError("worker returned an empty or tool-only response; workflow workers require a final text result")
+            raise RuntimeError("worker returned an empty or tool-only response")
         return WorkerResult.completed(worker.id, worker.provider, response.text)

@@ -16,7 +16,7 @@ from orchestrator.workflows import (
     WorkflowEngine,
     WorkflowSpec,
 )
-from orchestrator.llm.client import ChatResponse
+from orchestrator.llm.client import ChatResponse, ToolCall
 from orchestrator.llm.router import ModelInfo, ProviderRouter
 from orchestrator.context import TokenBudget
 from orchestrator.graph.main_graph import build_graph
@@ -83,6 +83,22 @@ def test_provider_worker_executor_selects_the_named_llm_client() -> None:
     assert result.output == "anthropic response"
     assert len(openai.requests) == 0
     assert len(anthropic.requests) == 1
+
+
+@pytest.mark.parametrize("response", [ChatResponse(text=""), ChatResponse(tool_calls=[ToolCall(id="call-1", name="Read", arguments={})])])
+def test_provider_worker_executor_rejects_non_final_response(response) -> None:
+    class FakeProvider:
+        async def chat(self, request):
+            return response
+
+    executor = ProviderWorkerExecutor({"default": FakeProvider()})
+    with pytest.raises(RuntimeError, match="empty or tool-only"):
+        asyncio.run(
+            executor(
+                WorkerSpec(id="worker", title="Worker", objective="produce a result"),
+                {},
+            )
+        )
 
 
 def test_provider_worker_executor_uses_router_model_selection() -> None:

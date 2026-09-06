@@ -48,6 +48,10 @@ type InvocationRecord struct {
 	Output        string           `json:"output,omitempty"`
 	Error         string           `json:"error,omitempty"`
 	ExitCode      int              `json:"exit_code"`
+	Truncated     bool             `json:"truncated,omitempty"`
+	SpillLocator  string           `json:"spill_locator,omitempty"`
+	SpillSHA256   string           `json:"spill_sha256,omitempty"`
+	SpillBytes    int64            `json:"spill_bytes,omitempty"`
 	ModifiedFiles []string         `json:"modified_files,omitempty"`
 	CreatedAt     time.Time        `json:"created_at"`
 	CompletedAt   time.Time        `json:"completed_at,omitempty"`
@@ -283,6 +287,12 @@ func (m *Manager) BeginInvocation(id, name, argumentsJSON string) (InvocationRec
 	}
 	for _, existing := range m.current.Invocations {
 		if existing.ID == id {
+			if existing.Status == InvocationCommitted {
+				return existing, nil
+			}
+			if existing.Name != name || existing.ArgumentsJSON != argumentsJSON {
+				return InvocationRecord{}, fmt.Errorf("invocation %s conflicts with the persisted tool call", id)
+			}
 			return existing, nil
 		}
 	}
@@ -314,6 +324,9 @@ func (m *Manager) MarkInvocationDispatched(id string) (InvocationRecord, error) 
 		if m.current.Invocations[index].Status == InvocationCommitted {
 			return m.current.Invocations[index], nil
 		}
+		if m.current.Invocations[index].Status == InvocationUnknown {
+			return InvocationRecord{}, fmt.Errorf("invocation %s is unknown; reconcile before dispatch", id)
+		}
 		previous := cloneSession(m.current)
 		m.current.Invocations[index].Status = InvocationDispatched
 		m.current.UpdatedAt = time.Now()
@@ -331,7 +344,67 @@ type InvocationResult struct {
 	Output        string
 	Error         string
 	ExitCode      int
+	Truncated     bool
+	SpillLocator  string
+	SpillSHA256   string
+	SpillBytes    int64
 	ModifiedFiles []string
+}
+
+// ReconcileInvocation records an externally verified result for an unknown
+// invocation. It deliberately never executes a tool and only accepts records
+// that are already marked unknown, keeping recovery explicit for operations
+// whose side effect may have happened before the original acknowledgement was
+// lost.
+func (m *Manager) ReconcileInvocation(result InvocationResult) (InvocationRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := strings.TrimSpace(result.ID)
+	for index := range m.current.Invocations {
+		if m.current.Invocations[index].ID != id {
+			continue
+		}
+		existing := m.current.Invocations[index]
+		if existing.Status != InvocationUnknown {
+			return InvocationRecord{}, fmt.Errorf("invocation %s is %s; only unknown invocations can be reconciled", id, existing.Status)
+		}
+		previous := cloneSession(m.current)
+		now := time.Now()
+		existing.Status = InvocationCommitted
+		existing.Name = firstNonEmpty(strings.TrimSpace(result.Name), existing.Name)
+		existing.Output = result.Output
+		existing.Error = result.Error
+		existing.ExitCode = result.ExitCode
+		existing.Truncated = result.Truncated
+		existing.SpillLocator = result.SpillLocator
+		existing.SpillSHA256 = result.SpillSHA256
+		existing.SpillBytes = result.SpillBytes
+		existing.CompletedAt = now
+		existing.ModifiedFiles = mergeFiles(existing.ModifiedFiles, result.ModifiedFiles)
+		m.current.Invocations[index] = existing
+		m.current.Metrics.ToolCalls++
+		m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, result.ModifiedFiles)
+		m.current.Messages = append(m.current.Messages, Message{
+			Role: RoleTool, Name: existing.Name, ToolCallID: id, Content: existing.Output,
+			IsError: existing.Error != "", CreatedAt: now,
+			SchemaVersion: ConversationMessageSchemaVersion,
+		})
+		m.current.UpdatedAt = now
+		if !m.commitLocked(context.Background(), previous) {
+			return InvocationRecord{}, errors.New("persist reconciled invocation")
+		}
+		return existing, nil
+	}
+	return InvocationRecord{}, ErrNotFound
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // CommitInvocation durably appends the paired tool result. Committed IDs are
@@ -352,6 +425,10 @@ func (m *Manager) CommitInvocation(result InvocationResult) (InvocationRecord, e
 		now := time.Now()
 		existing.Status = InvocationCommitted
 		existing.Output, existing.Error, existing.ExitCode, existing.CompletedAt = result.Output, result.Error, result.ExitCode, now
+		existing.Truncated = result.Truncated
+		existing.SpillLocator = result.SpillLocator
+		existing.SpillSHA256 = result.SpillSHA256
+		existing.SpillBytes = result.SpillBytes
 		existing.ModifiedFiles = mergeFiles(existing.ModifiedFiles, result.ModifiedFiles)
 		m.current.Metrics.ToolCalls++
 		m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, result.ModifiedFiles)
@@ -378,6 +455,12 @@ func (m *Manager) MarkInvocationUnknown(id, reason string) (InvocationRecord, er
 	for index := range m.current.Invocations {
 		if m.current.Invocations[index].ID != strings.TrimSpace(id) {
 			continue
+		}
+		if m.current.Invocations[index].Status == InvocationCommitted {
+			return InvocationRecord{}, fmt.Errorf("invocation %s is already committed", id)
+		}
+		if m.current.Invocations[index].Status == InvocationUnknown {
+			return m.current.Invocations[index], nil
 		}
 		previous := cloneSession(m.current)
 		m.current.Invocations[index].Status = InvocationUnknown

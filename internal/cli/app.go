@@ -1550,7 +1550,11 @@ func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {
 func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, result tools.ToolResult) error {
 	modifiedFiles := modifiedFilesFromToolCall(call, result)
 	if strings.TrimSpace(call.ID) != "" {
-		if _, err := a.session.CommitInvocation(session.InvocationResult{ID: call.ID, Name: call.Name, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode, ModifiedFiles: modifiedFiles}); err != nil {
+		if _, err := a.session.CommitInvocation(session.InvocationResult{
+			ID: call.ID, Name: call.Name, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode,
+			Truncated: result.Truncated, SpillLocator: spillLocator(result.Spill), SpillSHA256: spillSHA256(result.Spill), SpillBytes: spillBytes(result.Spill),
+			ModifiedFiles: modifiedFiles,
+		}); err != nil {
 			return err
 		}
 	} else {
@@ -1575,13 +1579,22 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 	a.session.MergeMetadata(values)
 	if err := a.session.AutoSave(ctx); err != nil {
 		a.renderer.PrintLine("autosave failed: " + err.Error())
+		if strings.TrimSpace(call.ID) != "" {
+			// The structured invocation result is already durable; metadata is
+			// ancillary and must not downgrade a committed side effect.
+			return nil
+		}
 		return err
 	}
 	return nil
 }
 
 func invocationToolResult(record session.InvocationRecord) orchestrator.ToolResult {
-	return orchestrator.ToolResult{ToolCallID: record.ID, ToolName: record.Name, Output: record.Output, Error: record.Error, ExitCode: int32(record.ExitCode)}
+	result := orchestrator.ToolResult{ToolCallID: record.ID, ToolName: record.Name, Output: record.Output, Error: record.Error, ExitCode: int32(record.ExitCode), Truncated: record.Truncated}
+	if record.SpillLocator != "" {
+		result.Spill = &orchestrator.SpillRef{Locator: record.SpillLocator, SHA256: record.SpillSHA256, Bytes: record.SpillBytes}
+	}
+	return result
 }
 
 func spillLocator(ref *tools.SpillRef) string {

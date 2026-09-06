@@ -99,6 +99,15 @@ class BlockingOperationRunner:
         )
 
 
+class CapturingCompactionRunner:
+    def __init__(self) -> None:
+        self.history = None
+
+    def compact_now(self, **kwargs):
+        self.history = kwargs.get("history")
+        return orchestrator_pb2.CompactionUpdate(summary="compacted", trigger="manual")
+
+
 def _session_actor(session_id: str) -> orchestrator_pb2.ActorContext:
     return orchestrator_pb2.ActorContext(
         schema_version=1,
@@ -1086,6 +1095,52 @@ def test_compact_is_rejected_when_session_has_active_converse(monkeypatch, tmp_p
         assert error.value.code() == grpc.StatusCode.FAILED_PRECONDITION
     finally:
         active_lease.release()
+        server.stop(grace=0)
+
+
+def test_compact_forwards_structured_tool_history(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    service = OrchestratorService(app)
+    runner = CapturingCompactionRunner()
+    service._new_runner = lambda: runner
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-compact-history"
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            response = stub.Compact(
+                orchestrator_pb2.CompactRequest(
+                    session_id=session_id,
+                    actor=_session_actor(session_id),
+                    history=[
+                        orchestrator_pb2.ConversationMessage(
+                            role="assistant",
+                            tool_calls=[
+                                orchestrator_pb2.ConversationToolCall(
+                                    id="call-1",
+                                    name="Read",
+                                    arguments_json='{"path":"README.md"}',
+                                )
+                            ],
+                        ),
+                        orchestrator_pb2.ConversationMessage(
+                            role="tool",
+                            name="Read",
+                            tool_call_id="call-1",
+                            content="content",
+                        ),
+                    ],
+                )
+            )
+        assert response.summary == "compacted"
+        assert runner.history[0]["tool_calls"][0]["id"] == "call-1"
+        assert runner.history[1]["tool_call_id"] == "call-1"
+        assert runner.history[1]["name"] == "Read"
+    finally:
         server.stop(grace=0)
 
 
