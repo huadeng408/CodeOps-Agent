@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REMOTE_PROVIDER_REPORTED_USAGE",
+  "limitations": [
+    "This lane verifies provider-reported context A/B usage, not the full product E2E.",
+    "P3 paths are task-pinned; this lane does not measure context-selection accuracy.",
+    "The full raw artifact tree is retained in the local ignored eval_results directory.",
+    "The provider did not return an immutable system fingerprint; model revision remains unverified."
+  ],
+  "run_id": "context-token-20260906-anthropic-sol-3",
+  "trace_id": "c7a6b0613d9a48e58cdce27b955dc920",
+  "source_pin": {
+    "git_sha": "6f587a793562dd43f6274964454ca288f74d7390",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_id": "workflow-provider-contract-v1",
+    "task_sha256": "dffbe79dc36a97a5b28e45b686fa80322a34e0095034ce1a8cac3bc734abc77c",
+    "corpus_sha256": "d8bb4638c5c09a3ed1f7f7c17da4abecbeeb7f18a5183c9a2009090041b15d14",
+    "corpus_file_count": 7,
+    "redacted_file_count": 0
+  },
+  "prompt_pins": {
+    "system_sha256": "5c9d6e4e73d01bc8db8bdb03d20d4595a6a7effbf546dcbaa24111b8c6ebd53",
+    "task_sha256": "9842b160235baf1042a3b82267678109f8bc4d7def1080a376ad7853ffd03ab7",
+    "baseline_context_sha256": "9cc79140478e1e85125928b2ca72eaf4977d930b4b23df8ea30fffc52a7164c3",
+    "layered_context_sha256": "a5b723dced0ddb103aed7413046d01a4c9e541a1cd640e35b6a397978b89804c"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-sol",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED"
+  },
+  "budget": {
+    "max_output_tokens_per_arm": 512,
+    "max_input_tokens_per_arm": 100000,
+    "timeout_seconds_per_arm": 600.0,
+    "temperature": 0.0,
+    "calls_per_arm": 1
+  },
+  "arms": {
+    "baseline": {
+      "call_completed": true,
+      "provider_input_tokens": 21686,
+      "provider_output_tokens": 95,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "response_id_sha256": "fefad084f9840857673c03b4fdaaafbb0e9c48d50996045f752cc6005678777b",
+      "reported_model": "gpt-5.6-sol",
+      "system_fingerprint": ""
+    },
+    "layered": {
+      "call_completed": true,
+      "provider_input_tokens": 708,
+      "provider_output_tokens": 184,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "response_id_sha256": "199e9b0ef76ebbca60acb84ac9bf83cd221506cff5c3ac3f9e68644839944571",
+      "reported_model": "gpt-5.6-sol",
+      "system_fingerprint": ""
+    }
+  },
+  "comparison": {
+    "baseline_input_token_denominator": 21686,
+    "layered_input_token_denominator": 708,
+    "saved_input_tokens": 20978,
+    "input_token_reduction": 0.9673522087983031,
+    "minimum_required_reduction": 0.6,
+    "outcome_regressed": false
+  },
+  "failures": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": "eval_results/context-token-20260906-anthropic-sol-3",
+    "checksum_manifest_sha256": "30606960a2e2d47ff8f3af665888e49bf414c8d171e9a5e67296fd832c353ad4",
+    "source_receipt_sha256": "e3a3809dc2f8f1a0d8cce05cfa8d3c05efbecf61c25a46a1fbcd9f520da98cb1",
+    "run_manifest_sha256": "8dc7ec80dab6bf8d24a5e2431ccc9558755fe2b6234682cb739193463e2f918e",
+    "arm_results_sha256": "5fed708e4b555ba895fa39c3241a2130bde6c028a427e3dde7231d090ce315ea",
+    "context_database_sha256": "66bd9ebd8ac1455ff46988303ce59b2e2b7013b09a6553d4e3cfc762937f4f7b"
+  }
+}
