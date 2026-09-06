@@ -8,6 +8,7 @@ import pytest
 from codeagent import orchestrator_pb2
 from orchestrator.identity import ActorIdentity
 from orchestrator.llm.client import ChatResponse, ToolCall
+from orchestrator.graph.nodes import GraphState
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, ServerConfig, create_grpc_server
 
@@ -170,6 +171,51 @@ def test_normal_conversation_writes_typed_graph_checkpoint(tmp_path: Path) -> No
     assert checkpoint.metadata["session_id"] == "graph-session"
     assert checkpoint.metadata["phase"] == "model_after"
     assert checkpoint.done is True
+    app.close()
+
+
+def test_normal_conversation_resumes_pending_checkpoint_turn(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "resume-session",
+                "phase": "tool_after",
+                "turn": 2,
+            },
+            tool_rounds=2,
+            done=False,
+            next_node="route",
+        ),
+        thread_id="resume-session",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    responses = list(runner.run("continue", iter(()), session_id="resume-session"))
+
+    assert responses[-1].done.success is True
+    assert runner._loop_last_turn == 3
+    resumed = [
+        event
+        for event in app.context_store.events("resume-session")
+        if event.payload.get("status") == "checkpoint_resumed"
+    ]
+    assert len(resumed) == 1
+    assert resumed[0].payload["resume_turn"] == 3
+    assert "continue" not in repr(resumed[0].payload)
     app.close()
 
 

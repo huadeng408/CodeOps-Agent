@@ -196,6 +196,26 @@ class CachedToolResult:
     is_error: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationCheckpoint:
+    """Typed recovery view over the durable LangGraph state.
+
+    The checkpoint intentionally contains lifecycle metadata and digests only;
+    the Harness remains the source of truth for message contents.  A pending
+    checkpoint therefore tells the runner which model/tool turn to retry while
+    the caller supplies the structured history projection again.
+    """
+
+    state: GraphState
+    phase: str
+    turn: int
+    next_turn: int
+
+    @property
+    def resumable(self) -> bool:
+        return not self.state.done
+
+
 def _strip_leading_tool_messages(window: list[ChatMessage]) -> list[ChatMessage]:
     """Drop tool messages at the head of *window*, which have nothing to answer.
 
@@ -308,6 +328,45 @@ class ConversationRunner:
         return tuple(
             {"phase": item["phase"], "metadata": dict(item["metadata"])}
             for item in self._loop_plugin_metadata
+        )
+
+    def load_checkpoint(self, session_id: str) -> ConversationCheckpoint | None:
+        """Read and validate the latest normal-conversation checkpoint.
+
+        Message bodies are deliberately not reconstructed here.  They belong
+        to the Go Harness session ledger and are sent back as the structured
+        ``history`` projection on the next RPC.  This method only exposes the
+        typed lifecycle cursor needed to resume safely after a process exit.
+        """
+
+        session_id = session_id.strip()
+        if not session_id:
+            return None
+        try:
+            state = self.graph.get_checkpoint(session_id)
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            return None
+        if state is None:
+            return None
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        checkpoint_session = str(metadata.get("session_id", "")).strip()
+        if checkpoint_session and checkpoint_session != session_id:
+            raise ValueError("checkpoint session id does not match request")
+        phase = str(metadata.get("phase", "")).strip()
+        if phase not in {"model_before", "model_after", "tool_after"}:
+            return ConversationCheckpoint(
+                state=state,
+                phase=phase,
+                turn=max(0, int(metadata.get("turn", 0) or 0)),
+                next_turn=1,
+            )
+        turn = max(1, int(metadata.get("turn", 1) or 1))
+        next_turn = turn + 1 if phase == "tool_after" else turn
+        return ConversationCheckpoint(
+            state=state,
+            phase=phase,
+            turn=turn,
+            next_turn=max(1, next_turn),
         )
 
     def run(
@@ -473,6 +532,21 @@ class ConversationRunner:
                     "request_sha256": self._digest_value(user_text),
                 },
             )
+        checkpoint = self.load_checkpoint(session_id)
+        start_turn = 1
+        if checkpoint is not None and checkpoint.resumable:
+            start_turn = min(self.max_tool_rounds, checkpoint.next_turn)
+            self._persist_event(
+                session_id,
+                "execution_result",
+                {
+                    "status": "checkpoint_resumed",
+                    "phase": checkpoint.phase,
+                    "checkpoint_turn": checkpoint.turn,
+                    "resume_turn": start_turn,
+                    "tool_rounds": checkpoint.state.tool_rounds,
+                },
+            )
         total_tokens_in = 0
         total_tokens_out = 0
         total_cached_tokens = 0
@@ -484,7 +558,7 @@ class ConversationRunner:
         overflow_retries = 0
         self._pending_compaction_updates.clear()
 
-        for turn in range(1, self.max_tool_rounds + 1):
+        for turn in range(start_turn, self.max_tool_rounds + 1):
             self._loop_last_turn = max(self._loop_last_turn, turn)
             # ── Cooperative user interrupt (design 22.8) ──────────────
             # Stop before doing any work this turn when the harness has
