@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED",
+  "exit_code": 0,
+  "evidence_scope": "REMOTE_PROVIDER_REPORTED_USAGE",
+  "limitations": [
+    "This lane verifies provider-reported context A/B usage, not the full product E2E.",
+    "P3 paths are task-pinned; this lane does not measure context-selection accuracy."
+  ],
+  "run_id": "context-token-20260906-anthropic-sol-7",
+  "trace_id": "556316e5593b42559ff942463490c8e7",
+  "source_pin": {
+    "git_sha": "b10fb3e0cc895620eb2cf52bbe562e002290a91d",
+    "dirty_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_files": 0
+  },
+  "data_pin": {
+    "task_id": "workflow-provider-contract-v1",
+    "task_sha256": "dffbe79dc36a97a5b28e45b686fa80322a34e0095034ce1a8cac3bc734abc77c",
+    "corpus_sha256": "d8bb4638c5c09a3ed1f7f7c17da4abecbeeb7f18a5183c9a2009090041b15d14",
+    "corpus_file_count": 7,
+    "redacted_file_count": 0
+  },
+  "prompt_pins": {
+    "system_sha256": "5c9d6e4e73d01bc8db8bdb03d20d4595a6a7effbf546dcbaa24111b8c6ebd53d",
+    "task_sha256": "9842b160235baf1042a3b82267678109f8bc4d7def1080a376ad7853ffd03ab7",
+    "baseline_context_sha256": "9cc79140478e1e85125928b2ca72eaf4977d930b4b23df8ea30fffc52a7164c3",
+    "layered_context_sha256": "a5b723dced0ddb103aed7413046d01a4c9e541a1cd640e35b6a397978b89804c"
+  },
+  "provider": {
+    "requested_model": "gpt-5.6-sol",
+    "endpoint": {
+      "scheme": "https",
+      "host": "beeapi.dev"
+    },
+    "model_revision_status": "MODEL_IDENTITY_UNVERIFIED"
+  },
+  "budget": {
+    "max_output_tokens_per_arm": 512,
+    "max_input_tokens_per_arm": 100000,
+    "timeout_seconds_per_arm": 600.0,
+    "temperature": 0.0,
+    "calls_per_arm": 1
+  },
+  "arms": {
+    "baseline": {
+      "call_completed": true,
+      "provider_input_tokens": 21390,
+      "provider_output_tokens": 240,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "reported_model": "gpt-5.6-sol",
+      "response_id_sha256": "312bd9cba36e94643e8566f51c35bc239c1a030a3ec067b5c8858c85b56a8111",
+      "system_fingerprint": ""
+    },
+    "layered": {
+      "call_completed": true,
+      "provider_input_tokens": 708,
+      "provider_output_tokens": 119,
+      "cached_input_tokens": 0,
+      "outcome_passed": true,
+      "response_sha256": "78322df61eceb69728734d95b9e695be1bf846b8f674da1bbe2c52c7336dcc6e",
+      "reported_model": "gpt-5.6-sol",
+      "response_id_sha256": "a4e41f676793637d8dc51da7ddd539d1314fe7d2a7883728ae3884d8cd038911",
+      "system_fingerprint": ""
+    }
+  },
+  "comparison": {
+    "baseline_input_token_denominator": 21390,
+    "layered_input_token_denominator": 708,
+    "saved_input_tokens": 20682,
+    "input_token_reduction": 0.9669004207573633,
+    "minimum_required_reduction": 0.6,
+    "outcome_regressed": false
+  },
+  "failures": [],
+  "raw_evidence": {
+    "storage_scope": "LOCAL_IGNORED",
+    "artifact_root": "eval_results/context-token/context-token-20260906-anthropic-sol-7/context-token-20260906-anthropic-sol-7",
+    "task_sha256": "dffbe79dc36a97a5b28e45b686fa80322a34e0095034ce1a8cac3bc734abc77c",
+    "corpus_sha256": "d8bb4638c5c09a3ed1f7f7c17da4abecbeeb7f18a5183c9a2009090041b15d14",
+    "arm_results_sha256": "c258f6555c76bb69bceda0619d6184ae256671116978312a9e6a85814a1dc1f7",
+    "context_database_sha256": "66bd9ebd8ac1455ff46988303ce59b2e2b7013b09a6553d4e3cfc762937f4f7b",
+    "run_manifest_sha256": "968e4d47194937a8e73e907888c1ff5e839f05742abd9c52851e3a9ebd7e855e"
+  },
+  "artifacts": {
+    "arm_results": "arm-results.json",
+    "checksum_file": "checksums.sha256",
+    "context_database": "context.sqlite"
+  }
+}
