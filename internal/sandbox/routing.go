@@ -74,6 +74,33 @@ func (r *RoutingRunner) Run(ctx context.Context, request Request) (Result, error
 	return selected.Run(ctx, request)
 }
 
+// Start forwards a background process request to the selected isolated
+// backend. A synchronous-only backend is rejected instead of falling back to
+// an unconfined host process.
+func (r *RoutingRunner) Start(ctx context.Context, request Request) (Process, error) {
+	if r == nil {
+		return nil, fmt.Errorf("%w: nil runner", ErrSandboxUnavailable)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := r.ensureSelected(ctx); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	selected := r.selected
+	trustRoot := r.trustRoot
+	r.mu.Unlock()
+	if err := validateRequestTrustRoot(request, trustRoot, selected); err != nil {
+		return nil, err
+	}
+	streamer, ok := selected.(StreamingRunner)
+	if !ok {
+		return nil, errors.New("sandbox backend does not support streaming jobs")
+	}
+	return streamer.Start(ctx, request)
+}
+
 type availabilityProbe func(context.Context, time.Duration, string, ...string) bool
 
 type runnerFactory func(Config, string, Backend) (Runner, error)

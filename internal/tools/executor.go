@@ -87,8 +87,14 @@ func NewExecutor(root string) *Executor {
 // NewExecutor and keep it as the sole job state owner.
 func (e *Executor) SetJobsRegistry(registry *jobs.Registry) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	sandboxRunner := e.sandbox
 	e.jobs = registry
+	e.mu.Unlock()
+	if registry != nil {
+		if streaming, ok := sandboxRunner.(sandbox.StreamingRunner); ok {
+			registry.SetStreamingRunner(streaming)
+		}
+	}
 }
 
 // Jobs returns the configured background-job registry for lifecycle-aware
@@ -141,8 +147,17 @@ func (e *Executor) SetRAGSearcher(searcher rag.Searcher) {
 // sandbox failure is returned to the caller and never retried on the host.
 func (e *Executor) SetSandbox(runner sandbox.Runner) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.sandbox = runner
+	registry := e.jobs
+	e.mu.Unlock()
+	if registry == nil {
+		return
+	}
+	if streaming, ok := runner.(sandbox.StreamingRunner); ok {
+		registry.SetStreamingRunner(streaming)
+		return
+	}
+	registry.SetStreamingRunner(nil)
 }
 
 func (e *Executor) sandboxRunner() sandbox.Runner {
@@ -154,6 +169,17 @@ func (e *Executor) sandboxRunner() sandbox.Runner {
 // HasSandbox reports whether Bash is constrained by a configured backend.
 func (e *Executor) HasSandbox() bool {
 	return e.sandboxRunner() != nil
+}
+
+// HasStreamingSandbox reports whether background jobs can stay inside the
+// configured isolation boundary while retaining live process pipes.
+func (e *Executor) HasStreamingSandbox() bool {
+	runner := e.sandboxRunner()
+	if runner == nil {
+		return false
+	}
+	_, ok := runner.(sandbox.StreamingRunner)
+	return ok
 }
 
 // SetTracer injects a genai.Tracer for creating execute_tool and retrieve spans.

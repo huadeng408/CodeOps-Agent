@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"code-agent/internal/safety"
+	"code-agent/internal/sandbox"
 )
 
 // Status is the externally observable process lifecycle state.
@@ -86,7 +87,8 @@ type ReadResult struct {
 type trackedJob struct {
 	spec       Spec
 	id         string
-	cmd        *exec.Cmd
+	proc       process
+	kill       func() error
 	stdin      io.WriteCloser
 	stdinMu    sync.Mutex
 	done       chan struct{}
@@ -101,6 +103,24 @@ type trackedJob struct {
 	timer      *time.Timer
 }
 
+type process interface {
+	StdoutPipe() (io.ReadCloser, error)
+	StderrPipe() (io.ReadCloser, error)
+	StdinPipe() (io.WriteCloser, error)
+	Start() error
+	Wait() error
+	Kill() error
+}
+
+type hostProcess struct{ cmd *exec.Cmd }
+
+func (p *hostProcess) StdoutPipe() (io.ReadCloser, error) { return p.cmd.StdoutPipe() }
+func (p *hostProcess) StderrPipe() (io.ReadCloser, error) { return p.cmd.StderrPipe() }
+func (p *hostProcess) StdinPipe() (io.WriteCloser, error) { return p.cmd.StdinPipe() }
+func (p *hostProcess) Start() error                       { return p.cmd.Start() }
+func (p *hostProcess) Wait() error                        { return p.cmd.Wait() }
+func (p *hostProcess) Kill() error                        { return killProcessTree(p.cmd) }
+
 // Registry tracks all jobs started by one Harness process.
 type Registry struct {
 	root                  string
@@ -111,6 +131,17 @@ type Registry struct {
 	jobs   map[string]*trackedJob
 	next   map[string]int
 	closed bool
+	stream sandbox.StreamingRunner
+}
+
+// SetStreamingRunner routes future jobs through an isolated backend that
+// supports live process pipes. A nil runner restores the host-process adapter
+// for development and unit tests; callers with a synchronous sandbox must
+// leave this unset so tools can fail closed.
+func (r *Registry) SetStreamingRunner(runner sandbox.StreamingRunner) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stream = runner
 }
 
 // NewRegistry constructs a process-local registry. A blank root resolves to
@@ -197,32 +228,54 @@ func (r *Registry) Start(ctx context.Context, spec Spec) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("background job limit reached for owner %q (limit: %d)", spec.Owner, r.maxConcurrentPerOwner)
 	}
 
-	var cmd *exec.Cmd
-	if program != "" {
-		cmd = exec.Command(program, spec.Args...)
+	var proc process
+	var kill func() error
+	if r.stream != nil {
+		proc, err = r.stream.Start(ctx, sandbox.Request{
+			Workspace:   r.root,
+			WorkingDir:  spec.WorkingDir,
+			Interactive: spec.Interactive,
+			Command:     spec.Command,
+			Program:     spec.Program,
+			Args:        append([]string(nil), spec.Args...),
+		})
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("start sandbox background job: %w", err)
+		}
+		if proc == nil {
+			return Snapshot{}, errors.New("sandbox background job returned a nil process")
+		}
+		kill = proc.Kill
 	} else {
-		name, args := shellCommand(command)
-		cmd = exec.Command(name, args...)
+		var cmd *exec.Cmd
+		if program != "" {
+			cmd = exec.Command(program, spec.Args...)
+		} else {
+			name, args := shellCommand(command)
+			cmd = exec.Command(name, args...)
+		}
+		cmd.Dir = spec.WorkingDir
+		cmd.Env = safety.ScrubEnvironment(os.Environ())
+		configureProcess(cmd)
+		proc = &hostProcess{cmd: cmd}
+		kill = func() error { return killProcessTree(cmd) }
 	}
-	cmd.Dir = spec.WorkingDir
-	cmd.Env = safety.ScrubEnvironment(os.Environ())
-	configureProcess(cmd)
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("open job stdout: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := proc.StderrPipe()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("open job stderr: %w", err)
 	}
 	var stdin io.WriteCloser
 	if spec.Interactive {
-		stdin, err = cmd.StdinPipe()
+		stdin, err = proc.StdinPipe()
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("open job stdin: %w", err)
 		}
 	}
-	if err := cmd.Start(); err != nil {
+	if err := proc.Start(); err != nil {
 		if stdin != nil {
 			_ = stdin.Close()
 		}
@@ -235,7 +288,8 @@ func (r *Registry) Start(ctx context.Context, spec Spec) (Snapshot, error) {
 	job := &trackedJob{
 		spec:      spec,
 		id:        id,
-		cmd:       cmd,
+		proc:      proc,
+		kill:      kill,
 		stdin:     stdin,
 		done:      make(chan struct{}),
 		status:    StatusRunning,
@@ -361,9 +415,9 @@ func (r *Registry) Kill(id, owner, reason string) (Snapshot, error) {
 	}
 	job.status = StatusStopping
 	job.detail = strings.TrimSpace(reason)
-	cmd := job.cmd
+	kill := job.kill
 	r.mu.Unlock()
-	if err := killProcessTree(cmd); err != nil {
+	if err := kill(); err != nil {
 		// The process may have exited between the state transition and kill. The
 		// waiter remains authoritative and will publish completed/failed/killed.
 		return r.Get(id, owner)
@@ -450,7 +504,7 @@ func (r *Registry) capture(job *trackedJob, stdout, stderr io.ReadCloser) {
 	// even though the child exits successfully.
 	<-stdoutDone
 	<-stderrDone
-	err := job.cmd.Wait()
+	err := job.proc.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if isTerminal(job.status) {

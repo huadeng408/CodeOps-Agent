@@ -32,7 +32,7 @@ func (e *Executor) executeJobStart(ctx context.Context, req ToolRequest) (ToolRe
 	if !ok || strings.TrimSpace(command) == "" {
 		return jobFailure("JobStart", "command is required")
 	}
-	if e.HasSandbox() {
+	if e.HasSandbox() && !e.HasStreamingSandbox() {
 		return jobFailure("JobStart", "background jobs require a streaming sandbox backend; synchronous sandbox refuses detached host processes")
 	}
 	if analysis := safety.NewAnalyzer().AnalyzeCommand(command); !analysis.Allowed {

@@ -79,8 +79,9 @@ func DefaultConfig() Config {
 
 // Request describes the workspace-scoped command to run.
 type Request struct {
-	Workspace  string
-	WorkingDir string
+	Workspace   string
+	WorkingDir  string
+	Interactive bool
 	// Command is interpreted by the sandbox shell. It is intended for the Bash
 	// tool only; structured callers must set Program and Args instead.
 	Command string
@@ -123,6 +124,25 @@ func (r *DockerRunner) Backend() Backend { return BackendDocker }
 
 func NewDockerRunner(config Config) *DockerRunner {
 	return newDockerRunner(config, runtime.GOOS, osCommandExecutor{})
+}
+
+// Start launches one isolated Docker process with live stdio pipes. The
+// context only gates an already-cancelled request; background job lifetime is
+// controlled explicitly through Process.Kill and Process.Wait.
+func (r *DockerRunner) Start(ctx context.Context, request Request) (Process, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	binary, args, err := BuildDockerCommand(r.platform, r.config, request)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(binary, args...)
+	configureSandboxProcess(cmd)
+	return &commandProcess{cmd: cmd}, nil
 }
 
 func newDockerRunner(config Config, platform string, executor commandExecutor) *DockerRunner {
@@ -217,6 +237,11 @@ func buildDockerRunArgs(config Config, workspaceSource, containerDir string, req
 		"--workdir", containerDir,
 		"--mount", mount,
 		config.Image,
+	}
+	if request.Interactive {
+		// Keep stdin attached for JobWrite without allocating a terminal. This
+		// preserves separate stdout/stderr streams for incremental reads.
+		args = append(args[:4], append([]string{"-i"}, args[4:]...)...)
 	}
 	if program != "" {
 		args = append(args, program)

@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"runtime"
 	"strings"
 	"testing"
@@ -16,6 +17,39 @@ type jobsTestSandbox struct{}
 
 func (jobsTestSandbox) Run(context.Context, sandbox.Request) (sandbox.Result, error) {
 	return sandbox.Result{}, nil
+}
+
+type streamingJobsTestProcess struct{}
+
+type streamingJobsTestWriter struct{}
+
+func (streamingJobsTestWriter) Write(value []byte) (int, error) { return len(value), nil }
+func (streamingJobsTestWriter) Close() error                    { return nil }
+
+func (streamingJobsTestProcess) StdoutPipe() (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("streamed job output\n")), nil
+}
+
+func (streamingJobsTestProcess) StderrPipe() (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (streamingJobsTestProcess) StdinPipe() (io.WriteCloser, error) {
+	return streamingJobsTestWriter{}, nil
+}
+
+func (streamingJobsTestProcess) Start() error { return nil }
+func (streamingJobsTestProcess) Wait() error  { return nil }
+func (streamingJobsTestProcess) Kill() error  { return nil }
+
+type streamingJobsTestSandbox struct{}
+
+func (streamingJobsTestSandbox) Run(context.Context, sandbox.Request) (sandbox.Result, error) {
+	return sandbox.Result{}, nil
+}
+
+func (streamingJobsTestSandbox) Start(context.Context, sandbox.Request) (sandbox.Process, error) {
+	return streamingJobsTestProcess{}, nil
 }
 
 type jobToolView struct {
@@ -198,6 +232,35 @@ func TestExecutorBackgroundJobsDoNotBypassConfiguredSandbox(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "streaming sandbox") {
 		t.Fatalf("unexpected sandbox refusal: %q", result.Error)
+	}
+}
+
+func TestExecutorBackgroundJobsUseStreamingSandbox(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	executor.SetSandbox(streamingJobsTestSandbox{})
+	started, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "JobStart", OwnerSessionID: "session-a",
+		Arguments: map[string]any{"command": "ignored", "kind": "streaming"},
+	})
+	if err != nil {
+		t.Fatalf("JobStart with streaming sandbox: %v", err)
+	}
+	var snapshot struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(started.Output), &snapshot); err != nil {
+		t.Fatalf("decode start snapshot: %v", err)
+	}
+	if snapshot.ID == "" || snapshot.Status != "running" {
+		t.Fatalf("unexpected start snapshot: %+v", snapshot)
+	}
+	output, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "JobOutput", OwnerSessionID: "session-a",
+		Arguments: map[string]any{"job_id": snapshot.ID, "wait": true},
+	})
+	if err != nil || !strings.Contains(output.Output, "streamed job output") {
+		t.Fatalf("streaming sandbox output = %q, err=%v", output.Output, err)
 	}
 }
 

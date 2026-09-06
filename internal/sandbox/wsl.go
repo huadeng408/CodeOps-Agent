@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,22 @@ func (r *wslRunner) Backend() Backend { return BackendWSL2 }
 
 func newWSLRunner(config Config) *wslRunner {
 	return &wslRunner{config: normalizeConfig(config)}
+}
+
+func (r *wslRunner) Start(ctx context.Context, request Request) (Process, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	binary, args, err := BuildWSLDockerCommand("windows", r.config, request)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(binary, args...)
+	configureSandboxProcess(cmd)
+	return &commandProcess{cmd: cmd}, nil
 }
 
 func (r *wslRunner) Run(ctx context.Context, request Request) (Result, error) {
