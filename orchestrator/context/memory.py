@@ -20,9 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from orchestrator.security.credentials import redact_credential_text
+
+if TYPE_CHECKING:
+    from .backends import ContextStore
 
 _EVENT_KINDS = {
     "plan",
@@ -494,7 +497,7 @@ class LayeredContext:
 
     def __init__(
         self,
-        store: SQLiteContextStore,
+        store: ContextStore,
         project_root: str | Path,
         max_files: int = 256,
         max_raw_bytes: int = 16_000,

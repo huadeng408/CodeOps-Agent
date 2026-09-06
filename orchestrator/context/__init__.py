@@ -1,5 +1,11 @@
 """Context management utilities."""
 
+from .backends import (
+    ContextStore,
+    MySQLContextStore,
+    RedisContextStore,
+    build_context_store,
+)
 from .budget import BudgetStatus, TokenBudget
 from .compaction import CompactionRequest, CompactionSummarizer, LLMCompactionSummarizer
 from .compactor import Compactor
@@ -19,12 +25,16 @@ __all__ = [
     "Compactor",
     "ContextEvent",
     "ContextSnapshot",
+    "ContextStore",
     "GitDiffSnapshot",
+    "LLMCompactionSummarizer",
     "LayeredContext",
     "LongTermMemory",
-    "LLMCompactionSummarizer",
+    "MySQLContextStore",
+    "RedisContextStore",
     "SQLiteContextStore",
     "TokenBudget",
+    "build_context_store",
     "load_git_diff_context",
     "load_git_diff_snapshot",
 ]

@@ -18,6 +18,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+context = [
+    # Optional remote persistence adapters. SQLite remains the zero-config default.
+    "pymysql>=1.1,<2",
+    "redis>=5,<7",
+]
 rag = [
     # Runtime imports for orchestrator.rag. Keep these optional because the Go
     # harness does not need the Python HTTP/RAG service installed.

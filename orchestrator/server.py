@@ -12,7 +12,7 @@ import grpc
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 
 from .config import configure_otel, load_dotenv, read_env
-from .context import LayeredContext, SQLiteContextStore, TokenBudget
+from .context import LayeredContext, TokenBudget, build_context_store
 from .graph.main_graph import build_graph
 from .identity import ActorIdentity, ActorIdentityError, ActorSessionRegistry
 from .llm.providers import (
@@ -53,6 +53,9 @@ class ServerConfig:
     max_tokens: int = 1_000_000
     max_cost: float = 5.0
     context_window: int = 256_000
+    # Empty means use CODE_AGENT_CONTEXT_BACKEND/CONTEXT_BACKEND, then SQLite.
+    # Remote URLs and DSNs are intentionally not part of this config object.
+    context_backend: str = ""
 
 
 class OrchestratorServer:
@@ -73,7 +76,10 @@ class OrchestratorServer:
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
-        self.context_store = SQLiteContextStore(Path(self.project_root) / ".agent" / "context.sqlite")
+        self.context_store = build_context_store(
+            self.config.context_backend,
+            project_root=self.project_root,
+        )
         self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
         self.extensions = ExtensionRegistry.from_manifest(
@@ -397,6 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=1_000_000)
     parser.add_argument("--max-cost", type=float, default=5.0)
     parser.add_argument("--context-window", type=int, default=256_000)
+    parser.add_argument(
+        "--context-backend",
+        choices=("sqlite", "redis", "mysql"),
+        default="",
+        help="context persistence backend; remote backends require their environment URL/DSN",
+    )
     return parser
 
 
@@ -412,6 +424,7 @@ def main(argv: list[str] | None = None) -> None:
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
             context_window=args.context_window,
+            context_backend=args.context_backend,
         )
     )
     server.serve()
