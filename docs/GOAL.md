@@ -4,7 +4,7 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为 `912ec3e8`。P0/P1/P2 的代码路径已完成定向验证：Python
+本轮代码验证基线为 `e32435fa`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2220 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
@@ -20,6 +20,13 @@ Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool S
 模型漂移脱节。当前机器仍未提供
 可用 Docker daemon 或 WSL2 内 Docker，因此该路径只有契约和本地回归证据，不能标为
 真实 Docker/WSL2 E2E。
+
+使用用户提供的 provider 配置完成了一次最小真实 Anthropic-compatible 流式 smoke，
+结果为 `OK`，流序列包含 `text -> usage -> done`，响应侧返回了 `reported_model` 和
+`response_id`。provider 未返回不可变 revision，因此该结果仍标记为
+`identity_verified=false`，只作为 `non_release_dev_smoke`，不能替代跨进程 Harness
+E2E 或发布级评测；脱敏 receipt 保存在被忽略的
+`.runtime/e2e/provider-live-stream-smoke.json`。
 
 以下发布指标仍保持 `BLOCKED`，不能由上述 deterministic provider 或 fixture
 替代：真实外部 provider 跨进程调用、Docker/WSL2 受限执行、Phoenix live trace、
