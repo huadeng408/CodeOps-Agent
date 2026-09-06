@@ -463,6 +463,19 @@ async def run_context_token_eval(
         if both_calls_completed and "" not in fingerprints and len(fingerprints) == 1
         else "MODEL_IDENTITY_UNVERIFIED"
     )
+    if (
+        scope == "REMOTE_PROVIDER_REPORTED_USAGE"
+        and model_revision_status != "VERIFIED"
+    ):
+        failures.append(
+            {
+                "category": "model_identity",
+                "message": (
+                    "remote provider must report one stable model revision "
+                    "fingerprint"
+                ),
+            }
+        )
     baseline_tokens = baseline.effective_input_tokens
     layered_tokens = layered.effective_input_tokens
     reduction = (
@@ -488,7 +501,11 @@ async def run_context_token_eval(
     passed = not failures
     status = (
         "VERIFIED"
-        if passed and scope == "REMOTE_PROVIDER_REPORTED_USAGE"
+        if (
+            passed
+            and scope == "REMOTE_PROVIDER_REPORTED_USAGE"
+            and model_revision_status == "VERIFIED"
+        )
         else "SMOKE_PASS"
         if passed
         else "BLOCKED"

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from eval.harness.artifacts import RunArtifacts
-from eval.harness.context_token_eval import load_context_token_task
+from eval.harness.context_token_eval import (
+    ContextTokenEvalConfig,
+    load_context_token_task,
+    run_context_token_eval,
+)
+from orchestrator.llm.client import ChatResponse, ChatRequest, LLMClient, Usage
 
 
 def _provider_server(
@@ -411,6 +418,50 @@ def test_provider_model_mismatch_blocks_comparison(tmp_path: Path) -> None:
         (
             tmp_path / "eval_results" / "context-token-model-mismatch" / "receipt.json"
         ).read_text(encoding="utf-8")
+    )
+    assert "model_identity" in {failure["category"] for failure in receipt["failures"]}
+
+
+@dataclass(slots=True)
+class _RemoteFixtureClient(LLMClient):
+    """Dataclass client used to exercise remote evidence semantics offline."""
+
+    base_url: str = "https://relay.example"
+    model: str = "locked-model"
+    max_tokens: int = 0
+    calls: int = 0
+
+    async def chat(self, request: ChatRequest) -> ChatResponse:
+        self.calls += 1
+        return ChatResponse(
+            text=json.dumps({"executor_class": "ProviderWorkerExecutor"}),
+            usage=Usage(input_tokens=1_000 if self.calls == 1 else 200, output_tokens=8),
+            model_identity={
+                "requested_model": request.model,
+                "reported_model": request.model,
+                "response_id": f"response-{self.calls}",
+                "system_fingerprint": "",
+            },
+        )
+
+
+def test_remote_provider_without_stable_revision_is_blocked(tmp_path: Path) -> None:
+    project_root, task_path, _ = _write_task(tmp_path)
+    config = ContextTokenEvalConfig(
+        run_id="context-token-remote-unpinned",
+        artifact_root=tmp_path / "eval_results",
+        project_root=project_root,
+        task_path=task_path,
+        model="locked-model",
+    )
+
+    receipt = asyncio.run(
+        run_context_token_eval(config, _RemoteFixtureClient())
+    )
+
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["provider"]["model_revision_status"] == (
+        "MODEL_IDENTITY_UNVERIFIED"
     )
     assert "model_identity" in {failure["category"] for failure in receipt["failures"]}
 
