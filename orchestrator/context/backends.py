@@ -515,10 +515,6 @@ class MySQLContextStore:
                     INDEX long_term_memory_session (session_id, created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
             )
-            # Existing installations may have been created before the
-            # provenance and hash-chain columns were introduced.  ALTER is
-            # intentionally additive and duplicate-column errors are safe to
-            # ignore, so startup upgrades the same tables in place.
             for table, column, definition in (
                 ("context_events", "event_id", "VARCHAR(64) NULL"),
                 ("context_events", "previous_checksum", "CHAR(64) NOT NULL DEFAULT ''"),
