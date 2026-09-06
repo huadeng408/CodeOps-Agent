@@ -938,6 +938,52 @@ def test_openai_stream_emits_incremental_text_and_tool_calls() -> None:
         server.server_close()
 
 
+def test_openai_stream_carries_provider_model_identity_on_done() -> None:
+    """Streaming receipts must retain response-side model identity."""
+    frames = [
+        _openai_frame(
+            {
+                "id": "chatcmpl-stream-1",
+                "model": "deepseek-chat-v4-pro-0722",
+                "system_fingerprint": "fp-stream-1",
+                "created": 1754700000,
+                "choices": [{"delta": {"content": "ok"}}],
+            }
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    server, _ = _sse_server(frames)
+    try:
+        client = OpenAIClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="gpt-5.6-sol",
+            timeout=5.0,
+        )
+        deltas = asyncio.run(
+            _collect(
+                client.stream(
+                    ChatRequest(
+                        model="gpt-5.6-sol",
+                        messages=[ChatMessage(role="user", content="hello")],
+                    )
+                )
+            )
+        )
+        done = next(delta for delta in deltas if delta.kind == "done")
+        assert done.model_identity == {
+            "requested_model": "gpt-5.6-sol",
+            "reported_model": "deepseek-chat-v4-pro-0722",
+            "response_id": "chatcmpl-stream-1",
+            "system_fingerprint": "fp-stream-1",
+            "created": 1754700000,
+            "identity_verified": True,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_openai_stream_preserves_reasoning_content_for_tool_followup() -> None:
     frames = [
         _openai_frame(
@@ -1134,6 +1180,53 @@ def test_anthropic_stream_emits_incremental_text_and_tool_use() -> None:
         assert done_delta.thinking_blocks == []
         body = json.loads(captured["body"])
         assert body["stream"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_anthropic_stream_carries_message_identity_on_done() -> None:
+    frames = [
+        _anthropic_frame(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg-stream-1",
+                    "model": "claude-test-2026-01",
+                    "usage": {"input_tokens": 1},
+                },
+            },
+        ),
+        _anthropic_frame("message_stop", {"type": "message_stop"}),
+    ]
+    server, _ = _sse_server(frames)
+    try:
+        client = AnthropicClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="claude-test",
+            timeout=5.0,
+        )
+        deltas = asyncio.run(
+            _collect(
+                client.stream(
+                    ChatRequest(
+                        model="claude-test",
+                        messages=[ChatMessage(role="user", content="hello")],
+                    )
+                )
+            )
+        )
+        done = next(delta for delta in deltas if delta.kind == "done")
+        assert done.model_identity == {
+            "requested_model": "claude-test",
+            "reported_model": "claude-test-2026-01",
+            "response_id": "msg-stream-1",
+            "system_fingerprint": "",
+            "created": 0,
+            "identity_verified": False,
+        }
     finally:
         server.shutdown()
         server.server_close()

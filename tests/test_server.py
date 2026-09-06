@@ -1791,6 +1791,22 @@ class StreamingFakeLLM:
         yield StreamDelta(kind="done")
 
 
+class IdentityStreamingFakeLLM(StreamingFakeLLM):
+    async def stream(self, request):
+        yield StreamDelta(kind="text", text="ok")
+        yield StreamDelta(
+            kind="done",
+            model_identity={
+                "requested_model": "fake",
+                "reported_model": "fake-build",
+                "response_id": "stream-response-1",
+                "system_fingerprint": "fp-1",
+                "created": 1,
+                "identity_verified": True,
+            },
+        )
+
+
 def test_runner_emits_incremental_text_chunks(monkeypatch, tmp_path) -> None:
     """A streaming-capable LLM produces multiple TextChunk messages per turn so
     the Go harness OnTextDelta fires per chunk (design 22.6)."""
@@ -1826,6 +1842,25 @@ def test_stream_request_preserves_allow_tools_flag(monkeypatch, tmp_path) -> Non
     assert len(llm.requests) == 1
     assert llm.requests[0].allow_tools is False
     assert llm.requests[0].tools == []
+
+
+def test_runner_preserves_stream_model_identity(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = IdentityStreamingFakeLLM()
+    app.llm = llm
+    runner = _runner_from_app(app, llm)
+    response_box = []
+
+    list(
+        runner._stream_chat(
+            [ChatMessage(role="user", content="hello")],
+            response_box=response_box,
+        )
+    )
+
+    assert response_box[0].model_identity["reported_model"] == "fake-build"
+    assert response_box[0].model_identity["system_fingerprint"] == "fp-1"
 
 
 # ---------------------------------------------------------------------------

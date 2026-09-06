@@ -157,6 +157,8 @@ class OpenAIClient(LLMClient):
         tool_accum: dict[int, dict[str, Any]] = {}
         reasoning_parts: list[str] = []
         usage = Usage()
+        identity_payload: dict[str, Any] = {}
+        identity_consistent = True
         try:
             response = urllib.request.urlopen(http_request, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
@@ -184,6 +186,15 @@ class OpenAIClient(LLMClient):
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                for key in ("model", "id", "system_fingerprint", "created"):
+                    value = chunk.get(key)
+                    if value in (None, ""):
+                        continue
+                    previous = identity_payload.get(key)
+                    if previous not in (None, "") and str(previous) != str(value):
+                        identity_consistent = False
+                    else:
+                        identity_payload[key] = value
                 chunk_usage = chunk.get("usage")
                 if isinstance(chunk_usage, dict):
                     usage = Usage(
@@ -228,7 +239,18 @@ class OpenAIClient(LLMClient):
             thinking_blocks.append(
                 {"type": "thinking", "thinking": "".join(reasoning_parts)}
             )
-        yield StreamDelta(kind="done", thinking_blocks=thinking_blocks)
+        model_identity = self._model_identity(
+            identity_payload,
+            requested_model=request.model or self.model,
+        )
+        if not identity_consistent:
+            model_identity["identity_consistent"] = False
+            model_identity["identity_verified"] = False
+        yield StreamDelta(
+            kind="done",
+            thinking_blocks=thinking_blocks,
+            model_identity=model_identity,
+        )
 
     def _stream_payload(self, request: ChatRequest) -> dict[str, Any]:
         """Build the chat-completions payload for SSE streaming.

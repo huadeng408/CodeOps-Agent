@@ -141,6 +141,11 @@ def _set_gen_ai_attributes(span, runner, response: ChatResponse) -> None:
             "gen_ai.request.model",
             str(getattr(runner.llm, "model", "")),
         )
+        identity = response.model_identity or {}
+        if identity.get("reported_model"):
+            span.set_attribute("gen_ai.response.model", str(identity["reported_model"]))
+        if identity.get("response_id"):
+            span.set_attribute("gen_ai.response.id", str(identity["response_id"]))
         usage = response.usage
         if usage is not None:
             span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
@@ -1986,6 +1991,7 @@ class ConversationRunner:
             tool_calls: list[ToolCall] = []
             thinking_blocks: list[dict[str, Any]] = []
             usage = Usage()
+            model_identity: dict[str, Any] = {}
             for delta in _iter_stream_async(stream_fn(request)):
                 # Defense-in-depth cooperative cancel between deltas. Real
                 # providers also raise from inside stream(); this catches the
@@ -2008,12 +2014,15 @@ class ConversationRunner:
                 elif kind == "done":
                     if delta.thinking_blocks:
                         thinking_blocks = list(delta.thinking_blocks)
+                    if delta.model_identity:
+                        model_identity = dict(delta.model_identity)
 
             response = ChatResponse(
                 text="".join(text_parts),
                 tool_calls=tool_calls,
                 thinking_blocks=thinking_blocks,
                 usage=usage,
+                model_identity=model_identity,
             )
             if response_box is not None:
                 response_box.append(response)

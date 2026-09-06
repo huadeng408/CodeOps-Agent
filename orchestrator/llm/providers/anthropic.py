@@ -150,6 +150,7 @@ class AnthropicClient(LLMClient):
         thinking_by_index: dict[int, dict[str, str]] = {}
         redacted_blocks: list[dict[str, Any]] = []
         current_event = ""
+        identity_payload: dict[str, Any] = {}
 
         with urllib.request.urlopen(http_request, timeout=self.timeout) as resp:
             for raw_line in resp:
@@ -168,9 +169,17 @@ class AnthropicClient(LLMClient):
                     evt = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                for key in ("model", "id", "system_fingerprint", "created"):
+                    value = evt.get(key)
+                    if value not in (None, ""):
+                        identity_payload[key] = value
                 etype = evt.get("type") or current_event
                 if etype == "message_start":
                     message = evt.get("message", {}) or {}
+                    for key in ("model", "id", "system_fingerprint", "created"):
+                        value = message.get(key)
+                        if value not in (None, ""):
+                            identity_payload[key] = value
                     usage_payload = message.get("usage", {}) or {}
                     input_tokens = int(usage_payload.get("input_tokens", 0) or 0)
                     cached_tokens = int(
@@ -244,6 +253,10 @@ class AnthropicClient(LLMClient):
         tool_calls = self._finalize_streamed_tool_calls(tool_accum)
         if tool_calls:
             yield StreamDelta(kind="tool_calls", tool_calls=tool_calls)
+        model_identity = self._model_identity(
+            identity_payload,
+            requested_model=request.model or self.model,
+        )
         yield StreamDelta(
             kind="usage",
             usage=Usage(
@@ -252,7 +265,11 @@ class AnthropicClient(LLMClient):
                 cached_input_tokens=cached_tokens,
             ),
         )
-        yield StreamDelta(kind="done", thinking_blocks=thinking_blocks)
+        yield StreamDelta(
+            kind="done",
+            thinking_blocks=thinking_blocks,
+            model_identity=model_identity,
+        )
 
     def _stream_payload(self, request: ChatRequest) -> dict[str, Any]:
         """Build the Anthropic messages payload for SSE streaming.

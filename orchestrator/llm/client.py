@@ -306,6 +306,10 @@ class StreamDelta:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: Usage | None = None
     thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
+    # Provider-reported identity is attached to the terminal ``done`` delta.
+    # Keeping it on the stream contract prevents SSE callers from silently
+    # losing the model/revision evidence available on non-stream responses.
+    model_identity: dict[str, Any] = field(default_factory=dict)
 
 
 class RequestInterrupted(RuntimeError):
@@ -371,7 +375,9 @@ class LLMClient(ABC):
             )
         yield StreamDelta(kind="usage", usage=response.usage)
         yield StreamDelta(
-            kind="done", thinking_blocks=list(response.thinking_blocks)
+            kind="done",
+            thinking_blocks=list(response.thinking_blocks),
+            model_identity=dict(response.model_identity),
         )
 
 

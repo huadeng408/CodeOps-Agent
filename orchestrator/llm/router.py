@@ -96,7 +96,11 @@ class PreparedRoute:
             if response.tool_calls:
                 yield StreamDelta(kind="tool_calls", tool_calls=list(response.tool_calls))
             yield StreamDelta(kind="usage", usage=response.usage)
-            yield StreamDelta(kind="done", thinking_blocks=list(response.thinking_blocks))
+            yield StreamDelta(
+                kind="done",
+                thinking_blocks=list(response.thinking_blocks),
+                model_identity=dict(response.model_identity),
+            )
             return
         async for delta in stream(self._request(request)):
             yield delta
