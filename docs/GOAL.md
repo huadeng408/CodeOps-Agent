@@ -4,7 +4,7 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为 `092e06fd`。P0/P1/P2 的代码路径已完成定向验证：Python
+本轮代码验证基线为 `af8f4dc1`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2224 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
@@ -20,6 +20,12 @@ Control（含进程恢复）、Legacy Session Import、Skill Manifest 和 Tool S
 模型漂移脱节。当前机器仍未提供
 可用 Docker daemon 或 WSL2 内 Docker，因此该路径只有契约和本地回归证据，不能标为
 真实 Docker/WSL2 E2E。
+
+本快照补齐了真实多进程恢复基准：8 个 Worker 执行 200 个任务，按固定计划注入
+30 次进程终止；30/30 次故障均已应用，恢复 `200/200`，成功率 `1.0`，收据状态为
+`VERIFIED`，并通过 SHA-256 校验。运行 ID 为
+`canonical-20260907-071234`，收据保存在被忽略的 `.tmp/fault-injection/` 下，
+不进入版本控制。
 
 本快照再次通过仓库统一 helper 隐藏启动 Docker Desktop，并执行
 `Wait-DockerDaemonReady -TimeoutSeconds 60`；探测在 60 秒后超时，`Ubuntu-24.04`
@@ -41,9 +47,9 @@ E2E 或发布级评测；脱敏 receipt 保存在被忽略的
 `identity_verified=false`，不能替代发布级 provider、Docker/WSL2 或官方 scorer 证据。
 
 以下发布指标仍保持 `BLOCKED`，不能由上述 deterministic provider、fixture 或开发
-smoke 替代：发布级真实外部 provider 跨进程证据、Docker/WSL2 受限执行、Phoenix live trace、
-官方 SWE-bench/Terminal-Bench scorer，以及 8 Worker/200 任务/30 次真实进程
-故障的恢复率基准。Docker daemon 不可用时，相关 E2E 必须记录为 `BLOCKED`。
+smoke 替代：发布级真实外部 provider 跨进程证据、Docker/WSL2 受限执行、Phoenix live trace，
+以及官方 SWE-bench/Terminal-Bench scorer。Docker daemon 不可用时，相关 E2E 必须记录为
+`BLOCKED`。
 
 本项目的验收标准来自当前任务的 active Goal。历史设计地图、进展日志、
 外部记忆和旧计划只用于追溯，不是启动入口或执行权威。
