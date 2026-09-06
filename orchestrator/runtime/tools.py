@@ -78,6 +78,21 @@ class ToolRegistry:
             return orchestrator_pb2.ALWAYS_ASK
         return spec.permission
 
+    def capability_catalog(self) -> dict[str, Any]:
+        """Return a stable, credential-free tool capability profile.
+
+        The model-facing schema remains available through ``openai_schemas``;
+        this smaller catalog is safe for child-agent receipts and control
+        surfaces because it exposes only names and Harness permission levels.
+        """
+        return {
+            "schema_version": "tools.v1",
+            "tools": [
+                {"name": spec.name, "permission": int(spec.permission)}
+                for spec in self.list()
+            ],
+        }
+
     def _refresh_mcp_tools(self) -> None:
         if self._mcp_manifest_path is None:
             return

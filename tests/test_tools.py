@@ -177,3 +177,16 @@ def test_registry_allowlist_hides_other_tools_and_mcp_entries(tmp_path) -> None:
         "SearchKnowledge"
     ]
     assert registry.get("Read") is None
+
+
+def test_registry_exposes_versioned_capability_catalog_without_execution_details() -> None:
+    registry = ToolRegistry(allowed_tools={"Read", "Bash"})
+
+    catalog = registry.capability_catalog()
+
+    assert catalog["schema_version"] == "tools.v1"
+    assert catalog["tools"] == [
+        {"name": "Bash", "permission": int(orchestrator_pb2.ALWAYS_ASK)},
+        {"name": "Read", "permission": int(orchestrator_pb2.AUTO_ALLOW)},
+    ]
+    assert all("parameters" not in item for item in catalog["tools"])
