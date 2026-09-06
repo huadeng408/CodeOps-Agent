@@ -53,3 +53,75 @@ def test_skill_manager_mirrors_harness_manifest_without_loading_prompt_bodies(tm
     deploy = manager.get("deploy")
     assert deploy is not None
     assert deploy.description == "Deploy safely."
+
+
+def test_skill_manifest_rejects_malformed_metadata_without_partial_refresh(tmp_path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    manifest = agent_dir / "skills.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "release",
+                        "description": "Prepare a release.",
+                        "tools": ["Git"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = SkillManager(tmp_path)
+    assert manager.get("release") is not None
+
+    manifest.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": ["not-a-name"], "description": "coercion must fail"},
+                    {"name": "Bad_Name", "description": "invalid name"},
+                    {"name": "broken-tools", "description": "invalid tools", "tools": ["Git", 7]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # A malformed replacement is fail-closed: the last good catalog remains
+    # available and no malformed entry is partially applied.
+    assert manager.get("release") is not None
+    assert manager.get("not-a-name") is None
+    assert manager.get("Bad_Name") is None
+    assert manager.get("broken-tools") is None
+
+
+def test_skill_manifest_rejects_duplicate_names_and_control_character_tools(tmp_path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    manifest = agent_dir / "skills.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": "custom-skill", "description": "one"},
+                    {"name": "custom-skill", "description": "two"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = SkillManager(tmp_path)
+    assert manager.get("custom-skill") is None
+
+    manifest.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": "safe-skill", "description": "safe", "tools": ["Git\nBash"]}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert manager.get("safe-skill") is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +64,7 @@ class SkillManager:
             self._catalog_defaults[name] = skill
 
     def register(self, skill: Skill) -> None:
+        _validate_skill_metadata(skill.name, skill.description, skill.tools)
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> Skill | None:
@@ -103,18 +105,13 @@ class SkillManager:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        raw_skills = payload.get("skills", []) if isinstance(payload, dict) else []
+        entries = _parse_manifest_entries(payload)
+        if entries is None:
+            # A malformed replacement must not erase the last known-good
+            # catalog or partially apply attacker-controlled metadata.
+            return
         next_names: set[str] = set()
-        for raw in raw_skills:
-            if not isinstance(raw, dict):
-                continue
-            name = str(raw.get("name", "")).strip()
-            description = str(raw.get("description", "")).strip()
-            if not name or not description:
-                continue
-            tools = raw.get("tools", [])
-            if not isinstance(tools, list):
-                tools = []
+        for name, description, tools in entries:
             existing = self._skills.get(name)
             prompt = (
                 existing.prompt
@@ -139,3 +136,47 @@ class SkillManager:
             self._skills.pop(name, None)
         self._manifest_names = next_names
         self._manifest_signature = signature
+
+
+_SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _validate_skill_metadata(name: str, description: str, tools: list[str]) -> None:
+    if not isinstance(name, str) or not _SKILL_NAME.fullmatch(name):
+        raise ValueError(f"invalid Skill name: {name!r}")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError(f"Skill {name!r} requires a description")
+    for tool in tools:
+        if not isinstance(tool, str) or not tool.strip() or any(char in tool for char in "\r\n\t"):
+            raise ValueError(f"Skill {name!r} contains invalid tool metadata")
+
+
+def _parse_manifest_entries(payload: object) -> list[tuple[str, str, list[str]]] | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+        return None
+    entries: list[tuple[str, str, list[str]]] = []
+    seen: set[str] = set()
+    for raw in payload["skills"]:
+        if not isinstance(raw, dict):
+            return None
+        name = raw.get("name")
+        description = raw.get("description")
+        tools_value = raw.get("tools", [])
+        if not isinstance(name, str) or not isinstance(description, str) or not isinstance(tools_value, list):
+            return None
+        normalized_name = name.strip()
+        normalized_description = description.strip()
+        tools: list[str] = []
+        for value in tools_value:
+            if not isinstance(value, str):
+                return None
+            tools.append(value.strip())
+        try:
+            _validate_skill_metadata(normalized_name, normalized_description, tools)
+        except ValueError:
+            return None
+        if normalized_name in seen:
+            return None
+        seen.add(normalized_name)
+        entries.append((normalized_name, normalized_description, tools))
+    return entries

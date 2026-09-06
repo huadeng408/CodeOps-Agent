@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -362,7 +363,8 @@ func (b *InputBuffer) readTermKey() (rune, string, bool, error) {
 	}
 
 	if first[0] != 0x1b {
-		return rune(first[0]), "", false, nil
+		key, err := readUTF8Rune(b.tty, first[0])
+		return key, "", false, err
 	}
 
 	// Escape received — try to read the escape sequence. The sequence bytes
@@ -381,6 +383,36 @@ func (b *InputBuffer) readTermKey() (rune, string, bool, error) {
 
 	// Alt+key sequence: ESC <char>
 	return 0, string(seq[:1]), true, nil
+}
+
+func readUTF8Rune(r io.Reader, first byte) (rune, error) {
+	width := 1
+	switch {
+	case first < utf8.RuneSelf:
+		width = 1
+	case first >= 0xc2 && first <= 0xdf:
+		width = 2
+	case first >= 0xe0 && first <= 0xef:
+		width = 3
+	case first >= 0xf0 && first <= 0xf4:
+		width = 4
+	default:
+		return utf8.RuneError, nil
+	}
+	if width == 1 {
+		return rune(first), nil
+	}
+
+	encoded := make([]byte, width)
+	encoded[0] = first
+	if _, err := io.ReadFull(r, encoded[1:]); err != nil {
+		return 0, err
+	}
+	if !utf8.Valid(encoded) {
+		return utf8.RuneError, nil
+	}
+	decoded, _ := utf8.DecodeRune(encoded)
+	return decoded, nil
 }
 
 // readTimeout reads from f with a deadline. It returns any bytes that arrived

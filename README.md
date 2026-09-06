@@ -187,6 +187,7 @@ python -m orchestrator.server
 3. `~/.agent/settings.json`
 4. `.agent/settings.json`
 5. `.agent/settings.local.json`
+6. 启动进程环境中的 provider/model（用于安全注入，优先级最高）
 
 常用 JSON 配置项：
 

@@ -99,3 +99,27 @@ func TestReadTimeoutReturnsBytesWhenAvailable(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+func TestReadTermKeyDecodesUTF8Rune(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	if _, err := w.Write([]byte("你")); err != nil {
+		t.Fatalf("write UTF-8 input: %v", err)
+	}
+	b := &InputBuffer{tty: r}
+	got, seq, escaped, err := b.readTermKey()
+	if err != nil {
+		t.Fatalf("readTermKey: %v", err)
+	}
+	if got != '你' {
+		t.Fatalf("rune = %q (U+%04X), want %q", got, got, '你')
+	}
+	if seq != "" || escaped {
+		t.Fatalf("UTF-8 rune decoded as escape sequence: seq=%q escaped=%v", seq, escaped)
+	}
+}

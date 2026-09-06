@@ -100,3 +100,30 @@ func TestLoadAppliesConfiguredSkillDirectories(t *testing.T) {
 		t.Fatalf("skill directories = %#v", cfg.SkillDirectories)
 	}
 }
+
+func TestLoadUsesExplicitProviderModelEnvironment(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".env.local"), []byte("LLM_PROVIDER=openai\nOPENAI_MODEL=old-model\n"), 0o600); err != nil {
+		t.Fatalf("write dotenv: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".agent"), 0o755); err != nil {
+		t.Fatalf("create agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".agent", "settings.local.json"), []byte(`{"model":"settings-model","model_fast":"settings-fast"}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	t.Setenv("LLM_PROVIDER", "anthropic")
+	t.Setenv("ANTHROPIC_MODEL", "gpt-5.6-sol")
+	t.Setenv("MODEL_FAST", "")
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Model != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want explicit Anthropic model", cfg.Model)
+	}
+	if cfg.ModelFast != "" {
+		t.Fatalf("empty MODEL_FAST should disable fast model, got %q", cfg.ModelFast)
+	}
+}

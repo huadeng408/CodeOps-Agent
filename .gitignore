@@ -53,6 +53,10 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-shm
+*.sqlite-wal
+*.db-shm
+*.db-wal
 /memory/
 
 # Editors and OS files

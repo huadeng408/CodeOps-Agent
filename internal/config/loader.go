@@ -138,7 +138,6 @@ func Load(projectRoot string) (Config, error) {
 	if err := applyDotenvModel(filepath.Join(cfg.ProjectRoot, ".env.local"), &cfg); err != nil {
 		return Config{}, err
 	}
-
 	applyThinkingEnv(&cfg)
 	applyRAGSecretEnv(&cfg)
 
@@ -157,6 +156,7 @@ func Load(projectRoot string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	applyModelEnv(&cfg)
 
 	for _, dir := range []string{cfg.MemoryDir, filepath.Dir(cfg.SessionDBPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
@@ -198,6 +198,30 @@ func applyDotenvModel(path string, cfg *Config) error {
 		cfg.Model = strings.TrimSpace(model)
 	}
 	return nil
+}
+
+func applyModelEnv(cfg *Config) {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("LLM_PROVIDER")))
+	keys := []string{}
+	switch provider {
+	case "anthropic":
+		keys = []string{"ANTHROPIC_MODEL"}
+	case "local":
+		keys = []string{"LOCAL_LLM_MODEL"}
+	case "openai":
+		keys = []string{"OPENAI_MODEL"}
+	default:
+		keys = []string{"OPENAI_MODEL", "ANTHROPIC_MODEL", "LOCAL_LLM_MODEL"}
+	}
+	for _, key := range keys {
+		if model := strings.TrimSpace(os.Getenv(key)); model != "" {
+			cfg.Model = model
+			break
+		}
+	}
+	if modelFast, ok := os.LookupEnv("MODEL_FAST"); ok {
+		cfg.ModelFast = strings.TrimSpace(modelFast)
+	}
 }
 
 func applyThinkingEnv(cfg *Config) {

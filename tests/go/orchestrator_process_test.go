@@ -13,6 +13,8 @@ import (
 	"code-agent/internal/orchestrator"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestProcessManagerUsesExistingHealthyServer(t *testing.T) {
@@ -295,6 +297,8 @@ func TestIsConnectionErrorClassification(t *testing.T) {
 		{"plain", errors.New("something else"), false},
 		{"connection refused", errors.New("dial tcp: connection refused"), true},
 		{"rpc error", errors.New("rpc error: code = Unavailable desc = transport"), true},
+		{"provider authentication failure", status.Error(codes.Unknown, "Exception iterating responses: OpenAI HTTP 401: invalid api key"), false},
+		{"provider permission failure", status.Error(codes.PermissionDenied, "provider rejected request"), false},
 		{"eof", errors.New("unexpected EOF"), true},
 		{"send user input", errors.New("send user input: read: connection reset"), true},
 	}

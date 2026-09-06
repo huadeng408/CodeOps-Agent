@@ -136,6 +136,54 @@ do not expose this prompt in the manifest
 	}
 }
 
+func TestDiscoverRejectsInvalidNamesAndToolMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeTestSkill(t, dir, "aaa-valid", `---
+name: aaa-valid
+description: Valid but must not be partially committed
+tools: [Git]
+---
+body
+`)
+	writeTestSkill(t, dir, "invalid-name", `---
+name: Bad_Name
+description: Invalid name
+tools: [Git]
+---
+body
+`)
+	writeTestSkill(t, dir, "invalid-tool", "---\nname: invalid-tool\ndescription: Invalid tool\ntools: [\"Git\\nBash\"]\n---\nbody\n")
+
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: dir}); err == nil {
+		t.Fatal("Discover should fail closed for invalid Skill metadata")
+	}
+	if _, ok := manager.Get("Bad_Name"); ok {
+		t.Fatal("invalid Skill name must not be registered")
+	}
+	if _, ok := manager.Get("invalid-tool"); ok {
+		t.Fatal("invalid tool metadata must not be registered")
+	}
+	if _, ok := manager.Get("aaa-valid"); ok {
+		t.Fatal("directory discovery must not partially commit before validation completes")
+	}
+}
+
+func TestRegisterRejectsInvalidRegisteredMetadata(t *testing.T) {
+	manager := NewManager()
+	manager.Register(Skill{Name: "Bad_Name", Description: "invalid", Prompt: "body"})
+	if _, ok := manager.Get("Bad_Name"); ok {
+		t.Fatal("Register should reject invalid Skill names")
+	}
+	manager.Register(Skill{Name: "safe-skill", Description: "invalid tools", Tools: []string{"Git\nBash"}})
+	if _, ok := manager.Get("safe-skill"); ok {
+		t.Fatal("Register should reject invalid tool metadata")
+	}
+	if err := manager.WriteManifest(filepath.Join(t.TempDir(), "skills.json")); err != nil {
+		t.Fatalf("built-in manifest should remain writable: %v", err)
+	}
+}
+
 func writeTestSkill(t *testing.T, root, name, contents string) {
 	t.Helper()
 	dir := filepath.Join(root, name)

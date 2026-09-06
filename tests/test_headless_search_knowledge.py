@@ -194,6 +194,7 @@ def test_search_knowledge_fails_closed_when_response_has_no_stable_hit(
 ) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             body = json.dumps({"code": 200, "data": {"results": []}}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

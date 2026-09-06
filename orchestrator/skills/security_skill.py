@@ -6,7 +6,7 @@ from .manager import Skill
 def build_skill() -> Skill:
     return Skill(
         name="security",
-        description="inspect risky commands and operations",
-        prompt="Analyze commands for destructive or unsafe behavior before execution.",
-        tools=["Bash", "Git", "Read"],
+        description="inspect security boundaries and secrets",
+        prompt="Inspect trust boundaries, authorization, secret handling, injection risks, and fail-closed paths.",
+        tools=["Read", "Grep", "Bash"],
     )

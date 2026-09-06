@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,24 @@ type Manager struct {
 	items map[string]skillEntry
 }
 
+var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+func validSkillName(name string) bool {
+	return skillNamePattern.MatchString(name)
+}
+
+func validSkillMetadata(skill Skill) bool {
+	if !validSkillName(skill.Name) || strings.TrimSpace(skill.Description) == "" {
+		return false
+	}
+	for _, tool := range skill.Tools {
+		if strings.TrimSpace(tool) == "" || strings.ContainsAny(tool, "\r\n\t") {
+			return false
+		}
+	}
+	return true
+}
+
 func NewManager() *Manager {
 	manager := &Manager{items: make(map[string]skillEntry)}
 	for _, skill := range goalSkills() {
@@ -59,6 +78,9 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Register(skill Skill) {
+	if !validSkillMetadata(skill) {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -90,6 +112,11 @@ func (m *Manager) discoverDirectory(root string) error {
 	if err != nil {
 		return fmt.Errorf("read skills directory %s: %w", root, err)
 	}
+	type discoveredSkill struct {
+		skill Skill
+		path  string
+	}
+	discovered := make([]discoveredSkill, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -106,23 +133,35 @@ func (m *Manager) discoverDirectory(root string) error {
 		if name == "" {
 			name = entry.Name()
 		}
-		if strings.ContainsAny(name, "\\/\r\n\t ") {
+		if !validSkillName(name) {
 			return fmt.Errorf("discover skill %s: invalid name %q", path, name)
 		}
 		description := strings.TrimSpace(metadata.Description)
 		if description == "" {
 			return fmt.Errorf("discover skill %s: description is required", path)
 		}
-		m.registerLazy(Skill{
+		candidate := Skill{
 			Name:        name,
 			Description: description,
-			Tools:       append([]string(nil), metadata.Tools...),
-		}, path)
+			Tools:       normalizeTools(metadata.Tools),
+		}
+		if !validSkillMetadata(candidate) || len(candidate.Tools) != len(metadata.Tools) {
+			return fmt.Errorf("discover skill %s: invalid tool metadata", path)
+		}
+		discovered = append(discovered, discoveredSkill{skill: candidate, path: path})
+	}
+	// Commit only after every entry in this root has passed validation. A
+	// malformed sibling must not leave a partially refreshed catalog behind.
+	for _, item := range discovered {
+		m.registerLazy(item.skill, item.path)
 	}
 	return nil
 }
 
 func (m *Manager) registerLazy(skill Skill, path string) {
+	if !validSkillMetadata(skill) {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.items[skill.Name] = skillEntry{skill: skill, path: path}
@@ -201,6 +240,9 @@ func (m *Manager) WriteManifest(path string) error {
 		Skills []manifestSkill `json:"skills"`
 	}{Skills: make([]manifestSkill, 0, len(items))}
 	for _, skill := range items {
+		if !validSkillMetadata(skill) {
+			return errors.New("invalid Skill metadata")
+		}
 		payload.Skills = append(payload.Skills, manifestSkill{
 			Name:        skill.Name,
 			Description: skill.Description,
@@ -218,6 +260,14 @@ func (m *Manager) WriteManifest(path string) error {
 		return fmt.Errorf("write skills manifest: %w", err)
 	}
 	return nil
+}
+
+func normalizeTools(tools []string) []string {
+	out := make([]string, len(tools))
+	for i, tool := range tools {
+		out[i] = strings.TrimSpace(tool)
+	}
+	return out
 }
 
 func readFrontmatter(path string) (skillFrontmatter, error) {

@@ -330,17 +330,39 @@ func IsConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	switch status.Code(err) {
-	case codes.Unavailable, codes.DeadlineExceeded, codes.Internal:
-		return true
-	}
-	// Wrapped errors without a gRPC status (status.Code returns Unknown for
-	// those) fall back to substring sniffing so transport failures surfaced as
-	// plain errors are still detected.
 	msg := strings.ToLower(err.Error())
+	if containsProviderAuthFailure(msg) {
+		return false
+	}
+
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return true
+	case codes.Internal:
+		return containsTransportFailure(msg)
+	}
+	return containsTransportFailure(msg)
+}
+
+func containsProviderAuthFailure(msg string) bool {
 	for _, hint := range []string{
-		"connection", "transport", "rpc error", "stream", "eof",
-		"reset", "broken pipe", "unavailable", "no such host", "refused",
+		"http 401", "http 403", "unauthorized", "unauthenticated",
+		"authentication", "invalid api key", "invalid_api_key",
+		"permission denied", "access denied", "forbidden",
+	} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTransportFailure(msg string) bool {
+	for _, hint := range []string{
+		"connection refused", "connection reset", "connection closed",
+		"transport is closing", "transport: closing", "desc = transport", "broken pipe",
+		"no such host", "network is unreachable", "dial tcp", "tls handshake timeout",
+		"unexpected eof", "unexpected end of file", "read: eof", "write: eof",
 	} {
 		if strings.Contains(msg, hint) {
 			return true
