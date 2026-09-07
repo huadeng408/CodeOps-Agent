@@ -13,6 +13,7 @@ from codeagent import orchestrator_pb2
 from orchestrator.identity import ActorIdentity
 from orchestrator.llm.client import ChatResponse, ToolCall
 from orchestrator.graph.nodes import GraphState
+from orchestrator.graph.main_graph import MainGraph
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.server import OrchestratorServer, ServerConfig, create_grpc_server
 
@@ -264,6 +265,32 @@ def test_normal_conversation_rejects_checkpoint_from_different_history(tmp_path:
                 history=[{"role": "user", "content": "different"}],
             )
         )
+    app.close()
+
+
+def test_normal_conversation_fails_closed_when_checkpoint_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    def unreadable_checkpoint(_graph, _session_id: str):
+        raise sqlite3.DatabaseError("checkpoint database is corrupt")
+
+    monkeypatch.setattr(MainGraph, "get_checkpoint", unreadable_checkpoint)
+    with pytest.raises(sqlite3.DatabaseError, match="corrupt"):
+        list(runner.run("continue", iter(()), session_id="corrupt-checkpoint"))
     app.close()
 
 

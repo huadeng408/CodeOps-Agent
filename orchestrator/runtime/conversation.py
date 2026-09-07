@@ -355,8 +355,14 @@ class ConversationRunner:
             return None
         try:
             state = self.graph.get_checkpoint(session_id)
-        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
-            return None
+        except RuntimeError as exc:
+            # A graph without a configured checkpointer is the explicit
+            # compatibility mode used by standalone callers. Any other
+            # runtime failure means persistence is unavailable and must not be
+            # mistaken for a fresh conversation.
+            if str(exc).strip().lower() == "graph checkpointing is not configured":
+                return None
+            raise
         if state is None:
             return None
         metadata = state.metadata if isinstance(state.metadata, dict) else {}

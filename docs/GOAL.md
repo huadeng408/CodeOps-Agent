@@ -5,7 +5,7 @@
 ## 当前验证快照（2026-09-07）
 
 本轮代码变更基线为 `c54f4f7b`。P0/P1/P2 的代码路径已完成定向验证：Python
-上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2228 passed, 16 skipped`；Go
+上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2229 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
 Go/Python 跨进程 E2E 的 Agent Loop、Extension、Background Job、Session
@@ -70,6 +70,11 @@ OpenAI 风格的 `tool_choice=function` 转换为 Anthropic `tool_choice.type=to
 SQLite/Redis/MySQL `events_after` 现在会在返回后缀前校验完整 hash chain，早期
 payload 被篡改时统一 fail closed；新增篡改前缀回归测试，Python 全量为
 `2228 passed, 16 skipped`，Go 全量通过。
+
+本轮补齐 P1 checkpoint 失败语义：ConversationRunner 仅在显式未配置
+checkpointer 时返回空恢复状态；SQLite 损坏、校验或类型异常不再被吞掉而误判为
+首次运行，避免已有工具副作用被重复执行。新增损坏 checkpoint 契约测试，Python
+全量为 `2229 passed, 16 skipped`，Go 全量通过。
 
 本次继续复核 provider 评测配置。首次低并发尝试因仓库 `.env.local` 的
 `LLM_PROVIDER=openai` 优先于临时 Anthropic 配置，实际误路由到 DeepSeek
