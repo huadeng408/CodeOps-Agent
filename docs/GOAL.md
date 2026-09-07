@@ -4,7 +4,7 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码验证基线为当前 `HEAD` `c54f4f7b`。P0/P1/P2 的代码路径已完成定向验证：Python
+本轮代码变更基线为 `c54f4f7b`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2226 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
