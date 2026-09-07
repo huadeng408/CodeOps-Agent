@@ -66,6 +66,15 @@ OpenAI 风格的 `tool_choice=function` 转换为 Anthropic `tool_choice.type=to
 `read operation timed out`，未产生可采信的新 receipt，因此 Skill 准确率和发布状态
 仍沿用上一个有完整证据的 `573/1000`、`BLOCKED` 快照。
 
+本次继续复核 provider 评测配置。首次低并发尝试因仓库 `.env.local` 的
+`LLM_PROVIDER=openai` 优先于临时 Anthropic 配置，实际误路由到 DeepSeek
+兼容 endpoint，完整分母结果为 `0/1000` 且类别为 `provider_call`，不计入准确率。
+修正 provider 优先级后，单并发 Anthropic 运行的前 `5` 个案例均真实返回并正确选中
+Skill，`reported_model` 为请求模型；provider 仍未返回稳定 fingerprint。并发 `4`
+运行在约 `70` 秒仅完成 `12` 个案例，显示当前 relay 吞吐不足以在本机合理时限内完成
+正式分母；该运行已中止，未产生可采信的完整 receipt。发布结论继续沿用上一个完整
+证据 `573/1000`、`BLOCKED`，不得把部分运行或网络失败当作模型准确率。
+
 本项目的验收标准来自当前任务的 active Goal。历史设计地图、进展日志、
 外部记忆和旧计划只用于追溯，不是启动入口或执行权威。
 
