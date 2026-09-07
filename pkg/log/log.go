@@ -8,7 +8,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-var sugar *zap.SugaredLogger
+// Keep logging safe before application startup (and in small package tests).
+// Init replaces this no-op logger with the configured logger during startup.
+var sugar = zap.NewNop().Sugar()
 
 // Init initializes the zap logger.
 func Init(level, format, outputPath string) {
@@ -50,11 +52,11 @@ func Init(level, format, outputPath string) {
 }
 
 func Info(msg string)                                { sugar.Info(msg) }
-func Infof(template string, args ...interface{})      { sugar.Infof(template, args...) }
-func Infow(msg string, keysAndValues ...interface{})   { sugar.Infow(msg, keysAndValues...) }
-func Warnf(template string, args ...interface{})      { sugar.Warnf(template, args...) }
-func Error(msg string, err error)                     { sugar.Errorw(msg, "error", err) }
-func Errorf(template string, args ...interface{})     { sugar.Errorf(template, args...) }
-func Fatal(msg string, err error)                     { sugar.Fatalw(msg, "error", err) }
-func Fatalf(template string, args ...interface{})     { sugar.Fatalf(template, args...) }
-func Sync()                                           { _ = sugar.Sync() }
+func Infof(template string, args ...interface{})     { sugar.Infof(template, args...) }
+func Infow(msg string, keysAndValues ...interface{}) { sugar.Infow(msg, keysAndValues...) }
+func Warnf(template string, args ...interface{})     { sugar.Warnf(template, args...) }
+func Error(msg string, err error)                    { sugar.Errorw(msg, "error", err) }
+func Errorf(template string, args ...interface{})    { sugar.Errorf(template, args...) }
+func Fatal(msg string, err error)                    { sugar.Fatalw(msg, "error", err) }
+func Fatalf(template string, args ...interface{})    { sugar.Fatalf(template, args...) }
+func Sync()                                          { _ = sugar.Sync() }

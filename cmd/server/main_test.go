@@ -130,3 +130,48 @@ func TestSearchReadIndexFailsClosedWhenCorpusReadAliasIsBlank(t *testing.T) {
 		t.Fatalf("error = %q, want corpus.read_alias context", err)
 	}
 }
+
+func TestCORSMiddlewareAllowsConfiguredCredentialedOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(corsMiddleware("http://localhost:3000,http://127.0.0.1:3000"))
+	router.GET("/resource", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	request.Header.Set("Origin", "http://localhost:3000")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("allow origin = %q", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("allow credentials = %q", got)
+	}
+	if got := response.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("vary = %q", got)
+	}
+}
+
+func TestCORSMiddlewareRejectsUnconfiguredPreflight(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(corsMiddleware("http://localhost:3000"))
+	router.OPTIONS("/resource", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodOptions, "/resource", nil)
+	request.Header.Set("Origin", "https://untrusted.example")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("untrusted origin was reflected: %q", got)
+	}
+}

@@ -176,6 +176,8 @@ internal/cli/.agent/
 /$taskDiag
 
 # Scratch outputs created by local UI/evaluation runs.
+/\.playwright-cli/
+/frontend/node_modules/
 /brainstorm-portal-layout.png
 /phoenix-v0.1-playwright-mcp*
 /resume-backend-developer.html

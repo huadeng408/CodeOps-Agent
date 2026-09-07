@@ -23,6 +23,7 @@ import (
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
+	"code-agent/internal/session"
 	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
@@ -48,6 +49,10 @@ func main() {
 	}
 	serverconfig.Init(configPath)
 	cfg := serverconfig.Conf
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "server configuration rejected: %v\n", err)
+		return
+	}
 
 	log.Init(cfg.Log.Level, cfg.Log.Format, cfg.Log.OutputPath)
 	defer log.Sync()
@@ -187,6 +192,20 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, embeddingClient, orchestratorMemoryClient, rerankerClient, es.ESClient, cfg.Memory)
 	orchestratorSupportService := service.NewOrchestratorSupportService(searchService, memoryService, conversationRepo, rerankerClient, docVectorRepo, userService)
 	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient, docVectorRepo, userService)
+	// WebSocket Hub
+	wsHub := handler.NewWebSocketHub()
+	ledgerPath := strings.TrimSpace(cfg.Harness.SessionLedgerPath)
+	if ledgerPath == "" {
+		ledgerPath = filepath.Join(".agent", "sessions", "sessions.sqlite")
+	}
+	ledger, err := session.OpenSQLiteEventLog(ledgerPath)
+	if err != nil {
+		log.Errorf("failed to open canonical session ledger: %v", err)
+		return
+	}
+	defer ledger.Close()
+	workbench := session.NewWorkbench(ledger, wsHub)
+	wsTickets := session.NewWebSocketTickets(30 * time.Second)
 
 	// Telemetry: create tracer and wire into handlers and services.
 	telemetry := genai.NewTelemetry(context.Background())
@@ -227,6 +246,7 @@ func main() {
 		}
 		c.Next()
 	})
+	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
 	r.Use(middleware.RequestLogger(), gin.Recovery())
 	r.GET("/healthz", healthzHandler(func() string { return embeddingPreflightStatus }))
 
@@ -288,6 +308,30 @@ func main() {
 		{
 			conversation.GET("", handler.NewConversationHandler(conversationService).GetConversations)
 		}
+
+		sessions := apiV1.Group("/sessions")
+		sessions.Use(middleware.AuthMiddleware(jwtManager, userService))
+		{
+			sessionHandler := handler.NewSessionHandlerWithTickets(workbench, wsTickets)
+			sessions.POST("", sessionHandler.Create)
+			sessions.GET("", sessionHandler.List)
+			sessions.GET("/:id", sessionHandler.Get)
+			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
+			sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
+			sessions.DELETE("/:id", sessionHandler.Delete)
+			sessions.POST("/:id/ws-ticket", sessionHandler.IssueWebSocketTicket)
+
+			eventHandler := handler.NewEventHandler(workbench)
+			sessions.GET("/:id/events", eventHandler.ListEvents)
+			sessions.POST("/:id/events", eventHandler.CreateEvent)
+			sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
+			sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
+			sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
+
+		}
+		// WebSocket uses an opaque one-time ticket, not an access JWT in the URL.
+		wsHandler := handler.NewWebSocketHandlerWithWorkbench(wsHub, workbench, wsTickets)
+		r.GET("/api/v1/sessions/:id/ws", wsHandler.HandleWebSocket)
 
 		chatGroup := apiV1.Group("/chat")
 		chatHandler := handler.NewChatHandler(chatService, userService, jwtManager)
@@ -410,6 +454,38 @@ func resolveTraceIndexForStartup(ctx context.Context, strict bool, readAlias, ex
 func healthzHandler(statusFn func() string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "embedding_preflight": statusFn()})
+	}
+}
+
+func corsMiddleware(rawOrigins string) gin.HandlerFunc {
+	allowed := make(map[string]struct{})
+	for _, value := range strings.Split(rawOrigins, ",") {
+		if origin := strings.TrimSpace(value); origin != "" {
+			allowed[origin] = struct{}{}
+		}
+	}
+	return func(c *gin.Context) {
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		if origin != "" {
+			if _, ok := allowed[origin]; ok {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Credentials", "true")
+				c.Header("Vary", "Origin")
+			}
+		}
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Refresh-Token")
+		if c.Request.Method == http.MethodOptions {
+			if origin != "" {
+				if _, ok := allowed[origin]; !ok {
+					c.AbortWithStatus(http.StatusForbidden)
+					return
+				}
+			}
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
 	}
 }
 

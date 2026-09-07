@@ -2,14 +2,14 @@
 package handler
 
 import (
-	"net/http"
 	"code-agent/internal/service"
 	"code-agent/pkg/log"
-	"strings"
+	"code-agent/pkg/token"
+	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"code-agent/internal/model"
+	"github.com/gin-gonic/gin"
 )
 
 // UserHandler 负责处理所有与普通用户相关的 API 请求。
@@ -24,8 +24,10 @@ func NewUserHandler(userService service.UserService) *UserHandler {
 
 // RegisterRequest 定义了用户注册 API 的请求体结构。
 type RegisterRequest struct {
-	Username string `json:"username" binding:"required"`
+	Username string `json:"username"`
+	Email    string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	Name     string `json:"name"`
 }
 
 // Register 处理用户注册请求。
@@ -36,15 +38,21 @@ func (h *UserHandler) Register(c *gin.Context) {
 		log.Warnf("Register: Invalid request payload, error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    http.StatusBadRequest,
-			"message": "无效的请求负载：用户名和密码不能为空",
+			"message": "无效的请求负载：邮箱和密码不能为空",
 		})
 		return
 	}
 
+	// Use email as username if username is not provided
+	username := req.Username
+	if username == "" {
+		username = req.Email
+	}
+
 	// 调用 service 层执行注册逻辑
-	user, err := h.userService.Register(req.Username, req.Password)
+	user, err := h.userService.Register(username, req.Password)
 	if err != nil {
-		log.Warnf("Register: User registration failed for '%s', error: %v", req.Username, err)
+		log.Warnf("Register: User registration failed for '%s', error: %v", username, err)
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
@@ -58,7 +66,8 @@ func (h *UserHandler) Register(c *gin.Context) {
 
 // LoginRequest 定义了用户登录 API 的请求体结构。
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
 	Password string `json:"password" binding:"required"`
 }
 
@@ -69,13 +78,19 @@ func (h *UserHandler) Login(c *gin.Context) {
 		log.Warnf("Login: Invalid request payload, error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    http.StatusBadRequest,
-			"message": "无效的请求负载：用户名和密码不能为空",
+			"message": "无效的请求负载：邮箱/用户名和密码不能为空",
 		})
 		return
 	}
 
+	// Use email as username if username is not provided
+	username := req.Username
+	if username == "" {
+		username = req.Email
+	}
+
 	// 调用 service 层执行登录逻辑
-	accessToken, refreshToken, err := h.userService.Login(req.Username, req.Password)
+	accessToken, refreshToken, err := h.userService.Login(username, req.Password)
 	if err != nil {
 		log.Warnf("Login: User authentication failed for '%s', error: %v", req.Username, err)
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -86,6 +101,9 @@ func (h *UserHandler) Login(c *gin.Context) {
 	}
 
 	log.Infof("User '%s' logged in successfully", req.Username)
+	// Browser clients authenticate with HttpOnly cookies; the JSON fields stay
+	// temporarily for existing non-browser clients during migration.
+	token.SetAuthCookies(c.Writer, c.Request, accessToken, refreshToken, 24*60*60, 7*24*60*60)
 	c.JSON(http.StatusOK, gin.H{
 		"code":    http.StatusOK,
 		"message": "Login successful",
@@ -123,9 +141,15 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 
 // Logout 处理用户登出逻辑。
 func (h *UserHandler) Logout(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-	refreshToken := c.GetHeader("X-Refresh-Token")
+	tokenString, tokenErr := token.AccessTokenFromRequest(c.Request)
+	if tokenErr != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "未认证"})
+		return
+	}
+	refreshToken, refreshErr := token.RefreshTokenFromRequest(c.Request)
+	if refreshErr != nil {
+		refreshToken = ""
+	}
 
 	err := h.userService.Logout(tokenString, refreshToken)
 	if err != nil {
@@ -143,6 +167,7 @@ func (h *UserHandler) Logout(c *gin.Context) {
 		}
 	}
 	log.Infof("User '%s' logged out successfully", username)
+	token.ClearAuthCookies(c.Writer, c.Request)
 	c.JSON(http.StatusOK, gin.H{
 		"code":    http.StatusOK,
 		"message": "登出成功"})

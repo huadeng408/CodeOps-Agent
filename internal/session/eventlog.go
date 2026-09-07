@@ -88,8 +88,10 @@ type EventLog interface {
 	ImportLegacySnapshot(ctx context.Context, sessionID string) (Event, bool, error)
 	Fork(ctx context.Context, sourceSessionID, targetSessionID string, targetSeq int64) error
 	Rewind(ctx context.Context, sessionID string, targetSeq int64) (Event, error)
+	RewindExpected(ctx context.Context, sessionID string, targetSeq, expectedSeq int64) (Event, error)
 	Events(ctx context.Context, sessionID string) ([]Event, error)
 	EventsAfter(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]Event, error)
+	SessionIDs(ctx context.Context) ([]string, error)
 	Surface(ctx context.Context, sessionID string) ([]Event, error)
 	Verify(ctx context.Context, sessionID string) error
 	Close() error
@@ -476,6 +478,29 @@ func (l *SQLiteEventLog) Rewind(ctx context.Context, sessionID string, targetSeq
 	if err != nil {
 		return Event{}, err
 	}
+	return l.rewindExpectedUnlocked(ctx, sessionID, targetSeq, int64(len(events)), events)
+}
+
+// RewindExpected appends one rewind marker only when expectedSeq is still the
+// next canonical sequence. Callers use it to prevent a restore racing past a
+// newly appended Session fact.
+func (l *SQLiteEventLog) RewindExpected(ctx context.Context, sessionID string, targetSeq, expectedSeq int64) (Event, error) {
+	if strings.TrimSpace(sessionID) == "" || targetSeq < 0 {
+		return Event{}, ErrRewindTargetInvalid
+	}
+	if expectedSeq < 0 {
+		return Event{}, errors.New("session rewind expected sequence must be non-negative")
+	}
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
+	events, err := l.Events(ctx, sessionID)
+	if err != nil {
+		return Event{}, err
+	}
+	return l.rewindExpectedUnlocked(ctx, sessionID, targetSeq, expectedSeq, events)
+}
+
+func (l *SQLiteEventLog) rewindExpectedUnlocked(ctx context.Context, sessionID string, targetSeq, expectedSeq int64, events []Event) (Event, error) {
 	if targetSeq >= int64(len(events)) {
 		return Event{}, fmt.Errorf("%w: target seq %d exceeds history", ErrRewindTargetInvalid, targetSeq)
 	}
@@ -483,7 +508,7 @@ func (l *SQLiteEventLog) Rewind(ctx context.Context, sessionID string, targetSeq
 	if err != nil {
 		return Event{}, fmt.Errorf("marshal rewind marker: %w", err)
 	}
-	appended, err := l.appendBatchUnlocked(ctx, sessionID, int64(len(events)), []pendingEvent{{
+	appended, err := l.appendBatchUnlocked(ctx, sessionID, expectedSeq, []pendingEvent{{
 		eventType: "session/rewind",
 		payload:   payload,
 	}})

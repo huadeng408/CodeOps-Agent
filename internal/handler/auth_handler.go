@@ -2,10 +2,11 @@
 package handler
 
 import (
-	"github.com/gin-gonic/gin"
-	"net/http"
 	"code-agent/internal/service"
 	"code-agent/pkg/log"
+	"code-agent/pkg/token"
+	"github.com/gin-gonic/gin"
+	"net/http"
 )
 
 // AuthHandler 负责处理认证相关的 API 请求，例如刷新 token。
@@ -26,8 +27,18 @@ type RefreshTokenRequest struct {
 // RefreshToken 处理刷新 token 的请求。
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	var req RefreshTokenRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Warnf("RefreshToken: Invalid request payload, error: %v", err)
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		// JSON is optional for browser clients, which keep the refresh token in
+		// an HttpOnly cookie. A malformed body is handled as a missing token.
+		_ = c.ShouldBindJSON(&req)
+	}
+	if req.RefreshToken == "" {
+		if cookieToken, err := token.RefreshTokenFromRequest(c.Request); err == nil {
+			req.RefreshToken = cookieToken
+		}
+	}
+	if req.RefreshToken == "" {
+		log.Warnf("RefreshToken: Invalid request payload: refreshToken is missing")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求负载：refreshToken 不能为空"})
 		return
 	}
@@ -40,6 +51,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	log.Info("Token refreshed successfully")
+	token.SetAuthCookies(c.Writer, c.Request, newAccessToken, newRefreshToken, 24*60*60, 7*24*60*60)
 	c.JSON(http.StatusOK, gin.H{
 		"code":    http.StatusOK,
 		"message": "Token refreshed successfully",

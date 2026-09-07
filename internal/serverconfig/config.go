@@ -2,6 +2,7 @@
 package serverconfig
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -16,6 +17,7 @@ var Conf Config
 // Config 是整个应用程序的配置结构体，与 config.yaml 文件结构对应。
 type Config struct {
 	Server        ServerConfig        `mapstructure:"server"`
+	Harness       HarnessConfig       `mapstructure:"harness"`
 	Database      DatabaseConfig      `mapstructure:"database"`
 	JWT           JWTConfig           `mapstructure:"jwt"`
 	Log           LogConfig           `mapstructure:"log"`
@@ -30,6 +32,17 @@ type Config struct {
 	Memory        MemoryConfig        `mapstructure:"memory"`
 	AI            AIConfig            `mapstructure:"ai"`
 	Corpus        CorpusConfig        `mapstructure:"corpus"`
+}
+
+// HarnessConfig contains local durable runtime paths. The ledger is the sole
+// writable source for browser sessions and is deliberately independent of the
+// legacy GORM snapshot tables.
+type HarnessConfig struct {
+	SessionLedgerPath string `mapstructure:"session_ledger_path"`
+}
+
+func DefaultHarnessConfig() HarnessConfig {
+	return HarnessConfig{SessionLedgerPath: ".agent/sessions/sessions.sqlite"}
 }
 
 // CorpusConfig controls versioned corpus writes without switching read aliases by default.
@@ -58,8 +71,9 @@ func DefaultCorpusConfig() CorpusConfig {
 
 // ServerConfig 存储服务器相关的配置。
 type ServerConfig struct {
-	Port string `mapstructure:"port"`
-	Mode string `mapstructure:"mode"`
+	Port           string `mapstructure:"port"`
+	Mode           string `mapstructure:"mode"`
+	AllowedOrigins string `mapstructure:"allowed_origins"`
 }
 
 // DatabaseConfig 存储所有数据库连接的配置。
@@ -85,6 +99,46 @@ type JWTConfig struct {
 	Secret                 string `mapstructure:"secret"`
 	AccessTokenExpireHours int    `mapstructure:"access_token_expire_hours"`
 	RefreshTokenExpireDays int    `mapstructure:"refresh_token_expire_days"`
+}
+
+// Validate rejects configurations that would silently start with an insecure
+// or non-durable runtime. It is called before any external client is opened.
+func (c Config) Validate() error {
+	invalid := make([]string, 0, 7)
+	if strings.TrimSpace(c.Server.Port) == "" {
+		invalid = append(invalid, "server.port")
+	}
+	origins := strings.TrimSpace(c.Server.AllowedOrigins)
+	if origins == "" {
+		invalid = append(invalid, "server.allowed_origins")
+	} else if origins == "*" || strings.Contains(origins, "*") {
+		invalid = append(invalid, "server.allowed_origins (wildcard is forbidden)")
+	}
+	if strings.TrimSpace(c.Harness.SessionLedgerPath) == "" {
+		invalid = append(invalid, "harness.session_ledger_path")
+	}
+	if strings.TrimSpace(c.Database.MySQL.DSN) == "" {
+		invalid = append(invalid, "database.mysql.dsn")
+	}
+	if strings.TrimSpace(c.Database.Redis.Addr) == "" {
+		invalid = append(invalid, "database.redis.addr")
+	}
+	secret := strings.TrimSpace(c.JWT.Secret)
+	if secret == "" {
+		invalid = append(invalid, "jwt.secret")
+	} else if secret == "dev-secret-key-change-in-production" || len(secret) < 32 {
+		invalid = append(invalid, "jwt.secret (minimum 32 characters)")
+	}
+	if c.JWT.AccessTokenExpireHours <= 0 {
+		invalid = append(invalid, "jwt.access_token_expire_hours")
+	}
+	if c.JWT.RefreshTokenExpireDays <= 0 {
+		invalid = append(invalid, "jwt.refresh_token_expire_days")
+	}
+	if len(invalid) > 0 {
+		return errors.New("invalid server configuration: missing or invalid " + strings.Join(invalid, ", "))
+	}
+	return nil
 }
 
 // LogConfig 存储日志相关的配置。
@@ -248,7 +302,7 @@ type AIPromptConfig struct {
 // Init 初始化配置加载，从指定的路径读取 YAML 文件并解析到 Conf 变量中。
 func Init(configPath string) {
 	viper.SetConfigFile(configPath)
-	Conf = Config{Corpus: DefaultCorpusConfig()}
+	Conf = Config{Corpus: DefaultCorpusConfig(), Harness: DefaultHarnessConfig()}
 	viper.SetConfigType("yaml")
 
 	// Support ${ENV_VAR:default} expansion in config values so secrets
@@ -265,6 +319,9 @@ func Init(configPath string) {
 
 	// Expand ${ENV:default} placeholders that viper doesn't natively support.
 	expandEnvBind(&Conf)
+	if value := strings.TrimSpace(os.Getenv("CODE_AGENT_SESSION_LEDGER_PATH")); value != "" {
+		Conf.Harness.SessionLedgerPath = value
+	}
 }
 
 // expandEnvBind walks a struct pointer with reflection and replaces

@@ -107,3 +107,21 @@ func GenerateRandomString(length int) string {
 	}
 	return hex.EncodeToString(bytes)
 }
+
+// ValidateAccessToken validates an access token and returns claims as a map
+func (m *JWTManager) ValidateAccessToken(tokenString string) (map[string]interface{}, error) {
+	claims, err := m.VerifyToken(tokenString)
+	if err != nil {
+		return nil, err
+	}
+
+	if claims.TokenType != TokenTypeAccess {
+		return nil, errors.New("invalid token type: expected access token")
+	}
+
+	return map[string]interface{}{
+		"userId":   claims.UserID,
+		"username": claims.Username,
+		"role":     claims.Role,
+	}, nil
+}
