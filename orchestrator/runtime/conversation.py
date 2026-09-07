@@ -1019,6 +1019,14 @@ class ConversationRunner:
                         tool_result_status="failed" if result.error else "completed",
                         tool_call_id=call_id,
                     )
+                    if self._checkpoint_persistence_error:
+                        yield self._finish(
+                            session_id,
+                            False,
+                            "checkpoint_persistence_unavailable",
+                            turn=turn,
+                        )
+                        return
                     self._emit_loop_event(
                         "tool_after",
                         session_id=session_id,
@@ -1486,6 +1494,14 @@ class ConversationRunner:
                     tool_result_status="failed" if result.error else "completed",
                     tool_call_id=call_id,
                 )
+                if self._checkpoint_persistence_error:
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "checkpoint_persistence_unavailable",
+                        turn=turn,
+                    )
+                    return
                 self._persist_file_change(session_id, call, result)
                 self._emit_loop_event(
                     "tool_after",
@@ -2559,6 +2575,14 @@ class ConversationRunner:
                     tool_result_status="failed" if result.error else "completed",
                     tool_call_id=call_id,
                 )
+                if self._checkpoint_persistence_error:
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "checkpoint_persistence_unavailable",
+                        turn=turn,
+                    )
+                    return consecutive_errors, True
                 self._persist_file_change(session_id, call, result)
                 key = self._tool_cache_key(call)
                 if key:

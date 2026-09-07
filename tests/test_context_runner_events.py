@@ -82,6 +82,17 @@ class FailingCheckpointGraph:
         raise OSError("checkpoint storage unavailable")
 
 
+class FailingCheckpointGraphAfter(FailingCheckpointGraph):
+    def __init__(self, fail_after: int) -> None:
+        self.writes = 0
+        self.fail_after = fail_after
+
+    def write_checkpoint(self, state, *, thread_id):
+        self.writes += 1
+        if self.writes > self.fail_after:
+            raise OSError("checkpoint storage unavailable")
+
+
 def test_runner_persists_authorized_actor_event(tmp_path: Path) -> None:
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
     runner = ConversationRunner(
@@ -466,4 +477,65 @@ def test_checkpoint_write_failure_fails_closed_before_next_model_call(tmp_path: 
     assert responses[-1].done.success is False
     assert responses[-1].done.message == "checkpoint persistence unavailable"
     assert llm.requests == 0
+    app.context_store.close()
+
+
+def test_batch_checkpoint_failure_stops_processing_later_results(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    runner = ConversationRunner(
+        graph=FailingCheckpointGraphAfter(fail_after=1),
+        llm=None,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+    calls = [
+        ToolCall(id="read-1", name="Read", arguments={"path": "a.txt"}),
+        ToolCall(id="glob-1", name="Glob", arguments={"pattern": "*.py"}),
+    ]
+    messages = list(
+        runner._handle_tool_batch(
+            calls,
+            iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Read", tool_call_id="read-1", output="a"
+                        )
+                    ),
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Glob", tool_call_id="glob-1", output="b"
+                        )
+                    ),
+                ]
+            ),
+            [],
+            {},
+            1,
+            0,
+            0,
+            0.0,
+            0,
+            session_id="session-1",
+        )
+    )
+
+    assert messages[-1].done.success is False
+    assert messages[-1].done.message == "checkpoint persistence unavailable"
+    persisted_results = [
+        event.payload.get("tool_call_id")
+        for event in app.context_store.events("session-1")
+        if event.kind == "execution_result" and event.payload.get("tool_call_id")
+    ]
+    assert persisted_results == ["read-1", "glob-1"]
+    assert len([message for message in messages if message.HasField("tool_request_batch")]) == 1
+    assert len(messages) == 2
     app.context_store.close()
