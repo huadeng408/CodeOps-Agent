@@ -549,6 +549,9 @@ class ConversationRunner:
                     "request_sha256": self._digest_value(user_text),
                 },
             )
+            if self._context_persistence_error:
+                yield self._finish(session_id, False, "context_persistence_unavailable", turn=0)
+                return
         checkpoint = self.load_checkpoint(
             session_id,
             history_digest=self._active_history_digest,

@@ -63,6 +63,15 @@ class NoToolLLM:
         return ChatResponse(text="done")
 
 
+class CountingNoToolLLM(NoToolLLM):
+    def __init__(self) -> None:
+        self.requests = 0
+
+    async def chat(self, request):
+        self.requests += 1
+        return await super().chat(request)
+
+
 def test_runner_persists_authorized_actor_event(tmp_path: Path) -> None:
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
     runner = ConversationRunner(
@@ -402,9 +411,10 @@ def test_context_persistence_failure_fails_closed_without_crashing_runner(tmp_pa
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
     )
+    llm = CountingNoToolLLM()
     runner = ConversationRunner(
         graph=app.graph,
-        llm=NoToolLLM(),
+        llm=llm,
         tool_registry=app.tools,
         todo_manager=app.todos,
         memory_manager=app.memory,
@@ -420,3 +430,4 @@ def test_context_persistence_failure_fails_closed_without_crashing_runner(tmp_pa
 
     assert responses[-1].done.success is False
     assert responses[-1].done.message == "context persistence unavailable"
+    assert llm.requests == 0

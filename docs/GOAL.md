@@ -4,7 +4,7 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码变更基线为 `71aa9ddb`。P0/P1/P2 的代码路径已完成定向验证：Python
+本轮代码变更基线为 `fb79451f`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2231 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
@@ -81,6 +81,11 @@ session、turn、调用序号、工具名和规范化参数生成稳定摘要 ID
 不可恢复 ID；同一请求跨对象/重试保持一致。现在还会在副作用执行前拒绝同一轮中
 重复的非空 provider ID，避免多个工具结果写入同一收据键；新增回归测试，Python
 全量为 `2231 passed, 16 skipped`，Go 全量通过。
+
+本轮继续补齐 P0 持久化 fail-closed 入口契约：事件存储在会话开始时不可用时，
+ConversationRunner 在首次模型调用前直接结束，并返回 `context_persistence_unavailable` /
+`context persistence unavailable`，保证模型和工具副作用均不会发生；新增回归测试覆盖
+模型调用次数为零。
 
 本次继续复核 provider 评测配置。首次低并发尝试因仓库 `.env.local` 的
 `LLM_PROVIDER=openai` 优先于临时 Anthropic 配置，实际误路由到 DeepSeek
