@@ -270,6 +270,7 @@ class ConversationRunner:
     require_harness_worktree: bool = False
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
+    _checkpoint_persistence_error: str = field(default="", init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _loop_last_turn: int = field(default=0, init=False, repr=False)
@@ -404,6 +405,8 @@ class ConversationRunner:
         self._hook_stop_message = ""
         self._stopping_hook_dispatched = False
         self._loop_last_turn = 0
+        self._context_persistence_error = ""
+        self._checkpoint_persistence_error = ""
         self._active_actor = actor
         if actor is not None:
             try:
@@ -583,6 +586,14 @@ class ConversationRunner:
 
         for turn in range(start_turn, self.max_tool_rounds + 1):
             self._loop_last_turn = max(self._loop_last_turn, turn)
+            if self._checkpoint_persistence_error:
+                yield self._finish(
+                    session_id,
+                    False,
+                    "checkpoint_persistence_unavailable",
+                    turn=turn,
+                )
+                return
             # ── Cooperative user interrupt (design 22.8) ──────────────
             # Stop before doing any work this turn when the harness has
             # cancelled the gRPC call (e.g. the user pressed Ctrl+C).
@@ -676,6 +687,9 @@ class ConversationRunner:
                     tool_rounds=turn - 1,
                     tool_request_count=0,
                 )
+                if self._checkpoint_persistence_error:
+                    yield self._finish(session_id, False, "checkpoint_persistence_unavailable", turn=turn)
+                    return
                 yield from self._stream_chat(
                     request_messages,
                     response_box=response_box,
@@ -731,6 +745,9 @@ class ConversationRunner:
                 tool_request_count=len(response.tool_calls),
                 response=response.text,
             )
+            if self._checkpoint_persistence_error:
+                yield self._finish(session_id, False, "checkpoint_persistence_unavailable", turn=turn)
+                return
             post_model = self._dispatch_hook(
                 "post_model",
                 session_id=session_id,
@@ -2883,10 +2900,13 @@ class ConversationRunner:
         )
         try:
             self.graph.write_checkpoint(state, thread_id=session_id)
-        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
-            # Checkpointing is supplementary to the event store.  A failed
-            # graph write must not turn a usable model response into a crash.
-            return
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
+            if (
+                isinstance(exc, RuntimeError)
+                and str(exc).strip().lower() == "graph checkpointing is not configured"
+            ):
+                return
+            self._checkpoint_persistence_error = "checkpoint_write_failed"
 
     def _persist_tool_call(self, session_id: str, call: ToolCall) -> None:
         self._persist_event(
@@ -3002,6 +3022,13 @@ class ConversationRunner:
                 done=orchestrator_pb2.Done(
                     success=False,
                     message="context persistence unavailable",
+                )
+            )
+        if self._checkpoint_persistence_error:
+            return orchestrator_pb2.OrchestratorMessage(
+                done=orchestrator_pb2.Done(
+                    success=False,
+                    message="checkpoint persistence unavailable",
                 )
             )
         return self._done(success)

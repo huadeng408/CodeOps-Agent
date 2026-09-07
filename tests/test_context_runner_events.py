@@ -72,6 +72,16 @@ class CountingNoToolLLM(NoToolLLM):
         return await super().chat(request)
 
 
+class FailingCheckpointGraph:
+    name = "failing-checkpoint"
+
+    def get_checkpoint(self, session_id):
+        return None
+
+    def write_checkpoint(self, state, *, thread_id):
+        raise OSError("checkpoint storage unavailable")
+
+
 def test_runner_persists_authorized_actor_event(tmp_path: Path) -> None:
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
     runner = ConversationRunner(
@@ -431,3 +441,29 @@ def test_context_persistence_failure_fails_closed_without_crashing_runner(tmp_pa
     assert responses[-1].done.success is False
     assert responses[-1].done.message == "context persistence unavailable"
     assert llm.requests == 0
+
+
+def test_checkpoint_write_failure_fails_closed_before_next_model_call(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    llm = CountingNoToolLLM()
+    runner = ConversationRunner(
+        graph=FailingCheckpointGraph(),
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    responses = list(runner.run("continue", iter(()), session_id="session-1"))
+
+    assert responses[-1].done.success is False
+    assert responses[-1].done.message == "checkpoint persistence unavailable"
+    assert llm.requests == 0
+    app.context_store.close()

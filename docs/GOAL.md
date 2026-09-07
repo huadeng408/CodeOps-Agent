@@ -4,8 +4,8 @@
 
 ## 当前验证快照（2026-09-07）
 
-本轮代码变更基线为 `fb79451f`。P0/P1/P2 的代码路径已完成定向验证：Python
-上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2231 passed, 16 skipped`；Go
+本轮代码变更基线为 `21b7c99c`。P0/P1/P2 的代码路径已完成定向验证：Python
+上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2232 passed, 16 skipped`；Go
 全量测试 `go test ./... -count=1` 通过；本轮新增 streaming sandbox 作业路径的
 定向 `internal/tools`、`internal/jobs`、`internal/sandbox` 测试及全量 Go 回归均通过。生产
 Go/Python 跨进程 E2E 的 Agent Loop、Extension、Background Job、Session
@@ -86,6 +86,10 @@ session、turn、调用序号、工具名和规范化参数生成稳定摘要 ID
 ConversationRunner 在首次模型调用前直接结束，并返回 `context_persistence_unavailable` /
 `context persistence unavailable`，保证模型和工具副作用均不会发生；新增回归测试覆盖
 模型调用次数为零。
+
+本轮补齐 P1 checkpoint 写入失败语义：已配置的 LangGraph checkpoint 写入异常会被记录为
+`checkpoint_persistence_unavailable`，并在下一次模型或工具轮次前停止；仅“未配置 checkpoint”
+继续保留轻量兼容路径。新增失败注入测试，确保写入失败不会继续调用模型。
 
 本次继续复核 provider 评测配置。首次低并发尝试因仓库 `.env.local` 的
 `LLM_PROVIDER=openai` 优先于临时 Anthropic 配置，实际误路由到 DeepSeek
