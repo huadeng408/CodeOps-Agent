@@ -356,10 +356,6 @@ class ConversationRunner:
         try:
             state = self.graph.get_checkpoint(session_id)
         except RuntimeError as exc:
-            # A graph without a configured checkpointer is the explicit
-            # compatibility mode used by standalone callers. Any other
-            # runtime failure means persistence is unavailable and must not be
-            # mistaken for a fresh conversation.
             if str(exc).strip().lower() == "graph checkpointing is not configured":
                 return None
             raise
@@ -711,6 +707,7 @@ class ConversationRunner:
                 overflow_retries += 1
                 continue
             response = response_box[0]
+            self._assign_tool_call_ids(response.tool_calls, session_id=session_id, turn=turn)
             self._emit_loop_event(
                 "model_after",
                 session_id=session_id,
@@ -2673,7 +2670,46 @@ class ConversationRunner:
         call_id = str(getattr(call, "id", "") or "").strip()
         if call_id:
             return call_id
-        return f"{call.name}-{id(call)}"
+        return ConversationRunner._stable_tool_call_id(call)
+
+    @staticmethod
+    def _stable_tool_call_id(
+        call: ToolCall,
+        *,
+        session_id: str = "",
+        turn: int = 0,
+        index: int = 0,
+    ) -> str:
+        try:
+            arguments = json.dumps(
+                call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except TypeError:
+            arguments = call.arguments_json or "{}"
+        seed = "|".join(
+            (
+                str(session_id).strip(),
+                str(max(0, int(turn))),
+                str(max(0, int(index))),
+                str(call.name).strip(),
+                arguments,
+            )
+        )
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+        return f"generated-tool-{digest}"
+
+    @staticmethod
+    def _assign_tool_call_ids(
+        calls: list[ToolCall], *, session_id: str, turn: int
+    ) -> None:
+        for index, call in enumerate(calls):
+            if not str(getattr(call, "id", "") or "").strip():
+                call.id = ConversationRunner._stable_tool_call_id(
+                    call, session_id=session_id, turn=turn, index=index
+                )
 
     @staticmethod
     def _call_arguments_json(call: ToolCall) -> str:

@@ -96,6 +96,31 @@ def test_runner_persists_authorized_actor_event(tmp_path: Path) -> None:
     app.context_store.close()
 
 
+def test_missing_tool_call_ids_are_stable_for_durable_retries() -> None:
+    first = ConversationRunner._stable_tool_call_id(
+        ToolCall(name="Write", arguments={"path": "out.txt", "content": "x"}),
+        session_id="session-1",
+        turn=2,
+        index=0,
+    )
+    second = ConversationRunner._stable_tool_call_id(
+        ToolCall(name="Write", arguments={"content": "x", "path": "out.txt"}),
+        session_id="session-1",
+        turn=2,
+        index=0,
+    )
+    different_turn = ConversationRunner._stable_tool_call_id(
+        ToolCall(name="Write", arguments={"path": "out.txt", "content": "x"}),
+        session_id="session-1",
+        turn=3,
+        index=0,
+    )
+
+    assert first == second
+    assert first.startswith("generated-tool-")
+    assert first != different_turn
+
+
 def test_conversation_runner_persists_plan_tool_diff_and_final_events(tmp_path: Path) -> None:
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
     llm = EventRecordingLLM()
