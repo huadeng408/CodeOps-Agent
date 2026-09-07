@@ -18,3 +18,13 @@ def test_release_gate_checkout_fetches_history_for_parent_bound_receipts() -> No
     )
 
     assert "          fetch-depth: 0" in lines[checkout_step:next_step]
+
+
+def test_release_gate_cancels_superseded_runs_per_ref() -> None:
+    workflow = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release-gate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "concurrency:" in workflow
+    assert "group: release-gate-${{ github.workflow }}-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: true" in workflow
