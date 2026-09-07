@@ -629,6 +629,9 @@ func (l *SQLiteEventLog) EventsAfter(ctx context.Context, sessionID string, afte
 	if err := l.ensure(ctx); err != nil {
 		return nil, err
 	}
+	if err := l.Verify(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	query := `SELECT session_id, seq, event_id, version, type, created_at, payload, surface_op, prev_checksum, checksum
 FROM session_events WHERE session_id = ? AND seq > ? ORDER BY seq ASC`
 	args := []any{sessionID, afterSeq}

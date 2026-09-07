@@ -90,6 +90,32 @@ func TestSQLiteEventLogReadsVerifiedEventsAfterCursor(t *testing.T) {
 	}
 }
 
+func TestSQLiteEventLogEventsAfterRejectsTamperedPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.sqlite")
+	log, err := session.OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	ctx := context.Background()
+	for index := 0; index < 3; index++ {
+		if _, err := log.Append(ctx, "tampered-prefix", int64(index), "plan", map[string]any{"index": index}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `UPDATE session_events SET payload = ? WHERE session_id = ? AND seq = ?`, `{"index":999}`, "tampered-prefix", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.EventsAfter(ctx, "tampered-prefix", 1, 1); !errors.Is(err, session.ErrEventIntegrity) {
+		t.Fatalf("EventsAfter error = %v, want ErrEventIntegrity", err)
+	}
+}
+
 func TestSQLiteEventLogRejectsStaleSequenceWithoutWriting(t *testing.T) {
 	ctx := context.Background()
 	log, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))

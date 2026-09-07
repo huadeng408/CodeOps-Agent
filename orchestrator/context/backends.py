@@ -387,21 +387,10 @@ class RedisContextStore:
     ) -> list[ContextEvent]:
         session_id = _session_id(session_id)
         cursor = max(0, int(after_sequence))
-        start = cursor
-        end = -1 if limit is None else cursor + max(1, int(limit)) - 1
-        raw = list(self.client.lrange(self._events_key(session_id), start, end))
-        selected: list[ContextEvent] = []
-        for index, value in enumerate(raw):
-            event = _event_from_wire(value, fallback_sequence=start + index + 1)
-            if event.sequence > cursor:
-                selected.append(event)
-        anchor = ""
-        if selected:
-            previous_raw = self.client.lrange(
-                self._events_key(session_id), selected[0].sequence - 2, selected[0].sequence - 2
-            )
-            anchor = _event_from_wire(previous_raw[0]).checksum if previous_raw else ""
-        _verify_event_chain(selected, anchor=anchor)
+        all_events = self.events(session_id)
+        selected = all_events[cursor:]
+        if limit is not None:
+            selected = selected[: max(1, int(limit))]
         return selected
 
     def _add_memory(
@@ -649,35 +638,10 @@ class MySQLContextStore:
     ) -> list[ContextEvent]:
         session_id = _session_id(session_id)
         after = max(0, int(after_sequence))
-        query = (
-            "SELECT event_id, session_id, sequence, kind, payload_json, created_at, "
-            "checksum, previous_checksum FROM context_events "
-            "WHERE session_id=%s AND sequence>%s ORDER BY sequence"
-        )
-        params: tuple[Any, ...] = (session_id, after)
+        all_events = self.events(session_id)
+        result = all_events[after:]
         if limit is not None:
-            query += " LIMIT %s"
-            params += (max(1, int(limit)),)
-        with self._lock, self.connection.cursor() as cursor:
-            cursor.execute(query, params)
-            rows = list(cursor.fetchall())
-            anchor = ""
-            if rows:
-                cursor.execute(
-                    "SELECT checksum FROM context_events WHERE session_id=%s AND sequence<%s ORDER BY sequence DESC LIMIT 1",
-                    (session_id, rows[0][2]),
-                )
-                anchor_row = cursor.fetchone()
-                anchor = str(anchor_row[0]) if anchor_row else ""
-        result = []
-        for row in rows:
-            result.append(
-                ContextEvent(
-                    str(row[0]), str(row[1]), int(row[2]), str(row[3]),
-                    json.loads(str(row[4])), str(row[5]), str(row[6]), str(row[7] or ""),
-                )
-            )
-        _verify_event_chain(result, anchor=anchor)
+            result = result[: max(1, int(limit))]
         return result
 
     def _insert_memory(

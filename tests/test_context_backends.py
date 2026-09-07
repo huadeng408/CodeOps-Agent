@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -79,6 +80,37 @@ def test_redis_context_store_round_trips_events_and_memory() -> None:
     assert [event.sequence for event in page] == [second.sequence]
     assert page[0].previous_checksum == first.checksum
 
+    store.close()
+
+
+def test_redis_events_after_rejects_tampered_prefix() -> None:
+    client = _FakeRedis()
+    store = RedisContextStore(client, prefix="test-integrity")
+    store.append("session-1", "plan", {"step": "one"})
+    store.append("session-1", "tool_call", {"tool": "Read"})
+    key = "test-integrity:events:session-1"
+    raw = json.loads(client.values[key][0])
+    raw["payload"] = {"step": "tampered"}
+    client.values[key][0] = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    with pytest.raises(ValueError, match="checksum"):
+        store.events_after("session-1", 1, limit=1)
+    store.close()
+
+
+def test_sqlite_events_after_rejects_tampered_prefix(tmp_path) -> None:
+    store = SQLiteContextStore(tmp_path / "context-integrity.sqlite")
+    store.append("session-1", "plan", {"step": "one"})
+    store.append("session-1", "tool_call", {"tool": "Read"})
+    with store._lock:
+        store._connection.execute(
+            "UPDATE context_events SET payload_json = ? WHERE session_id = ? AND sequence = ?",
+            (json.dumps({"step": "tampered"}), "session-1", 1),
+        )
+        store._connection.commit()
+
+    with pytest.raises(ValueError, match="checksum"):
+        store.events_after("session-1", 1, limit=1)
     store.close()
 
 

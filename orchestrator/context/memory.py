@@ -446,49 +446,15 @@ class SQLiteContextStore:
     ) -> list[ContextEvent]:
         """Return a verified event suffix after an inclusive cursor.
 
-        Only the requested suffix is decoded.  The predecessor checksum is
-        fetched as an anchor so a caller cannot skip over a forged event while
-        consuming an incremental snapshot.
+        The complete chain is verified before slicing so a caller cannot skip
+        over a forged earlier event while consuming an incremental snapshot.
         """
         session_id = _session_id(session_id)
         after = max(0, int(after_sequence))
-        query = (
-            "SELECT sequence, event_id, session_id, kind, payload_json, created_at, "
-            "checksum, previous_checksum FROM context_events "
-            "WHERE session_id = ? AND sequence > ? ORDER BY sequence"
-        )
-        parameters: tuple[object, ...] = (session_id, after)
+        all_events = self.events(session_id)
+        result = all_events[after:]
         if limit is not None:
-            query += " LIMIT ?"
-            parameters += (max(1, int(limit)),)
-        with self._lock:
-            rows = self._connection.execute(query, parameters).fetchall()
-            anchor_checksum = ""
-            if rows:
-                anchor = self._connection.execute(
-                    "SELECT checksum FROM context_events WHERE session_id = ? AND sequence < ? "
-                    "ORDER BY sequence DESC LIMIT 1",
-                    (session_id, int(rows[0]["sequence"])),
-                ).fetchone()
-                anchor_checksum = str(anchor["checksum"]) if anchor else ""
-        result: list[ContextEvent] = []
-        for row in rows:
-            payload = json.loads(str(row["payload_json"]))
-            if not isinstance(payload, dict):
-                raise TypeError(f"invalid context payload at sequence {row['sequence']}")
-            result.append(
-                ContextEvent(
-                    event_id=str(row["event_id"] or ""),
-                    session_id=str(row["session_id"]),
-                    sequence=int(row["sequence"]),
-                    kind=str(row["kind"]),
-                    payload=payload,
-                    created_at=str(row["created_at"]),
-                    checksum=str(row["checksum"]),
-                    previous_checksum=str(row["previous_checksum"] or ""),
-                )
-            )
-        _verify_context_event_chain(result, anchor_checksum)
+            result = result[: max(1, int(limit))]
         return result
 
     def _append_locked(
