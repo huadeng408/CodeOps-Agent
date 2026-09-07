@@ -938,6 +938,82 @@ def test_openai_stream_emits_incremental_text_and_tool_calls() -> None:
         server.server_close()
 
 
+def test_anthropic_client_translates_tool_routing_hints() -> None:
+    server, captured = _json_server({"id": "msg-routing", "content": [], "usage": {}})
+    try:
+        client = AnthropicClient(
+            api_key="test-key",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            model="claude-test",
+            timeout=5.0,
+            max_tokens=1024,
+        )
+        asyncio.run(
+            client.chat(
+                ChatRequest(
+                    model="claude-test",
+                    messages=[ChatMessage(role="user", content="pick a tool")],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "Skill",
+                                "description": "Select a skill.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "Skill"},
+                    },
+                    parallel_tool_calls=False,
+                )
+            )
+        )
+
+        body = json.loads(captured["body"])
+        assert body["tool_choice"] == {
+            "type": "tool",
+            "name": "Skill",
+            "disable_parallel_tool_use": True,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_anthropic_stream_payload_translates_tool_routing_hints() -> None:
+    client = AnthropicClient(api_key="test-key", model="claude-test")
+    payload = client._stream_payload(
+        ChatRequest(
+            model="claude-test",
+            messages=[ChatMessage(role="user", content="pick a tool")],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Skill",
+                        "description": "Select a skill.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            tool_choice={
+                "type": "function",
+                "function": {"name": "Skill"},
+            },
+            parallel_tool_calls=False,
+        )
+    )
+
+    assert payload["tool_choice"] == {
+        "type": "tool",
+        "name": "Skill",
+        "disable_parallel_tool_use": True,
+    }
+
+
 def test_openai_stream_carries_provider_model_identity_on_done() -> None:
     """Streaming receipts must retain response-side model identity."""
     frames = [

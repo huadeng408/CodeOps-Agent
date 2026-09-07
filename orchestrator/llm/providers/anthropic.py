@@ -76,6 +76,11 @@ class AnthropicClient(LLMClient):
             payload["system"] = system
         if request.tools:
             payload["tools"] = [self._convert_tool(tool) for tool in request.tools]
+        tool_choice = self._convert_tool_choice(
+            request.tool_choice, request.parallel_tool_calls
+        )
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
         data = json.dumps(payload).encode("utf-8")
         http_request = urllib.request.Request(
@@ -294,6 +299,11 @@ class AnthropicClient(LLMClient):
             payload["system"] = system
         if request.tools:
             payload["tools"] = [self._convert_tool(tool) for tool in request.tools]
+        tool_choice = self._convert_tool_choice(
+            request.tool_choice, request.parallel_tool_calls
+        )
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         return payload
 
     @staticmethod
@@ -488,6 +498,46 @@ class AnthropicClient(LLMClient):
             "description": str(function.get("description") or tool.get("description") or "").strip(),
             "input_schema": schema,
         }
+
+    @staticmethod
+    def _convert_tool_choice(
+        tool_choice: str | dict[str, Any] | None,
+        parallel_tool_calls: bool | None,
+    ) -> dict[str, Any] | None:
+        """Translate provider-neutral/OpenAI routing hints to Anthropic form."""
+        if tool_choice is None and parallel_tool_calls is None:
+            return None
+
+        if isinstance(tool_choice, str):
+            choice_type = {
+                "required": "any",
+                "auto": "auto",
+                "any": "any",
+                "none": "none",
+            }.get(tool_choice.strip().lower(), tool_choice.strip().lower())
+            converted: dict[str, Any] = {"type": choice_type}
+        elif isinstance(tool_choice, dict):
+            choice_type = str(tool_choice.get("type", "")).strip().lower()
+            if choice_type == "function":
+                function = tool_choice.get("function", {}) or {}
+                converted = {
+                    "type": "tool",
+                    "name": str(function.get("name", "")).strip(),
+                }
+            elif choice_type in {"auto", "any", "none", "tool"}:
+                converted = {"type": choice_type}
+                if choice_type == "tool":
+                    name = str(tool_choice.get("name", "")).strip()
+                    if name:
+                        converted["name"] = name
+            else:
+                converted = dict(tool_choice)
+        else:
+            converted = {"type": "auto"}
+
+        if parallel_tool_calls is False and converted.get("type") in {"auto", "any", "tool"}:
+            converted["disable_parallel_tool_use"] = True
+        return converted
 
     @staticmethod
     def _model_identity(

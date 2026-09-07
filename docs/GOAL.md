@@ -59,6 +59,13 @@ Skill 选择运行 `skill-selection-current-20260907`，固定 40 个 Skill、1,
 provider fingerprint 缺失，因此状态为 `BLOCKED`。两份完整 receipt 与 checkpoint
 均保存在被忽略的 `.tmp/eval-results/` 下，未进入版本控制。
 
+本轮修复了 Anthropic adapter 的工具路由边界：同步与流式请求现在都会把
+OpenAI 风格的 `tool_choice=function` 转换为 Anthropic `tool_choice.type=tool`，
+并将 `parallel_tool_calls=false` 转换为 `disable_parallel_tool_use=true`；新增
+回归测试覆盖两条请求路径。使用代理重跑官方 1,000 案例时 endpoint 持续
+`read operation timed out`，未产生可采信的新 receipt，因此 Skill 准确率和发布状态
+仍沿用上一个有完整证据的 `573/1000`、`BLOCKED` 快照。
+
 本项目的验收标准来自当前任务的 active Goal。历史设计地图、进展日志、
 外部记忆和旧计划只用于追溯，不是启动入口或执行权威。
 
