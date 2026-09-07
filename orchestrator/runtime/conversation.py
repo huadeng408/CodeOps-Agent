@@ -2705,11 +2705,16 @@ class ConversationRunner:
     def _assign_tool_call_ids(
         calls: list[ToolCall], *, session_id: str, turn: int
     ) -> None:
+        seen: set[str] = set()
         for index, call in enumerate(calls):
             if not str(getattr(call, "id", "") or "").strip():
                 call.id = ConversationRunner._stable_tool_call_id(
                     call, session_id=session_id, turn=turn, index=index
                 )
+            call_id = str(call.id).strip()
+            if call_id in seen:
+                raise ValueError(f"duplicate tool call id: {call_id}")
+            seen.add(call_id)
 
     @staticmethod
     def _call_arguments_json(call: ToolCall) -> str:

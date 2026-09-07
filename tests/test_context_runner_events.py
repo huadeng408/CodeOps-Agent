@@ -121,6 +121,16 @@ def test_missing_tool_call_ids_are_stable_for_durable_retries() -> None:
     assert first != different_turn
 
 
+def test_duplicate_provider_tool_call_ids_are_rejected() -> None:
+    calls = [
+        ToolCall(name="Read", id="duplicate", arguments={"path": "a.txt"}),
+        ToolCall(name="Read", id="duplicate", arguments={"path": "b.txt"}),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate tool call id"):
+        ConversationRunner._assign_tool_call_ids(calls, session_id="session-1", turn=1)
+
+
 def test_conversation_runner_persists_plan_tool_diff_and_final_events(tmp_path: Path) -> None:
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
     llm = EventRecordingLLM()
