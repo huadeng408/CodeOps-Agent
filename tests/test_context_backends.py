@@ -47,6 +47,11 @@ class _FakeRedis:
         values.append(value)
         return len(values)
 
+    def incr(self, key: str) -> int:
+        value = int(self.values.get(key, "0")) + 1
+        self.values[key] = str(value)
+        return value
+
     def lrange(self, key: str, start: int, end: int) -> list[str]:
         values = self.values.get(key, [])
         assert isinstance(values, list)
@@ -95,6 +100,20 @@ def test_redis_events_after_rejects_tampered_prefix() -> None:
 
     with pytest.raises(ValueError, match="checksum"):
         store.events_after("session-1", 1, limit=1)
+    store.close()
+
+
+def test_redis_events_after_uses_global_sequence_cursor() -> None:
+    store = RedisContextStore(_FakeRedis(), prefix="test-global-sequence")
+    first = store.append("session-1", "plan", {"step": 1})
+    store.append("session-2", "plan", {"step": "other"})
+    second = store.append("session-1", "tool_call", {"tool": "Read"})
+
+    page = store.events_after("session-1", 2)
+
+    assert [event.sequence for event in page] == [second.sequence]
+    assert second.sequence == 3
+    assert first.sequence == 1
     store.close()
 
 

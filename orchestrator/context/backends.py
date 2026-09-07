@@ -298,6 +298,15 @@ class RedisContextStore:
     def _memory_key(self) -> str:
         return f"{self.prefix}:memories"
 
+    def _sequence_key(self) -> str:
+        """Return the prefix-wide allocator used for event cursors.
+
+        Event cursors are shared by all sessions.  Keeping the allocator at
+        the prefix level makes a cursor captured from one session safe to use
+        after events from another session have been appended.
+        """
+        return f"{self.prefix}:event-sequence"
+
     def _lock_key(self, session_id: str) -> str:
         return f"{self.prefix}:lock:{session_id}"
 
@@ -333,7 +342,11 @@ class RedisContextStore:
         raw = self.client.lrange(self._events_key(session_id), -1, -1)
         previous = _event_from_wire(raw[0]).checksum if raw else ""
         event_id = uuid.uuid4().hex
-        sequence = len(self.client.lrange(self._events_key(session_id), 0, -1)) + 1
+        # Redis INCR is atomic across clients, so the cursor remains globally
+        # monotonic even though the checksum chain is still scoped to a
+        # session.  A per-session list length would make cursors ambiguous as
+        # soon as two sessions interleave writes.
+        sequence = int(self.client.incr(self._sequence_key()))
         encoded = _canonical_payload(
             event_id, kind, session_id, safe_payload, created_at, previous
         )
