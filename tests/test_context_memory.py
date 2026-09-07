@@ -50,6 +50,18 @@ def test_context_events_after_cursor_returns_verified_increment(tmp_path: Path) 
     store.close()
 
 
+def test_context_events_after_uses_sequence_cursor_when_other_sessions_interleave(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    first = store.append("session-1", "plan", {"step": 1})
+    store.append("session-2", "plan", {"step": "other"})
+    second = store.append("session-1", "tool_call", {"tool": "Read"})
+
+    page = store.events_after("session-1", 2)
+
+    assert [event.sequence for event in page] == [second.sequence]
+    store.close()
+
+
 def test_layered_context_loads_p0_p1_and_explicit_p3_without_leaking_secrets(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

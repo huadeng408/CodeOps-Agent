@@ -388,7 +388,7 @@ class RedisContextStore:
         session_id = _session_id(session_id)
         cursor = max(0, int(after_sequence))
         all_events = self.events(session_id)
-        selected = all_events[cursor:]
+        selected = [event for event in all_events if event.sequence > cursor]
         if limit is not None:
             selected = selected[: max(1, int(limit))]
         return selected
@@ -639,7 +639,7 @@ class MySQLContextStore:
         session_id = _session_id(session_id)
         after = max(0, int(after_sequence))
         all_events = self.events(session_id)
-        result = all_events[after:]
+        result = [event for event in all_events if event.sequence > after]
         if limit is not None:
             result = result[: max(1, int(limit))]
         return result
