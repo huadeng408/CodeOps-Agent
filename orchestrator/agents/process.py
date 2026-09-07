@@ -89,7 +89,12 @@ class ProcessAgentExecutor:
         )
         try:
             process.stdin.write(request_json + "\n")
+            process.stdin.flush()
             process.stdin.close()
+            # communicate() flushes stdin when the Popen object still owns a
+            # stream.  Keep the EOF we just sent, but detach the closed handle
+            # so Python 3.12 runners do not flush it a second time.
+            process.stdin = None
             deadline = time.monotonic() + self.timeout
             while True:
                 if cancel_event is not None and cancel_event.is_set():
