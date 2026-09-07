@@ -11,6 +11,15 @@ function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): Sessio
   return [...byID.values()].sort((a, b) => a.seq - b.seq);
 }
 
+// The ledger remains the transport cursor and audit history. The active UI
+// surface hides only the stale branch between the latest rewind target and its
+// marker, so later events can continue to stream without losing locality.
+function deriveActiveEvents(events: SessionEvent[]): SessionEvent[] {
+  const rewind = [...events].reverse().find((event) => event.rewindTargetSeq !== undefined);
+  if (!rewind || rewind.rewindTargetSeq === undefined) return events;
+  return events.filter((event) => event.seq <= rewind.rewindTargetSeq! || event.seq >= rewind.seq);
+}
+
 function errorMessage(cause: unknown, fallback: string): string {
   if (cause instanceof ApiError && cause.status === 409) return '会话已被其他操作更新，请重试';
   return cause instanceof Error ? cause.message : fallback;
@@ -278,12 +287,13 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   }, [sessionId]);
   useEffect(() => { setEvents([]); setLoading(true); void loadEvents(); }, [loadEvents, refreshKey]);
   const cursor = events.reduce((max, event) => Math.max(max, event.seq), -1);
+  const activeEvents = deriveActiveEvents(events);
   const socket = useWebSocket({ sessionId, after: cursor, onMessage: (event) => setEvents((previous) => mergeEvents(previous, [event])) });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
     <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}{socket.lastError && <span>{socket.lastError}</span>}</div>
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {events.length === 0 ? <div className="empty-state"><strong>还没有消息</strong><span>发送第一条消息开始这个会话。</span></div> : events.map((event) => <article key={event.id} className={`message ${event.author}`}>
+    {activeEvents.length === 0 ? <div className="empty-state"><strong>还没有消息</strong><span>发送第一条消息开始这个会话。</span></div> : activeEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}</span><time>#{event.seq}</time></div>
       <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}</div>
     </article>)}

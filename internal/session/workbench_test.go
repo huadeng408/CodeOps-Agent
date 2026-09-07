@@ -152,6 +152,9 @@ func TestWorkbenchRestoreAppendsRewindAndKeepsHistory(t *testing.T) {
 	if rewind.Seq != 4 || rewind.ID != after[4].EventID || rewind.Hash != after[4].Checksum {
 		t.Fatalf("rewind view = %+v, canonical event = %+v", rewind, after[4])
 	}
+	if rewind.RewindTargetSeq == nil || *rewind.RewindTargetSeq != 1 {
+		t.Fatalf("rewind target = %+v, want 1", rewind.RewindTargetSeq)
+	}
 	for index := range before {
 		if after[index].EventID != originalIDs[index] || after[index].Checksum != originalChecksums[index] {
 			t.Fatalf("restore rewrote event %d: before=%+v after=%+v", index, before[index], after[index])

@@ -23,6 +23,7 @@ export interface SessionEvent {
   prevHash: string;
   seq: number;
   createdAt: string;
+  rewindTargetSeq?: number;
 }
 
 export interface SessionCheckpoint {

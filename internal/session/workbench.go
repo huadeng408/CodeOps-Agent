@@ -72,18 +72,19 @@ type SessionView struct {
 
 // EventView is the browser-safe representation of one canonical ledger fact.
 type EventView struct {
-	ID         string    `json:"id"`
-	SessionID  string    `json:"sessionId"`
-	Seq        int64     `json:"seq"`
-	Type       string    `json:"type"`
-	Author     string    `json:"author"`
-	Content    string    `json:"content"`
-	ToolName   string    `json:"toolName,omitempty"`
-	ToolStatus string    `json:"toolStatus,omitempty"`
-	ToolOutput string    `json:"toolOutput,omitempty"`
-	Hash       string    `json:"hash"`
-	PrevHash   string    `json:"prevHash"`
-	CreatedAt  time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	SessionID       string    `json:"sessionId"`
+	Seq             int64     `json:"seq"`
+	Type            string    `json:"type"`
+	Author          string    `json:"author"`
+	Content         string    `json:"content"`
+	ToolName        string    `json:"toolName,omitempty"`
+	ToolStatus      string    `json:"toolStatus,omitempty"`
+	ToolOutput      string    `json:"toolOutput,omitempty"`
+	Hash            string    `json:"hash"`
+	PrevHash        string    `json:"prevHash"`
+	CreatedAt       time.Time `json:"createdAt"`
+	RewindTargetSeq *int64    `json:"rewindTargetSeq,omitempty"`
 }
 
 // CheckpointView identifies an immutable checkpoint fact and the canonical
@@ -484,6 +485,12 @@ func eventToView(event Event) (EventView, error) {
 			return EventView{}, fmt.Errorf("%w: invalid message payload at seq %d", ErrEventIntegrity, event.Seq)
 		}
 		view.Author, view.Content = payload.Author, payload.Content
+	case "session/rewind":
+		var payload rewindPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.TargetSeq < 0 {
+			return EventView{}, fmt.Errorf("%w: invalid rewind payload at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		view.RewindTargetSeq = &payload.TargetSeq
 	default:
 		view.Author = "system"
 	}
