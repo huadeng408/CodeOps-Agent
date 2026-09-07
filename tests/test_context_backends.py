@@ -52,6 +52,18 @@ class _FakeRedis:
         self.values[key] = str(value)
         return value
 
+    def get(self, key: str) -> str | None:
+        value = self.values.get(key)
+        return value if isinstance(value, str) else None
+
+    def set(self, key: str, value: str) -> bool:
+        self.values[key] = value
+        return True
+
+    def scan_iter(self, *, match: str):
+        prefix = match.removesuffix("*")
+        return (key for key in self.values if key.startswith(prefix))
+
     def lrange(self, key: str, start: int, end: int) -> list[str]:
         values = self.values.get(key, [])
         assert isinstance(values, list)
@@ -115,6 +127,20 @@ def test_redis_events_after_uses_global_sequence_cursor() -> None:
     assert second.sequence == 3
     assert first.sequence == 1
     store.close()
+
+
+def test_redis_global_sequence_counter_seeds_from_existing_events() -> None:
+    client = _FakeRedis()
+    first_store = RedisContextStore(client, prefix="test-sequence-migration")
+    first_store.append("session-1", "plan", {"step": 1})
+    first_store.close()
+
+    client.values.pop("test-sequence-migration:event-sequence")
+    second_store = RedisContextStore(client, prefix="test-sequence-migration")
+    event = second_store.append("session-2", "plan", {"step": 2})
+
+    assert event.sequence == 2
+    second_store.close()
 
 
 def test_sqlite_events_after_rejects_tampered_prefix(tmp_path) -> None:

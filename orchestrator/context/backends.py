@@ -307,6 +307,40 @@ class RedisContextStore:
         """
         return f"{self.prefix}:event-sequence"
 
+    def _ensure_sequence_counter(self) -> None:
+        """Seed the global cursor when opening a pre-existing Redis store.
+
+        Older deployments assigned sequence numbers from each session list.
+        A missing prefix counter must therefore start after the largest
+        persisted number instead of resetting to one.  The initialization lock
+        makes the scan and seed one-time safe across Redis clients.
+        """
+        key = self._sequence_key()
+        if self.client.get(key) is not None:
+            return
+        lock = self.client.lock(
+            f"{self.prefix}:event-sequence-init-lock", timeout=self.lock_timeout
+        )
+        acquired = lock.acquire(blocking=True, blocking_timeout=self.lock_timeout)
+        if not acquired:
+            raise RuntimeError("Redis event sequence initialization timed out")
+        try:
+            if self.client.get(key) is not None:
+                return
+            maximum = 0
+            for event_key in self.client.scan_iter(match=f"{self.prefix}:events:*"):
+                for raw in self.client.lrange(event_key, 0, -1):
+                    try:
+                        value = json.loads(
+                            raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                        )
+                        maximum = max(maximum, int(value.get("sequence", 0)))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raise RuntimeError("Redis context event sequence is invalid")
+            self.client.set(key, str(maximum))
+        finally:
+            lock.release()
+
     def _lock_key(self, session_id: str) -> str:
         return f"{self.prefix}:lock:{session_id}"
 
@@ -342,6 +376,7 @@ class RedisContextStore:
         raw = self.client.lrange(self._events_key(session_id), -1, -1)
         previous = _event_from_wire(raw[0]).checksum if raw else ""
         event_id = uuid.uuid4().hex
+        self._ensure_sequence_counter()
         # Redis INCR is atomic across clients, so the cursor remains globally
         # monotonic even though the checksum chain is still scoped to a
         # session.  A per-session list length would make cursors ambiguous as
