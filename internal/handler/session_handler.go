@@ -51,6 +51,7 @@ type updateStatusRequest struct {
 type recoveryManifest struct {
 	Session           session.SessionView    `json:"session"`
 	LedgerSeq         int64                  `json:"ledgerSeq"`
+	LatestLedgerHash  string                 `json:"latestLedgerHash"`
 	EventCount        int                    `json:"eventCount"`
 	RewindCount       int                    `json:"rewindCount"`
 	ContinuationCount int                    `json:"continuationCount"`
@@ -139,6 +140,7 @@ func (h *SessionHandler) RecoveryManifest(c *gin.Context) {
 	manifest := recoveryManifest{Session: view, EventCount: len(events), CheckpointCount: len(checkpoints), LedgerSeq: -1}
 	if len(events) > 0 {
 		manifest.LedgerSeq = events[len(events)-1].Seq
+		manifest.LatestLedgerHash = events[len(events)-1].Hash
 	}
 	for _, event := range events {
 		switch event.Type {

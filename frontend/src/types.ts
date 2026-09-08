@@ -64,6 +64,7 @@ export interface SessionCheckpoint {
 export interface RecoveryManifest {
   session: Session;
   ledgerSeq: number;
+  latestLedgerHash: string;
   eventCount: number;
   rewindCount: number;
   continuationCount: number;

@@ -80,11 +80,12 @@ func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
 	}
 	var envelope struct {
 		Data struct {
-			LedgerSeq         int64 `json:"ledgerSeq"`
-			EventCount        int   `json:"eventCount"`
-			RewindCount       int   `json:"rewindCount"`
-			ContinuationCount int   `json:"continuationCount"`
-			CheckpointCount   int   `json:"checkpointCount"`
+			LedgerSeq         int64  `json:"ledgerSeq"`
+			LatestLedgerHash  string `json:"latestLedgerHash"`
+			EventCount        int    `json:"eventCount"`
+			RewindCount       int    `json:"rewindCount"`
+			ContinuationCount int    `json:"continuationCount"`
+			CheckpointCount   int    `json:"checkpointCount"`
 			LatestRecovery    *struct {
 				Type string `json:"type"`
 				Seq  int64  `json:"seq"`
@@ -99,6 +100,9 @@ func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
 	}
 	if envelope.Data.LatestRecovery == nil || envelope.Data.LatestRecovery.Type != "session/rewind" || envelope.Data.LatestRecovery.Seq != 3 {
 		t.Fatalf("latest recovery = %+v", envelope.Data.LatestRecovery)
+	}
+	if envelope.Data.LatestLedgerHash == "" {
+		t.Fatal("latest ledger hash is empty")
 	}
 	foreign := performSessionRequest(sessionTestRouter(8, workbench), http.MethodGet, "/sessions/"+created.ID+"/recovery-manifest", nil)
 	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/recovery-manifest", nil)
