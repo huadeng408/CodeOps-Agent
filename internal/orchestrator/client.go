@@ -121,7 +121,15 @@ type ConversationRequest struct {
 	Input     string
 	SessionID string
 	RunID     string
-	Resume    bool
+	// RetryOfRunID is the stable root predecessor for a fresh continuation
+	// attempt. It remains as a compatibility field for callers that only know
+	// one predecessor.
+	RetryOfRunID string
+	// RetryOfRunIDs contains all verified failed-run predecessors for the same
+	// checkpoint. The root is first; the remaining IDs let the Harness reuse a
+	// committed tool receipt from any earlier failed attempt.
+	RetryOfRunIDs []string
+	Resume        bool
 	// SurfaceSHA256 binds a resumed run to the immutable checkpoint Surface.
 	// Legal tool/result suffixes may grow while this identity remains stable.
 	SurfaceSHA256 string
@@ -551,6 +559,11 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 		if surfaceSHA256 != "" {
 			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-surface-sha256", surfaceSHA256)
 		}
+		retryOfIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
+		if len(retryOfIDs) > 0 {
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-retry-of-run-id", retryOfIDs[0])
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-retry-of-run-ids", strings.Join(retryOfIDs, ","))
+		}
 	}
 	actor, sessionID, err := bindActorToSession(request.Actor, request.SessionID)
 	if err != nil {
@@ -729,6 +742,27 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 		return "", fmt.Errorf("%w: orchestrator stream ended before terminal done", ErrConversationFailed)
 	}
 	return strings.TrimSpace(strings.Join(parts, "")), nil
+}
+
+func normalizedRetryRunIDs(primary string, candidates []string) []string {
+	seen := make(map[string]struct{}, len(candidates)+1)
+	ids := make([]string, 0, len(candidates)+1)
+	appendID := func(raw string) {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	appendID(primary)
+	for _, candidate := range candidates {
+		appendID(candidate)
+	}
+	return ids
 }
 
 func conversationToolCalls(calls []ConversationToolCall) []*codeagentpb.ConversationToolCall {

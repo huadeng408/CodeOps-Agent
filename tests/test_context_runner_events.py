@@ -704,6 +704,86 @@ def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path
     app.close()
 
 
+def test_resume_allows_explicit_retry_of_failed_checkpoint(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "run-retry",
+                "run_id": "run:failed",
+                "phase": "model_before",
+                "turn": 1,
+                "surface_sha256": "surface:retry",
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="run-retry",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    checkpoint = runner.load_checkpoint(
+        "run-retry",
+        run_id="run:new",
+        resume=True,
+        surface_sha256="surface:retry",
+        retry_of_run_id="run:failed",
+    )
+    assert checkpoint is not None
+    assert checkpoint.phase == "model_before"
+
+    # A later failed attempt may have persisted a checkpoint under its own
+    # run identity. The original failed run remains the stable lineage root,
+    # so a subsequent retry must still be able to use that root predecessor.
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "run-retry",
+                "run_id": "run:middle",
+                "retry_root_run_id": "run:failed",
+                "phase": "model_before",
+                "turn": 1,
+                "surface_sha256": "surface:retry",
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="run-retry",
+    )
+    rooted_retry = runner.load_checkpoint(
+        "run-retry",
+        run_id="run:latest",
+        resume=True,
+        surface_sha256="surface:retry",
+        retry_of_run_id="run:failed",
+        retry_of_run_ids=("run:middle", "run:failed"),
+    )
+    assert rooted_retry is not None
+    assert rooted_retry.state.metadata["run_id"] == "run:middle"
+    with pytest.raises(ValueError, match="checkpoint run id does not match request"):
+        runner.load_checkpoint(
+            "run-retry",
+            run_id="run:new",
+            resume=True,
+            surface_sha256="surface:retry",
+            retry_of_run_ids=("run:other",),
+        )
+    app.close()
+
+
 def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Path) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))

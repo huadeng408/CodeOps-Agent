@@ -283,6 +283,9 @@ class ConversationRunner:
     _active_actor: ActorIdentity | None = field(default=None, init=False, repr=False)
     _active_history_digest: str = field(default="", init=False, repr=False)
     _active_run_id: str = field(default="", init=False, repr=False)
+    _active_retry_of_run_id: str = field(default="", init=False, repr=False)
+    _active_retry_of_run_ids: tuple[str, ...] = field(default=(), init=False, repr=False)
+    _active_retry_root_run_id: str = field(default="", init=False, repr=False)
     _active_surface_sha256: str = field(default="", init=False, repr=False)
     _resume_requested: bool = field(default=False, init=False, repr=False)
     _replay_response: ChatResponse | None = field(default=None, init=False, repr=False)
@@ -350,6 +353,8 @@ class ConversationRunner:
         run_id: str = "",
         resume: bool = False,
         surface_sha256: str = "",
+        retry_of_run_id: str = "",
+        retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
@@ -364,10 +369,16 @@ class ConversationRunner:
             return None
         requested_run_id = str(run_id).strip()
         requested_surface_sha256 = str(surface_sha256).strip()
+        requested_retry_of_run_id = str(retry_of_run_id).strip()
+        requested_retry_of_run_ids = self._normalise_retry_run_ids(
+            requested_retry_of_run_id, retry_of_run_ids
+        )
         if resume and not requested_run_id:
             raise ValueError("continuation run id is required when resume is true")
         if resume and not requested_surface_sha256:
             raise ValueError("continuation surface sha256 is required when resume is true")
+        if requested_retry_of_run_ids and not resume:
+            raise ValueError("continuation retry run id requires resume")
         try:
             state = self.graph.get_checkpoint(session_id)
         except RuntimeError as exc:
@@ -378,10 +389,25 @@ class ConversationRunner:
             return None
         metadata = state.metadata if isinstance(state.metadata, dict) else {}
         checkpoint_run_id = str(metadata.get("run_id", "")).strip()
+        checkpoint_retry_root_run_id = str(metadata.get("retry_root_run_id", "")).strip()
         if requested_run_id and checkpoint_run_id and checkpoint_run_id != requested_run_id:
-            if not state.done:
+            # A failed Harness continuation may be retried with a fresh
+            # request/run identity, but only when Go explicitly identifies the
+            # failed predecessor. Surface validation below still proves the
+            # retry is anchored to the same immutable checkpoint.
+            if not (
+                resume
+                and requested_surface_sha256
+                and any(
+                    candidate in {checkpoint_run_id, checkpoint_retry_root_run_id}
+                    for candidate in requested_retry_of_run_ids
+                )
+            ):
+                if not state.done:
+                    raise ValueError("checkpoint run id does not match request")
+                return None
+            if state.done:
                 raise ValueError("checkpoint run id does not match request")
-            return None
         if requested_run_id and resume and not checkpoint_run_id and not state.done:
             raise ValueError("checkpoint run id is missing")
         checkpoint_session = str(metadata.get("session_id", "")).strip()
@@ -415,6 +441,21 @@ class ConversationRunner:
             next_turn=max(1, next_turn),
         )
 
+    @staticmethod
+    def _normalise_retry_run_ids(
+        primary: str, candidates: list[str] | tuple[str, ...] | None
+    ) -> tuple[str, ...]:
+        """Deduplicate retry lineage IDs while preserving their trust order."""
+
+        seen: set[str] = set()
+        result: list[str] = []
+        for raw_id in (primary, *(candidates or ())):
+            candidate = str(raw_id).strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                result.append(candidate)
+        return tuple(result)
+
     def run(
         self,
         user_text: str,
@@ -427,6 +468,8 @@ class ConversationRunner:
         run_id: str = "",
         resume: bool = False,
         surface_sha256: str = "",
+        retry_of_run_id: str = "",
+        retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -441,12 +484,24 @@ class ConversationRunner:
         self._checkpoint_persistence_error = ""
         self._active_actor = actor
         self._active_run_id = str(run_id).strip()
+        active_retry_of_run_id = str(retry_of_run_id).strip()
+        self._active_retry_of_run_ids = self._normalise_retry_run_ids(
+            active_retry_of_run_id, retry_of_run_ids
+        )
+        self._active_retry_of_run_id = (
+            self._active_retry_of_run_ids[0]
+            if self._active_retry_of_run_ids
+            else active_retry_of_run_id
+        )
+        self._active_retry_root_run_id = self._active_retry_of_run_id
         self._resume_requested = bool(resume)
         self._active_surface_sha256 = str(surface_sha256).strip()
         if self._resume_requested and not self._active_run_id:
             raise ValueError("continuation run id is required when resume is true")
         if self._resume_requested and not self._active_surface_sha256:
             raise ValueError("continuation surface sha256 is required when resume is true")
+        if self._active_retry_of_run_ids and not self._resume_requested:
+            raise ValueError("continuation retry run id requires resume")
         self._replay_response = None
         self._replay_checkpoint_turn = False
         if actor is not None:
@@ -550,6 +605,9 @@ class ConversationRunner:
             )
             self._active_actor = None
             self._active_run_id = ""
+            self._active_retry_of_run_id = ""
+            self._active_retry_of_run_ids = ()
+            self._active_retry_root_run_id = ""
             self._active_surface_sha256 = ""
             self._resume_requested = False
             self._replay_response = None
@@ -607,9 +665,20 @@ class ConversationRunner:
             run_id=self._active_run_id,
             resume=self._resume_requested,
             surface_sha256=self._active_surface_sha256,
+            retry_of_run_id=self._active_retry_of_run_id,
+            retry_of_run_ids=self._active_retry_of_run_ids,
         )
         start_turn = 1
         if checkpoint is not None and checkpoint.resumable:
+            metadata = checkpoint.state.metadata if isinstance(checkpoint.state.metadata, dict) else {}
+            checkpoint_retry_root_run_id = str(metadata.get("retry_root_run_id", "")).strip()
+            if checkpoint_retry_root_run_id:
+                self._active_retry_root_run_id = checkpoint_retry_root_run_id
+            elif not self._active_retry_root_run_id:
+                # A legacy checkpoint has no explicit lineage. Its run id is
+                # the only verifiable predecessor and becomes the stable
+                # root for subsequent retries.
+                self._active_retry_root_run_id = str(metadata.get("run_id", "")).strip()
             start_turn = min(self.max_tool_rounds, checkpoint.next_turn)
             self._persist_event(
                 session_id,
@@ -3018,6 +3087,11 @@ class ConversationRunner:
                 "tool_call_id": tool_call_id,
                 "history_sha256": self._active_history_digest,
                 "surface_sha256": self._active_surface_sha256,
+                "retry_root_run_id": (
+                    self._active_retry_root_run_id
+                    or self._active_retry_of_run_id
+                    or self._active_run_id
+                ),
             },
             tool_rounds=max(0, int(tool_rounds)),
             tool_requests=serialized_tool_requests,

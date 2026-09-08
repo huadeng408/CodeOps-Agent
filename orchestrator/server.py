@@ -151,7 +151,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         raise AssertionError("context.abort must terminate the RPC")
 
     @staticmethod
-    def _continuation_metadata(context) -> tuple[str, bool, str]:
+    def _continuation_metadata(context) -> tuple[str, bool, str, str, tuple[str, ...]]:
         """Read the per-RPC continuation identity from the Harness seam."""
 
         values = {
@@ -170,6 +170,10 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         if isinstance(raw_surface_sha256, bytes):
             raw_surface_sha256 = raw_surface_sha256.decode("utf-8", errors="replace")
         surface_sha256 = str(raw_surface_sha256).strip()
+        raw_retry_of_run_id = values.get("x-code-agent-retry-of-run-id", "")
+        if isinstance(raw_retry_of_run_id, bytes):
+            raw_retry_of_run_id = raw_retry_of_run_id.decode("utf-8", errors="replace")
+        retry_of_run_id = str(raw_retry_of_run_id).strip()
         if resume and not run_id:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
@@ -184,7 +188,26 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation run id is too long")
         if len(surface_sha256) > 256:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation surface sha256 is too long")
-        return run_id, resume, surface_sha256
+        if len(retry_of_run_id) > 256:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation retry run id is too long")
+        if retry_of_run_id and not resume:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation retry run id requires resume")
+        raw_retry_of_run_ids = values.get("x-code-agent-retry-of-run-ids", "")
+        if isinstance(raw_retry_of_run_ids, bytes):
+            raw_retry_of_run_ids = raw_retry_of_run_ids.decode("utf-8", errors="replace")
+        retry_of_run_ids: list[str] = []
+        for raw_id in str(raw_retry_of_run_ids).split(","):
+            candidate = raw_id.strip()
+            if not candidate or candidate in retry_of_run_ids:
+                continue
+            if len(candidate) > 256:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation retry run id is too long")
+            retry_of_run_ids.append(candidate)
+        if retry_of_run_id and retry_of_run_id not in retry_of_run_ids:
+            retry_of_run_ids.insert(0, retry_of_run_id)
+        if retry_of_run_ids and not resume:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation retry run id requires resume")
+        return run_id, resume, surface_sha256, retry_of_run_id, tuple(retry_of_run_ids)
 
     def _new_runner(self) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
@@ -269,7 +292,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         return update or orchestrator_pb2.CompactionUpdate()
 
     def Converse(self, request_iterator, context):
-        run_id, resume, surface_sha256 = self._continuation_metadata(context)
+        run_id, resume, surface_sha256, retry_of_run_id, retry_of_run_ids = self._continuation_metadata(context)
         user_text = ""
         session_id = ""
         actor = None
@@ -356,6 +379,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 run_id=run_id,
                 resume=resume,
                 surface_sha256=surface_sha256,
+                retry_of_run_id=retry_of_run_id,
+                retry_of_run_ids=retry_of_run_ids,
             )
         finally:
             lease.release()

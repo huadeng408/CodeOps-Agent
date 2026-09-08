@@ -162,6 +162,8 @@ def test_converse_propagates_and_validates_continuation_metadata(
                         ("x-code-agent-run-id", "run:durable-123"),
                         ("x-code-agent-resume", "true"),
                         ("x-code-agent-surface-sha256", "surface:stable-123"),
+                        ("x-code-agent-retry-of-run-id", "run:root"),
+                        ("x-code-agent-retry-of-run-ids", "run:root,run:middle,run:root"),
                     ),
                 )
             )
@@ -169,6 +171,8 @@ def test_converse_propagates_and_validates_continuation_metadata(
             assert runner.kwargs["run_id"] == "run:durable-123"
             assert runner.kwargs["resume"] is True
             assert runner.kwargs["surface_sha256"] == "surface:stable-123"
+            assert runner.kwargs["retry_of_run_id"] == "run:root"
+            assert runner.kwargs["retry_of_run_ids"] == ("run:root", "run:middle")
 
             with pytest.raises(grpc.RpcError) as caught:
                 list(

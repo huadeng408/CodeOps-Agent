@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -464,9 +465,10 @@ func (r *SessionRunner) execute(key runKey) {
 		return
 	}
 	var blocked atomic.Bool
+	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
 	handlers := orchestrator.ConversationHandlers{
 		Tool: func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
-			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, call)
+			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, call, retryRunIDs...)
 			if unsafe {
 				blocked.Store(true)
 			}
@@ -635,13 +637,19 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
+	requestRetryOfRunID := ""
+	retryOfRunIDs := []string(nil)
 	if projection.surfaceHash != "" {
 		checkpointSurface, surfaceErr := surfaceAt(events, projection.targetSeq)
 		if surfaceErr != nil || projection.surfaceHash != checksumSurface(checkpointSurface) {
 			return orchestrator.ConversationRequest{}, fmt.Errorf("%w: continuation surface has changed", ErrEventIntegrity)
 		}
-		if err := validateContinuationSurface(checkpointSurface, surface, key.runID); err != nil {
+		retryOfRunIDs = failedRetryRunIDs(events, key.runID, projection.view.CheckpointHash, projection.actor.ScopeKey())
+		if err := validateContinuationSurface(checkpointSurface, surface, key.runID, retryOfRunIDs...); err != nil {
 			return orchestrator.ConversationRequest{}, err
+		}
+		if len(retryOfRunIDs) > 0 {
+			requestRetryOfRunID = retryOfRunIDs[0]
 		}
 	}
 	history, input, err := conversationHistory(surface, events, key.runID, projection.inputEvent)
@@ -650,11 +658,12 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	}
 	return orchestrator.ConversationRequest{
 		Input: input, SessionID: key.sessionID, RunID: key.runID, Resume: true, SurfaceSHA256: projection.surfaceHash,
+		RetryOfRunID: requestRetryOfRunID, RetryOfRunIDs: retryOfRunIDs,
 		Actor: projection.actor, History: history,
 	}, nil
 }
 
-func validateContinuationSurface(checkpoint, current []Event, runID string) error {
+func validateContinuationSurface(checkpoint, current []Event, runID string, retryOfRunIDs ...string) error {
 	if len(current) < len(checkpoint) {
 		return fmt.Errorf("%w: continuation surface prefix is missing", ErrEventIntegrity)
 	}
@@ -663,21 +672,36 @@ func validateContinuationSurface(checkpoint, current []Event, runID string) erro
 			return fmt.Errorf("%w: continuation surface prefix has changed", ErrEventIntegrity)
 		}
 	}
+	allowedRunIDs := map[string]struct{}{runID: {}}
+	for _, retryOfRunID := range retryOfRunIDs {
+		if strings.TrimSpace(retryOfRunID) != "" {
+			allowedRunIDs[strings.TrimSpace(retryOfRunID)] = struct{}{}
+		}
+	}
 	for _, event := range current[len(checkpoint):] {
 		switch event.Type {
 		case "tool/call":
 			var payload toolCallPayload
-			if json.Unmarshal(event.Payload, &payload) != nil || payload.RunID != runID {
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return fmt.Errorf("%w: continuation surface contains a foreign tool call", ErrEventIntegrity)
+			}
+			if _, ok := allowedRunIDs[payload.RunID]; !ok {
 				return fmt.Errorf("%w: continuation surface contains a foreign tool call", ErrEventIntegrity)
 			}
 		case "tool/result":
 			var payload toolResultPayload
-			if json.Unmarshal(event.Payload, &payload) != nil || payload.RunID != runID {
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return fmt.Errorf("%w: continuation surface contains a foreign tool result", ErrEventIntegrity)
+			}
+			if _, ok := allowedRunIDs[payload.RunID]; !ok {
 				return fmt.Errorf("%w: continuation surface contains a foreign tool result", ErrEventIntegrity)
 			}
 		case "assistant/message":
 			var payload messagePayload
-			if json.Unmarshal(event.Payload, &payload) != nil || payload.RunID != runID {
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return fmt.Errorf("%w: continuation surface contains a foreign assistant message", ErrEventIntegrity)
+			}
+			if _, ok := allowedRunIDs[payload.RunID]; !ok {
 				return fmt.Errorf("%w: continuation surface contains a foreign assistant message", ErrEventIntegrity)
 			}
 		default:
@@ -754,7 +778,7 @@ func invocationHistoryKey(runID, callID string) string {
 	return strings.TrimSpace(runID) + "\x00" + strings.TrimSpace(callID)
 }
 
-func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall) (orchestrator.ToolResult, bool) {
+func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall, retryOfRunIDs ...string) (orchestrator.ToolResult, bool) {
 	call.ID = strings.TrimSpace(call.ID)
 	call.Name = strings.TrimSpace(call.Name)
 	if call.ID == "" || call.Name == "" {
@@ -777,6 +801,43 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	}
 	if state.result != nil {
 		return toolResultFromPayload(*state.result), false
+	}
+	// A retry may replay a tool request whose result was durably committed by
+	// the failed predecessor. Reuse that receipt and materialize a current-run
+	// call/result pair for auditability; never invoke the external tool again.
+	retryOfRunIDs = normalizedRetryRunIDs("", retryOfRunIDs)
+	if len(retryOfRunIDs) > 0 {
+		unknownPrior := false
+		for _, retryOfRunID := range retryOfRunIDs {
+			prior := invocationProjection(events, retryOfRunID, call.ID)
+			if (prior.prepared != nil && !toolCallMatches(*prior.prepared, call)) ||
+				(prior.dispatched != nil && !toolCallMatches(*prior.dispatched, call)) {
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation identity conflict", ExitCode: 1}, true
+			}
+			if prior.result != nil {
+				if prior.prepared == nil {
+					return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool result has no prepared invocation", ExitCode: 1}, true
+				}
+				callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON}
+				if state.prepared == nil {
+					if err := r.appendLeasedSurface(ctx, key, lease, "tool/call", callPayload); err != nil {
+						return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
+					}
+				}
+				reused := toolResultFromPayload(*prior.result)
+				if err := r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(reused, key.runID)); err != nil {
+					return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool result persistence failed", ExitCode: 1}, true
+				}
+				return reused, false
+			}
+			if prior.dispatched != nil {
+				unknownPrior = true
+			}
+		}
+		if unknownPrior {
+			_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON})
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
+		}
 	}
 	if state.dispatched != nil {
 		_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON})
@@ -960,6 +1021,67 @@ func runForRequest(events []Event, requestID string) (runProjection, bool, error
 		}
 	}
 	return runProjection{}, false, nil
+}
+
+// failedRetryRunIDs returns terminal failures for the same checkpoint in
+// lineage order. The oldest failure is the stable retry root: Python may have
+// persisted a checkpoint under any later attempt, or may still have the root
+// checkpoint after an attempt failed before its first checkpoint write.
+// Unrelated unfinished runs remain isolated.
+func failedRetryRunIDs(events []Event, currentRunID, checkpointHash string, actorScopes ...string) []string {
+	checkpointHash = strings.TrimSpace(checkpointHash)
+	if checkpointHash == "" {
+		return nil
+	}
+	runs, err := projectRuns(events)
+	if err != nil {
+		return nil
+	}
+	type candidate struct {
+		id    string
+		order int64
+	}
+	candidates := make([]candidate, 0)
+	actorScope := ""
+	if len(actorScopes) > 0 {
+		actorScope = strings.TrimSpace(actorScopes[0])
+	}
+	for runID, run := range runs {
+		if runID == currentRunID || !run.terminal || run.view.Status != RunFailed || run.view.CheckpointHash != checkpointHash {
+			continue
+		}
+		if actorScope != "" && run.actor.ScopeKey() != actorScope {
+			continue
+		}
+		candidates = append(candidates, candidate{id: runID, order: run.order})
+	}
+	sort.Slice(candidates, func(left, right int) bool { return candidates[left].order < candidates[right].order })
+	ids := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		ids = append(ids, item.id)
+	}
+	return ids
+}
+
+func normalizedRetryRunIDs(primary string, candidates []string) []string {
+	seen := make(map[string]struct{}, len(candidates)+1)
+	ids := make([]string, 0, len(candidates)+1)
+	appendID := func(raw string) {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	appendID(primary)
+	for _, candidate := range candidates {
+		appendID(candidate)
+	}
+	return ids
 }
 
 func projectRun(events []Event, runID string) (runProjection, error) {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -25,6 +26,38 @@ type blockingConversationAdapter struct {
 type recoverableConversationAdapter struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type retryToolConversationAdapter struct {
+	mu          sync.Mutex
+	toolResults []orchestrator.ToolResult
+}
+
+func (a *retryToolConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	if handlers.Tool == nil {
+		return orchestrator.ConversationResult{}, errors.New("tool handler is missing")
+	}
+	result := handlers.Tool(ctx, orchestrator.ToolCall{
+		ID:             "retry-call",
+		Name:           "Write",
+		ParametersJSON: `{"content":"retry","path":"runtime/retry.txt"}`,
+	})
+	a.mu.Lock()
+	a.toolResults = append(a.toolResults, result)
+	a.mu.Unlock()
+	return orchestrator.ConversationResult{Success: true, Message: "reused committed result"}, nil
+}
+
+type countingToolAdapter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *countingToolAdapter) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	return orchestrator.ToolResult{Output: "unexpected external execution"}
 }
 
 func (a *blockingConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, _ orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
@@ -258,6 +291,169 @@ func TestSessionRunnerRetriesTransportFailureAfterLeaseWithoutTerminalFailure(t 
 			t.Fatalf("recoverable transport failure wrote terminal event: %+v", event)
 		}
 	}
+}
+
+func TestSessionRunnerRetryReusesCommittedToolResultWithoutExecutingAgain(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPayload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-failed", "run-failed", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, oldPayload); err != nil {
+		t.Fatal(err)
+	}
+	oldLease := runLeasePayload{
+		RunID: "run-failed", RequestID: "request-failed", LeaseID: "lease-failed",
+		WorkerID: "worker-failed", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, oldLease); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: "run-failed", ToolCallID: "retry-call", ToolName: "Write", ArgumentsJSON: `{"content":"retry","path":"runtime/retry.txt"}`}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 7, toolDispatchedType, call); err != nil {
+		t.Fatal(err)
+	}
+	committed := toolResultPayload{RunID: "run-failed", ToolCallID: "retry-call", ToolName: "Write", Output: "committed once"}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 8, "tool/result", committed, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 9, runFailedEventType, runTerminalPayload{
+		RunID: "run-failed", RequestID: "request-failed", LeaseID: "lease-failed", Attempt: 1, Error: "agent continuation failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := &retryToolConversationAdapter{}
+	external := &countingToolAdapter{}
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{WorkerID: "worker-retry", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-retry", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 10, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.Attempt != 1 {
+		t.Fatalf("new retry run attempt = %d, want 1", terminal.Attempt)
+	}
+	external.mu.Lock()
+	toolCalls := external.calls
+	external.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("retry executed external tool %d times, want 0", toolCalls)
+	}
+	conversation.mu.Lock()
+	defer conversation.mu.Unlock()
+	if len(conversation.toolResults) != 1 || conversation.toolResults[0].Output != "committed once" {
+		t.Fatalf("retry tool result = %#v, want committed receipt", conversation.toolResults)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var currentResults int
+	for _, event := range events {
+		if event.Type != "tool/result" {
+			continue
+		}
+		var payload toolResultPayload
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.RunID == accepted.RunID {
+			currentResults++
+			if payload.Output != "committed once" {
+				t.Fatalf("retry result output = %q, want committed receipt", payload.Output)
+			}
+		}
+	}
+	if currentResults != 1 {
+		t.Fatalf("current retry result receipts = %d, want 1", currentResults)
+	}
+}
+
+func TestSessionRunnerRetrySearchesAllFailedPredecessorsForToolReceipt(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendRun := func(requestID, runID string, seq int64) {
+		t.Helper()
+		payload, payloadErr := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, requestID, runID, actor)
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		if _, appendErr := ledger.Append(ctx, created.ID, seq, continuationEventType, payload); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		if _, appendErr := ledger.Append(ctx, created.ID, seq+1, runLeasedEventType, runLeasePayload{
+			RunID: runID, RequestID: requestID, LeaseID: "lease-" + runID,
+			WorkerID: "worker-" + runID, Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+		}); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	appendRun("request-root", "run-root", 4)
+	if _, err := ledger.Append(ctx, created.ID, 6, runFailedEventType, runTerminalPayload{
+		RunID: "run-root", RequestID: "request-root", LeaseID: "lease-run-root", Attempt: 1, Error: "root failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendRun("request-middle", "run-middle", 7)
+	call := toolCallPayload{RunID: "run-middle", ToolCallID: "retry-call", ToolName: "Write", ArgumentsJSON: `{"content":"retry","path":"runtime/retry.txt"}`}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 9, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 10, toolDispatchedType, call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 11, "tool/result", toolResultPayload{
+		RunID: "run-middle", ToolCallID: "retry-call", ToolName: "Write", Output: "committed by middle",
+	}, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 12, runFailedEventType, runTerminalPayload{
+		RunID: "run-middle", RequestID: "request-middle", LeaseID: "lease-run-middle", Attempt: 1, Error: "middle failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := &retryToolConversationAdapter{}
+	external := &countingToolAdapter{}
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{WorkerID: "worker-latest", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-latest", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 13, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.Status != RunCompleted {
+		t.Fatalf("latest retry status = %+v", terminal)
+	}
+	conversation.mu.Lock()
+	if len(conversation.toolResults) != 1 || conversation.toolResults[0].Output != "committed by middle" {
+		t.Fatalf("latest retry did not reuse middle receipt: %#v", conversation.toolResults)
+	}
+	conversation.mu.Unlock()
+	external.mu.Lock()
+	if external.calls != 0 {
+		t.Fatalf("latest retry executed external tool %d times, want 0", external.calls)
+	}
+	external.mu.Unlock()
 }
 
 func TestSessionRunnerGracefulCloseLeavesRunRecoverable(t *testing.T) {
