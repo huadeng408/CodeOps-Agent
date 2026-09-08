@@ -260,15 +260,17 @@ func main() {
 		}
 		return out
 	})
-	continuationRunner := session.NewSessionRunner(workbench, continuationClient, continuationTools, session.SessionRunnerOptions{
-		WorkerID: "server:" + strings.TrimSpace(cfg.Server.Port),
-	})
-	if continuationErr == nil {
-		if err := continuationRunner.Recover(context.Background()); err != nil {
+	var continuationRunner session.ContinuationModule
+	if continuationErr == nil && continuationClient != nil {
+		runner := session.NewSessionRunner(workbench, continuationClient, continuationTools, session.SessionRunnerOptions{
+			WorkerID: "server:" + strings.TrimSpace(cfg.Server.Port),
+		})
+		continuationRunner = runner
+		if err := runner.Recover(context.Background()); err != nil {
 			log.Warnf("session continuation recovery scan failed: %v", err)
 		}
+		defer runner.Close()
 	}
-	defer continuationRunner.Close()
 	defer continuationExecutor.Close()
 	if continuationClient != nil {
 		defer continuationClient.Close()
