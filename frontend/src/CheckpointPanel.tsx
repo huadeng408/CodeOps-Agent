@@ -29,12 +29,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
     const loadingSessionID = session.id;
     setError('');
     try {
-      const [checkpointData, eventData, recoveryManifest] = await Promise.all([
+      const [checkpointData, eventData] = await Promise.all([
         api.listCheckpoints(session.id),
         api.listEvents(session.id),
-        api.getRecoveryManifest(session.id),
       ]);
-      const [workspaceManifest, runs] = await Promise.all([
+      const [recoveryManifest, workspaceManifest, runs] = await Promise.all([
+        api.getRecoveryManifest(session.id).catch(() => null),
         api.getWorkspaceManifest(session.id).catch(() => ({ available: false, reason: 'workspace recovery is unavailable' })),
         api.getRunHistory(session.id).catch(() => []),
       ]);
@@ -254,6 +254,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
           {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
         </div>
       )}
+      {!manifest && <div className="recovery-summary" role="status"><div className="recovery-summary-title">恢复清单暂不可用</div><div className="recovery-summary-meta">已显示 canonical ledger 事件与检查点，可稍后刷新恢复状态。</div></div>}
       {runHistory.length > 0 && (
         <div className="run-history-list" aria-label="运行历史详情">
           <div className="run-history-heading"><div className="recovery-summary-title">运行记录</div><select aria-label="运行历史筛选" value={runFilter} onChange={(event) => setRunFilter(event.target.value as typeof runFilter)}><option value="all">全部</option><option value="active">进行中</option><option value="failed">失败</option><option value="completed">已完成</option></select></div>
