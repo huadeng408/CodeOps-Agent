@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, SessionEvent } from './types';
 import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
@@ -335,18 +335,36 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code'>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const loadEvents = useCallback(async () => {
+  const cursorRef = useRef(-1);
+  const loadedSessionRef = useRef('');
+  const loadEvents = useCallback(async (after = -1) => {
     try {
       // The ledger is the durable conversation history; an arbitrary client
       // cap would make long sessions appear to forget their earliest turns.
-      const data = await api.listEvents(sessionId);
-      setEvents((previous) => mergeEvents(previous, data));
+      // Once a session is loaded, refreshes only request the suffix after the
+      // last observed ledger sequence.
+      const data = await api.listEvents(sessionId, after >= 0 ? { after } : {});
+      setEvents((previous) => {
+        const merged = mergeEvents(previous, data);
+        cursorRef.current = merged.reduce((max, event) => Math.max(max, event.seq), -1);
+        return merged;
+      });
       setError('');
     } catch (cause) {
       setError(errorMessage(cause, '事件加载失败'));
     } finally { setLoading(false); }
   }, [sessionId]);
-  useEffect(() => { setEventFilter('all'); setEvents([]); setLoading(true); void loadEvents(); }, [loadEvents, refreshKey]);
+  useEffect(() => {
+    const sameSession = loadedSessionRef.current === sessionId;
+    if (!sameSession) {
+      loadedSessionRef.current = sessionId;
+      cursorRef.current = -1;
+      setEventFilter('all');
+      setEvents([]);
+      setLoading(true);
+    }
+    void loadEvents(sameSession ? cursorRef.current : -1);
+  }, [loadEvents, refreshKey, sessionId]);
   const cursor = events.reduce((max, event) => Math.max(max, event.seq), -1);
   const activeEvents = deriveActiveEvents(events);
   const executionSummary = activeEvents.reduce((summary, event) => {
