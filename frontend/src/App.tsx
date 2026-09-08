@@ -309,10 +309,17 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   useEffect(() => { setEvents([]); setLoading(true); void loadEvents(); }, [loadEvents, refreshKey]);
   const cursor = events.reduce((max, event) => Math.max(max, event.seq), -1);
   const activeEvents = deriveActiveEvents(events);
+  const executionSummary = activeEvents.reduce((summary, event) => {
+    if (event.toolName || event.type.startsWith('tool/')) summary.tools += 1;
+    else if (event.type.includes('approval')) summary.approvals += 1;
+    else if (event.type.includes('patch') || event.type.includes('code')) summary.codeChanges += 1;
+    else summary.messages += 1;
+    return summary;
+  }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0 });
   const socket = useWebSocket({ sessionId, after: cursor, onMessage: (event) => setEvents((previous) => mergeEvents(previous, [event])) });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
-    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}{socket.lastError && <span>{socket.lastError}</span>}</div>
+    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span>{socket.lastError && <span>{socket.lastError}</span>}</div>
     {error && <div className="inline-error" role="alert">{error}</div>}
     {activeEvents.length === 0 ? <div className="empty-state"><strong>还没有消息</strong><span>发送第一条消息开始这个会话。</span></div> : activeEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}</span><time>#{event.seq}</time></div>

@@ -464,6 +464,8 @@ button:disabled {
   color: var(--dsw-alias-text-tertiary);
   font-size: 11px;
 }
+.execution-summary { margin-left: 10px; color: var(--muted-text, #6b7280); font-size: 11px; white-space: nowrap; }
+@media (max-width: 640px) { .execution-summary { display: block; margin: 3px 0 0; white-space: normal; } }
 
 .stream-status span:last-child {
   color: var(--dsw-static-red-500);
