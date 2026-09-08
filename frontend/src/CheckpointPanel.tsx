@@ -98,7 +98,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
 
   const handleExportManifest = () => {
     if (!manifest) return;
-    const payload = JSON.stringify(manifest, null, 2);
+    const payload = JSON.stringify({
+      ...manifest,
+      runs: runHistory,
+      workspace: workspace || { available: false, reason: 'workspace recovery is unavailable' },
+      exportedAt: new Date().toISOString(),
+    }, null, 2);
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const anchor = document.createElement('a');
     anchor.href = url;
