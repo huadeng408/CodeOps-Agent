@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, SessionRun, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -83,6 +83,13 @@ class ApiClient {
 
   async getSession(sessionId: string): Promise<Session> {
     const result = await this.request<Session>('GET', `/sessions/${encodeURIComponent(sessionId)}`);
+    return result.data;
+  }
+
+  async getRecoveryManifest(sessionId: string): Promise<RecoveryManifest> {
+    const result = await this.request<RecoveryManifest>(
+      'GET', `/sessions/${encodeURIComponent(sessionId)}/recovery-manifest`,
+    );
     return result.data;
   }
 

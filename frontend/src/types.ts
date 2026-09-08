@@ -61,6 +61,15 @@ export interface SessionCheckpoint {
   createdAt: string;
 }
 
+export interface RecoveryManifest {
+  session: Session;
+  ledgerSeq: number;
+  eventCount: number;
+  rewindCount: number;
+  continuationCount: number;
+  checkpointCount: number;
+}
+
 export interface ApiResponse<T> {
   code: number;
   message: string;

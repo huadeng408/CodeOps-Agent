@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Session, SessionCheckpoint, SessionEvent } from './types';
+import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent } from './types';
 import { api, ApiError } from './api';
 
 interface CheckpointPanelProps {
@@ -10,6 +10,7 @@ interface CheckpointPanelProps {
 
 export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPanelProps) {
   const [checkpoints, setCheckpoints] = useState<SessionCheckpoint[]>([]);
+  const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [newLabel, setNewLabel] = useState('');
@@ -21,11 +22,13 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const load = async () => {
     setError('');
     try {
-      const [checkpointData, eventData] = await Promise.all([
+      const [checkpointData, eventData, recoveryManifest] = await Promise.all([
         api.listCheckpoints(session.id),
         api.listEvents(session.id),
+        api.getRecoveryManifest(session.id),
       ]);
       setCheckpoints(checkpointData);
+      setManifest(recoveryManifest);
       const marker = [...eventData].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
       const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
       setEvents(eventData.filter((event) => {
@@ -47,7 +50,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     setIsCreating(false);
     setNewLabel('');
     setSelectedEventId('');
-    setError('');
+      setError('');
+      setManifest(null);
   }, [session.id]);
 
   useEffect(() => {
@@ -165,10 +169,11 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         </div>
       )}
       {error && <div className="inline-error" role="alert">{error}</div>}
-      {(rewindEvents.length > 0 || continuationEvents.length > 0) && (
+      {(manifest || rewindEvents.length > 0 || continuationEvents.length > 0) && (
         <div className="recovery-summary" aria-label="恢复历史摘要">
           <div className="recovery-summary-title">恢复历史</div>
-          <div className="recovery-summary-meta">恢复 {rewindEvents.length} 次 · 继续 {continuationEvents.length} 次</div>
+          <div className="recovery-summary-meta">ledger #{manifest?.ledgerSeq ?? '-'} · 事件 {manifest?.eventCount ?? events.length}</div>
+          <div className="recovery-summary-meta">恢复 {manifest?.rewindCount ?? rewindEvents.length} 次 · 继续 {manifest?.continuationCount ?? continuationEvents.length} 次</div>
           {latestRecovery?.type === 'session/rewind' && latestRecovery.rewindTargetSeq !== undefined && <div className="recovery-summary-meta">最近恢复到事件 #{latestRecovery.rewindTargetSeq}</div>}
           {latestRecovery?.type === 'session/continued' && latestRecovery.continuation && <div className="recovery-summary-meta">最近从事件 #{latestRecovery.continuation.targetSeq} 继续（第 {latestRecovery.continuation.resumeCount} 次）</div>}
         </div>
