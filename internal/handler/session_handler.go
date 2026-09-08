@@ -66,6 +66,15 @@ type recoveryManifest struct {
 	ContinuationCount int                    `json:"continuationCount"`
 	CheckpointCount   int                    `json:"checkpointCount"`
 	LatestRecovery    *recoveryManifestEvent `json:"latestRecovery,omitempty"`
+	CurrentRun        *recoveryRunSummary    `json:"currentRun,omitempty"`
+}
+
+type recoveryRunSummary struct {
+	RunID         string   `json:"runId"`
+	Status        string   `json:"status"`
+	Attempt       int      `json:"attempt"`
+	RetryOfRunID  string   `json:"retryOfRunId,omitempty"`
+	RetryOfRunIDs []string `json:"retryOfRunIds,omitempty"`
 }
 
 type recoveryManifestEvent struct {
@@ -162,6 +171,12 @@ func (h *SessionHandler) RecoveryManifest(c *gin.Context) {
 		return
 	}
 	manifest := recoveryManifest{Session: view, EventCount: len(events), CheckpointCount: len(checkpoints), LedgerSeq: -1}
+	if view.Run != nil {
+		manifest.CurrentRun = &recoveryRunSummary{
+			RunID: view.Run.RunID, Status: string(view.Run.Status), Attempt: view.Run.Attempt,
+			RetryOfRunID: view.Run.RetryOfRunID, RetryOfRunIDs: append([]string(nil), view.Run.RetryOfRunIDs...),
+		}
+	}
 	if len(events) > 0 {
 		manifest.LedgerSeq = events[len(events)-1].Seq
 		manifest.LatestLedgerHash = events[len(events)-1].Hash

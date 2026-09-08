@@ -77,6 +77,13 @@ export interface RecoveryManifest {
     targetSeq?: number;
     resumeCount?: number;
   };
+  currentRun?: {
+    runId: string;
+    status: SessionRunStatus;
+    attempt: number;
+    retryOfRunId?: string;
+    retryOfRunIds?: string[];
+  };
 }
 
 export interface WorkspaceManifest {

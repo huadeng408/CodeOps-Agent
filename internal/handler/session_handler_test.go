@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"code-agent/internal/session"
 	"code-agent/internal/worktree"
@@ -146,6 +147,10 @@ func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
 				Type string `json:"type"`
 				Seq  int64  `json:"seq"`
 			} `json:"latestRecovery"`
+			CurrentRun *struct {
+				RunID        string `json:"runId"`
+				RetryOfRunID string `json:"retryOfRunId"`
+			} `json:"currentRun"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
@@ -164,6 +169,34 @@ func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
 	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/recovery-manifest", nil)
 	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
 		t.Fatalf("foreign=%d missing=%d; bodies must match", foreign.Code, missing.Code)
+	}
+}
+
+func TestRecoveryManifestIncludesCurrentRunLineage(t *testing.T) {
+	workbench, ledger := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "lineage", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(context.Background(), 7, created.ID, 1, "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(context.Background(), 7, created.ID, 2, message.ID, "anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"request_id": "request-root", "run_id": "run-root", "checkpoint_hash": checkpoint.Hash, "target_event_id": message.ID, "target_seq": 1, "target_checksum": checkpoint.TargetHash, "surface_sha256": "surface", "input_event_id": message.ID, "resume_count": 1}
+	if _, err := ledger.Append(context.Background(), created.ID, 3, "session/continued", payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(context.Background(), created.ID, 4, "session/run-leased", map[string]any{"run_id": "run-root", "request_id": "request-root", "lease_id": "lease-root", "worker_id": "worker-root", "attempt": 1, "lease_until": time.Now().Add(time.Minute).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(7, workbench)
+	response := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/recovery-manifest", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"runId":"run-root"`)) {
+		t.Fatalf("manifest current run missing: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
