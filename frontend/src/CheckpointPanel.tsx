@@ -197,7 +197,6 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     try {
       const fresh = await api.getRun(session.id, run.runId);
       setRunHistory((items) => items.map((item) => item.runId === fresh.runId ? fresh : item));
-      await onChanged();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '运行状态刷新失败');
     } finally {
