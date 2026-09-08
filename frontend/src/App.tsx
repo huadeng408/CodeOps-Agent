@@ -42,6 +42,7 @@ function App() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -229,6 +230,7 @@ function App() {
               <option value="queued" disabled>排队中</option><option value="running">运行中</option><option value="paused">已暂停</option><option value="done">已完成</option>
             </select>}
             <button className="icon-btn" type="button" title="切换主题" aria-label="切换主题" onClick={() => setIsDarkTheme((value) => !value)}>{isDarkTheme ? '☀' : '◐'}</button>
+            <button className="icon-btn" type="button" title="打开会话详情" aria-label="打开会话详情" onClick={() => setShowDetails((value) => !value)}>▣</button>
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}
           </div>
         </header>
@@ -242,7 +244,7 @@ function App() {
         </form>
       </main>
 
-      <aside className="task-panel">
+      <aside className={`task-panel ${showDetails ? 'open' : ''}`}>
         <div className="task-panel-header">会话状态</div>
         <div className="task-list">
           {selectedSession ? <SessionStatus session={selectedSession} /> : <div className="empty-panel">未选择</div>}

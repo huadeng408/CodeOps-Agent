@@ -566,7 +566,20 @@ button:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
+
+/* Codex-style workbench: details are an explicit drawer, leaving the
+   conversation as the primary surface until the user asks for them. */
+.app-frame { grid-template-columns: 322px minmax(0, 1fr); }
+.task-panel { display: none; position: absolute; z-index: 4; top: 0; right: 0; bottom: 0; width: min(340px, 88vw); box-shadow: -12px 0 32px rgba(0,0,0,.24); }
+.task-panel.open { display: flex; }
+.conversation-header { min-height: 48px; padding: 8px 18px; }
+.message-list { padding: 24px max(24px, 7vw) 150px; }
+.message-stream { max-width: 900px; }
+.input-area { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); width: min(850px, calc(100% - 48px)); z-index: 2; border: 1px solid var(--dsw-alias-border-l1); border-radius: 16px; background: var(--dsw-alias-bg-l1); box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+.input-box { min-height: 48px; background: transparent; border: 0; }
+.input-box:focus { border: 0; }
 
 .task-panel-header {
   padding: 16px;
@@ -716,7 +729,7 @@ button:disabled {
 @media (max-width: 900px) {
   body { overflow: auto; }
   .app-frame { grid-template-columns: 230px minmax(0, 1fr); min-height: 100vh; height: auto; }
-  .task-panel { grid-column: 1 / -1; min-height: 0; border-top: 1px solid var(--dsw-alias-border-l1); border-left: 0; }
+  .task-panel { grid-column: auto; min-height: 0; border-top: 0; border-left: 1px solid var(--dsw-alias-border-l1); }
   .checkpoint-panel { max-height: none; }
 }
 
@@ -725,7 +738,7 @@ button:disabled {
   .sidebar { max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
   .conversation { min-height: 62vh; }
   .message-list { padding: 14px; }
-  .input-area { padding: 10px 14px; }
+  .input-area { padding: 10px 14px; bottom: 12px; width: calc(100% - 22px); }
   .input-box { min-height: 48px; }
   .header-actions select { max-width: 90px; }
 }
