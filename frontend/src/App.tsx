@@ -70,8 +70,12 @@ function App() {
     const data = await api.listSessions();
     setSessions(data);
     setSelectedSession((current) => {
-      const wanted = preferredID || current?.id;
-      return (wanted && data.find((session) => session.id === wanted)) || data[0] || null;
+      const remembered = localStorage.getItem('codeops:selected-session');
+      const wanted = preferredID || current?.id || remembered;
+      const next = (wanted && data.find((session) => session.id === wanted)) || data[0] || null;
+      if (next) localStorage.setItem('codeops:selected-session', next.id);
+      else localStorage.removeItem('codeops:selected-session');
+      return next;
     });
     return data;
   }, []);
@@ -232,6 +236,7 @@ function App() {
           {Object.entries(sessionsByProject).map(([projectName, projectSessions]) => (
             <ProjectFolder key={projectName} projectName={projectName} sessions={projectSessions} selectedSessionId={selectedSession?.id} onSelectSession={(session) => {
               setSelectedSession(session);
+              localStorage.setItem('codeops:selected-session', session.id);
               setStatusDraft(session.status);
               setEditingTitle(false);
               setError('');
