@@ -47,6 +47,43 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// managedContinuation owns the paired runner and gRPC client so replacing the
+// continuation slot also closes the transport without leaking resources.
+type managedContinuation struct {
+	runner session.ContinuationModule
+	client *harnessorch.Client
+}
+
+func (m *managedContinuation) RequestContinuation(ctx context.Context, cmd session.ContinueCommand) (session.RunView, error) {
+	if m == nil || m.runner == nil {
+		return session.RunView{}, session.ErrContinuationUnavailable
+	}
+	return m.runner.RequestContinuation(ctx, cmd)
+}
+
+func (m *managedContinuation) Recover(ctx context.Context) error {
+	if m == nil || m.runner == nil {
+		return session.ErrContinuationUnavailable
+	}
+	return m.runner.Recover(ctx)
+}
+
+func (m *managedContinuation) Close() error {
+	if m == nil {
+		return nil
+	}
+	var firstErr error
+	if m.runner != nil {
+		firstErr = m.runner.Close()
+	}
+	if m.client != nil {
+		if err := m.client.Close(); firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // main bootstraps infrastructure dependencies and starts the HTTP server.
 func main() {
 	configPath := strings.TrimSpace(os.Getenv("CODEAGENT_CONFIG"))
@@ -260,21 +297,52 @@ func main() {
 		}
 		return out
 	})
-	var continuationRunner session.ContinuationModule
-	if continuationErr == nil && continuationClient != nil {
-		runner := session.NewSessionRunner(workbench, continuationClient, continuationTools, session.SessionRunnerOptions{
-			WorkerID: "server:" + strings.TrimSpace(cfg.Server.Port),
-		})
-		continuationRunner = runner
+	continuationSlot := session.NewContinuationSlot()
+	continuationCtx, cancelContinuation := context.WithCancel(context.Background())
+	defer cancelContinuation()
+	workerID := "server:" + strings.TrimSpace(cfg.Server.Port)
+	attachContinuation := func(client *harnessorch.Client) bool {
+		if client == nil {
+			return false
+		}
+		healthCtx, cancelHealth := context.WithTimeout(context.Background(), 2*time.Second)
+		health, healthErr := client.Health(healthCtx)
+		cancelHealth()
+		if healthErr != nil || health == nil || !strings.EqualFold(strings.TrimSpace(health.Status), "ok") {
+			_ = client.Close()
+			return false
+		}
+		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{WorkerID: workerID})
 		if err := runner.Recover(context.Background()); err != nil {
 			log.Warnf("session continuation recovery scan failed: %v", err)
 		}
-		defer runner.Close()
+		continuationSlot.Attach(&managedContinuation{runner: runner, client: client})
+		return true
 	}
+	attached := continuationErr == nil && attachContinuation(continuationClient)
+	if !attached {
+		if continuationClient != nil && !continuationSlot.Available() {
+			_ = continuationClient.Close()
+		}
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-continuationCtx.Done():
+					return
+				case <-ticker.C:
+					client, err := harnessorch.NewClient(continuationTarget)
+					if err != nil || !attachContinuation(client) {
+						continue
+					}
+					return
+				}
+			}
+		}()
+	}
+	defer continuationSlot.Close()
 	defer continuationExecutor.Close()
-	if continuationClient != nil {
-		defer continuationClient.Close()
-	}
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
 
 	// Telemetry: create tracer and wire into handlers and services.
@@ -395,7 +463,7 @@ func main() {
 			sessions.DELETE("/:id", sessionHandler.Delete)
 			sessions.POST("/:id/ws-ticket", sessionHandler.IssueWebSocketTicket)
 
-			eventHandler := handler.NewEventHandler(workbench, continuationRunner)
+			eventHandler := handler.NewEventHandlerWithContinuationSlot(workbench, continuationSlot)
 			sessions.GET("/:id/events", eventHandler.ListEvents)
 			sessions.POST("/:id/events", eventHandler.CreateEvent)
 			sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)

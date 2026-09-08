@@ -21,6 +21,7 @@ import (
 type EventHandler struct {
 	workbench    session.WorkbenchModule
 	continuation session.ContinuationModule
+	slot         *session.ContinuationSlot
 }
 
 func NewEventHandler(workbench session.WorkbenchModule, continuation ...session.ContinuationModule) *EventHandler {
@@ -29,6 +30,22 @@ func NewEventHandler(workbench session.WorkbenchModule, continuation ...session.
 		handler.continuation = continuation[0]
 	}
 	return handler
+}
+
+// NewEventHandlerWithContinuationSlot keeps the HTTP handler stable while the
+// orchestrator supervisor swaps the live runner in and out.
+func NewEventHandlerWithContinuationSlot(workbench session.WorkbenchModule, slot *session.ContinuationSlot) *EventHandler {
+	return &EventHandler{workbench: workbench, slot: slot}
+}
+
+// SetContinuation swaps the live runner behind the stable handler seam. This
+// is used by server startup/reconnect supervision; requests already in flight
+// retain the runner they selected while new requests observe the replacement.
+func (h *EventHandler) SetContinuation(continuation session.ContinuationModule) {
+	if h == nil {
+		return
+	}
+	h.continuation = continuation
 }
 
 type createEventRequest struct {
@@ -200,7 +217,11 @@ func (h *EventHandler) ContinueSession(c *gin.Context) {
 		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("requestId and expectedSeq are required")), "requestId and expectedSeq are required")
 		return
 	}
-	if h.continuation == nil {
+	continuation := h.continuation
+	if h.slot != nil {
+		continuation = h.slot
+	}
+	if continuation == nil {
 		if strings.TrimSpace(req.RequestID) == "" {
 			continued, legacyErr := h.workbench.ContinueFromCheckpoint(c.Request.Context(), owner, c.Param("id"), req.CheckpointHash, *req.ExpectedSeq)
 			if legacyErr != nil {
@@ -218,7 +239,7 @@ func (h *EventHandler) ContinueSession(c *gin.Context) {
 		writeSessionError(c, err, "authentication required")
 		return
 	}
-	continued, err := h.continuation.RequestContinuation(c.Request.Context(), session.ContinueCommand{
+	continued, err := continuation.RequestContinuation(c.Request.Context(), session.ContinueCommand{
 		RequestID: strings.TrimSpace(req.RequestID), SessionID: c.Param("id"),
 		CheckpointHash: req.CheckpointHash, OwnerID: owner, ExpectedSeq: *req.ExpectedSeq,
 		Actor: actor,
