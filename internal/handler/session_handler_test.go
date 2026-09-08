@@ -43,6 +43,7 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
 	sessions.POST("", sessionHandler.Create)
 	sessions.GET("", sessionHandler.List)
 	sessions.GET("/:id", sessionHandler.Get)
+	sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 	sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 	sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 	sessions.DELETE("/:id", sessionHandler.Delete)
@@ -53,6 +54,50 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
 	sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
 	sessions.POST("/:id/continue", eventHandler.ContinueSession)
 	return router
+}
+
+func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "recovery", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(context.Background(), 7, created.ID, 1, "resume me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(context.Background(), 7, created.ID, 2, message.ID, "anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.RestoreCheckpoint(context.Background(), 7, created.ID, checkpoint.Hash, 3); err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(7, workbench)
+	response := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/recovery-manifest", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d; body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			LedgerSeq         int64 `json:"ledgerSeq"`
+			EventCount        int   `json:"eventCount"`
+			RewindCount       int   `json:"rewindCount"`
+			ContinuationCount int   `json:"continuationCount"`
+			CheckpointCount   int   `json:"checkpointCount"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.LedgerSeq != 3 || envelope.Data.EventCount != 4 || envelope.Data.RewindCount != 1 || envelope.Data.ContinuationCount != 0 || envelope.Data.CheckpointCount != 1 {
+		t.Fatalf("manifest summary = %+v", envelope.Data)
+	}
+	foreign := performSessionRequest(sessionTestRouter(8, workbench), http.MethodGet, "/sessions/"+created.ID+"/recovery-manifest", nil)
+	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/recovery-manifest", nil)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d missing=%d; bodies must match", foreign.Code, missing.Code)
+	}
 }
 
 func performSessionRequest(router http.Handler, method, path string, body any) *httptest.ResponseRecorder {

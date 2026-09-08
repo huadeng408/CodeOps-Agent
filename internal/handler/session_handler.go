@@ -48,6 +48,15 @@ type updateStatusRequest struct {
 	ExpectedSeq *int64 `json:"expectedSeq"`
 }
 
+type recoveryManifest struct {
+	Session           session.SessionView `json:"session"`
+	LedgerSeq         int64               `json:"ledgerSeq"`
+	EventCount        int                 `json:"eventCount"`
+	RewindCount       int                 `json:"rewindCount"`
+	ContinuationCount int                 `json:"continuationCount"`
+	CheckpointCount   int                 `json:"checkpointCount"`
+}
+
 func (h *SessionHandler) Create(c *gin.Context) {
 	owner, err := authenticatedOwner(c)
 	if err != nil {
@@ -93,6 +102,45 @@ func (h *SessionHandler) Get(c *gin.Context) {
 		return
 	}
 	writeSessionData(c, http.StatusOK, view)
+}
+
+// RecoveryManifest exposes a read-only, ledger-derived resume summary. It is
+// intentionally assembled from the same owner-scoped APIs as the UI rather
+// than introducing a second persistence model for recovery state.
+func (h *SessionHandler) RecoveryManifest(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	view, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "session not found")
+		return
+	}
+	events, err := h.workbench.Events(c.Request.Context(), owner, c.Param("id"), 0)
+	if err != nil {
+		writeSessionError(c, err, "failed to read recovery manifest")
+		return
+	}
+	checkpoints, err := h.workbench.ListCheckpoints(c.Request.Context(), owner, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "failed to read recovery manifest")
+		return
+	}
+	manifest := recoveryManifest{Session: view, EventCount: len(events), CheckpointCount: len(checkpoints), LedgerSeq: -1}
+	if len(events) > 0 {
+		manifest.LedgerSeq = events[len(events)-1].Seq
+	}
+	for _, event := range events {
+		switch event.Type {
+		case "session/rewind":
+			manifest.RewindCount++
+		case "session/continued":
+			manifest.ContinuationCount++
+		}
+	}
+	writeSessionData(c, http.StatusOK, manifest)
 }
 
 func (h *SessionHandler) UpdateTitle(c *gin.Context) {
