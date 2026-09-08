@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -413,6 +414,9 @@ func (h *WebSocketHandler) replay(ctx context.Context, conn *websocket.Conn, ses
 			}
 			continue
 		}
+		if err := validateReplayBatch(last, batch); err != nil {
+			return err
+		}
 		for _, event := range batch {
 			if event.Seq <= last {
 				continue
@@ -490,6 +494,9 @@ func (h *WebSocketHandler) flushSuffix(ctx context.Context, sessionID string, ow
 		if len(batch) == 0 {
 			return nil
 		}
+		if err := validateReplayBatch(last, batch); err != nil {
+			return err
+		}
 		for _, event := range batch {
 			if event.Seq <= last {
 				continue
@@ -504,6 +511,17 @@ func (h *WebSocketHandler) flushSuffix(ctx context.Context, sessionID string, ow
 			last = event.Seq
 		}
 	}
+}
+
+func validateReplayBatch(last int64, batch []session.EventView) error {
+	expected := last + 1
+	for _, event := range batch {
+		if event.Seq != expected {
+			return fmt.Errorf("websocket replay sequence gap: expected %d, got %d", expected, event.Seq)
+		}
+		expected++
+	}
+	return nil
 }
 
 func (h *WebSocketHandler) writeRawEvent(conn *websocket.Conn, raw []byte, seenIDs map[string]struct{}) error {

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"code-agent/internal/session"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -50,4 +52,17 @@ func TestWebSocketHubReplayGatePreservesQueueOrder(t *testing.T) {
 		t.Fatalf("live event=%s", got)
 	}
 	hub.RemoveConnection("s", &conn)
+}
+
+func TestValidateReplayBatchRejectsSequenceGaps(t *testing.T) {
+	batch := []session.EventView{{Seq: 3}, {Seq: 4}}
+	if err := validateReplayBatch(1, batch); err == nil {
+		t.Fatal("sequence gap was accepted")
+	}
+	if err := validateReplayBatch(2, batch); err != nil {
+		t.Fatalf("contiguous replay rejected: %v", err)
+	}
+	if err := validateReplayBatch(-1, []session.EventView{{Seq: 0}}); err != nil {
+		t.Fatalf("sequence zero should be valid after an empty cursor: %v", err)
+	}
 }
