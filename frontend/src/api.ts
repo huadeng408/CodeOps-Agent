@@ -39,8 +39,15 @@ class ApiClient {
   }
 
   async login(identifier: string, password: string): Promise<{ user: unknown }> {
+    const normalized = identifier.trim();
     const result = await this.request<{ token?: string; refreshToken?: string; user?: unknown }>(
-      'POST', '/users/login', { body: { email: identifier, username: identifier, password } },
+      'POST', '/users/login', {
+        body: {
+          email: '',
+          username: normalized,
+          password,
+        },
+      },
     );
     return { user: result.data?.user };
   }
