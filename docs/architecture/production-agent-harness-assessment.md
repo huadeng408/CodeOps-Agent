@@ -150,8 +150,8 @@ DAG join 必须在依赖满足后以 `worker_id + attempt` 幂等；超时、取
 ## 当前阻塞
 
 - `configs/server.yaml` 仍包含开发默认凭据表达式，生产启动必须要求外部 secret。
-- WebSocket 当前仍在 URL query 读取 JWT，需迁移到 ticket/header。
-- `frontend/node_modules` 尚未忽略，且当前 UI 仍有 placeholder task panel。
+- WebSocket ticket、一次性消费、session/owner 绑定和过期拒绝已有实现与定向测试；仍需补齐真实生产部署下的 header-only 传输与代理日志审计。
+- `frontend/node_modules` 属于本地依赖并保持未跟踪；当前 task panel 已展示会话状态、运行 lineage 与 checkpoint，仍缺独立的 worker/memory 可视化面板。
 - 全局 CORS 为 `*`，不符合生产租户策略。
 - Docker daemon/WSL2、Phoenix live trace、真实外部 provider 发布证据和官方 SWE-bench/Terminal-Bench scorer 尚未齐全。
 - 用户给定的 `D:\vscode\OpenViking` 不是官方仓库，包含扫描 `.env` 并向 `httpbin.org/post` 外传的 `backdoor.sh`；在用户确认前不删除。
