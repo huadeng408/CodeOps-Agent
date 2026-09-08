@@ -29,8 +29,9 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
       const marker = [...eventData].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
       const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
       setEvents(eventData.filter((event) => {
+        const recoveryEvent = event.type === 'session/rewind' || event.type === 'session/continued';
         const surfaceEvent = ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(event.type);
-        return surfaceEvent && (!marker || targetSeq === undefined || event.seq <= targetSeq || event.seq >= marker.seq);
+        return recoveryEvent || (surfaceEvent && (!marker || targetSeq === undefined || event.seq <= targetSeq || event.seq >= marker.seq));
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '加载失败');
@@ -61,6 +62,10 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     requestIds.current.delete(requestKey);
     localStorage.removeItem(`continuation-request:${requestKey}`);
   }, [session.id, session.run?.checkpointHash, session.run?.status]);
+
+  const rewindEvents = events.filter((event) => event.type === 'session/rewind' && event.rewindTargetSeq !== undefined);
+  const continuationEvents = events.filter((event) => event.type === 'session/continued' && event.continuation);
+  const latestRecovery = [...events].reverse().find((event) => event.type === 'session/rewind' || event.type === 'session/continued');
 
   const handleCreateCheckpoint = async () => {
     if (!newLabel.trim() || !selectedEventId || busy) return;
@@ -160,6 +165,14 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         </div>
       )}
       {error && <div className="inline-error" role="alert">{error}</div>}
+      {(rewindEvents.length > 0 || continuationEvents.length > 0) && (
+        <div className="recovery-summary" aria-label="恢复历史摘要">
+          <div className="recovery-summary-title">恢复历史</div>
+          <div className="recovery-summary-meta">恢复 {rewindEvents.length} 次 · 继续 {continuationEvents.length} 次</div>
+          {latestRecovery?.type === 'session/rewind' && latestRecovery.rewindTargetSeq !== undefined && <div className="recovery-summary-meta">最近恢复到事件 #{latestRecovery.rewindTargetSeq}</div>}
+          {latestRecovery?.type === 'session/continued' && latestRecovery.continuation && <div className="recovery-summary-meta">最近从事件 #{latestRecovery.continuation.targetSeq} 继续（第 {latestRecovery.continuation.resumeCount} 次）</div>}
+        </div>
+      )}
       {checkpoints.length === 0 ? (
         <div className="empty-panel">暂无检查点</div>
       ) : (

@@ -677,6 +677,17 @@ button:disabled {
 .checkpoint-form {
   margin-bottom: 12px;
 }
+.recovery-summary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-base);
+}
+.recovery-summary-title { font-size: 11px; font-weight: 600; color: var(--dsw-alias-text-secondary); }
+.recovery-summary-meta { font-size: 10px; color: var(--dsw-alias-text-tertiary); }
 
 .checkpoint-item {
   padding: 9px;
