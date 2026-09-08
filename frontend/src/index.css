@@ -662,6 +662,8 @@ button:disabled {
   justify-content: space-between;
   margin-bottom: 10px;
 }
+.panel-actions { display: inline-flex; align-items: center; gap: 6px; }
+.panel-actions .icon-btn { width: 28px; height: 28px; }
 
 .panel-heading h3 {
   font-size: 13px;

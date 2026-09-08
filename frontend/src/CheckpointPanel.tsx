@@ -144,9 +144,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     <section className="checkpoint-panel" aria-label="Checkpoints">
       <div className="panel-heading">
         <h3>Checkpoints</h3>
-        <button className="subtle-btn" type="button" onClick={() => setIsCreating((value) => !value)} disabled={busy}>
-          {isCreating ? '取消' : '新建'}
-        </button>
+        <div className="panel-actions">
+          <button className="icon-btn" type="button" title="刷新恢复状态" aria-label="刷新恢复状态" onClick={() => void onChanged()} disabled={busy}>↻</button>
+          <button className="subtle-btn" type="button" onClick={() => setIsCreating((value) => !value)} disabled={busy}>
+            {isCreating ? '取消' : '新建'}
+          </button>
+        </div>
       </div>
       {isCreating && (
         <div className="checkpoint-form">
