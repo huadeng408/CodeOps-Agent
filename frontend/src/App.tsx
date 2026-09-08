@@ -35,6 +35,10 @@ function eventKind(event: SessionEvent): EventKind {
   return 'messages';
 }
 
+function eventKindLabel(kind: EventKind): string {
+  return kind === 'tools' ? '工具' : kind === 'approvals' ? '审批' : kind === 'code' ? '修改' : '消息';
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -334,7 +338,7 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
     <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
     {error && <div className="inline-error" role="alert">{error}</div>}
     {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
-      <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}</span><time>#{event.seq}</time></div>
+      <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}<span className={`event-kind ${eventKind(event)}`}>{eventKindLabel(eventKind(event))}</span></span><time>#{event.seq}</time></div>
       <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}</div>
     </article>)}
   </div>;

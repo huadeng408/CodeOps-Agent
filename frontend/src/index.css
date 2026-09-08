@@ -521,6 +521,10 @@ button:disabled {
   font-size: 10px;
   font-weight: 400;
 }
+.event-kind { display: inline-flex; margin-left: 7px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 400; color: var(--dsw-alias-text-tertiary); background: var(--dsw-alias-bg-l1); border: 1px solid var(--dsw-alias-border-l1); }
+.event-kind.tools { color: var(--dsw-static-blue-500); }
+.event-kind.approvals { color: var(--dsw-static-orange-500); }
+.event-kind.code { color: var(--dsw-static-green-500); }
 
 .message-content pre {
   margin-top: 9px;
