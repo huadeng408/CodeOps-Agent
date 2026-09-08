@@ -13,8 +13,15 @@ function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): Sessio
 
 function hasSequenceGap(after: number, incoming: SessionEvent[]): boolean {
   if (after < 0 || incoming.length === 0) return false;
-  const first = [...incoming].sort((a, b) => a.seq - b.seq)[0];
-  return first.seq > after + 1;
+  const sorted = [...new Map(incoming.map((event) => [event.seq, event])).values()]
+    .filter((event) => event.seq > after)
+    .sort((a, b) => a.seq - b.seq);
+  let expected = after + 1;
+  for (const event of sorted) {
+    if (event.seq > expected) return true;
+    if (event.seq === expected) expected += 1;
+  }
+  return false;
 }
 
 function persistedSessionCursor(sessionId: string, cursor: number): void {
@@ -360,7 +367,7 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
       // Once a session is loaded, refreshes only request the suffix after the
       // last observed ledger sequence.
       const data = await api.listEvents(sessionId, after >= 0 ? { after } : {});
-      setEvents((previous) => {
+    setEvents((previous) => {
         const merged = mergeEvents(previous, data);
         cursorRef.current = merged.reduce((max, event) => Math.max(max, event.seq), -1);
         persistedSessionCursor(sessionId, cursorRef.current);
