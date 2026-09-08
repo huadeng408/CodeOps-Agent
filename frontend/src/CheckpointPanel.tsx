@@ -21,8 +21,11 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const requestIds = useRef(new Map<string, string>());
+  const loadVersionRef = useRef(0);
 
   const load = async () => {
+    const loadVersion = ++loadVersionRef.current;
+    const loadingSessionID = session.id;
     setError('');
     try {
       const [checkpointData, eventData, recoveryManifest, workspaceManifest, runs] = await Promise.all([
@@ -32,6 +35,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         api.getWorkspaceManifest(session.id),
         api.getRunHistory(session.id),
       ]);
+      if (loadVersion !== loadVersionRef.current || loadingSessionID !== session.id) return;
       setCheckpoints(checkpointData);
       setManifest(recoveryManifest);
       setWorkspace(workspaceManifest);
@@ -44,6 +48,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         return recoveryEvent || (surfaceEvent && (!marker || targetSeq === undefined || event.seq <= targetSeq || event.seq >= marker.seq));
       }));
     } catch (cause) {
+      if (loadVersion !== loadVersionRef.current || loadingSessionID !== session.id) return;
       setError(cause instanceof Error ? cause.message : '加载失败');
     }
   };
@@ -54,6 +59,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   // switches sessions so an event id from the previous ledger cannot be sent
   // to the newly selected session.
   useEffect(() => {
+    loadVersionRef.current += 1;
     setIsCreating(false);
     setNewLabel('');
     setSelectedEventId('');
