@@ -144,13 +144,13 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     }
   };
 
-  const handleContinue = async (checkpoint: SessionCheckpoint) => {
+  const handleContinue = async (checkpoint: SessionCheckpoint, forceNewRequestId = false) => {
     if (busy || session.status !== 'paused') return;
     setBusy(true);
     setError('');
     const requestKey = `${session.id}:${checkpoint.hash}`;
     const storageKey = `continuation-request:${requestKey}`;
-    let requestId = requestIds.current.get(requestKey) || localStorage.getItem(storageKey) || '';
+    let requestId = forceNewRequestId ? '' : requestIds.current.get(requestKey) || localStorage.getItem(storageKey) || '';
     if (!requestId) {
       requestId = `browser:${crypto.randomUUID()}`;
       requestIds.current.set(requestKey, requestId);
@@ -182,7 +182,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
       setError('找不到该运行对应的检查点，请刷新恢复清单');
       return;
     }
-    await handleContinue(checkpoint);
+    await handleContinue(checkpoint, true);
   };
 
   return (
