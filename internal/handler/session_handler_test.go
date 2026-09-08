@@ -200,6 +200,27 @@ func TestRecoveryManifestIncludesCurrentRunLineage(t *testing.T) {
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"runId":"run-root"`)) {
 		t.Fatalf("manifest current run missing: status=%d body=%s", response.Code, response.Body.String())
 	}
+	var envelope struct {
+		Data struct {
+			CurrentRun *struct {
+				RunID  string `json:"runId"`
+				Status string `json:"status"`
+			} `json:"currentRun"`
+			Runs []struct {
+				RunID  string `json:"runId"`
+				Status string `json:"status"`
+			} `json:"runs"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.CurrentRun == nil || envelope.Data.CurrentRun.RunID != "run-root" || envelope.Data.CurrentRun.Status != "running" {
+		t.Fatalf("current run projection = %+v", envelope.Data.CurrentRun)
+	}
+	if len(envelope.Data.Runs) != 1 || envelope.Data.Runs[0].RunID != "run-root" || envelope.Data.Runs[0].Status != "running" {
+		t.Fatalf("run history projection = %+v", envelope.Data.Runs)
+	}
 }
 
 func performSessionRequest(router http.Handler, method, path string, body any) *httptest.ResponseRecorder {
