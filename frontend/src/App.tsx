@@ -11,6 +11,12 @@ function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): Sessio
   return [...byID.values()].sort((a, b) => a.seq - b.seq);
 }
 
+function hasSequenceGap(after: number, incoming: SessionEvent[]): boolean {
+  if (after < 0 || incoming.length === 0) return false;
+  const first = [...incoming].sort((a, b) => a.seq - b.seq)[0];
+  return first.seq > after + 1;
+}
+
 // The ledger remains the transport cursor and audit history. The active UI
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
@@ -376,7 +382,22 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
     return summary;
   }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0 });
   const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventKind(event) === eventFilter);
-  const socket = useWebSocket({ sessionId, after: cursor, onMessage: (event) => setEvents((previous) => mergeEvents(previous, [event])) });
+  const handleLiveEvent = useCallback((event: SessionEvent) => {
+    const currentCursor = cursorRef.current;
+    if (hasSequenceGap(currentCursor, [event])) {
+      // A reconnect can miss a suffix if the server rotated the connection
+      // between ticket issuance and replay. Re-read the canonical ledger
+      // instead of presenting a silently incomplete conversation.
+      void loadEvents(-1);
+      return;
+    }
+    setEvents((previous) => {
+      const merged = mergeEvents(previous, [event]);
+      cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
+      return merged;
+    });
+  }, [loadEvents]);
+  const socket = useWebSocket({ sessionId, after: cursor, onMessage: handleLiveEvent });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
     <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
