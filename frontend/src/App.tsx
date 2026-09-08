@@ -26,6 +26,15 @@ function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
+type EventKind = 'messages' | 'tools' | 'approvals' | 'code';
+
+function eventKind(event: SessionEvent): EventKind {
+  if (event.toolName || event.type.startsWith('tool/')) return 'tools';
+  if (event.type.includes('approval')) return 'approvals';
+  if (event.type.includes('patch') || event.type.includes('code')) return 'code';
+  return 'messages';
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -293,6 +302,7 @@ function SessionStatus({ session }: { session: Session }) {
 
 function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey: number }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code'>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const loadEvents = useCallback(async () => {
@@ -310,18 +320,20 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   const cursor = events.reduce((max, event) => Math.max(max, event.seq), -1);
   const activeEvents = deriveActiveEvents(events);
   const executionSummary = activeEvents.reduce((summary, event) => {
-    if (event.toolName || event.type.startsWith('tool/')) summary.tools += 1;
-    else if (event.type.includes('approval')) summary.approvals += 1;
-    else if (event.type.includes('patch') || event.type.includes('code')) summary.codeChanges += 1;
+    const kind = eventKind(event);
+    if (kind === 'tools') summary.tools += 1;
+    else if (kind === 'approvals') summary.approvals += 1;
+    else if (kind === 'code') summary.codeChanges += 1;
     else summary.messages += 1;
     return summary;
   }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0 });
+  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventKind(event) === eventFilter);
   const socket = useWebSocket({ sessionId, after: cursor, onMessage: (event) => setEvents((previous) => mergeEvents(previous, [event])) });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
-    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span>{socket.lastError && <span>{socket.lastError}</span>}</div>
+    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {activeEvents.length === 0 ? <div className="empty-state"><strong>还没有消息</strong><span>发送第一条消息开始这个会话。</span></div> : activeEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
+    {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}</span><time>#{event.seq}</time></div>
       <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}</div>
     </article>)}

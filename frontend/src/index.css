@@ -466,6 +466,9 @@ button:disabled {
 }
 .execution-summary { margin-left: 10px; color: var(--muted-text, #6b7280); font-size: 11px; white-space: nowrap; }
 @media (max-width: 640px) { .execution-summary { display: block; margin: 3px 0 0; white-space: normal; } }
+.event-filter { margin-left: 10px; display: inline-flex; align-items: center; gap: 5px; color: var(--dsw-alias-text-tertiary); font-size: 11px; }
+.event-filter select { padding: 2px 5px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-text-secondary); font: inherit; }
+@media (max-width: 640px) { .event-filter { margin: 4px 0 0; } }
 
 .stream-status span:last-child {
   color: var(--dsw-static-red-500);
