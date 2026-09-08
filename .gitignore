@@ -177,6 +177,7 @@ internal/cli/.agent/
 
 # Scratch outputs created by local UI/evaluation runs.
 /\.playwright-cli/
+/ui-prototypes/
 /frontend/node_modules/
 /brainstorm-portal-layout.png
 /phoenix-v0.1-playwright-mcp*
