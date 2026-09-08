@@ -297,6 +297,7 @@ function SessionStatus({ session }: { session: Session }) {
     <div className="status-row"><span>更新</span><strong>{new Date(session.updatedAt).toLocaleString()}</strong></div>
     {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
     <div className="status-row"><span>执行 worker</span><strong>{session.run?.workerId || '待分配'}</strong></div>
+    {session.run && <div className="lineage-block" aria-label="运行 lineage"><div className="status-row"><span>运行 lineage</span><strong className="mono-value">{session.run.runId.slice(0, 12)}…</strong></div><div className="status-row"><span>重试次数</span><strong>第 {session.run.attempt} 次</strong></div><div className="status-row"><span>请求标识</span><strong className="mono-value">{session.run.requestId.slice(0, 12)}…</strong></div></div>}
     <div className="status-row"><span>记忆事件</span><strong>{session.eventCount} 条（ledger）</strong></div>
     {session.run?.checkpointHash && <div className="status-row"><span>恢复锚点</span><strong className="mono-value">{session.run.checkpointHash.slice(0, 12)}…</strong></div>}
     {session.run?.error && <div className="inline-error" role="status">{session.run.error}</div>}
