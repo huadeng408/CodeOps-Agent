@@ -76,6 +76,7 @@ type SessionView struct {
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 	Run         *RunView  `json:"run,omitempty"`
+	Runs        []RunView `json:"runs,omitempty"`
 }
 
 // EventView is the browser-safe representation of one canonical ledger fact.
@@ -567,8 +568,14 @@ func reduceSessionView(events []Event) (SessionView, error) {
 		}
 	}
 	var latestOrder int64 = -1
+	orderedRuns := make([]runProjection, 0, len(runs))
 	for _, run := range runs {
+		orderedRuns = append(orderedRuns, run)
+	}
+	sort.Slice(orderedRuns, func(i, j int) bool { return orderedRuns[i].order < orderedRuns[j].order })
+	for _, run := range orderedRuns {
 		candidate := run.view
+		view.Runs = append(view.Runs, candidate)
 		if view.Run == nil || run.order > latestOrder {
 			view.Run = &candidate
 			latestOrder = run.order

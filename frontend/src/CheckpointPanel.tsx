@@ -196,6 +196,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
           {manifest?.latestLedgerHash && <div className="recovery-summary-meta mono-value">链指纹 {manifest.latestLedgerHash.slice(0, 12)}…</div>}
           <div className="recovery-summary-meta">恢复 {manifest?.rewindCount ?? rewindEvents.length} 次 · 继续 {manifest?.continuationCount ?? continuationEvents.length} 次</div>
           {manifest?.currentRun?.retryOfRunId && <div className="recovery-summary-meta">当前运行承接 {manifest.currentRun.retryOfRunId.slice(0, 12)}… · 历史失败 {manifest.currentRun.retryOfRunIds?.length ?? 1} 个</div>}
+          {manifest?.runs && manifest.runs.length > 1 && <div className="recovery-summary-meta">运行历史 {manifest.runs.length} 次：{manifest.runs.map((run) => `${run.runId.slice(0, 8)}…/${run.status}`).join(' · ')}</div>}
           {latestRecoveryType === 'session/rewind' && <div className="recovery-summary-meta">最近恢复到事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.rewindTargetSeq}</div>}
           {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
         </div>

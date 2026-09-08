@@ -84,6 +84,13 @@ export interface RecoveryManifest {
     retryOfRunId?: string;
     retryOfRunIds?: string[];
   };
+  runs?: Array<{
+    runId: string;
+    status: SessionRunStatus;
+    attempt: number;
+    retryOfRunId?: string;
+    retryOfRunIds?: string[];
+  }>;
 }
 
 export interface WorkspaceManifest {
