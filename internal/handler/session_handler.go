@@ -147,6 +147,25 @@ func (h *SessionHandler) Get(c *gin.Context) {
 	writeSessionData(c, http.StatusOK, view)
 }
 
+// RunHistory returns the complete durable run lineage for a session. The
+// projection is derived from canonical ledger facts by Workbench.Get.
+func (h *SessionHandler) RunHistory(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	view, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "session not found")
+		return
+	}
+	if view.Runs == nil {
+		view.Runs = []session.RunView{}
+	}
+	writeSessionData(c, http.StatusOK, view.Runs)
+}
+
 // RecoveryManifest exposes a read-only, ledger-derived resume summary. It is
 // intentionally assembled from the same owner-scoped APIs as the UI rather
 // than introducing a second persistence model for recovery state.

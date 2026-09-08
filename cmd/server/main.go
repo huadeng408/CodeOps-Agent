@@ -384,6 +384,7 @@ func main() {
 			sessions.POST("", sessionHandler.Create)
 			sessions.GET("", sessionHandler.List)
 			sessions.GET("/:id", sessionHandler.Get)
+			sessions.GET("/:id/runs", sessionHandler.RunHistory)
 			sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 			sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)

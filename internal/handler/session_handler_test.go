@@ -51,6 +51,7 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*
 	sessions.POST("", sessionHandler.Create)
 	sessions.GET("", sessionHandler.List)
 	sessions.GET("/:id", sessionHandler.Get)
+	sessions.GET("/:id/runs", sessionHandler.RunHistory)
 	sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 	sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 	sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
@@ -238,6 +239,20 @@ func TestSessionRoutesReturnSame404ForForeignAndMissing(t *testing.T) {
 	}
 	if foreign.Body.String() != missing.Body.String() {
 		t.Fatalf("foreign response %q enumerates differently from missing %q", foreign.Body.String(), missing.Body.String())
+	}
+}
+
+func TestRunHistoryReturnsSame404ForForeignAndMissing(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "history", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(8, workbench)
+	foreign := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/runs", nil)
+	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/runs", nil)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d missing=%d; bodies must match", foreign.Code, missing.Code)
 	}
 }
 

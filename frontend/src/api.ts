@@ -86,6 +86,13 @@ class ApiClient {
     return result.data;
   }
 
+  async getRunHistory(sessionId: string): Promise<SessionRun[]> {
+    const result = await this.request<SessionRun[]>(
+      'GET', `/sessions/${encodeURIComponent(sessionId)}/runs`,
+    );
+    return result.data || [];
+  }
+
   async getRecoveryManifest(sessionId: string): Promise<RecoveryManifest> {
     const result = await this.request<RecoveryManifest>(
       'GET', `/sessions/${encodeURIComponent(sessionId)}/recovery-manifest`,
