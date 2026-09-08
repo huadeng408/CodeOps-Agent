@@ -379,6 +379,7 @@ func main() {
 			sessions.POST("", sessionHandler.Create)
 			sessions.GET("", sessionHandler.List)
 			sessions.GET("/:id", sessionHandler.Get)
+			sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 			sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 			sessions.DELETE("/:id", sessionHandler.Delete)
