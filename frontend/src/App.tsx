@@ -283,6 +283,9 @@ function SessionStatus({ session }: { session: Session }) {
     <div className="status-row"><span>事件</span><strong>{session.eventCount}</strong></div>
     <div className="status-row"><span>更新</span><strong>{new Date(session.updatedAt).toLocaleString()}</strong></div>
     {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
+    <div className="status-row"><span>执行 worker</span><strong>{session.run?.workerId || '待分配'}</strong></div>
+    <div className="status-row"><span>记忆事件</span><strong>{session.eventCount} 条（ledger）</strong></div>
+    {session.run?.checkpointHash && <div className="status-row"><span>恢复锚点</span><strong className="mono-value">{session.run.checkpointHash.slice(0, 12)}…</strong></div>}
     {session.run?.error && <div className="inline-error" role="status">{session.run.error}</div>}
     {session.goal && <div className="goal-block"><span>目标</span><p>{session.goal}</p></div>}
   </div>;

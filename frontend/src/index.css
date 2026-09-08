@@ -622,6 +622,7 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.mono-value { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
 
 .goal-block {
   display: grid;
