@@ -33,6 +33,10 @@ function persistedSessionCursor(sessionId: string, cursor: number): void {
   }
 }
 
+function sessionDraftKey(sessionId: string): string {
+  return `codeops:draft:${sessionId}`;
+}
+
 // The ledger remains the transport cursor and audit history. The active UI
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
@@ -87,6 +91,30 @@ function App() {
   useEffect(() => {
     if (selectedSession) setStatusDraft(selectedSession.status);
   }, [selectedSession?.id, selectedSession?.status]);
+
+  useEffect(() => {
+    if (!selectedSession) {
+      setMessage('');
+      return;
+    }
+    try {
+      setMessage(localStorage.getItem(sessionDraftKey(selectedSession.id)) || '');
+    } catch {
+      setMessage('');
+    }
+  }, [selectedSession?.id]);
+
+  useEffect(() => {
+    if (!selectedSession) return;
+    try {
+      const draft = message.trim();
+      if (draft) localStorage.setItem(sessionDraftKey(selectedSession.id), message);
+      else localStorage.removeItem(sessionDraftKey(selectedSession.id));
+    } catch {
+      // Draft persistence is a convenience; canonical ledger recovery does
+      // not depend on browser storage being available.
+    }
+  }, [message, selectedSession?.id]);
 
   const syncSessions = useCallback(async (preferredID?: string) => {
     const data = await api.listSessions();
@@ -190,6 +218,7 @@ function App() {
     try {
       await api.createEvent(selectedSession.id, content, selectedSession.eventCount);
       setMessage('');
+      try { localStorage.removeItem(sessionDraftKey(selectedSession.id)); } catch { /* best effort */ }
       await refreshSelected();
     } catch (cause) {
       setError(errorMessage(cause, '消息发送失败'));
