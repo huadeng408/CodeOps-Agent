@@ -25,6 +25,8 @@ export interface SessionRun {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  retryOfRunId?: string;
+  retryOfRunIds?: string[];
 }
 
 export interface SessionEvent {

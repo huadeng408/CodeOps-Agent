@@ -444,6 +444,9 @@ func TestSessionRunnerRetrySearchesAllFailedPredecessorsForToolReceipt(t *testin
 	if terminal.Status != RunCompleted {
 		t.Fatalf("latest retry status = %+v", terminal)
 	}
+	if terminal.RetryOfRunID != "run-root" || len(terminal.RetryOfRunIDs) != 2 || terminal.RetryOfRunIDs[0] != "run-root" || terminal.RetryOfRunIDs[1] != "run-middle" {
+		t.Fatalf("retry lineage = %+v, want root and middle predecessors", terminal)
+	}
 	conversation.mu.Lock()
 	if len(conversation.toolResults) != 1 || conversation.toolResults[0].Output != "committed by middle" {
 		t.Fatalf("latest retry did not reuse middle receipt: %#v", conversation.toolResults)

@@ -64,6 +64,8 @@ type RunView struct {
 	StartedAt      *time.Time `json:"startedAt,omitempty"`
 	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 	Error          string     `json:"error,omitempty"`
+	RetryOfRunID   string     `json:"retryOfRunId,omitempty"`
+	RetryOfRunIDs  []string   `json:"retryOfRunIds,omitempty"`
 }
 
 // ContinuationModule is the small transport-facing interface of the deep
@@ -1158,6 +1160,35 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			}
 			run.order = event.Seq
 			runs[payload.RunID] = run
+		}
+	}
+	// Derive retry lineage from the same immutable event stream. A retry only
+	// points backwards to terminal failures for the same checkpoint and actor;
+	// unrelated or future runs remain isolated.
+	for runID, current := range runs {
+		checkpointHash := strings.TrimSpace(current.view.CheckpointHash)
+		if checkpointHash == "" {
+			continue
+		}
+		candidates := make([]runProjection, 0)
+		for candidateID, candidate := range runs {
+			if candidateID == runID || !candidate.terminal || candidate.view.Status != RunFailed || candidate.view.CheckpointHash != checkpointHash || candidate.order >= current.order {
+				continue
+			}
+			if current.actor.ScopeKey() != "" && candidate.actor.ScopeKey() != current.actor.ScopeKey() {
+				continue
+			}
+			candidates = append(candidates, candidate)
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].order < candidates[j].order })
+		if len(candidates) > 0 {
+			ids := make([]string, 0, len(candidates))
+			for _, candidate := range candidates {
+				ids = append(ids, candidate.view.RunID)
+			}
+			current.view.RetryOfRunID = ids[0]
+			current.view.RetryOfRunIDs = ids
+			runs[runID] = current
 		}
 	}
 	return runs, nil
