@@ -256,6 +256,30 @@ func TestRunHistoryReturnsSame404ForForeignAndMissing(t *testing.T) {
 	}
 }
 
+func TestRunHistoryReturnsCanonicalEmptyArrayForSessionWithoutRuns(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "history-empty", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := performSessionRequest(sessionTestRouter(7, workbench), http.MethodGet, "/sessions/"+created.ID+"/runs", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("run history status = %d; body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data []session.RunView `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data == nil {
+		t.Fatalf("run history data must be an array, body=%s", response.Body.String())
+	}
+	if len(envelope.Data) != 0 {
+		t.Fatalf("run history = %+v, want empty array", envelope.Data)
+	}
+}
+
 func TestDeleteSessionAcceptsExpectedSequenceInQuery(t *testing.T) {
 	workbench, ledger := openHandlerTestWorkbench(t)
 	created, err := workbench.Create(context.Background(), 7, "repo", "delete-query", "goal")
