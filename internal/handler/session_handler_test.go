@@ -263,6 +263,10 @@ func TestContinueSessionRouteReturnsDurableResumeReceipt(t *testing.T) {
 	if len(events) != 5 || events[4].Type != "session/continued" {
 		t.Fatalf("continue changed canonical history unexpectedly: %+v", events)
 	}
+	manifest := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/recovery-manifest", nil)
+	if manifest.Code != http.StatusOK || !bytes.Contains(manifest.Body.Bytes(), []byte(`"continuationCount":1`)) || !bytes.Contains(manifest.Body.Bytes(), []byte(`"type":"session/continued"`)) || !bytes.Contains(manifest.Body.Bytes(), []byte(`"targetSeq":1`)) {
+		t.Fatalf("manifest does not reflect continuation: status=%d body=%s", manifest.Code, manifest.Body.String())
+	}
 }
 
 func TestContinueSessionRouteHidesForeignSessionLikeMissing(t *testing.T) {
