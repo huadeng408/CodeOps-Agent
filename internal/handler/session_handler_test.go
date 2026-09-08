@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -92,6 +93,29 @@ func TestSessionRoutesReturnSame404ForForeignAndMissing(t *testing.T) {
 	}
 	if foreign.Body.String() != missing.Body.String() {
 		t.Fatalf("foreign response %q enumerates differently from missing %q", foreign.Body.String(), missing.Body.String())
+	}
+}
+
+func TestDeleteSessionAcceptsExpectedSequenceInQuery(t *testing.T) {
+	workbench, ledger := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "delete-query", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(7, workbench)
+	response := performSessionRequest(router, http.MethodDelete, "/sessions/"+created.ID+"?expectedSeq=1", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("query delete status = %d; body=%s", response.Code, response.Body.String())
+	}
+	if _, err := workbench.Get(context.Background(), 7, created.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("deleted session lookup error = %v, want not found", err)
+	}
+	events, err := ledger.Events(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[1].Type != "session/deleted" {
+		t.Fatalf("delete did not append tombstone: %+v", events)
 	}
 }
 
