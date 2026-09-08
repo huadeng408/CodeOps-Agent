@@ -173,6 +173,25 @@ function App() {
     }
   };
 
+  const handleContinueSession = async () => {
+    if (!selectedSession || busy || selectedSession.status !== 'paused' || !selectedSession.run?.checkpointHash) return;
+    setBusy(true);
+    setError('');
+    const checkpointHash = selectedSession.run.checkpointHash;
+    const storageKey = `continuation-request:${selectedSession.id}:${checkpointHash}`;
+    const requestId = localStorage.getItem(storageKey) || `browser:${crypto.randomUUID()}`;
+    localStorage.setItem(storageKey, requestId);
+    try {
+      await api.continueSession(selectedSession.id, selectedSession.eventCount, checkpointHash, requestId);
+      await refreshSelected();
+    } catch (cause) {
+      setError(errorMessage(cause, '继续历史任务失败'));
+      await refreshSelected().catch(() => undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleLogout = async () => {
     setBusy(true);
     try {
@@ -263,7 +282,7 @@ function App() {
           <button className="icon-btn" type="button" title="关闭会话详情" aria-label="关闭会话详情" onClick={() => setShowDetails(false)}>×</button>
         </div>
         <div className="task-list">
-          {selectedSession ? <SessionStatus session={selectedSession} /> : <div className="empty-panel">未选择</div>}
+          {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} /> : <div className="empty-panel">未选择</div>}
         </div>
         {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} />}
       </aside>
@@ -286,7 +305,7 @@ function ProjectFolder({ projectName, sessions, selectedSessionId, onSelectSessi
   </div>;
 }
 
-function SessionStatus({ session }: { session: Session }) {
+function SessionStatus({ session, onContinue, busy }: { session: Session; onContinue: () => void; busy: boolean }) {
   const runLabel = session.run?.status === 'queued' ? '排队中'
     : session.run?.status === 'running' ? '运行中'
       : session.run?.status === 'completed' ? '已完成'
@@ -298,6 +317,7 @@ function SessionStatus({ session }: { session: Session }) {
     {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
     <div className="status-row"><span>执行 worker</span><strong>{session.run?.workerId || '待分配'}</strong></div>
     {session.run && <div className="lineage-block" aria-label="运行 lineage"><div className="status-row"><span>运行 lineage</span><strong className="mono-value">{session.run.runId.slice(0, 12)}…</strong></div><div className="status-row"><span>重试次数</span><strong>第 {session.run.attempt} 次</strong></div><div className="status-row"><span>请求标识</span><strong className="mono-value">{session.run.requestId.slice(0, 12)}…</strong></div></div>}
+    {session.status === 'paused' && session.run?.checkpointHash && <button className="primary-btn continue-session-btn" type="button" onClick={onContinue} disabled={busy}>{busy ? '继续中...' : '继续历史任务'}</button>}
     <div className="status-row"><span>记忆事件</span><strong>{session.eventCount} 条（ledger）</strong></div>
     {session.run?.checkpointHash && <div className="status-row"><span>恢复锚点</span><strong className="mono-value">{session.run.checkpointHash.slice(0, 12)}…</strong></div>}
     {session.run?.error && <div className="inline-error" role="status">{session.run.error}</div>}

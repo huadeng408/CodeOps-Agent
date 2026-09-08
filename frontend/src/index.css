@@ -631,6 +631,7 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.continue-session-btn { width: 100%; margin-top: 4px; }
 .mono-value { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
 
 .goal-block {
