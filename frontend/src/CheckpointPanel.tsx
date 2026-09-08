@@ -56,13 +56,15 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
     }
   };
 
-  useEffect(() => { void load(); }, [session.id, refreshKey]);
+  useEffect(() => {
+    loadVersionRef.current += 1;
+    void load();
+  }, [session.id, refreshKey]);
 
   // A checkpoint form belongs to one session. Reset its draft when the user
   // switches sessions so an event id from the previous ledger cannot be sent
   // to the newly selected session.
   useEffect(() => {
-    loadVersionRef.current += 1;
     setIsCreating(false);
     setNewLabel('');
     setSelectedEventId('');
