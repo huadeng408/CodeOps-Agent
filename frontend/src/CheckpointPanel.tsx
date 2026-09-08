@@ -50,8 +50,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     setIsCreating(false);
     setNewLabel('');
     setSelectedEventId('');
-      setError('');
-      setManifest(null);
+    setError('');
+    setManifest(null);
   }, [session.id]);
 
   useEffect(() => {
@@ -71,6 +71,17 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const continuationEvents = events.filter((event) => event.type === 'session/continued' && event.continuation);
   const latestRecovery = [...events].reverse().find((event) => event.type === 'session/rewind' || event.type === 'session/continued');
   const latestRecoveryType = manifest?.latestRecovery?.type ?? latestRecovery?.type;
+
+  const handleExportManifest = () => {
+    if (!manifest) return;
+    const payload = JSON.stringify(manifest, null, 2);
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `recovery-manifest-${session.id}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleCreateCheckpoint = async () => {
     if (!newLabel.trim() || !selectedEventId || busy) return;
@@ -146,6 +157,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         <h3>Checkpoints</h3>
         <div className="panel-actions">
           <button className="icon-btn" type="button" title="刷新恢复状态" aria-label="刷新恢复状态" onClick={() => void onChanged()} disabled={busy}>↻</button>
+          <button className="icon-btn" type="button" title="导出恢复清单" aria-label="导出恢复清单" onClick={handleExportManifest} disabled={busy || !manifest}>⇩</button>
           <button className="subtle-btn" type="button" onClick={() => setIsCreating((value) => !value)} disabled={busy}>
             {isCreating ? '取消' : '新建'}
           </button>
