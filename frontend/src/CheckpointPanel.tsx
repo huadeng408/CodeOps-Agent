@@ -63,10 +63,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   }, [session.id]);
 
   useEffect(() => {
-    if (!session.run || (session.run.status !== 'queued' && session.run.status !== 'running')) return undefined;
+    const historyHasActiveRun = runHistory.some((run) => run.status === 'queued' || run.status === 'running');
+    const sessionHasActiveRun = session.run?.status === 'queued' || session.run?.status === 'running';
+    if (!sessionHasActiveRun && !historyHasActiveRun) return undefined;
     const timer = window.setInterval(() => { void onChanged(); }, 1000);
     return () => window.clearInterval(timer);
-  }, [session.id, session.run?.runId, session.run?.status, onChanged]);
+  }, [session.id, session.run?.runId, session.run?.status, runHistory, onChanged]);
 
   useEffect(() => {
     if (session.run?.status !== 'failed') return;
