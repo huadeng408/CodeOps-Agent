@@ -516,7 +516,7 @@ class HarnessRun:
             # Give cooperative adapters a short cancellation window to return
             # their partial result. A non-cooperative call is still detached
             # from the harness after this bounded grace period.
-            if not done_event.wait(min(0.05, max(timeout_s * 0.25, 0.001))):
+            if not done_event.wait(min(0.01, max(timeout_s * 0.1, 0.001))):
                 raise TimeoutError(f"phase exceeded {timeout_s:.3f}s deadline")
         if error:
             raise error[0]
