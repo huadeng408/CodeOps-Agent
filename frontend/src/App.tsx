@@ -179,7 +179,7 @@ function App() {
   if (loading) return <div className="loading-screen">正在加载...</div>;
 
   return (
-    <div className="app-frame">
+    <div className={`app-frame ${showDetails ? 'details-open' : ''}`}>
       <aside className="sidebar">
         <div className="sidebar-header">
           <div className="sidebar-brand">CodeOps Agent</div>
@@ -245,7 +245,10 @@ function App() {
       </main>
 
       <aside className={`task-panel ${showDetails ? 'open' : ''}`}>
-        <div className="task-panel-header">会话状态</div>
+        <div className="task-panel-header">
+          <span>会话状态</span>
+          <button className="icon-btn" type="button" title="关闭会话详情" aria-label="关闭会话详情" onClick={() => setShowDetails(false)}>×</button>
+        </div>
         <div className="task-list">
           {selectedSession ? <SessionStatus session={selectedSession} /> : <div className="empty-panel">未选择</div>}
         </div>

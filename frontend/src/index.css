@@ -572,7 +572,7 @@ button:disabled {
 /* Codex-style workbench: details are an explicit drawer, leaving the
    conversation as the primary surface until the user asks for them. */
 .app-frame { grid-template-columns: 322px minmax(0, 1fr); }
-.task-panel { display: none; position: absolute; z-index: 4; top: 0; right: 0; bottom: 0; width: min(340px, 88vw); box-shadow: -12px 0 32px rgba(0,0,0,.24); }
+.task-panel { display: none; position: absolute; z-index: 4; top: 48px; right: 0; bottom: 112px; width: min(340px, 88vw); box-shadow: -12px 0 32px rgba(0,0,0,.24); }
 .task-panel.open { display: flex; }
 .conversation-header { min-height: 48px; padding: 8px 18px; }
 .message-list { padding: 24px max(24px, 7vw) 150px; }
@@ -586,6 +586,15 @@ button:disabled {
   border-bottom: 1px solid var(--dsw-alias-border-l1);
   font-size: 14px;
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-panel-header .icon-btn {
+  width: 28px;
+  height: 28px;
 }
 
 .session-status {
