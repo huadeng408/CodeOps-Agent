@@ -150,6 +150,31 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             context.abort(code, str(exc))
         raise AssertionError("context.abort must terminate the RPC")
 
+    @staticmethod
+    def _continuation_metadata(context) -> tuple[str, bool]:
+        """Read the per-RPC continuation identity from the Harness seam."""
+
+        values = {
+            str(key).lower(): value
+            for key, value in (context.invocation_metadata() or ())
+        }
+        raw_run_id = values.get("x-code-agent-run-id", "")
+        if isinstance(raw_run_id, bytes):
+            raw_run_id = raw_run_id.decode("utf-8", errors="replace")
+        run_id = str(raw_run_id).strip()
+        raw_resume = values.get("x-code-agent-resume", "")
+        if isinstance(raw_resume, bytes):
+            raw_resume = raw_resume.decode("utf-8", errors="replace")
+        resume = str(raw_resume).strip().lower() in {"1", "true", "yes", "on"}
+        if resume and not run_id:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "continuation run id is required when resume is true",
+            )
+        if len(run_id) > 256:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation run id is too long")
+        return run_id, resume
+
     def _new_runner(self) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
         # executable tools. This keeps compaction on the same model boundary
@@ -233,6 +258,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         return update or orchestrator_pb2.CompactionUpdate()
 
     def Converse(self, request_iterator, context):
+        run_id, resume = self._continuation_metadata(context)
         user_text = ""
         session_id = ""
         actor = None
@@ -316,6 +342,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 cancel_event=cancel_event,
                 plan_todo_snapshot=plan_todo_snapshot,
                 actor=runner_actor,
+                run_id=run_id,
+                resume=resume,
             )
         finally:
             lease.release()

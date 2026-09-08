@@ -282,6 +282,10 @@ class ConversationRunner:
     _state_machine: PlanTodoStateMachine | None = field(default=None, init=False, repr=False)
     _active_actor: ActorIdentity | None = field(default=None, init=False, repr=False)
     _active_history_digest: str = field(default="", init=False, repr=False)
+    _active_run_id: str = field(default="", init=False, repr=False)
+    _resume_requested: bool = field(default=False, init=False, repr=False)
+    _replay_response: ChatResponse | None = field(default=None, init=False, repr=False)
+    _replay_checkpoint_turn: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.token_budget is None:
@@ -342,6 +346,8 @@ class ConversationRunner:
         session_id: str,
         *,
         history_digest: str = "",
+        run_id: str = "",
+        resume: bool = False,
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
@@ -363,6 +369,14 @@ class ConversationRunner:
         if state is None:
             return None
         metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        requested_run_id = str(run_id).strip()
+        checkpoint_run_id = str(metadata.get("run_id", "")).strip()
+        if requested_run_id and checkpoint_run_id and checkpoint_run_id != requested_run_id:
+            if not state.done:
+                raise ValueError("checkpoint run id does not match request")
+            return None
+        if requested_run_id and resume and not checkpoint_run_id and not state.done:
+            raise ValueError("checkpoint run id is missing")
         checkpoint_session = str(metadata.get("session_id", "")).strip()
         if checkpoint_session and checkpoint_session != session_id:
             raise ValueError("checkpoint session id does not match request")
@@ -395,6 +409,8 @@ class ConversationRunner:
         cancel_event: threading.Event | None = None,
         plan_todo_snapshot: PlanTodoSnapshot | dict[str, Any] | None = None,
         actor: ActorIdentity | None = None,
+        run_id: str = "",
+        resume: bool = False,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -408,6 +424,10 @@ class ConversationRunner:
         self._context_persistence_error = ""
         self._checkpoint_persistence_error = ""
         self._active_actor = actor
+        self._active_run_id = str(run_id).strip()
+        self._resume_requested = bool(resume)
+        self._replay_response = None
+        self._replay_checkpoint_turn = False
         if actor is not None:
             try:
                 actor.validate_session(session_id)
@@ -508,6 +528,10 @@ class ConversationRunner:
                 },
             )
             self._active_actor = None
+            self._active_run_id = ""
+            self._resume_requested = False
+            self._replay_response = None
+            self._replay_checkpoint_turn = False
 
     def _run(
         self,
@@ -558,6 +582,8 @@ class ConversationRunner:
         checkpoint = self.load_checkpoint(
             session_id,
             history_digest=self._active_history_digest,
+            run_id=self._active_run_id,
+            resume=self._resume_requested,
         )
         start_turn = 1
         if checkpoint is not None and checkpoint.resumable:
@@ -573,6 +599,11 @@ class ConversationRunner:
                     "tool_rounds": checkpoint.state.tool_rounds,
                 },
             )
+            if self._resume_requested and checkpoint.phase == "model_after":
+                self._replay_response = self._checkpoint_response(checkpoint.state)
+                if self._replay_response is None:
+                    raise ValueError("model_after checkpoint is not replayable")
+                self._replay_checkpoint_turn = self._replay_response is not None
         total_tokens_in = 0
         total_tokens_out = 0
         total_cached_tokens = 0
@@ -744,10 +775,14 @@ class ConversationRunner:
                 tool_rounds=turn - 1,
                 tool_request_count=len(response.tool_calls),
                 response=response.text,
+                tool_requests=response.tool_calls,
             )
             if self._checkpoint_persistence_error:
                 yield self._finish(session_id, False, "checkpoint_persistence_unavailable", turn=turn)
                 return
+            if self._replay_checkpoint_turn:
+                self._replay_response = None
+                self._replay_checkpoint_turn = False
             post_model = self._dispatch_hook(
                 "post_model",
                 session_id=session_id,
@@ -1858,7 +1893,12 @@ class ConversationRunner:
                 ]
         messages = list(system_messages)
         messages.extend(self._history_messages(history))
-        messages.append(ChatMessage(role="user", content=user_text))
+        # A continuation request may intentionally carry no new user input:
+        # the durable Surface and checkpoint are the work to resume. Appending
+        # an empty user turn would change the provider transcript and make the
+        # same continuation non-idempotent.
+        if str(user_text).strip():
+            messages.append(ChatMessage(role="user", content=user_text))
         return messages
 
     def _detect_provider(self) -> str:
@@ -1975,6 +2015,14 @@ class ConversationRunner:
         inside ``stream`` on their own between-chunk check. Either way the
         exception propagates to :meth:`run`'s handler.
         """
+        replay = self._replay_response
+        if replay is not None:
+            # A model_after checkpoint is already an accepted provider result.
+            # Replaying it keeps recovery deterministic and avoids a second
+            # provider call that could produce different tool arguments.
+            if response_box is not None:
+                response_box.append(replay)
+            return
         route = (
             self._active_route
             if self._active_route is not None and self._active_route.client is self.llm
@@ -2097,6 +2145,9 @@ class ConversationRunner:
         if registry is None:
             return HookDispatchResult()
         try:
+            hook_metadata = dict(metadata or {})
+            if self._active_run_id:
+                hook_metadata.setdefault("run_id", self._active_run_id)
             result = registry.dispatch(
                 HookEvent(
                     phase=phase,
@@ -2104,7 +2155,7 @@ class ConversationRunner:
                     turn=max(0, int(turn)),
                     tool_name=tool_name,
                     payload=payload or {},
-                    metadata=metadata or {},
+                    metadata=hook_metadata,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - a hook must not crash the loop
@@ -2133,7 +2184,9 @@ class ConversationRunner:
         """Dispatch bounded lifecycle metadata without changing loop control."""
 
         self._loop_last_turn = max(self._loop_last_turn, int(turn))
-        event_metadata = metadata or {}
+        event_metadata = dict(metadata or {})
+        if self._active_run_id:
+            event_metadata.setdefault("run_id", self._active_run_id)
         registry = self.loop_plugins
         if registry is not None:
             result = registry.emit(
@@ -2901,14 +2954,38 @@ class ConversationRunner:
         response: str = "",
         tool_result_status: str = "",
         tool_call_id: str = "",
+        tool_requests: list[ToolCall] | list[dict[str, Any]] | None = None,
     ) -> None:
         """Persist the typed conversation lifecycle state for recovery."""
 
         if not session_id.strip():
             return
+        if self._replay_checkpoint_turn and phase in {"model_before", "model_after"}:
+            # Do not overwrite the durable model_after payload while replaying
+            # a provider result after a process restart.
+            return
+        serialized_tool_requests: list[dict[str, Any]] = []
+        for call in tool_requests or []:
+            if isinstance(call, ToolCall):
+                serialized_tool_requests.append(
+                    {
+                        "id": self._tool_call_id(call),
+                        "name": str(call.name),
+                        "arguments_json": self._call_arguments_json(call),
+                    }
+                )
+            elif isinstance(call, dict):
+                serialized_tool_requests.append(
+                    {
+                        "id": str(call.get("id", "")).strip(),
+                        "name": str(call.get("name", "")).strip(),
+                        "arguments_json": str(call.get("arguments_json", "") or "{}"),
+                    }
+                )
         state = GraphState(
             metadata={
                 "session_id": session_id,
+                "run_id": self._active_run_id,
                 "phase": phase,
                 "turn": int(turn),
                 "model": str(getattr(self.llm, "model", "")),
@@ -2919,6 +2996,7 @@ class ConversationRunner:
                 "history_sha256": self._active_history_digest,
             },
             tool_rounds=max(0, int(tool_rounds)),
+            tool_requests=serialized_tool_requests,
             done=bool(done),
             next_node="done" if done else "route",
         )
@@ -2931,6 +3009,37 @@ class ConversationRunner:
             ):
                 return
             self._checkpoint_persistence_error = "checkpoint_write_failed"
+
+    @staticmethod
+    def _checkpoint_response(state: GraphState) -> ChatResponse | None:
+        """Rebuild an accepted model response from a model_after checkpoint."""
+
+        calls: list[ToolCall] = []
+        for raw_call in state.tool_requests or []:
+            if not isinstance(raw_call, dict):
+                continue
+            call_id = str(raw_call.get("id", "")).strip()
+            name = str(raw_call.get("name", "")).strip()
+            if not call_id or not name:
+                continue
+            arguments_json = str(raw_call.get("arguments_json", "") or "{}")
+            try:
+                arguments = json.loads(arguments_json)
+            except json.JSONDecodeError:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            calls.append(
+                ToolCall(
+                    id=call_id,
+                    name=name,
+                    arguments=arguments,
+                    arguments_json=arguments_json,
+                )
+            )
+        if not calls and not str(state.response or ""):
+            return None
+        return ChatResponse(text=str(state.response or ""), tool_calls=calls)
 
     def _persist_tool_call(self, session_id: str, call: ToolCall) -> None:
         self._persist_event(

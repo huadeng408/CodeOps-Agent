@@ -99,6 +99,17 @@ class BlockingOperationRunner:
         )
 
 
+class CapturingConversationRunner:
+    def __init__(self) -> None:
+        self.kwargs = None
+
+    def run(self, *args, **kwargs):
+        self.kwargs = kwargs
+        yield orchestrator_pb2.OrchestratorMessage(
+            done=orchestrator_pb2.Done(success=True, message="done")
+        )
+
+
 class CapturingCompactionRunner:
     def __init__(self) -> None:
         self.history = None
@@ -117,6 +128,58 @@ def _session_actor(session_id: str) -> orchestrator_pb2.ActorContext:
         roles=["USER"],
         session_id=session_id,
     )
+
+
+def test_converse_propagates_and_validates_continuation_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(
+        ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory"))
+    )
+    service = OrchestratorService(app)
+    runner = CapturingConversationRunner()
+    service._new_runner = lambda: runner
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-continuation-metadata"
+    request = orchestrator_pb2.HarnessMessage(
+        user_input=orchestrator_pb2.UserInput(
+            text="",
+            session_id=session_id,
+            actor=_session_actor(session_id),
+        )
+    )
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter([request]),
+                    metadata=(
+                        ("x-code-agent-run-id", "run:durable-123"),
+                        ("x-code-agent-resume", "true"),
+                    ),
+                )
+            )
+            assert responses[-1].done.success is True
+            assert runner.kwargs["run_id"] == "run:durable-123"
+            assert runner.kwargs["resume"] is True
+
+            with pytest.raises(grpc.RpcError) as caught:
+                list(
+                    stub.Converse(
+                        iter([request]),
+                        metadata=(("x-code-agent-resume", "true"),),
+                    )
+                )
+            assert caught.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+            assert "run id is required" in caught.value.details()
+    finally:
+        server.stop(grace=0)
+        app.close()
 
 
 class HistoryFakeLLM:

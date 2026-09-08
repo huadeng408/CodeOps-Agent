@@ -72,6 +72,15 @@ class CountingNoToolLLM(NoToolLLM):
         return await super().chat(request)
 
 
+class ResumeRecordingLLM(NoToolLLM):
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        return ChatResponse(text="resumed after tool")
+
+
 class FailingCheckpointGraph:
     name = "failing-checkpoint"
 
@@ -286,6 +295,251 @@ def test_normal_conversation_resumes_pending_checkpoint_turn(tmp_path: Path) -> 
     assert len(resumed) == 1
     assert resumed[0].payload["resume_turn"] == 3
     assert "continue" not in repr(resumed[0].payload)
+    app.close()
+
+
+def test_model_after_checkpoint_replays_tool_request_without_calling_model(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    llm = ResumeRecordingLLM()
+    run_id = "run:model-after-replay"
+    session_id = "model-after-replay"
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": session_id,
+                "run_id": run_id,
+                "phase": "model_after",
+                "turn": 1,
+                "history_sha256": ConversationRunner._digest_value([]),
+            },
+            tool_requests=[
+                {
+                    "id": "read-1",
+                    "name": "Read",
+                    "arguments_json": '{"path":"README.md"}',
+                }
+            ],
+            done=False,
+            next_node="route",
+        ),
+        thread_id=session_id,
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+    responses = list(
+        runner.run(
+            "",
+            iter(
+                [
+                    orchestrator_pb2.HarnessMessage(
+                        tool_result=orchestrator_pb2.ToolResult(
+                            tool_name="Read",
+                            tool_call_id="read-1",
+                            output="README contents",
+                        )
+                    )
+                ]
+            ),
+            session_id=session_id,
+            run_id=run_id,
+            resume=True,
+        )
+    )
+
+    assert responses[-1].done.success is True
+    assert [item.tool_request.tool_call_id for item in responses if item.HasField("tool_request")] == [
+        "read-1"
+    ]
+    assert len(llm.requests) == 1
+    assert all(
+        not (message.role == "user" and not str(message.content).strip())
+        for message in llm.requests[0].messages
+    )
+    app.close()
+
+
+def test_tool_after_resume_uses_harness_history_without_empty_user_turn(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    llm = ResumeRecordingLLM()
+    session_id = "tool-after-history"
+    run_id = "run:tool-after-history"
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": session_id,
+                "run_id": run_id,
+                "phase": "tool_after",
+                "turn": 1,
+                "history_sha256": ConversationRunner._digest_value(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "read-2",
+                                    "name": "Read",
+                                    "arguments_json": '{"path":"README.md"}',
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "name": "Read",
+                            "tool_call_id": "read-2",
+                            "content": "README contents",
+                        },
+                    ]
+                ),
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id=session_id,
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    responses = list(
+        runner.run(
+            "",
+            iter(()),
+            session_id=session_id,
+            run_id=run_id,
+            resume=True,
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "read-2",
+                            "name": "Read",
+                            "arguments_json": '{"path":"README.md"}',
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "Read",
+                    "tool_call_id": "read-2",
+                    "content": "README contents",
+                },
+            ],
+        )
+    )
+
+    assert responses[-1].done.success is True
+    messages = llm.requests[0].messages
+    assert any(message.role == "assistant" and message.tool_calls for message in messages)
+    assert any(message.role == "tool" and message.tool_call_id == "read-2" for message in messages)
+    assert all(
+        not (message.role == "user" and not str(message.content).strip())
+        for message in messages
+    )
+    app.close()
+
+
+def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "run-isolation",
+                "run_id": "run:old",
+                "phase": "tool_after",
+                "turn": 1,
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="run-isolation",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint run id does not match request"):
+        runner.load_checkpoint("run-isolation", run_id="run:new", resume=True)
+    app.close()
+
+
+def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "unreplayable-model-after",
+                "run_id": "run:unreplayable",
+                "phase": "model_after",
+                "turn": 1,
+                "history_sha256": ConversationRunner._digest_value([]),
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="unreplayable-model-after",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match="model_after checkpoint is not replayable"):
+        list(
+            runner.run(
+                "",
+                iter(()),
+                session_id="unreplayable-model-after",
+                run_id="run:unreplayable",
+                resume=True,
+            )
+        )
     app.close()
 
 
