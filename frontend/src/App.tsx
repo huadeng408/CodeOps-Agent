@@ -316,7 +316,7 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
       setError(errorMessage(cause, '事件加载失败'));
     } finally { setLoading(false); }
   }, [sessionId]);
-  useEffect(() => { setEvents([]); setLoading(true); void loadEvents(); }, [loadEvents, refreshKey]);
+  useEffect(() => { setEventFilter('all'); setEvents([]); setLoading(true); void loadEvents(); }, [loadEvents, refreshKey]);
   const cursor = events.reduce((max, event) => Math.max(max, event.seq), -1);
   const activeEvents = deriveActiveEvents(events);
   const executionSummary = activeEvents.reduce((summary, event) => {
