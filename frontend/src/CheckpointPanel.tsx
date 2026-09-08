@@ -6,9 +6,10 @@ interface CheckpointPanelProps {
   session: Session;
   refreshKey: number;
   onChanged: () => Promise<void>;
+  onRunChanged?: (run: SessionRun) => void;
 }
 
-export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPanelProps) {
+export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }: CheckpointPanelProps) {
   const [checkpoints, setCheckpoints] = useState<SessionCheckpoint[]>([]);
   const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
@@ -197,6 +198,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     try {
       const fresh = await api.getRun(session.id, run.runId);
       setRunHistory((items) => items.map((item) => item.runId === fresh.runId ? fresh : item));
+      onRunChanged?.(fresh);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '运行状态刷新失败');
     } finally {

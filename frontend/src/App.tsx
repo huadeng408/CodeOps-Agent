@@ -312,7 +312,10 @@ function App() {
         <div className="task-list">
           {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} /> : <div className="empty-panel">未选择</div>}
         </div>
-        {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} />}
+        {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} onRunChanged={(run) => {
+          setSelectedSession((current) => current && current.id === run.sessionId ? { ...current, run } : current);
+          setSessions((items) => items.map((item) => item.id === run.sessionId ? { ...item, run } : item));
+        }} />}
       </aside>
     </div>
   );
