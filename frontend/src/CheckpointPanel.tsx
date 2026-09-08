@@ -190,6 +190,21 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     await handleContinue(checkpoint, true);
   };
 
+  const handleRefreshRun = async (run: SessionRun) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const fresh = await api.getRun(session.id, run.runId);
+      setRunHistory((items) => items.map((item) => item.runId === fresh.runId ? fresh : item));
+      await onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '运行状态刷新失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="checkpoint-panel" aria-label="Checkpoints">
       <div className="panel-heading">
@@ -248,6 +263,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
               </div>
               {run.retryOfRunId && <div className="recovery-summary-meta">承接 {run.retryOfRunId.slice(0, 12)}…</div>}
               {run.error && <div className="recovery-summary-meta">{run.error}</div>}
+              <button className="subtle-btn" type="button" onClick={() => void handleRefreshRun(run)} disabled={busy}>刷新状态</button>
               {run.status === 'failed' && <button className="subtle-btn" type="button" onClick={() => void handleRetryRun(run)} disabled={busy || session.status !== 'paused'}>再次运行</button>}
             </div>
           ))}
