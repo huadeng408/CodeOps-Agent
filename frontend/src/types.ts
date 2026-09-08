@@ -9,6 +9,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   run?: SessionRun;
+  lastUserInput?: string;
 }
 
 export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed';

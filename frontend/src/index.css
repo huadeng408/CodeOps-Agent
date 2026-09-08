@@ -699,6 +699,7 @@ button:disabled {
 .run-history-heading select { min-width: 72px; padding: 3px 5px; border: 1px solid var(--dsw-alias-border-subtle); border-radius: 4px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-text-secondary); font-size: 10px; }
 .run-history-main { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--dsw-alias-text-secondary); }
 .header-continue-btn { white-space: nowrap; }
+.restore-input-btn { align-self: flex-start; padding: 4px 8px; border: 1px solid var(--dsw-alias-border-subtle); border-radius: 4px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-text-secondary); font-size: 10px; }
 
 .checkpoint-item {
   padding: 9px;

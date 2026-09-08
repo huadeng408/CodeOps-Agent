@@ -66,17 +66,18 @@ type Workbench struct {
 
 // SessionView is the current owner-scoped projection of Session facts.
 type SessionView struct {
-	ID          string    `json:"id"`
-	UserID      uint      `json:"userId"`
-	ProjectName string    `json:"projectName"`
-	Title       string    `json:"title"`
-	Goal        string    `json:"goal"`
-	Status      string    `json:"status"`
-	EventCount  int       `json:"eventCount"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	Run         *RunView  `json:"run,omitempty"`
-	Runs        []RunView `json:"runs,omitempty"`
+	ID            string    `json:"id"`
+	UserID        uint      `json:"userId"`
+	ProjectName   string    `json:"projectName"`
+	Title         string    `json:"title"`
+	Goal          string    `json:"goal"`
+	Status        string    `json:"status"`
+	EventCount    int       `json:"eventCount"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	Run           *RunView  `json:"run,omitempty"`
+	Runs          []RunView `json:"runs,omitempty"`
+	LastUserInput string    `json:"lastUserInput,omitempty"`
 }
 
 // EventView is the browser-safe representation of one canonical ledger fact.
@@ -526,6 +527,18 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	runs, runsErr := projectRuns(events)
 	if runsErr != nil {
 		return SessionView{}, runsErr
+	}
+	if surface, surfaceErr := projectSurface(events); surfaceErr == nil {
+		for index := len(surface) - 1; index >= 0; index-- {
+			if surface[index].Type != userMessageEventType {
+				continue
+			}
+			var payload messagePayload
+			if json.Unmarshal(surface[index].Payload, &payload) == nil && strings.TrimSpace(payload.Content) != "" {
+				view.LastUserInput = payload.Content
+			}
+			break
+		}
 	}
 	for _, event := range events[1:] {
 		switch event.Type {

@@ -299,6 +299,7 @@ function App() {
           {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
+          {selectedSession?.lastUserInput && !message && <button className="restore-input-btn" type="button" onClick={() => setMessage(selectedSession.lastUserInput || '')} disabled={busy}>恢复上次输入</button>}
           <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
           <button className="send-btn" type="submit" disabled={!selectedSession || busy || !message.trim()}>{busy ? '处理中...' : '发送'}</button>
         </form>
