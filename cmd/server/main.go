@@ -84,6 +84,20 @@ func (m *managedContinuation) Close() error {
 	return firstErr
 }
 
+func (m *managedContinuation) Health(ctx context.Context) error {
+	if m == nil || m.client == nil {
+		return session.ErrContinuationUnavailable
+	}
+	response, err := m.client.Health(ctx)
+	if err != nil {
+		return err
+	}
+	if response == nil || !strings.EqualFold(strings.TrimSpace(response.Status), "ok") {
+		return fmt.Errorf("orchestrator health is not ok")
+	}
+	return nil
+}
+
 // main bootstraps infrastructure dependencies and starts the HTTP server.
 func main() {
 	configPath := strings.TrimSpace(os.Getenv("CODEAGENT_CONFIG"))
@@ -259,10 +273,6 @@ func main() {
 	if continuationTarget == "" {
 		continuationTarget = "127.0.0.1:50051"
 	}
-	continuationClient, continuationErr := harnessorch.NewClient(continuationTarget)
-	if continuationErr != nil {
-		log.Warnf("session continuation orchestrator unavailable: %v", continuationErr)
-	}
 	continuationRoot, rootErr := os.Getwd()
 	if rootErr != nil || strings.TrimSpace(continuationRoot) == "" {
 		continuationRoot = "."
@@ -298,49 +308,18 @@ func main() {
 		return out
 	})
 	continuationSlot := session.NewContinuationSlot()
-	continuationCtx, cancelContinuation := context.WithCancel(context.Background())
-	defer cancelContinuation()
 	workerID := "server:" + strings.TrimSpace(cfg.Server.Port)
-	attachContinuation := func(client *harnessorch.Client) bool {
-		if client == nil {
-			return false
-		}
-		healthCtx, cancelHealth := context.WithTimeout(context.Background(), 2*time.Second)
-		health, healthErr := client.Health(healthCtx)
-		cancelHealth()
-		if healthErr != nil || health == nil || !strings.EqualFold(strings.TrimSpace(health.Status), "ok") {
-			_ = client.Close()
-			return false
+	connectContinuation := func(ctx context.Context) (session.ContinuationModule, error) {
+		client, err := harnessorch.NewClient(continuationTarget)
+		if err != nil {
+			return nil, err
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{WorkerID: workerID})
-		if err := runner.Recover(context.Background()); err != nil {
-			log.Warnf("session continuation recovery scan failed: %v", err)
-		}
-		continuationSlot.Attach(&managedContinuation{runner: runner, client: client})
-		return true
+		return &managedContinuation{runner: runner, client: client}, nil
 	}
-	attached := continuationErr == nil && attachContinuation(continuationClient)
-	if !attached {
-		if continuationClient != nil && !continuationSlot.Available() {
-			_ = continuationClient.Close()
-		}
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-continuationCtx.Done():
-					return
-				case <-ticker.C:
-					client, err := harnessorch.NewClient(continuationTarget)
-					if err != nil || !attachContinuation(client) {
-						continue
-					}
-					return
-				}
-			}
-		}()
-	}
+	continuationSupervisor := session.NewContinuationSupervisor(continuationSlot, 5*time.Second, connectContinuation)
+	continuationSupervisor.Start(context.Background())
+	defer continuationSupervisor.Close()
 	defer continuationSlot.Close()
 	defer continuationExecutor.Close()
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
