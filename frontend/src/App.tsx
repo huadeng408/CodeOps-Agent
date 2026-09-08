@@ -17,6 +17,15 @@ function hasSequenceGap(after: number, incoming: SessionEvent[]): boolean {
   return first.seq > after + 1;
 }
 
+function persistedSessionCursor(sessionId: string, cursor: number): void {
+  try {
+    localStorage.setItem(`codeops:ledger-cursor:${sessionId}`, String(cursor));
+  } catch {
+    // Storage can be disabled in private browsing; ledger recovery remains
+    // authoritative and does not depend on this diagnostic hint.
+  }
+}
+
 // The ledger remains the transport cursor and audit history. The active UI
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
@@ -353,6 +362,7 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
       setEvents((previous) => {
         const merged = mergeEvents(previous, data);
         cursorRef.current = merged.reduce((max, event) => Math.max(max, event.seq), -1);
+        persistedSessionCursor(sessionId, cursorRef.current);
         return merged;
       });
       setError('');
@@ -391,9 +401,10 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
       void loadEvents(-1);
       return;
     }
-    setEvents((previous) => {
+      setEvents((previous) => {
       const merged = mergeEvents(previous, [event]);
       cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
+      persistedSessionCursor(sessionId, cursorRef.current);
       return merged;
     });
   }, [loadEvents]);
