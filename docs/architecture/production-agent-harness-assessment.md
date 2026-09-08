@@ -26,7 +26,7 @@
 | 领域 | CodeOps-Agent 当前证据 | Codex/Claude Code 第一方行为 | DeepSeek Harness 源码参考 | OpenViking 源码参考 | 差距判断 |
 | --- | --- | --- | --- | --- | --- |
 | 项目规则 | `internal/config/agentmd.go` 已解析规则 | `AGENTS.md`/`CLAUDE.md` 分层、路径规则按需加载 | `packages/CLAUDE.md` 和 workspace loader | 不承担项目规则 | 已有基础，缺来源/优先级 receipt |
-| Session | `internal/session/eventlog.go` 有 hash chain、surface、fork、rewind | `thread/resume/fork/compact` 可观察 | `storage-*`、session snapshot/invariant | session commit/archive/queue | 新 HTTP/UI 尚写 GORM projection，必须修复 |
+| Session | `internal/session/eventlog.go` 有 hash chain、surface、fork、rewind；HTTP/UI 通过 owner-scoped ledger API 读写 | `thread/resume/fork/compact` 可观察 | `storage-*`、session snapshot/invariant | session commit/archive/queue | Context Ledger 与跨模块恢复仍需补强 |
 | Context | `orchestrator/context/*` 有预算、compaction、git diff、memory | `/context`、自动/手动 compact、独立 subagent context | snapshot compaction fixture | `ContextType` + L0/L1/L2 | 缺统一 Context Ledger 和恢复断言 |
 | Memory | SQLite/Redis/MySQL long-term memory、checksum、TTL | local memory 与强制规则分离 | durable storage、snapshot | registry、policy、isolation、derived vector | 缺 namespace/ACL/冲突与召回轨迹统一模型 |
 | Subagent | Python subagent/workflow/process executor | 独立 context、权限继承/降权、worktree | workflow worker thread、独立 package | peer/user memory isolation | 缺 durable DAG lease/join/idempotency |
@@ -152,6 +152,7 @@ DAG join 必须在依赖满足后以 `worker_id + attempt` 幂等；超时、取
 - `configs/server.yaml` 仍包含开发默认凭据表达式，生产启动必须要求外部 secret。
 - WebSocket ticket、一次性消费、session/owner 绑定和过期拒绝已有实现与定向测试；仍需补齐真实生产部署下的 header-only 传输与代理日志审计。
 - `frontend/node_modules` 属于本地依赖并保持未跟踪；当前 task panel 已展示会话状态、运行 lineage、worker 标识、ledger 记忆事件数与 checkpoint；独立的 worker/memory 时间线与筛选面板仍是后续项。
+- `GET /api/v1/sessions/:id/recovery-manifest` 是只读 ledger 派生接口，返回最新 seq/hash、事件与 checkpoint 数、rewind/continuation 计数及最近恢复 marker；前端可导出该清单，但不得把它当第二可写事实源。
 - 全局 CORS 为 `*`，不符合生产租户策略。
 - Docker daemon/WSL2、Phoenix live trace、真实外部 provider 发布证据和官方 SWE-bench/Terminal-Bench scorer 尚未齐全。
 - 用户给定的 `D:\vscode\OpenViking` 不是官方仓库，包含扫描 `.env` 并向 `httpbin.org/post` 外传的 `backdoor.sh`；在用户确认前不删除。
