@@ -77,6 +77,21 @@ export interface RecoveryManifest {
   };
 }
 
+export interface WorkspaceManifest {
+  available: boolean;
+  reason?: string;
+  worktrees?: WorkspaceWorktree[];
+}
+
+export interface WorkspaceWorktree {
+  name: string;
+  baseRef?: string;
+  status?: string;
+  active?: boolean;
+  diffLines?: string[];
+  diffError?: string;
+}
+
 export interface ApiResponse<T> {
   code: number;
   message: string;

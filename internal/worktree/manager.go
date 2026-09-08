@@ -569,7 +569,26 @@ func (m *Manager) deleteGitBranch(ctx context.Context, name string, discard bool
 }
 
 func (m *Manager) DiffLines(ctx context.Context) ([]string, error) {
-	root := m.root
+	if m == nil {
+		return nil, errors.New("worktree manager is nil")
+	}
+	return diffLinesAt(ctx, m.root)
+}
+
+// DiffLinesAt returns a bounded, read-only git status summary for a managed
+// worktree checkout. Callers should only pass paths returned by List; the
+// manager still verifies containment before invoking git.
+func (m *Manager) DiffLinesAt(ctx context.Context, path string) ([]string, error) {
+	if m == nil {
+		return nil, errors.New("worktree manager is nil")
+	}
+	if err := ensureContainedPath(m.root, path); err != nil {
+		return nil, err
+	}
+	return diffLinesAt(ctx, path)
+}
+
+func diffLinesAt(ctx context.Context, root string) ([]string, error) {
 	if strings.TrimSpace(root) == "" {
 		root = "."
 	}

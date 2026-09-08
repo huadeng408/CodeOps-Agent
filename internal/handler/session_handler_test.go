@@ -7,10 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"code-agent/internal/session"
+	"code-agent/internal/worktree"
 	"code-agent/pkg/token"
 
 	"github.com/gin-gonic/gin"
@@ -30,7 +33,7 @@ func openHandlerTestWorkbench(t *testing.T) (*session.Workbench, *session.SQLite
 	return session.NewWorkbench(ledger, nil), ledger
 }
 
-func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
+func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*worktree.Manager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -38,12 +41,17 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
 		c.Next()
 	})
 	sessions := router.Group("/sessions")
-	sessionHandler := NewSessionHandler(workbench)
+	var manager *worktree.Manager
+	if len(managers) > 0 {
+		manager = managers[0]
+	}
+	sessionHandler := NewSessionHandlerWithWorktree(workbench, nil, manager)
 	eventHandler := NewEventHandler(workbench)
 	sessions.POST("", sessionHandler.Create)
 	sessions.GET("", sessionHandler.List)
 	sessions.GET("/:id", sessionHandler.Get)
 	sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
+	sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 	sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 	sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 	sessions.DELETE("/:id", sessionHandler.Delete)
@@ -54,6 +62,54 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
 	sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
 	sessions.POST("/:id/continue", eventHandler.ContinueSession)
 	return router
+}
+
+func TestWorkspaceManifestIsSessionScopedAndReportsUnavailableCleanly(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "workspace", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(t.TempDir(), "HEAD")
+	router := sessionTestRouter(7, workbench, manager)
+	response := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/workspace-manifest", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"available":false`)) {
+		t.Fatalf("workspace manifest status=%d body=%s", response.Code, response.Body.String())
+	}
+	foreign := performSessionRequest(sessionTestRouter(8, workbench, manager), http.MethodGet, "/sessions/"+created.ID+"/workspace-manifest", nil)
+	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/workspace-manifest", nil)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d missing=%d; bodies must match", foreign.Code, missing.Code)
+	}
+}
+
+func TestWorkspaceManifestIncludesBoundWorktreeDiff(t *testing.T) {
+	root := t.TempDir()
+	if _, err := exec.Command("git", "-C", root, "init").CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	path := filepath.Join(root, ".agent", "worktrees", "resume")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command("git", "-C", path, "init").CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "changed.txt"), []byte("pending\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(root, "HEAD")
+	manager.Restore([]worktree.Worktree{{Name: "resume", Path: path, ParentSessionID: "placeholder"}})
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "workspace", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Restore([]worktree.Worktree{{Name: "resume", Path: path, ParentSessionID: created.ID}})
+	response := performSessionRequest(sessionTestRouter(7, workbench, manager), http.MethodGet, "/sessions/"+created.ID+"/workspace-manifest", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"available":true`)) || !bytes.Contains(response.Body.Bytes(), []byte("changed.txt")) {
+		t.Fatalf("workspace diff missing: status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {

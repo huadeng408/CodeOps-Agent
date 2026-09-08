@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent } from './types';
+import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
 
 interface CheckpointPanelProps {
@@ -11,6 +11,7 @@ interface CheckpointPanelProps {
 export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPanelProps) {
   const [checkpoints, setCheckpoints] = useState<SessionCheckpoint[]>([]);
   const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [newLabel, setNewLabel] = useState('');
@@ -22,13 +23,15 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const load = async () => {
     setError('');
     try {
-      const [checkpointData, eventData, recoveryManifest] = await Promise.all([
+      const [checkpointData, eventData, recoveryManifest, workspaceManifest] = await Promise.all([
         api.listCheckpoints(session.id),
         api.listEvents(session.id),
         api.getRecoveryManifest(session.id),
+        api.getWorkspaceManifest(session.id),
       ]);
       setCheckpoints(checkpointData);
       setManifest(recoveryManifest);
+      setWorkspace(workspaceManifest);
       const marker = [...eventData].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
       const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
       setEvents(eventData.filter((event) => {
@@ -52,6 +55,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     setSelectedEventId('');
     setError('');
     setManifest(null);
+    setWorkspace(null);
   }, [session.id]);
 
   useEffect(() => {
@@ -193,6 +197,19 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
           <div className="recovery-summary-meta">恢复 {manifest?.rewindCount ?? rewindEvents.length} 次 · 继续 {manifest?.continuationCount ?? continuationEvents.length} 次</div>
           {latestRecoveryType === 'session/rewind' && <div className="recovery-summary-meta">最近恢复到事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.rewindTargetSeq}</div>}
           {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
+        </div>
+      )}
+      {workspace && (
+        <div className="workspace-summary" aria-label="工作区恢复摘要">
+          <div className="recovery-summary-title">工作区恢复</div>
+          {!workspace.available ? (
+            <div className="recovery-summary-meta">{workspace.reason || '暂无绑定工作区'}</div>
+          ) : workspace.worktrees?.map((tree) => (
+            <div className="workspace-item" key={tree.name}>
+              <div className="recovery-summary-meta"><strong>{tree.name}</strong> · {tree.status || 'active'}{tree.active ? ' · 当前' : ''}</div>
+              {tree.diffError ? <div className="recovery-summary-meta">{tree.diffError}</div> : <div className="recovery-summary-meta">{tree.diffLines?.join(' · ') || 'working tree clean'}</div>}
+            </div>
+          ))}
         </div>
       )}
       {checkpoints.length === 0 ? (

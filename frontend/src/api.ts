@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -89,6 +89,13 @@ class ApiClient {
   async getRecoveryManifest(sessionId: string): Promise<RecoveryManifest> {
     const result = await this.request<RecoveryManifest>(
       'GET', `/sessions/${encodeURIComponent(sessionId)}/recovery-manifest`,
+    );
+    return result.data;
+  }
+
+  async getWorkspaceManifest(sessionId: string): Promise<WorkspaceManifest> {
+    const result = await this.request<WorkspaceManifest>(
+      'GET', `/sessions/${encodeURIComponent(sessionId)}/workspace-manifest`,
     );
     return result.data;
   }

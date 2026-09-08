@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"code-agent/internal/session"
+	"code-agent/internal/worktree"
 
 	"github.com/gin-gonic/gin"
 )
@@ -16,6 +17,7 @@ import (
 type SessionHandler struct {
 	workbench session.WorkbenchModule
 	tickets   *session.WebSocketTickets
+	worktree  *worktree.Manager
 }
 
 func NewSessionHandler(workbench session.WorkbenchModule) *SessionHandler {
@@ -26,6 +28,13 @@ func NewSessionHandler(workbench session.WorkbenchModule) *SessionHandler {
 // issuer. Keeping this separate preserves the small HTTP session seam.
 func NewSessionHandlerWithTickets(workbench session.WorkbenchModule, tickets *session.WebSocketTickets) *SessionHandler {
 	return &SessionHandler{workbench: workbench, tickets: tickets}
+}
+
+// NewSessionHandlerWithWorktree adds the optional read-only workspace recovery
+// seam while preserving the small constructor used by unit tests and legacy
+// transports.
+func NewSessionHandlerWithWorktree(workbench session.WorkbenchModule, tickets *session.WebSocketTickets, manager *worktree.Manager) *SessionHandler {
+	return &SessionHandler{workbench: workbench, tickets: tickets, worktree: manager}
 }
 
 type createSessionRequest struct {
@@ -64,6 +73,21 @@ type recoveryManifestEvent struct {
 	Seq         int64  `json:"seq"`
 	TargetSeq   *int64 `json:"targetSeq,omitempty"`
 	ResumeCount int    `json:"resumeCount,omitempty"`
+}
+
+type workspaceManifest struct {
+	Available bool                `json:"available"`
+	Reason    string              `json:"reason,omitempty"`
+	Worktrees []workspaceWorktree `json:"worktrees,omitempty"`
+}
+
+type workspaceWorktree struct {
+	Name      string   `json:"name"`
+	BaseRef   string   `json:"baseRef,omitempty"`
+	Status    string   `json:"status,omitempty"`
+	Active    bool     `json:"active,omitempty"`
+	DiffLines []string `json:"diffLines,omitempty"`
+	DiffError string   `json:"diffError,omitempty"`
 }
 
 func (h *SessionHandler) Create(c *gin.Context) {
@@ -153,6 +177,44 @@ func (h *SessionHandler) RecoveryManifest(c *gin.Context) {
 				manifest.LatestRecovery = &recoveryManifestEvent{Type: event.Type, Seq: event.Seq, TargetSeq: &event.Continuation.TargetSeq, ResumeCount: event.Continuation.ResumeCount}
 			}
 		}
+	}
+	writeSessionData(c, http.StatusOK, manifest)
+}
+
+// WorkspaceManifest is a read-only summary of managed agent checkouts bound to
+// this session. It never falls back to the server's global working directory.
+func (h *SessionHandler) WorkspaceManifest(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	if _, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id")); err != nil {
+		writeSessionError(c, err, "session not found")
+		return
+	}
+	manifest := workspaceManifest{Available: false, Reason: "no session worktree is currently bound"}
+	if h.worktree == nil {
+		manifest.Reason = "workspace recovery is unavailable"
+		writeSessionData(c, http.StatusOK, manifest)
+		return
+	}
+	for _, tree := range h.worktree.List() {
+		if tree.ParentSessionID != c.Param("id") && tree.ChildSessionID != c.Param("id") {
+			continue
+		}
+		item := workspaceWorktree{Name: tree.Name, BaseRef: tree.BaseRef, Status: tree.Status, Active: tree.Active}
+		lines, diffErr := h.worktree.DiffLinesAt(c.Request.Context(), tree.Path)
+		if diffErr != nil {
+			item.DiffError = "workspace diff unavailable"
+		} else {
+			item.DiffLines = lines
+		}
+		manifest.Worktrees = append(manifest.Worktrees, item)
+	}
+	if len(manifest.Worktrees) > 0 {
+		manifest.Available = true
+		manifest.Reason = ""
 	}
 	writeSessionData(c, http.StatusOK, manifest)
 }

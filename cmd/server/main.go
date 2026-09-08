@@ -30,6 +30,7 @@ import (
 	"code-agent/internal/session"
 	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
+	"code-agent/internal/worktree"
 	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
@@ -210,6 +211,10 @@ func main() {
 	}
 	defer ledger.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
+	// Workspace recovery is read-only and scoped to active agent worktrees.
+	// The manager is intentionally separate from the session ledger; it only
+	// supplies git status for leases already bound to a session.
+	workspaceManager := worktree.NewManager(".", "HEAD")
 	// Browser continuations use the Go-owned SessionRunner. The gRPC client is
 	// connection-only; actor, run identity, history, and callbacks are supplied
 	// per request so concurrent Sessions cannot cross-write one another.
@@ -375,11 +380,12 @@ func main() {
 		sessions := apiV1.Group("/sessions")
 		sessions.Use(middleware.AuthMiddleware(jwtManager, userService))
 		{
-			sessionHandler := handler.NewSessionHandlerWithTickets(workbench, wsTickets)
+			sessionHandler := handler.NewSessionHandlerWithWorktree(workbench, wsTickets, workspaceManager)
 			sessions.POST("", sessionHandler.Create)
 			sessions.GET("", sessionHandler.List)
 			sessions.GET("/:id", sessionHandler.Get)
 			sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
+			sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 			sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 			sessions.DELETE("/:id", sessionHandler.Delete)
