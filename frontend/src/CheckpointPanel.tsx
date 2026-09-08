@@ -13,6 +13,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
   const [runHistory, setRunHistory] = useState<SessionRun[]>([]);
+  const [runFilter, setRunFilter] = useState<'all' | 'active' | 'failed' | 'completed'>('all');
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [newLabel, setNewLabel] = useState('');
@@ -60,6 +61,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     setManifest(null);
     setWorkspace(null);
     setRunHistory([]);
+    setRunFilter('all');
   }, [session.id]);
 
   useEffect(() => {
@@ -81,6 +83,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const continuationEvents = events.filter((event) => event.type === 'session/continued' && event.continuation);
   const latestRecovery = [...events].reverse().find((event) => event.type === 'session/rewind' || event.type === 'session/continued');
   const latestRecoveryType = manifest?.latestRecovery?.type ?? latestRecovery?.type;
+  const visibleRunHistory = runHistory.filter((run) => {
+    if (runFilter === 'active') return run.status === 'queued' || run.status === 'running';
+    if (runFilter === 'failed') return run.status === 'failed';
+    if (runFilter === 'completed') return run.status === 'completed';
+    return true;
+  });
 
   const handleExportManifest = () => {
     if (!manifest) return;
@@ -219,8 +227,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
       )}
       {runHistory.length > 0 && (
         <div className="run-history-list" aria-label="运行历史详情">
-          <div className="recovery-summary-title">运行记录</div>
-          {runHistory.map((run) => (
+          <div className="run-history-heading"><div className="recovery-summary-title">运行记录</div><select aria-label="运行历史筛选" value={runFilter} onChange={(event) => setRunFilter(event.target.value as typeof runFilter)}><option value="all">全部</option><option value="active">进行中</option><option value="failed">失败</option><option value="completed">已完成</option></select></div>
+          {visibleRunHistory.length === 0 ? <div className="recovery-summary-meta">没有匹配的运行记录</div> : visibleRunHistory.map((run) => (
             <div className="run-history-item" key={run.runId}>
               <div className="run-history-main">
                 <span className={`run-status ${run.status}`}>{run.status}</span>
