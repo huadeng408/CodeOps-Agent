@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent, WorkspaceManifest } from './types';
+import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
 
 interface CheckpointPanelProps {
@@ -12,6 +12,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const [checkpoints, setCheckpoints] = useState<SessionCheckpoint[]>([]);
   const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
+  const [runHistory, setRunHistory] = useState<SessionRun[]>([]);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [newLabel, setNewLabel] = useState('');
@@ -23,15 +24,17 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const load = async () => {
     setError('');
     try {
-      const [checkpointData, eventData, recoveryManifest, workspaceManifest] = await Promise.all([
+      const [checkpointData, eventData, recoveryManifest, workspaceManifest, runs] = await Promise.all([
         api.listCheckpoints(session.id),
         api.listEvents(session.id),
         api.getRecoveryManifest(session.id),
         api.getWorkspaceManifest(session.id),
+        api.getRunHistory(session.id),
       ]);
       setCheckpoints(checkpointData);
       setManifest(recoveryManifest);
       setWorkspace(workspaceManifest);
+      setRunHistory(runs);
       const marker = [...eventData].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
       const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
       setEvents(eventData.filter((event) => {
@@ -56,6 +59,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     setError('');
     setManifest(null);
     setWorkspace(null);
+    setRunHistory([]);
   }, [session.id]);
 
   useEffect(() => {
@@ -196,7 +200,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
           {manifest?.latestLedgerHash && <div className="recovery-summary-meta mono-value">链指纹 {manifest.latestLedgerHash.slice(0, 12)}…</div>}
           <div className="recovery-summary-meta">恢复 {manifest?.rewindCount ?? rewindEvents.length} 次 · 继续 {manifest?.continuationCount ?? continuationEvents.length} 次</div>
           {manifest?.currentRun?.retryOfRunId && <div className="recovery-summary-meta">当前运行承接 {manifest.currentRun.retryOfRunId.slice(0, 12)}… · 历史失败 {manifest.currentRun.retryOfRunIds?.length ?? 1} 个</div>}
-          {manifest?.runs && manifest.runs.length > 1 && <div className="recovery-summary-meta">运行历史 {manifest.runs.length} 次：{manifest.runs.map((run) => `${run.runId.slice(0, 8)}…/${run.status}`).join(' · ')}</div>}
+          {runHistory.length > 1 && <div className="recovery-summary-meta">运行历史 {runHistory.length} 次：{runHistory.map((run) => `${run.runId.slice(0, 8)}…/${run.status}`).join(' · ')}</div>}
           {latestRecoveryType === 'session/rewind' && <div className="recovery-summary-meta">最近恢复到事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.rewindTargetSeq}</div>}
           {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
         </div>
