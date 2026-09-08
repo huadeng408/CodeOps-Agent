@@ -68,6 +68,12 @@ export interface RecoveryManifest {
   rewindCount: number;
   continuationCount: number;
   checkpointCount: number;
+  latestRecovery?: {
+    type: 'session/rewind' | 'session/continued';
+    seq: number;
+    targetSeq?: number;
+    resumeCount?: number;
+  };
 }
 
 export interface ApiResponse<T> {

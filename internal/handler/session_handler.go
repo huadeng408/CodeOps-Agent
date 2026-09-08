@@ -49,12 +49,20 @@ type updateStatusRequest struct {
 }
 
 type recoveryManifest struct {
-	Session           session.SessionView `json:"session"`
-	LedgerSeq         int64               `json:"ledgerSeq"`
-	EventCount        int                 `json:"eventCount"`
-	RewindCount       int                 `json:"rewindCount"`
-	ContinuationCount int                 `json:"continuationCount"`
-	CheckpointCount   int                 `json:"checkpointCount"`
+	Session           session.SessionView    `json:"session"`
+	LedgerSeq         int64                  `json:"ledgerSeq"`
+	EventCount        int                    `json:"eventCount"`
+	RewindCount       int                    `json:"rewindCount"`
+	ContinuationCount int                    `json:"continuationCount"`
+	CheckpointCount   int                    `json:"checkpointCount"`
+	LatestRecovery    *recoveryManifestEvent `json:"latestRecovery,omitempty"`
+}
+
+type recoveryManifestEvent struct {
+	Type        string `json:"type"`
+	Seq         int64  `json:"seq"`
+	TargetSeq   *int64 `json:"targetSeq,omitempty"`
+	ResumeCount int    `json:"resumeCount,omitempty"`
 }
 
 func (h *SessionHandler) Create(c *gin.Context) {
@@ -136,8 +144,12 @@ func (h *SessionHandler) RecoveryManifest(c *gin.Context) {
 		switch event.Type {
 		case "session/rewind":
 			manifest.RewindCount++
+			manifest.LatestRecovery = &recoveryManifestEvent{Type: event.Type, Seq: event.Seq, TargetSeq: event.RewindTargetSeq}
 		case "session/continued":
 			manifest.ContinuationCount++
+			if event.Continuation != nil {
+				manifest.LatestRecovery = &recoveryManifestEvent{Type: event.Type, Seq: event.Seq, TargetSeq: &event.Continuation.TargetSeq, ResumeCount: event.Continuation.ResumeCount}
+			}
 		}
 	}
 	writeSessionData(c, http.StatusOK, manifest)

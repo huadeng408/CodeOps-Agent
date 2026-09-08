@@ -70,6 +70,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const rewindEvents = events.filter((event) => event.type === 'session/rewind' && event.rewindTargetSeq !== undefined);
   const continuationEvents = events.filter((event) => event.type === 'session/continued' && event.continuation);
   const latestRecovery = [...events].reverse().find((event) => event.type === 'session/rewind' || event.type === 'session/continued');
+  const latestRecoveryType = manifest?.latestRecovery?.type ?? latestRecovery?.type;
 
   const handleCreateCheckpoint = async () => {
     if (!newLabel.trim() || !selectedEventId || busy) return;
@@ -174,8 +175,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
           <div className="recovery-summary-title">恢复历史</div>
           <div className="recovery-summary-meta">ledger #{manifest?.ledgerSeq ?? '-'} · 事件 {manifest?.eventCount ?? events.length}</div>
           <div className="recovery-summary-meta">恢复 {manifest?.rewindCount ?? rewindEvents.length} 次 · 继续 {manifest?.continuationCount ?? continuationEvents.length} 次</div>
-          {latestRecovery?.type === 'session/rewind' && latestRecovery.rewindTargetSeq !== undefined && <div className="recovery-summary-meta">最近恢复到事件 #{latestRecovery.rewindTargetSeq}</div>}
-          {latestRecovery?.type === 'session/continued' && latestRecovery.continuation && <div className="recovery-summary-meta">最近从事件 #{latestRecovery.continuation.targetSeq} 继续（第 {latestRecovery.continuation.resumeCount} 次）</div>}
+          {latestRecoveryType === 'session/rewind' && <div className="recovery-summary-meta">最近恢复到事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.rewindTargetSeq}</div>}
+          {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
         </div>
       )}
       {checkpoints.length === 0 ? (
