@@ -247,9 +247,9 @@ func planTodoPythonEnv(root string) []string {
 	}
 	// Preserve the setup-python site-packages while making the checkout itself
 	// importable. Replacing PYTHONPATH (rather than appending an empty value)
-	// avoids stale developer paths, and PYTHONNOUSERSITE keeps user-level
-	// packages from changing the probe result.
-	result = append(result, "PYTHONPATH="+root, "PYTHONNOUSERSITE=1", "PYTHONUTF8=1")
+	// avoids stale developer paths. Do not disable user site-packages: WSL and
+	// hosted runners commonly install the required E2E dependencies there.
+	result = append(result, "PYTHONPATH="+root, "PYTHONUTF8=1")
 	return result
 }
 
