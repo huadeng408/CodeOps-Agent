@@ -166,6 +166,29 @@ func (h *SessionHandler) RunHistory(c *gin.Context) {
 	writeSessionData(c, http.StatusOK, view.Runs)
 }
 
+// RunDetail returns one durable run projection without exposing another
+// mutable store. Missing run IDs intentionally use the same 404 shape as a
+// missing session to avoid cross-session enumeration.
+func (h *SessionHandler) RunDetail(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	view, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "session not found")
+		return
+	}
+	for _, run := range view.Runs {
+		if run.RunID == c.Param("runId") {
+			writeSessionData(c, http.StatusOK, run)
+			return
+		}
+	}
+	writeSessionError(c, session.ErrSessionNotFound, "session not found")
+}
+
 // RecoveryManifest exposes a read-only, ledger-derived resume summary. It is
 // intentionally assembled from the same owner-scoped APIs as the UI rather
 // than introducing a second persistence model for recovery state.

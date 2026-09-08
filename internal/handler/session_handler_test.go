@@ -52,6 +52,7 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*
 	sessions.GET("", sessionHandler.List)
 	sessions.GET("/:id", sessionHandler.Get)
 	sessions.GET("/:id/runs", sessionHandler.RunHistory)
+	sessions.GET("/:id/runs/:runId", sessionHandler.RunDetail)
 	sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 	sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 	sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
@@ -277,6 +278,21 @@ func TestRunHistoryReturnsCanonicalEmptyArrayForSessionWithoutRuns(t *testing.T)
 	}
 	if len(envelope.Data) != 0 {
 		t.Fatalf("run history = %+v, want empty array", envelope.Data)
+	}
+}
+
+func TestRunDetailReturnsSame404ForForeignMissingAndUnknownRun(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "run-detail", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(8, workbench)
+	foreign := performSessionRequest(router, http.MethodGet, "/sessions/"+created.ID+"/runs/run-x", nil)
+	missing := performSessionRequest(router, http.MethodGet, "/sessions/missing/runs/run-x", nil)
+	unknown := performSessionRequest(sessionTestRouter(7, workbench), http.MethodGet, "/sessions/"+created.ID+"/runs/run-x", nil)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || unknown.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() || missing.Body.String() != unknown.Body.String() {
+		t.Fatalf("foreign=%d missing=%d unknown=%d; responses must match", foreign.Code, missing.Code, unknown.Code)
 	}
 }
 
