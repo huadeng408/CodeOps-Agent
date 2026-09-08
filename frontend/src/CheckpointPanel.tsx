@@ -29,12 +29,14 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
     const loadingSessionID = session.id;
     setError('');
     try {
-      const [checkpointData, eventData, recoveryManifest, workspaceManifest, runs] = await Promise.all([
+      const [checkpointData, eventData, recoveryManifest] = await Promise.all([
         api.listCheckpoints(session.id),
         api.listEvents(session.id),
         api.getRecoveryManifest(session.id),
-        api.getWorkspaceManifest(session.id),
-        api.getRunHistory(session.id),
+      ]);
+      const [workspaceManifest, runs] = await Promise.all([
+        api.getWorkspaceManifest(session.id).catch(() => ({ available: false, reason: 'workspace recovery is unavailable' })),
+        api.getRunHistory(session.id).catch(() => []),
       ]);
       if (loadVersion !== loadVersionRef.current || loadingSessionID !== session.id) return;
       setCheckpoints(checkpointData);
