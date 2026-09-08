@@ -692,6 +692,10 @@ button:disabled {
 .recovery-summary-meta { font-size: 10px; color: var(--dsw-alias-text-tertiary); }
 .workspace-summary { display: grid; gap: 4px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-subtle); border-radius: 6px; }
 .workspace-item { display: grid; gap: 2px; }
+.run-history-list { display: grid; gap: 6px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-subtle); border-radius: 6px; }
+.run-history-item { display: grid; gap: 3px; padding-bottom: 5px; border-bottom: 1px solid var(--dsw-alias-border-subtle); }
+.run-history-item:last-child { padding-bottom: 0; border-bottom: 0; }
+.run-history-main { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--dsw-alias-text-secondary); }
 
 .checkpoint-item {
   padding: 9px;

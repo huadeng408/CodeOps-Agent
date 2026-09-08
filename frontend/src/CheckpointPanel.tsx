@@ -159,6 +159,16 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
     }
   };
 
+  const handleRetryRun = async (run: SessionRun) => {
+    if (run.status !== 'failed' || busy || session.status !== 'paused') return;
+    const checkpoint = checkpoints.find((item) => item.hash === run.checkpointHash);
+    if (!checkpoint) {
+      setError('找不到该运行对应的检查点，请刷新恢复清单');
+      return;
+    }
+    await handleContinue(checkpoint);
+  };
+
   return (
     <section className="checkpoint-panel" aria-label="Checkpoints">
       <div className="panel-heading">
@@ -203,6 +213,23 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
           {runHistory.length > 1 && <div className="recovery-summary-meta">运行历史 {runHistory.length} 次：{runHistory.map((run) => `${run.runId.slice(0, 8)}…/${run.status}`).join(' · ')}</div>}
           {latestRecoveryType === 'session/rewind' && <div className="recovery-summary-meta">最近恢复到事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.rewindTargetSeq}</div>}
           {latestRecoveryType === 'session/continued' && <div className="recovery-summary-meta">最近从事件 #{manifest?.latestRecovery?.targetSeq ?? latestRecovery?.continuation?.targetSeq} 继续（第 {manifest?.latestRecovery?.resumeCount ?? latestRecovery?.continuation?.resumeCount} 次）</div>}
+        </div>
+      )}
+      {runHistory.length > 0 && (
+        <div className="run-history-list" aria-label="运行历史详情">
+          <div className="recovery-summary-title">运行记录</div>
+          {runHistory.map((run) => (
+            <div className="run-history-item" key={run.runId}>
+              <div className="run-history-main">
+                <span className={`run-status ${run.status}`}>{run.status}</span>
+                <span className="mono-value">{run.runId.slice(0, 12)}…</span>
+                <span>第 {run.attempt || 1} 次</span>
+              </div>
+              {run.retryOfRunId && <div className="recovery-summary-meta">承接 {run.retryOfRunId.slice(0, 12)}…</div>}
+              {run.error && <div className="recovery-summary-meta">{run.error}</div>}
+              {run.status === 'failed' && <button className="subtle-btn" type="button" onClick={() => void handleRetryRun(run)} disabled={busy || session.status !== 'paused'}>再次运行</button>}
+            </div>
+          ))}
         </div>
       )}
       {workspace && (
