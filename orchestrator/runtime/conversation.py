@@ -283,6 +283,7 @@ class ConversationRunner:
     _active_actor: ActorIdentity | None = field(default=None, init=False, repr=False)
     _active_history_digest: str = field(default="", init=False, repr=False)
     _active_run_id: str = field(default="", init=False, repr=False)
+    _active_surface_sha256: str = field(default="", init=False, repr=False)
     _resume_requested: bool = field(default=False, init=False, repr=False)
     _replay_response: ChatResponse | None = field(default=None, init=False, repr=False)
     _replay_checkpoint_turn: bool = field(default=False, init=False, repr=False)
@@ -348,6 +349,7 @@ class ConversationRunner:
         history_digest: str = "",
         run_id: str = "",
         resume: bool = False,
+        surface_sha256: str = "",
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
@@ -360,6 +362,12 @@ class ConversationRunner:
         session_id = session_id.strip()
         if not session_id:
             return None
+        requested_run_id = str(run_id).strip()
+        requested_surface_sha256 = str(surface_sha256).strip()
+        if resume and not requested_run_id:
+            raise ValueError("continuation run id is required when resume is true")
+        if resume and not requested_surface_sha256:
+            raise ValueError("continuation surface sha256 is required when resume is true")
         try:
             state = self.graph.get_checkpoint(session_id)
         except RuntimeError as exc:
@@ -369,7 +377,6 @@ class ConversationRunner:
         if state is None:
             return None
         metadata = state.metadata if isinstance(state.metadata, dict) else {}
-        requested_run_id = str(run_id).strip()
         checkpoint_run_id = str(metadata.get("run_id", "")).strip()
         if requested_run_id and checkpoint_run_id and checkpoint_run_id != requested_run_id:
             if not state.done:
@@ -380,8 +387,16 @@ class ConversationRunner:
         checkpoint_session = str(metadata.get("session_id", "")).strip()
         if checkpoint_session and checkpoint_session != session_id:
             raise ValueError("checkpoint session id does not match request")
+        expected_surface_sha256 = str(metadata.get("surface_sha256", "")).strip()
         expected_history_digest = str(metadata.get("history_sha256", "")).strip()
-        if expected_history_digest and history_digest and expected_history_digest != history_digest:
+        if resume and requested_surface_sha256:
+            if not expected_surface_sha256:
+                raise ValueError("checkpoint surface sha256 is missing")
+            if expected_surface_sha256 != requested_surface_sha256:
+                raise ValueError("checkpoint surface sha256 does not match request")
+        elif expected_history_digest and history_digest and expected_history_digest != history_digest:
+            # A normal invocation has no stable continuation identity. Its
+            # history must therefore still match the checkpoint exactly.
             raise ValueError("checkpoint history does not match request")
         phase = str(metadata.get("phase", "")).strip()
         if phase not in {"model_before", "model_after", "tool_after"}:
@@ -411,6 +426,7 @@ class ConversationRunner:
         actor: ActorIdentity | None = None,
         run_id: str = "",
         resume: bool = False,
+        surface_sha256: str = "",
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -426,6 +442,11 @@ class ConversationRunner:
         self._active_actor = actor
         self._active_run_id = str(run_id).strip()
         self._resume_requested = bool(resume)
+        self._active_surface_sha256 = str(surface_sha256).strip()
+        if self._resume_requested and not self._active_run_id:
+            raise ValueError("continuation run id is required when resume is true")
+        if self._resume_requested and not self._active_surface_sha256:
+            raise ValueError("continuation surface sha256 is required when resume is true")
         self._replay_response = None
         self._replay_checkpoint_turn = False
         if actor is not None:
@@ -529,6 +550,7 @@ class ConversationRunner:
             )
             self._active_actor = None
             self._active_run_id = ""
+            self._active_surface_sha256 = ""
             self._resume_requested = False
             self._replay_response = None
             self._replay_checkpoint_turn = False
@@ -584,6 +606,7 @@ class ConversationRunner:
             history_digest=self._active_history_digest,
             run_id=self._active_run_id,
             resume=self._resume_requested,
+            surface_sha256=self._active_surface_sha256,
         )
         start_turn = 1
         if checkpoint is not None and checkpoint.resumable:
@@ -2994,6 +3017,7 @@ class ConversationRunner:
                 "tool_result_status": tool_result_status,
                 "tool_call_id": tool_call_id,
                 "history_sha256": self._active_history_digest,
+                "surface_sha256": self._active_surface_sha256,
             },
             tool_rounds=max(0, int(tool_rounds)),
             tool_requests=serialized_tool_requests,

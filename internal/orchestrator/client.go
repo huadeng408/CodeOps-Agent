@@ -39,6 +39,10 @@ type ConversationToolCall struct {
 	ArgumentsJSON string
 }
 
+// ErrConversationFailed is returned when the orchestrator reaches an explicit
+// unsuccessful terminal state. Transport success is not execution success.
+var ErrConversationFailed = errors.New("orchestrator conversation failed")
+
 // ActorIdentity is the versioned, non-secret caller identity propagated to
 // the Python orchestrator.
 type ActorIdentity = identity.Actor
@@ -109,6 +113,42 @@ type EventHandler func(context.Context, Event)
 type AskUserHandler func(context.Context, *codeagentpb.AskUserRequest) (ToolResult, error)
 type AgentSpawnHandler func(context.Context, *codeagentpb.AgentSpawn) error
 type AgentLifecycleHandler func(context.Context, *codeagentpb.AgentLifecycle) error
+
+// ConversationRequest is the complete request-scoped input for one durable
+// orchestrator turn. Actor is intentionally explicit so a shared Client
+// connection can safely serve concurrent authenticated Sessions.
+type ConversationRequest struct {
+	Input     string
+	SessionID string
+	RunID     string
+	Resume    bool
+	// SurfaceSHA256 binds a resumed run to the immutable checkpoint Surface.
+	// Legal tool/result suffixes may grow while this identity remains stable.
+	SurfaceSHA256 string
+	Actor         ActorIdentity
+	History       []ConversationMessage
+	State         *codeagentpb.PlanTodoSnapshot
+}
+
+type ConversationResult struct {
+	Success bool
+	Message string
+}
+
+// ConversationHandlers contains every callback whose behavior may vary by
+// Session. Keeping these callbacks per call prevents concurrent browser runs
+// from writing deltas, state, tool results, or Subagent lifecycle facts into
+// another Session.
+type ConversationHandlers struct {
+	Tool           ToolHandler
+	Event          EventHandler
+	AskUser        AskUserHandler
+	TextDelta      func(delta string)
+	Compaction     func(update *codeagentpb.CompactionUpdate) error
+	PlanTodo       func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error
+	AgentSpawn     AgentSpawnHandler
+	AgentLifecycle AgentLifecycleHandler
+}
 
 type ToolProgress struct {
 	ToolCallID string
@@ -221,13 +261,17 @@ func (c *Client) Actor() ActorIdentity {
 }
 
 func (c *Client) actorForSession(sessionID string) (identity.Actor, string, error) {
+	return bindActorToSession(c.Actor(), sessionID)
+}
+
+func bindActorToSession(actor identity.Actor, sessionID string) (identity.Actor, string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		// Legacy no-session callers still get an explicit isolated identity. The
 		// production CLI always supplies its durable session id.
-		sessionID = "ephemeral:" + strings.TrimSpace(c.actor.ActorID)
+		sessionID = "ephemeral:" + strings.TrimSpace(actor.ActorID)
 	}
-	actor, err := c.actor.BindSession(sessionID)
+	actor, err := actor.BindSession(sessionID)
 	if err != nil {
 		return identity.Actor{}, "", err
 	}
@@ -445,6 +489,44 @@ func (c *Client) ConverseWithHistoryAndPrompts(ctx context.Context, input string
 // current Plan/Todo snapshot. Keeping this as an additive API preserves the
 // existing callers while making state recovery explicit at the protocol edge.
 func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, sessionID string, history []ConversationMessage, state *codeagentpb.PlanTodoSnapshot, eventHandler EventHandler, askHandler AskUserHandler, handlers ...ToolHandler) (string, error) {
+	if c == nil {
+		return "", errors.New("orchestrator client is nil")
+	}
+	var toolHandler ToolHandler
+	if len(handlers) > 0 {
+		toolHandler = handlers[0]
+	}
+	result, err := c.RunConversation(ctx, ConversationRequest{
+		Input:     input,
+		SessionID: sessionID,
+		History:   history,
+		State:     state,
+		Actor:     c.Actor(),
+	}, ConversationHandlers{
+		TextDelta:      c.OnTextDelta,
+		Compaction:     c.OnCompaction,
+		PlanTodo:       c.OnPlanTodoUpdate,
+		AgentSpawn:     c.OnAgentSpawn,
+		AgentLifecycle: c.OnAgentLifecycle,
+		Event:          eventHandler,
+		AskUser:        askHandler,
+		Tool:           toolHandler,
+	})
+	return result.Message, err
+}
+
+// RunConversation runs one request without reading any actor or callback from
+// shared Client state. The Client owns only connection-level configuration;
+// all Session-varying behavior crosses this interface explicitly.
+func (c *Client) RunConversation(ctx context.Context, request ConversationRequest, handlers ConversationHandlers) (ConversationResult, error) {
+	message, err := c.runConversation(ctx, request, handlers)
+	if err != nil {
+		return ConversationResult{Success: false}, err
+	}
+	return ConversationResult{Success: true, Message: message}, nil
+}
+
+func (c *Client) runConversation(ctx context.Context, request ConversationRequest, handlers ConversationHandlers) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("orchestrator client is nil")
 	}
@@ -456,7 +538,21 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	// orchestrator can attach its gen_ai inference spans as children of the
 	// Go invoke_agent span — replacing the broken launch-time env-var hack.
 	ctx = c.injectTraceMetadata(ctx)
-	actor, sessionID, err := c.actorForSession(sessionID)
+	runID := strings.TrimSpace(request.RunID)
+	if request.Resume && runID == "" {
+		return "", errors.New("resume conversation run id is required")
+	}
+	if runID != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-run-id", runID)
+	}
+	if request.Resume {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-resume", "true")
+		surfaceSHA256 := strings.TrimSpace(request.SurfaceSHA256)
+		if surfaceSHA256 != "" {
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-surface-sha256", surfaceSHA256)
+		}
+	}
+	actor, sessionID, err := bindActorToSession(request.Actor, request.SessionID)
 	if err != nil {
 		return "", fmt.Errorf("bind actor to session: %w", err)
 	}
@@ -466,8 +562,8 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 		return "", fmt.Errorf("open conversation stream: %w", err)
 	}
 
-	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
-	for _, item := range trimConversationHistory(history) {
+	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(request.History))
+	for _, item := range trimConversationHistory(request.History) {
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
 			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
 			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
@@ -478,10 +574,10 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_UserInput{
 			UserInput: &codeagentpb.UserInput{
-				Text:          input,
+				Text:          request.Input,
 				SessionId:     sessionID,
 				History:       historyPayload,
-				PlanTodoState: state,
+				PlanTodoState: request.State,
 				Actor:         actorProto(actor),
 			},
 		},
@@ -490,11 +586,8 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 	}
 	defer func() { _ = stream.CloseSend() }()
 
-	var handler ToolHandler
-	if len(handlers) > 0 {
-		handler = handlers[0]
-	}
 	var parts []string
+	doneReceived := false
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -508,42 +601,42 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 		case *codeagentpb.OrchestratorMessage_Text:
 			if payload.Text != nil {
 				parts = append(parts, payload.Text.Text)
-				if c.OnTextDelta != nil {
-					c.OnTextDelta(payload.Text.Text)
+				if handlers.TextDelta != nil {
+					handlers.TextDelta(payload.Text.Text)
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_TodoUpdate:
-			if payload.TodoUpdate != nil && c.OnPlanTodoUpdate != nil {
-				if err := c.OnPlanTodoUpdate(nil, payload.TodoUpdate); err != nil {
+			if payload.TodoUpdate != nil && handlers.PlanTodo != nil {
+				if err := handlers.PlanTodo(nil, payload.TodoUpdate); err != nil {
 					return "", fmt.Errorf("persist todo update: %w", err)
 				}
 			}
-			if eventHandler != nil {
-				eventHandler(ctx, Event{TodoUpdate: payload.TodoUpdate})
+			if handlers.Event != nil {
+				handlers.Event(ctx, Event{TodoUpdate: payload.TodoUpdate})
 			}
 		case *codeagentpb.OrchestratorMessage_PlanUpdate:
-			if payload.PlanUpdate != nil && c.OnPlanTodoUpdate != nil {
-				if err := c.OnPlanTodoUpdate(payload.PlanUpdate, nil); err != nil {
+			if payload.PlanUpdate != nil && handlers.PlanTodo != nil {
+				if err := handlers.PlanTodo(payload.PlanUpdate, nil); err != nil {
 					return "", fmt.Errorf("persist plan update: %w", err)
 				}
 			}
-			if eventHandler != nil {
-				eventHandler(ctx, Event{PlanUpdate: payload.PlanUpdate})
+			if handlers.Event != nil {
+				handlers.Event(ctx, Event{PlanUpdate: payload.PlanUpdate})
 			}
 		case *codeagentpb.OrchestratorMessage_SessionMeta:
-			if eventHandler != nil {
-				eventHandler(ctx, Event{SessionMeta: payload.SessionMeta})
+			if handlers.Event != nil {
+				handlers.Event(ctx, Event{SessionMeta: payload.SessionMeta})
 			}
 		case *codeagentpb.OrchestratorMessage_CompactionUpdate:
-			if payload.CompactionUpdate != nil && c.OnCompaction != nil {
-				if err := c.OnCompaction(payload.CompactionUpdate); err != nil {
+			if payload.CompactionUpdate != nil && handlers.Compaction != nil {
+				if err := handlers.Compaction(payload.CompactionUpdate); err != nil {
 					return "", fmt.Errorf("persist compaction update: %w", err)
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_AgentSpawn:
-			if payload.AgentSpawn != nil && c.OnAgentSpawn != nil {
+			if payload.AgentSpawn != nil && handlers.AgentSpawn != nil {
 				decision := &codeagentpb.AgentSpawnDecision{RequestId: payload.AgentSpawn.GetRequestId(), Accepted: true}
-				if err := c.OnAgentSpawn(ctx, payload.AgentSpawn); err != nil {
+				if err := handlers.AgentSpawn(ctx, payload.AgentSpawn); err != nil {
 					decision.Accepted = false
 					decision.Error = "harness rejected agent worktree"
 					_ = stream.Send(&codeagentpb.HarnessMessage{Payload: &codeagentpb.HarnessMessage_AgentSpawnDecision{AgentSpawnDecision: decision}})
@@ -554,24 +647,34 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 				// a best-effort send keeps older servers readable while any real
 				// transport failure is still observed on the following Recv.
 				_ = stream.Send(&codeagentpb.HarnessMessage{Payload: &codeagentpb.HarnessMessage_AgentSpawnDecision{AgentSpawnDecision: decision}})
+			} else if payload.AgentSpawn != nil && request.Resume {
+				// A continuation run must never let an agent spawn request disappear
+				// silently. Without a Harness worktree/permission handler, reject it
+				// explicitly so the Python side can terminate and the run is failed.
+				decision := &codeagentpb.AgentSpawnDecision{
+					RequestId: payload.AgentSpawn.GetRequestId(), Accepted: false,
+					Error: "agent worktree handler unavailable",
+				}
+				_ = stream.Send(&codeagentpb.HarnessMessage{Payload: &codeagentpb.HarnessMessage_AgentSpawnDecision{AgentSpawnDecision: decision}})
+				return "", errors.New("agent spawn rejected: Harness worktree handler unavailable")
 			}
-			if eventHandler != nil {
-				eventHandler(ctx, Event{AgentSpawn: payload.AgentSpawn})
+			if handlers.Event != nil {
+				handlers.Event(ctx, Event{AgentSpawn: payload.AgentSpawn})
 			}
 		case *codeagentpb.OrchestratorMessage_AgentLifecycle:
-			if payload.AgentLifecycle != nil && c.OnAgentLifecycle != nil {
-				if err := c.OnAgentLifecycle(ctx, payload.AgentLifecycle); err != nil {
+			if payload.AgentLifecycle != nil && handlers.AgentLifecycle != nil {
+				if err := handlers.AgentLifecycle(ctx, payload.AgentLifecycle); err != nil {
 					return "", fmt.Errorf("persist agent lifecycle: %w", err)
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_AskUserRequest:
-			if eventHandler != nil {
-				eventHandler(ctx, Event{AskUserRequest: payload.AskUserRequest})
+			if handlers.Event != nil {
+				handlers.Event(ctx, Event{AskUserRequest: payload.AskUserRequest})
 			}
 			if payload.AskUserRequest == nil {
 				continue
 			}
-			result, err := c.handleAskUser(ctx, payload.AskUserRequest, askHandler)
+			result, err := c.handleAskUser(ctx, payload.AskUserRequest, handlers.AskUser)
 			if err != nil {
 				return "", fmt.Errorf("handle ask user request: %w", err)
 			}
@@ -582,7 +685,7 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 			if payload.ToolRequestBatch == nil {
 				continue
 			}
-			if err := c.handleToolRequestBatch(ctx, stream, handler, eventHandler, payload.ToolRequestBatch); err != nil {
+			if err := c.handleToolRequestBatch(ctx, stream, handlers.Tool, handlers.Event, payload.ToolRequestBatch); err != nil {
 				return "", err
 			}
 		case *codeagentpb.OrchestratorMessage_ToolRequest:
@@ -596,21 +699,35 @@ func (c *Client) ConverseWithHistoryAndState(ctx context.Context, input string, 
 				RequiredPermission: payload.ToolRequest.RequiredPermission,
 			}
 			toolCtx, toolSpan := c.startToolSpan(ctx, call)
-			emitToolProgress(ctx, eventHandler, call, "start", 1, 1, ToolResult{})
-			result := invokeToolHandler(toolCtx, handler, call)
+			emitToolProgress(ctx, handlers.Event, call, "start", 1, 1, ToolResult{})
+			result := invokeToolHandler(toolCtx, handlers.Tool, call)
 			finishToolSpan(toolSpan, result)
-			emitToolProgress(ctx, eventHandler, call, "finish", 1, 1, result)
+			emitToolProgress(ctx, handlers.Event, call, "finish", 1, 1, result)
 			if err := sendToolResult(stream, result); err != nil {
 				return "", err
 			}
 		case *codeagentpb.OrchestratorMessage_Done:
-			if payload.Done != nil && payload.Done.Message != "" {
+			if payload.Done == nil {
+				continue
+			}
+			if !payload.Done.GetSuccess() {
+				reason := strings.TrimSpace(payload.Done.GetMessage())
+				if reason == "" {
+					reason = "unspecified failure"
+				}
+				return "", fmt.Errorf("%w: %s", ErrConversationFailed, reason)
+			}
+			if payload.Done.Message != "" {
 				parts = append(parts, payload.Done.Message)
 			}
+			doneReceived = true
 			return strings.TrimSpace(strings.Join(parts, "")), nil
 		}
 	}
 
+	if !doneReceived {
+		return "", fmt.Errorf("%w: orchestrator stream ended before terminal done", ErrConversationFailed)
+	}
 	return strings.TrimSpace(strings.Join(parts, "")), nil
 }
 
@@ -630,43 +747,90 @@ func trimConversationHistory(history []ConversationMessage) []ConversationMessag
 	for _, item := range history {
 		role := strings.TrimSpace(item.Role)
 		content := strings.TrimSpace(item.Content)
-		if role == "" || content == "" {
+		if role == "" || (content == "" && len(item.ToolCalls) == 0 && strings.TrimSpace(item.ToolCallID) == "") {
 			continue
 		}
 		item.Role = role
-		item.Content = truncateHistoryContent(content)
+		if content != "" {
+			item.Content = truncateHistoryContent(content)
+		} else {
+			item.Content = ""
+		}
 		cleaned = append(cleaned, item)
 	}
 	if len(cleaned) == 0 {
 		return nil
 	}
 
-	selected := make([]ConversationMessage, 0, minInt(len(cleaned), maxHistoryMessages))
+	groups := conversationHistoryGroups(cleaned)
+	selectedGroups := make([][]ConversationMessage, 0, len(groups))
+	selectedCount := 0
 	usedChars := 0
 	omitted := 0
-	for idx := len(cleaned) - 1; idx >= 0; idx-- {
-		item := cleaned[idx]
-		itemChars := len(item.Role) + len(item.Content)
-		if len(selected) >= maxHistoryMessages || (len(selected) > 0 && usedChars+itemChars > maxHistoryChars) {
-			omitted = idx + 1
+	for idx := len(groups) - 1; idx >= 0; idx-- {
+		group := groups[idx]
+		groupChars := conversationHistoryGroupChars(group)
+		if selectedCount+len(group) > maxHistoryMessages || (selectedCount > 0 && usedChars+groupChars > maxHistoryChars) {
+			for _, older := range groups[:idx+1] {
+				omitted += len(older)
+			}
 			break
 		}
-		selected = append(selected, item)
-		usedChars += itemChars
+		selectedGroups = append(selectedGroups, group)
+		selectedCount += len(group)
+		usedChars += groupChars
 	}
-	reverseConversationMessages(selected)
+	reverseConversationMessageGroups(selectedGroups)
 
 	if omitted > 0 {
-		if len(selected) >= maxHistoryMessages {
-			selected = selected[1:]
+		// Reserve one slot for the truncation marker. Remove whole causal groups
+		// so an assistant tool call is never separated from its tool results.
+		for selectedCount >= maxHistoryMessages && len(selectedGroups) > 0 {
+			omitted += len(selectedGroups[0])
+			selectedCount -= len(selectedGroups[0])
+			selectedGroups = selectedGroups[1:]
 		}
-		summary := ConversationMessage{
+		selectedGroups = append([][]ConversationMessage{{{
 			Role:    "system",
 			Content: fmt.Sprintf("[History truncated: %d older messages omitted to fit context budget.]", omitted),
-		}
-		selected = append([]ConversationMessage{summary}, selected...)
+		}}}, selectedGroups...)
+	}
+	selected := make([]ConversationMessage, 0, selectedCount+1)
+	for _, group := range selectedGroups {
+		selected = append(selected, group...)
 	}
 	return selected
+}
+
+// conversationHistoryGroups keeps each assistant tool-call record together
+// with the contiguous tool results that answer it. The group is the smallest
+// causal unit that history trimming may retain or omit.
+func conversationHistoryGroups(history []ConversationMessage) [][]ConversationMessage {
+	groups := make([][]ConversationMessage, 0, len(history))
+	for index := 0; index < len(history); {
+		item := history[index]
+		group := []ConversationMessage{item}
+		index++
+		if item.Role == "assistant" && len(item.ToolCalls) > 0 {
+			for index < len(history) && history[index].Role == "tool" {
+				group = append(group, history[index])
+				index++
+			}
+		}
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func conversationHistoryGroupChars(group []ConversationMessage) int {
+	total := 0
+	for _, item := range group {
+		total += len(item.Role) + len(item.Content) + len(item.Name) + len(item.ToolCallID)
+		for _, call := range item.ToolCalls {
+			total += len(call.ID) + len(call.Name) + len(call.ArgumentsJSON)
+		}
+	}
+	return total
 }
 
 func truncateHistoryContent(content string) string {
@@ -677,17 +841,10 @@ func truncateHistoryContent(content string) string {
 	return strings.TrimSpace(content[:maxHistoryMessageChars]) + "\n[history message truncated]"
 }
 
-func reverseConversationMessages(messages []ConversationMessage) {
-	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
-		messages[left], messages[right] = messages[right], messages[left]
+func reverseConversationMessageGroups(groups [][]ConversationMessage) {
+	for left, right := 0, len(groups)-1; left < right; left, right = left+1, right-1 {
+		groups[left], groups[right] = groups[right], groups[left]
 	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // startToolSpan creates an execute_tool span as a child of the context's

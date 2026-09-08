@@ -2,6 +2,7 @@ package codeagent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type toolSpanContextKey struct{}
@@ -99,6 +101,151 @@ type historyOrchestratorServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
 	sessionID string
 	history   []*codeagentpb.ConversationMessage
+}
+
+type failedOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+type incompleteOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+func (s *incompleteOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Text{Text: &codeagentpb.TextChunk{Text: "partial"}},
+	})
+}
+
+func (s *failedOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{
+			Done: &codeagentpb.Done{Success: false, Message: "checkpoint persistence unavailable"},
+		},
+	})
+}
+
+type requestScopedObservation struct {
+	actorID       string
+	sessionID     string
+	runID         string
+	resume        string
+	surfaceSHA256 string
+	history       string
+	stateRevision uint64
+}
+
+type requestScopedOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+	mu           sync.Mutex
+	observations map[string]requestScopedObservation
+}
+
+func (s *requestScopedOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	message, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	input := message.GetUserInput()
+	if input == nil {
+		return errors.New("missing user input")
+	}
+	tag := input.GetText()
+	observation := requestScopedObservation{
+		actorID:   input.GetActor().GetActorId(),
+		sessionID: input.GetSessionId(),
+	}
+	if incoming, ok := metadata.FromIncomingContext(stream.Context()); ok {
+		observation.runID = firstMetadataValue(incoming.Get("x-code-agent-run-id"))
+		observation.resume = firstMetadataValue(incoming.Get("x-code-agent-resume"))
+		observation.surfaceSHA256 = firstMetadataValue(incoming.Get("x-code-agent-surface-sha256"))
+	}
+	if len(input.GetHistory()) > 0 {
+		observation.history = input.GetHistory()[0].GetContent()
+	}
+	if input.GetPlanTodoState() != nil {
+		observation.stateRevision = input.GetPlanTodoState().GetRevision()
+	}
+	s.mu.Lock()
+	if s.observations == nil {
+		s.observations = make(map[string]requestScopedObservation)
+	}
+	s.observations[tag] = observation
+	s.mu.Unlock()
+
+	for _, outgoing := range []*codeagentpb.OrchestratorMessage{
+		{Payload: &codeagentpb.OrchestratorMessage_Text{Text: &codeagentpb.TextChunk{Text: "text-" + tag}}},
+		{Payload: &codeagentpb.OrchestratorMessage_TodoUpdate{TodoUpdate: &codeagentpb.TodoUpdate{
+			Revision: 2, Todos: []*codeagentpb.TodoItem{{Content: tag, Status: "pending"}},
+		}}},
+		{Payload: &codeagentpb.OrchestratorMessage_PlanUpdate{PlanUpdate: &codeagentpb.PlanUpdate{
+			Revision: 3, Steps: []string{tag}, Mode: "chat",
+		}}},
+		{Payload: &codeagentpb.OrchestratorMessage_CompactionUpdate{CompactionUpdate: &codeagentpb.CompactionUpdate{Summary: tag}}},
+		{Payload: &codeagentpb.OrchestratorMessage_AgentSpawn{AgentSpawn: &codeagentpb.AgentSpawn{
+			RequestId: "spawn-" + tag, ParentSessionId: input.GetSessionId(), ChildSessionId: input.GetSessionId() + ":child",
+		}}},
+	} {
+		if err := stream.Send(outgoing); err != nil {
+			return err
+		}
+	}
+	decision, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if got := decision.GetAgentSpawnDecision(); got == nil || !got.GetAccepted() || got.GetRequestId() != "spawn-"+tag {
+		return fmt.Errorf("invalid spawn decision for %s: %#v", tag, got)
+	}
+
+	for _, outgoing := range []*codeagentpb.OrchestratorMessage{
+		{Payload: &codeagentpb.OrchestratorMessage_AgentLifecycle{AgentLifecycle: &codeagentpb.AgentLifecycle{
+			RequestId: "spawn-" + tag, ChildSessionId: input.GetSessionId() + ":child", Status: "completed", Reason: tag,
+		}}},
+		{Payload: &codeagentpb.OrchestratorMessage_AskUserRequest{AskUserRequest: &codeagentpb.AskUserRequest{
+			AskUserId: "ask-" + tag, Question: tag,
+		}}},
+	} {
+		if err := stream.Send(outgoing); err != nil {
+			return err
+		}
+	}
+	askResult, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if got := askResult.GetToolResult(); got == nil || got.GetOutput() != "ask-"+tag {
+		return fmt.Errorf("invalid ask result for %s: %#v", tag, got)
+	}
+
+	if err := stream.Send(&codeagentpb.OrchestratorMessage{Payload: &codeagentpb.OrchestratorMessage_ToolRequest{
+		ToolRequest: &codeagentpb.ToolRequest{ToolCallId: "tool-" + tag, ToolName: "Echo", ParametersJson: tag},
+	}}); err != nil {
+		return err
+	}
+	toolResult, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if got := toolResult.GetToolResult(); got == nil || got.GetOutput() != "tool-"+tag {
+		return fmt.Errorf("invalid tool result for %s: %#v", tag, got)
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{Payload: &codeagentpb.OrchestratorMessage_Done{
+		Done: &codeagentpb.Done{Success: true, Message: "done-" + tag},
+	}})
+}
+
+func firstMetadataValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 type subAgentMetadataServer struct {
@@ -543,6 +690,252 @@ func TestOrchestratorClientSendsSessionHistory(t *testing.T) {
 	}
 	if capturing.history[0].Role != "user" || capturing.history[0].Content != "previous request" {
 		t.Fatalf("unexpected history payload: %#v", capturing.history)
+	}
+}
+
+func TestOrchestratorClientPreservesEmptyAssistantToolCallAndResult(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	capturing := &historyOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capturing)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	history := make([]orchestrator.ConversationMessage, 0, 42)
+	for index := 0; index < 39; index++ {
+		history = append(history, orchestrator.ConversationMessage{Role: "user", Content: fmt.Sprintf("old-%02d", index)})
+	}
+	history = append(history,
+		orchestrator.ConversationMessage{
+			Role: "assistant",
+			ToolCalls: []orchestrator.ConversationToolCall{{
+				ID: "call-1", Name: "Read", ArgumentsJSON: `{"path":"README.md"}`,
+			}},
+		},
+		orchestrator.ConversationMessage{Role: "tool", Content: "contents", Name: "Read", ToolCallID: "call-1"},
+		orchestrator.ConversationMessage{Role: "user", Content: "continue after tool"},
+	)
+
+	if _, err := client.ConverseWithHistory(context.Background(), "next", "session-tools", history); err != nil {
+		t.Fatalf("converse with tool history failed: %v", err)
+	}
+	if len(capturing.history) != 40 {
+		t.Fatalf("trimmed history length = %d, want 40", len(capturing.history))
+	}
+	var callIndex, resultIndex = -1, -1
+	for index, item := range capturing.history {
+		if len(item.GetToolCalls()) == 1 && item.GetToolCalls()[0].GetId() == "call-1" {
+			callIndex = index
+		}
+		if item.GetRole() == "tool" && item.GetToolCallId() == "call-1" {
+			resultIndex = index
+		}
+	}
+	if callIndex < 0 || resultIndex != callIndex+1 {
+		t.Fatalf("tool call/result pair was split or dropped: call=%d result=%d history=%#v", callIndex, resultIndex, capturing.history)
+	}
+	if capturing.history[callIndex].GetContent() != "" {
+		t.Fatalf("empty tool-call assistant content changed to %q", capturing.history[callIndex].GetContent())
+	}
+}
+
+func TestOrchestratorClientReturnsErrorForUnsuccessfulDone(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &failedOrchestratorServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	result, err := client.RunConversation(context.Background(), orchestrator.ConversationRequest{
+		Input: "resume", SessionID: "failed-session", RunID: "failed-run", Resume: true, SurfaceSHA256: "surface-failed",
+		Actor: orchestrator.ActorIdentity{
+			ActorID: "actor-failed", Subject: "user-failed", TenantID: "tenant-failed", Roles: []string{"USER"},
+		},
+	}, orchestrator.ConversationHandlers{})
+	if !errors.Is(err, orchestrator.ErrConversationFailed) {
+		t.Fatalf("converse error = %v, want ErrConversationFailed", err)
+	}
+	if result.Success || result.Message != "" || !strings.Contains(err.Error(), "checkpoint persistence unavailable") {
+		t.Fatalf("failed conversation result=%+v error=%v", result, err)
+	}
+}
+
+func TestOrchestratorClientRejectsEOFWithoutTerminalDone(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &incompleteOrchestratorServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	result, err := client.RunConversation(context.Background(), orchestrator.ConversationRequest{
+		Input: "resume", SessionID: "incomplete-session", RunID: "incomplete-run",
+		Resume: true, SurfaceSHA256: "surface-incomplete",
+		Actor: orchestrator.ActorIdentity{ActorID: "actor", Subject: "user", TenantID: "tenant", Roles: []string{"USER"}},
+	}, orchestrator.ConversationHandlers{})
+	if !errors.Is(err, orchestrator.ErrConversationFailed) || result.Success || result.Message != "" {
+		t.Fatalf("incomplete stream result=%+v error=%v", result, err)
+	}
+}
+
+func TestOrchestratorClientConversationRequestIsolatesConcurrentActorsAndHandlers(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	capturing := &requestScopedOrchestratorServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capturing)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.SetActor(orchestrator.ActorIdentity{
+		ActorID: "legacy", Subject: "legacy", TenantID: "legacy", Roles: []string{"LEGACY"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct {
+		tag   string
+		reply string
+		err   error
+		seen  map[string]bool
+	}
+	outcomes := make(chan outcome, 2)
+	for index, tag := range []string{"alpha", "beta"} {
+		index, tag := index, tag
+		go func() {
+			seen := make(map[string]bool)
+			mark := func(key string) { seen[key] = true }
+			result, err := client.RunConversation(context.Background(), orchestrator.ConversationRequest{
+				Input:         tag,
+				SessionID:     "session-" + tag,
+				RunID:         "run-" + tag,
+				Resume:        true,
+				SurfaceSHA256: "surface-" + tag,
+				History:       []orchestrator.ConversationMessage{{Role: "user", Content: "history-" + tag}},
+				State: &codeagentpb.PlanTodoSnapshot{
+					Revision: uint64(index + 10),
+				},
+				Actor: orchestrator.ActorIdentity{
+					ActorID: "actor-" + tag, Subject: "user-" + tag, TenantID: "tenant-" + tag, Roles: []string{"USER"},
+				},
+			}, orchestrator.ConversationHandlers{
+				TextDelta: func(delta string) {
+					if delta == "text-"+tag {
+						mark("text")
+					}
+				},
+				Compaction: func(update *codeagentpb.CompactionUpdate) error {
+					if update.GetSummary() != tag {
+						return fmt.Errorf("wrong compaction for %s: %s", tag, update.GetSummary())
+					}
+					mark("compaction")
+					return nil
+				},
+				PlanTodo: func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error {
+					switch {
+					case plan != nil && len(plan.GetSteps()) == 1 && plan.GetSteps()[0] == tag:
+						mark("plan")
+					case todo != nil && len(todo.GetTodos()) == 1 && todo.GetTodos()[0].GetContent() == tag:
+						mark("todo")
+					default:
+						return fmt.Errorf("wrong plan/todo callback for %s", tag)
+					}
+					return nil
+				},
+				AgentSpawn: func(_ context.Context, spawn *codeagentpb.AgentSpawn) error {
+					if spawn.GetRequestId() != "spawn-"+tag {
+						return fmt.Errorf("wrong spawn for %s", tag)
+					}
+					mark("spawn")
+					return nil
+				},
+				AgentLifecycle: func(_ context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
+					if lifecycle.GetReason() != tag {
+						return fmt.Errorf("wrong lifecycle for %s", tag)
+					}
+					mark("lifecycle")
+					return nil
+				},
+				Event: func(_ context.Context, event orchestrator.Event) {
+					if event.AskUserRequest != nil && event.AskUserRequest.GetQuestion() == tag {
+						mark("event")
+					}
+				},
+				AskUser: func(_ context.Context, request *codeagentpb.AskUserRequest) (orchestrator.ToolResult, error) {
+					if request.GetQuestion() != tag {
+						return orchestrator.ToolResult{}, fmt.Errorf("wrong ask request for %s", tag)
+					}
+					mark("ask")
+					return orchestrator.ToolResult{Output: "ask-" + tag}, nil
+				},
+				Tool: func(_ context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+					if call.ParametersJSON == tag {
+						mark("tool")
+					}
+					return orchestrator.ToolResult{Output: "tool-" + tag}
+				},
+			})
+			if !result.Success && err == nil {
+				err = errors.New("conversation result was not successful")
+			}
+			outcomes <- outcome{tag: tag, reply: result.Message, err: err, seen: seen}
+		}()
+	}
+
+	for range 2 {
+		result := <-outcomes
+		if result.err != nil {
+			t.Fatalf("request %s failed: %v", result.tag, result.err)
+		}
+		if result.reply != "text-"+result.tag+"done-"+result.tag {
+			t.Fatalf("request %s reply = %q", result.tag, result.reply)
+		}
+		for _, callback := range []string{"text", "compaction", "plan", "todo", "spawn", "lifecycle", "event", "ask", "tool"} {
+			if !result.seen[callback] {
+				t.Errorf("request %s missed %s callback", result.tag, callback)
+			}
+		}
+	}
+
+	capturing.mu.Lock()
+	defer capturing.mu.Unlock()
+	for index, tag := range []string{"alpha", "beta"} {
+		got := capturing.observations[tag]
+		if got.actorID != "actor-"+tag || got.sessionID != "session-"+tag || got.runID != "run-"+tag || got.resume != "true" || got.surfaceSHA256 != "surface-"+tag || got.history != "history-"+tag || got.stateRevision != uint64(index+10) {
+			t.Errorf("request-scoped input crossed sessions for %s: %+v", tag, got)
+		}
 	}
 }
 

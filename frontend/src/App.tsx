@@ -15,9 +15,10 @@ function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): Sessio
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
 function deriveActiveEvents(events: SessionEvent[]): SessionEvent[] {
-  const rewind = [...events].reverse().find((event) => event.rewindTargetSeq !== undefined);
-  if (!rewind || rewind.rewindTargetSeq === undefined) return events;
-  return events.filter((event) => event.seq <= rewind.rewindTargetSeq! || event.seq >= rewind.seq);
+	const marker = [...events].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
+	const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
+	if (!marker || targetSeq === undefined) return events;
+	return events.filter((event) => event.seq <= targetSeq || event.seq >= marker.seq);
 }
 
 function errorMessage(cause: unknown, fallback: string): string {
@@ -46,6 +47,10 @@ function App() {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
     localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
   }, [isDarkTheme]);
+
+  useEffect(() => {
+    if (selectedSession) setStatusDraft(selectedSession.status);
+  }, [selectedSession?.id, selectedSession?.status]);
 
   const syncSessions = useCallback(async (preferredID?: string) => {
     const data = await api.listSessions();
@@ -220,8 +225,8 @@ function App() {
             {selectedSession && <span className={`status-chip ${selectedSession.status}`}>{selectedSession.status}</span>}
           </div>
           <div className="header-actions">
-            {selectedSession && <select aria-label="会话状态" value={statusDraft} onChange={(event) => { const next = event.target.value as Session['status']; setStatusDraft(next); void handleStatus(next); }} disabled={busy}>
-              <option value="running">运行中</option><option value="paused">已暂停</option><option value="done">已完成</option>
+            {selectedSession && <select aria-label="会话状态" value={statusDraft} onChange={(event) => { const next = event.target.value as Session['status']; setStatusDraft(next); void handleStatus(next); }} disabled={busy || selectedSession.status === 'queued'}>
+              <option value="queued" disabled>排队中</option><option value="running">运行中</option><option value="paused">已暂停</option><option value="done">已完成</option>
             </select>}
             <button className="icon-btn" type="button" title="切换主题" aria-label="切换主题" onClick={() => setIsDarkTheme((value) => !value)}>{isDarkTheme ? '☀' : '◐'}</button>
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}
@@ -264,10 +269,16 @@ function ProjectFolder({ projectName, sessions, selectedSessionId, onSelectSessi
 }
 
 function SessionStatus({ session }: { session: Session }) {
+  const runLabel = session.run?.status === 'queued' ? '排队中'
+    : session.run?.status === 'running' ? '运行中'
+      : session.run?.status === 'completed' ? '已完成'
+        : session.run?.status === 'failed' ? '失败' : '';
   return <div className="session-status">
     <div className="status-row"><span>项目</span><strong>{session.projectName}</strong></div>
     <div className="status-row"><span>事件</span><strong>{session.eventCount}</strong></div>
     <div className="status-row"><span>更新</span><strong>{new Date(session.updatedAt).toLocaleString()}</strong></div>
+    {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
+    {session.run?.error && <div className="inline-error" role="status">{session.run.error}</div>}
     {session.goal && <div className="goal-block"><span>目标</span><p>{session.goal}</p></div>}
   </div>;
 }
@@ -278,7 +289,9 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   const [error, setError] = useState('');
   const loadEvents = useCallback(async () => {
     try {
-      const data = await api.listEvents(sessionId, { limit: 1000 });
+      // The ledger is the durable conversation history; an arbitrary client
+      // cap would make long sessions appear to forget their earliest turns.
+      const data = await api.listEvents(sessionId);
       setEvents((previous) => mergeEvents(previous, data));
       setError('');
     } catch (cause) {

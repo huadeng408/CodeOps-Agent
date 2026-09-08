@@ -4,10 +4,27 @@ export interface Session {
   projectName: string;
   title: string;
   goal: string;
-  status: 'running' | 'paused' | 'done';
+  status: 'queued' | 'running' | 'paused' | 'done';
   eventCount: number;
   createdAt: string;
   updatedAt: string;
+  run?: SessionRun;
+}
+
+export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+export interface SessionRun {
+  sessionId: string;
+  runId: string;
+  requestId: string;
+  status: SessionRunStatus;
+  attempt: number;
+  workerId?: string;
+  checkpointHash: string;
+  leaseUntil?: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
 }
 
 export interface SessionEvent {
@@ -24,6 +41,13 @@ export interface SessionEvent {
   seq: number;
   createdAt: string;
   rewindTargetSeq?: number;
+  continuation?: {
+    checkpointHash: string;
+    targetEventId: string;
+    targetSeq: number;
+    targetHash: string;
+    resumeCount: number;
+  };
 }
 
 export interface SessionCheckpoint {

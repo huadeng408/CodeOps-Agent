@@ -81,6 +81,42 @@ class ResumeRecordingLLM(NoToolLLM):
         return ChatResponse(text="resumed after tool")
 
 
+class ToolThenFailLLM:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return ChatResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="read-first-run",
+                        name="Read",
+                        arguments={"path": "README.md"},
+                        arguments_json='{"path":"README.md"}',
+                    )
+                ]
+            )
+        raise RuntimeError("simulated process interruption")
+
+
+class RecordingGraph:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.states = []
+        self.name = getattr(delegate, "name", "recording-graph")
+
+    def get_checkpoint(self, session_id):
+        return self.delegate.get_checkpoint(session_id)
+
+    def write_checkpoint(self, state, *, thread_id):
+        self.states.append(state)
+        return self.delegate.write_checkpoint(state, thread_id=thread_id)
+
+
 class FailingCheckpointGraph:
     name = "failing-checkpoint"
 
@@ -242,14 +278,70 @@ def test_normal_conversation_writes_typed_graph_checkpoint(tmp_path: Path) -> No
         layered_context=app.layered_context,
     )
 
-    responses = list(runner.run("hello", iter(()), session_id="graph-session"))
+    responses = list(
+        runner.run(
+            "hello",
+            iter(()),
+            session_id="graph-session",
+            run_id="run:graph-session",
+            resume=False,
+            surface_sha256="surface:graph-session",
+        )
+    )
 
     assert responses[-1].done.success is True
     checkpoint = app.graph.get_checkpoint("graph-session")
     assert checkpoint is not None
     assert checkpoint.metadata["session_id"] == "graph-session"
     assert checkpoint.metadata["phase"] == "model_after"
+    assert checkpoint.metadata["surface_sha256"] == "surface:graph-session"
     assert checkpoint.done is True
+    app.close()
+
+
+def test_first_run_persists_real_tool_after_surface_identity(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    graph = RecordingGraph(app.graph)
+    runner = ConversationRunner(
+        graph=graph,
+        llm=ToolThenFailLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        list(
+            runner.run(
+                "read README",
+                iter(
+                    [
+                        orchestrator_pb2.HarnessMessage(
+                            tool_result=orchestrator_pb2.ToolResult(
+                                tool_name="Read",
+                                tool_call_id="read-first-run",
+                                output="README contents",
+                            )
+                        )
+                    ]
+                ),
+                session_id="tool-after-first-run",
+                run_id="run:tool-after-first-run",
+                surface_sha256="surface:tool-after-first-run",
+            )
+        )
+
+    tool_after = [state for state in graph.states if state.metadata.get("phase") == "tool_after"]
+    assert tool_after
+    assert tool_after[-1].metadata["surface_sha256"] == "surface:tool-after-first-run"
+    assert tool_after[-1].metadata["tool_call_id"] == "read-first-run"
     app.close()
 
 
@@ -313,6 +405,7 @@ def test_model_after_checkpoint_replays_tool_request_without_calling_model(tmp_p
                 "phase": "model_after",
                 "turn": 1,
                 "history_sha256": ConversationRunner._digest_value([]),
+                "surface_sha256": "surface:model-after-replay",
             },
             tool_requests=[
                 {
@@ -355,6 +448,7 @@ def test_model_after_checkpoint_replays_tool_request_without_calling_model(tmp_p
             session_id=session_id,
             run_id=run_id,
             resume=True,
+            surface_sha256="surface:model-after-replay",
         )
     )
 
@@ -384,27 +478,10 @@ def test_tool_after_resume_uses_harness_history_without_empty_user_turn(tmp_path
                 "run_id": run_id,
                 "phase": "tool_after",
                 "turn": 1,
-                "history_sha256": ConversationRunner._digest_value(
-                    [
-                        {
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "read-2",
-                                    "name": "Read",
-                                    "arguments_json": '{"path":"README.md"}',
-                                }
-                            ],
-                        },
-                        {
-                            "role": "tool",
-                            "name": "Read",
-                            "tool_call_id": "read-2",
-                            "content": "README contents",
-                        },
-                    ]
-                ),
+                # The Harness Surface has legitimately grown after the
+                # checkpoint with the assistant call and its tool result.
+                "history_sha256": ConversationRunner._digest_value([]),
+                "surface_sha256": "surface:tool-after-history",
             },
             done=False,
             next_node="route",
@@ -431,6 +508,7 @@ def test_tool_after_resume_uses_harness_history_without_empty_user_turn(tmp_path
             session_id=session_id,
             run_id=run_id,
             resume=True,
+            surface_sha256="surface:tool-after-history",
             history=[
                 {
                     "role": "assistant",
@@ -464,6 +542,127 @@ def test_tool_after_resume_uses_harness_history_without_empty_user_turn(tmp_path
     app.close()
 
 
+def test_resume_rejects_changed_checkpoint_surface_identity(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "surface-mismatch",
+                "run_id": "run:surface-mismatch",
+                "phase": "tool_after",
+                "turn": 1,
+                "surface_sha256": "surface:original",
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="surface-mismatch",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint surface sha256 does not match request"):
+        runner.load_checkpoint(
+            "surface-mismatch",
+            run_id="run:surface-mismatch",
+            resume=True,
+            surface_sha256="surface:changed",
+        )
+    app.close()
+
+
+def test_resume_rejects_checkpoint_without_surface_identity(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "surface-missing",
+                "run_id": "run:surface-missing",
+                "phase": "tool_after",
+                "turn": 1,
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="surface-missing",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint surface sha256 is missing"):
+        runner.load_checkpoint(
+            "surface-missing",
+            run_id="run:surface-missing",
+            resume=True,
+            surface_sha256="surface:expected",
+        )
+    app.close()
+
+
+@pytest.mark.parametrize(
+    ("run_id", "surface_sha256", "message"),
+    [
+        ("", "surface:required", "continuation run id is required"),
+        ("run:required", "", "continuation surface sha256 is required"),
+    ],
+)
+def test_runner_resume_requires_both_identities(
+    tmp_path: Path, run_id: str, surface_sha256: str, message: str
+) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        list(
+            runner.run(
+                "continue",
+                iter(()),
+                session_id="resume-identities",
+                run_id=run_id,
+                resume=True,
+                surface_sha256=surface_sha256,
+            )
+        )
+    app.close()
+
+
 def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path: Path) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
@@ -475,6 +674,7 @@ def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path
                 "run_id": "run:old",
                 "phase": "tool_after",
                 "turn": 1,
+                "surface_sha256": "surface:old",
             },
             done=False,
             next_node="route",
@@ -495,7 +695,12 @@ def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path
     )
 
     with pytest.raises(ValueError, match="checkpoint run id does not match request"):
-        runner.load_checkpoint("run-isolation", run_id="run:new", resume=True)
+        runner.load_checkpoint(
+            "run-isolation",
+            run_id="run:new",
+            resume=True,
+            surface_sha256="surface:old",
+        )
     app.close()
 
 
@@ -511,6 +716,7 @@ def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Pa
                 "phase": "model_after",
                 "turn": 1,
                 "history_sha256": ConversationRunner._digest_value([]),
+                "surface_sha256": "surface:unreplayable",
             },
             done=False,
             next_node="route",
@@ -538,6 +744,7 @@ def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Pa
                 session_id="unreplayable-model-after",
                 run_id="run:unreplayable",
                 resume=True,
+                surface_sha256="surface:unreplayable",
             )
         )
     app.close()

@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -129,6 +129,14 @@ class ApiClient {
     const result = await this.request<SessionEvent>(
       'POST', `/sessions/${encodeURIComponent(sessionId)}/restore/${encodeURIComponent(hash)}`,
       { body: { expectedSeq } },
+    );
+    return result.data;
+  }
+
+  async continueSession(sessionId: string, expectedSeq: number, checkpointHash = '', requestId = ''): Promise<SessionRun> {
+    const result = await this.request<SessionRun>(
+      'POST', `/sessions/${encodeURIComponent(sessionId)}/continue`,
+      { body: { checkpointHash, expectedSeq, requestId } },
     );
     return result.data;
   }

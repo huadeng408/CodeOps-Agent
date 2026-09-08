@@ -2,11 +2,15 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"code-agent/internal/identity"
+	"code-agent/internal/model"
 	"code-agent/internal/session"
+	"code-agent/pkg/token"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,10 +18,17 @@ import (
 // EventHandler is the browser transport for user messages and immutable
 // checkpoint facts. Tool/assistant events are produced by the orchestrator,
 // never selected by an untrusted browser request.
-type EventHandler struct{ workbench session.WorkbenchModule }
+type EventHandler struct {
+	workbench    session.WorkbenchModule
+	continuation session.ContinuationModule
+}
 
-func NewEventHandler(workbench session.WorkbenchModule) *EventHandler {
-	return &EventHandler{workbench: workbench}
+func NewEventHandler(workbench session.WorkbenchModule, continuation ...session.ContinuationModule) *EventHandler {
+	handler := &EventHandler{workbench: workbench}
+	if len(continuation) > 0 {
+		handler.continuation = continuation[0]
+	}
+	return handler
 }
 
 type createEventRequest struct {
@@ -36,6 +47,12 @@ type createCheckpointRequest struct {
 
 type restoreCheckpointRequest struct {
 	ExpectedSeq *int64 `json:"expectedSeq"`
+}
+
+type continueSessionRequest struct {
+	RequestID      string `json:"requestId"`
+	CheckpointHash string `json:"checkpointHash"`
+	ExpectedSeq    *int64 `json:"expectedSeq"`
 }
 
 func (h *EventHandler) ListEvents(c *gin.Context) {
@@ -167,4 +184,86 @@ func (h *EventHandler) RestoreCheckpoint(c *gin.Context) {
 		return
 	}
 	writeSessionData(c, http.StatusOK, rewind)
+}
+
+// ContinueSession accepts a durable continuation request. The runner returns
+// queued before any model or tool work starts; lifecycle facts stream through
+// the canonical Session Ledger afterwards.
+func (h *EventHandler) ContinueSession(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	var req continueSessionRequest
+	if c.Request.Body == nil || c.ShouldBindJSON(&req) != nil || req.ExpectedSeq == nil {
+		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("requestId and expectedSeq are required")), "requestId and expectedSeq are required")
+		return
+	}
+	if h.continuation == nil {
+		if strings.TrimSpace(req.RequestID) == "" {
+			continued, legacyErr := h.workbench.ContinueFromCheckpoint(c.Request.Context(), owner, c.Param("id"), req.CheckpointHash, *req.ExpectedSeq)
+			if legacyErr != nil {
+				writeSessionError(c, legacyErr, "failed to continue session")
+				return
+			}
+			writeSessionData(c, http.StatusOK, continued)
+			return
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": http.StatusServiceUnavailable, "message": "agent continuation is unavailable", "data": nil})
+		return
+	}
+	actor, err := authenticatedActor(c, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	continued, err := h.continuation.RequestContinuation(c.Request.Context(), session.ContinueCommand{
+		RequestID: strings.TrimSpace(req.RequestID), SessionID: c.Param("id"),
+		CheckpointHash: req.CheckpointHash, OwnerID: owner, ExpectedSeq: *req.ExpectedSeq,
+		Actor: actor,
+	})
+	if err != nil {
+		writeSessionError(c, err, "failed to continue session")
+		return
+	}
+	writeSessionData(c, http.StatusAccepted, continued)
+}
+
+func authenticatedActor(c *gin.Context, sessionID string) (identity.Actor, error) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		return identity.Actor{}, err
+	}
+	claimsValue, ok := c.Get("claims")
+	if !ok {
+		return identity.Actor{}, errAuthenticatedOwner
+	}
+	claims, ok := claimsValue.(*token.CustomClaims)
+	if !ok || claims == nil {
+		return identity.Actor{}, errAuthenticatedOwner
+	}
+	subject := strings.TrimSpace(claims.Username)
+	role := strings.TrimSpace(claims.Role)
+	tenant := ""
+	if value, exists := c.Get("user"); exists {
+		if user, valid := value.(*model.User); valid && user != nil && user.ID == owner {
+			subject = strings.TrimSpace(user.Username)
+			role = strings.TrimSpace(user.Role)
+			tenant = strings.TrimSpace(user.PrimaryOrg)
+		}
+	}
+	if subject == "" {
+		subject = fmt.Sprintf("user:%d", owner)
+	}
+	if role == "" {
+		role = "USER"
+	}
+	if tenant == "" {
+		tenant = fmt.Sprintf("tenant:user:%d", owner)
+	}
+	return identity.Actor{
+		SchemaVersion: identity.SchemaVersion, ActorID: fmt.Sprintf("user:%d", owner),
+		Subject: subject, TenantID: tenant, Roles: []string{role}, SessionID: strings.TrimSpace(sessionID),
+	}, nil
 }

@@ -151,7 +151,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         raise AssertionError("context.abort must terminate the RPC")
 
     @staticmethod
-    def _continuation_metadata(context) -> tuple[str, bool]:
+    def _continuation_metadata(context) -> tuple[str, bool, str]:
         """Read the per-RPC continuation identity from the Harness seam."""
 
         values = {
@@ -166,14 +166,25 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         if isinstance(raw_resume, bytes):
             raw_resume = raw_resume.decode("utf-8", errors="replace")
         resume = str(raw_resume).strip().lower() in {"1", "true", "yes", "on"}
+        raw_surface_sha256 = values.get("x-code-agent-surface-sha256", "")
+        if isinstance(raw_surface_sha256, bytes):
+            raw_surface_sha256 = raw_surface_sha256.decode("utf-8", errors="replace")
+        surface_sha256 = str(raw_surface_sha256).strip()
         if resume and not run_id:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "continuation run id is required when resume is true",
             )
+        if resume and not surface_sha256:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "continuation surface sha256 is required when resume is true",
+            )
         if len(run_id) > 256:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation run id is too long")
-        return run_id, resume
+        if len(surface_sha256) > 256:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation surface sha256 is too long")
+        return run_id, resume, surface_sha256
 
     def _new_runner(self) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
@@ -258,7 +269,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         return update or orchestrator_pb2.CompactionUpdate()
 
     def Converse(self, request_iterator, context):
-        run_id, resume = self._continuation_metadata(context)
+        run_id, resume, surface_sha256 = self._continuation_metadata(context)
         user_text = ""
         session_id = ""
         actor = None
@@ -344,6 +355,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 actor=runner_actor,
                 run_id=run_id,
                 resume=resume,
+                surface_sha256=surface_sha256,
             )
         finally:
             lease.release()

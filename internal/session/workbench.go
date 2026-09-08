@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"code-agent/internal/identity"
 )
 
 var (
@@ -18,12 +20,14 @@ var (
 	// ownerless authorization bypass.
 	ErrSessionOwnerRequired = errors.New("session owner is required")
 	ErrInvalidSessionInput  = errors.New("invalid session input")
+	ErrSessionStateConflict = errors.New("session state conflict")
 )
 
 const (
 	sessionCreatedEventType = "session/created"
 	userMessageEventType    = "user/message"
 	checkpointEventType     = "checkpoint/create"
+	continuationEventType   = "session/continued"
 )
 
 // EventNotifier is a coalescible hint that a Session may have a new ledger
@@ -48,6 +52,9 @@ type WorkbenchModule interface {
 	CreateCheckpoint(context.Context, uint, string, int64, string, string) (CheckpointView, error)
 	ListCheckpoints(context.Context, uint, string) ([]CheckpointView, error)
 	RestoreCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
+	// ContinueFromCheckpoint is retained for older transports. New production
+	// callers must inject ContinuationModule so the request enters a durable run.
+	ContinueFromCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
 }
 
 // Workbench is the deep module used by browser transports. It keeps Session
@@ -68,23 +75,35 @@ type SessionView struct {
 	EventCount  int       `json:"eventCount"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+	Run         *RunView  `json:"run,omitempty"`
 }
 
 // EventView is the browser-safe representation of one canonical ledger fact.
 type EventView struct {
-	ID              string    `json:"id"`
-	SessionID       string    `json:"sessionId"`
-	Seq             int64     `json:"seq"`
-	Type            string    `json:"type"`
-	Author          string    `json:"author"`
-	Content         string    `json:"content"`
-	ToolName        string    `json:"toolName,omitempty"`
-	ToolStatus      string    `json:"toolStatus,omitempty"`
-	ToolOutput      string    `json:"toolOutput,omitempty"`
-	Hash            string    `json:"hash"`
-	PrevHash        string    `json:"prevHash"`
-	CreatedAt       time.Time `json:"createdAt"`
-	RewindTargetSeq *int64    `json:"rewindTargetSeq,omitempty"`
+	ID              string            `json:"id"`
+	SessionID       string            `json:"sessionId"`
+	Seq             int64             `json:"seq"`
+	Type            string            `json:"type"`
+	Author          string            `json:"author"`
+	Content         string            `json:"content"`
+	ToolName        string            `json:"toolName,omitempty"`
+	ToolStatus      string            `json:"toolStatus,omitempty"`
+	ToolOutput      string            `json:"toolOutput,omitempty"`
+	Hash            string            `json:"hash"`
+	PrevHash        string            `json:"prevHash"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	RewindTargetSeq *int64            `json:"rewindTargetSeq,omitempty"`
+	Continuation    *ContinuationView `json:"continuation,omitempty"`
+}
+
+// ContinuationView is the typed, browser-safe recovery receipt. Callers never
+// need to parse display text to recover the selected checkpoint identity.
+type ContinuationView struct {
+	CheckpointHash string `json:"checkpointHash"`
+	TargetEventID  string `json:"targetEventId"`
+	TargetSeq      int64  `json:"targetSeq"`
+	TargetHash     string `json:"targetHash"`
+	ResumeCount    int    `json:"resumeCount"`
 }
 
 // CheckpointView identifies an immutable checkpoint fact and the canonical
@@ -111,6 +130,7 @@ type sessionCreatedPayload struct {
 type messagePayload struct {
 	Author  string `json:"author"`
 	Content string `json:"content"`
+	RunID   string `json:"run_id,omitempty"`
 }
 
 type checkpointPayload struct {
@@ -118,6 +138,22 @@ type checkpointPayload struct {
 	TargetSeq      int64  `json:"target_seq"`
 	TargetChecksum string `json:"target_checksum"`
 	Label          string `json:"label"`
+}
+
+// continuationPayload is the durable receipt for a Codex-style resume. The
+// checkpoint anchor is copied into the event so a future reader can continue
+// from one immutable fact without consulting mutable UI state.
+type continuationPayload struct {
+	RequestID      string         `json:"request_id,omitempty"`
+	RunID          string         `json:"run_id,omitempty"`
+	CheckpointHash string         `json:"checkpoint_hash"`
+	TargetEventID  string         `json:"target_event_id"`
+	TargetSeq      int64          `json:"target_seq"`
+	TargetChecksum string         `json:"target_checksum"`
+	SurfaceSHA256  string         `json:"surface_sha256,omitempty"`
+	InputEventID   string         `json:"input_event_id,omitempty"`
+	ResumeCount    int            `json:"resume_count"`
+	Actor          identity.Actor `json:"actor,omitempty"`
 }
 
 func NewWorkbench(ledger EventLog, notify EventNotifier) *Workbench {
@@ -296,6 +332,14 @@ func (w *Workbench) CreateCheckpoint(ctx context.Context, ownerID uint, sessionI
 	if err != nil {
 		return CheckpointView{}, err
 	}
+	surface, err := w.ledger.Surface(ctx, sessionID)
+	if err != nil {
+		return CheckpointView{}, err
+	}
+	activeTargetIDs := make(map[string]struct{}, len(surface))
+	for _, event := range surface {
+		activeTargetIDs[event.EventID] = struct{}{}
+	}
 	var target *Event
 	for index := range events {
 		if events[index].EventID == targetEventID {
@@ -304,6 +348,9 @@ func (w *Workbench) CreateCheckpoint(ctx context.Context, ownerID uint, sessionI
 		}
 	}
 	if target == nil {
+		return CheckpointView{}, ErrSessionNotFound
+	}
+	if _, active := activeTargetIDs[target.EventID]; !active {
 		return CheckpointView{}, ErrSessionNotFound
 	}
 	payload := checkpointPayload{
@@ -356,6 +403,33 @@ func (w *Workbench) RestoreCheckpoint(ctx context.Context, ownerID uint, session
 	}
 	w.signal(sessionID)
 	return eventToView(rewind)
+}
+
+// ContinueFromCheckpoint is a compatibility adapter for tests and legacy
+// transports. The server wires SessionRunner for the real browser route.
+func (w *Workbench) ContinueFromCheckpoint(ctx context.Context, ownerID uint, sessionID, checkpointHash string, expectedSeq int64) (EventView, error) {
+	current, err := w.Get(ctx, ownerID, sessionID)
+	if err != nil {
+		return EventView{}, err
+	}
+	if current.Status != "paused" {
+		return EventView{}, fmt.Errorf("%w: session must be paused before continuation", ErrSessionStateConflict)
+	}
+	events, err := w.ledger.Events(ctx, sessionID)
+	if err != nil {
+		return EventView{}, err
+	}
+	checkpoint, target, err := selectCheckpoint(events, checkpointHash)
+	if err != nil {
+		return EventView{}, err
+	}
+	receipt := continuationPayload{CheckpointHash: checkpoint.Checksum, TargetEventID: target.EventID, TargetSeq: target.Seq, TargetChecksum: target.Checksum, ResumeCount: 1}
+	event, err := w.ledger.Append(ctx, sessionID, expectedSeq, continuationEventType, receipt)
+	if err != nil {
+		return EventView{}, err
+	}
+	w.signal(sessionID)
+	return eventToView(event)
 }
 
 // Events returns a verified owner-scoped projection of the full ledger.
@@ -447,6 +521,11 @@ func reduceSessionView(events []Event) (SessionView, error) {
 		Status: created.Status, EventCount: len(events),
 		CreatedAt: events[0].CreatedAt, UpdatedAt: events[len(events)-1].CreatedAt,
 	}
+	continuationCount := 0
+	runs, runsErr := projectRuns(events)
+	if runsErr != nil {
+		return SessionView{}, runsErr
+	}
 	for _, event := range events[1:] {
 		switch event.Type {
 		case "session/title-updated":
@@ -467,6 +546,32 @@ func reduceSessionView(events []Event) (SessionView, error) {
 			view.Status = payload.Status
 		case "session/deleted":
 			view.Status = "deleted"
+		case continuationEventType:
+			continuationCount++
+			if err := validateContinuation(events, event, continuationCount); err != nil {
+				return SessionView{}, err
+			}
+			var payload continuationPayload
+			_ = json.Unmarshal(event.Payload, &payload)
+			if payload.RunID == "" {
+				view.Status = "running"
+			} else {
+				view.Status = "queued"
+			}
+		case runLeasedEventType, runHeartbeatEventType:
+			view.Status = "running"
+		case runCompletedEventType:
+			view.Status = "done"
+		case runFailedEventType:
+			view.Status = "paused"
+		}
+	}
+	var latestOrder int64 = -1
+	for _, run := range runs {
+		candidate := run.view
+		if view.Run == nil || run.order > latestOrder {
+			view.Run = &candidate
+			latestOrder = run.order
 		}
 	}
 	return view, nil
@@ -476,7 +581,7 @@ func eventToView(event Event) (EventView, error) {
 	view := EventView{
 		ID: event.EventID, SessionID: event.SessionID, Seq: event.Seq,
 		Type: event.Type, Hash: event.Checksum, PrevHash: event.PrevChecksum,
-		CreatedAt: event.CreatedAt,
+		Author: "system", CreatedAt: event.CreatedAt,
 	}
 	switch event.Type {
 	case userMessageEventType, "assistant/message":
@@ -491,10 +596,79 @@ func eventToView(event Event) (EventView, error) {
 			return EventView{}, fmt.Errorf("%w: invalid rewind payload at seq %d", ErrEventIntegrity, event.Seq)
 		}
 		view.RewindTargetSeq = &payload.TargetSeq
-	default:
-		view.Author = "system"
+	case continuationEventType:
+		payload, err := decodeContinuationPayload(event.Payload)
+		if err != nil {
+			return EventView{}, fmt.Errorf("%w: invalid continuation payload at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		view.Content = fmt.Sprintf("continued from checkpoint at #%d (resume #%d)", payload.TargetSeq, payload.ResumeCount)
+		view.Continuation = &ContinuationView{
+			CheckpointHash: payload.CheckpointHash,
+			TargetEventID:  payload.TargetEventID,
+			TargetSeq:      payload.TargetSeq,
+			TargetHash:     payload.TargetChecksum,
+			ResumeCount:    payload.ResumeCount,
+		}
 	}
 	return view, nil
+}
+
+func validateContinuation(events []Event, event Event, expectedResumeCount int) error {
+	payload, err := decodeContinuationPayload(event.Payload)
+	if err != nil || payload.ResumeCount != expectedResumeCount {
+		return fmt.Errorf("%w: invalid continuation payload at seq %d", ErrEventIntegrity, event.Seq)
+	}
+	if payload.TargetSeq >= event.Seq || payload.TargetSeq >= int64(len(events)) {
+		return fmt.Errorf("%w: invalid continuation target at seq %d", ErrEventIntegrity, event.Seq)
+	}
+	target := events[payload.TargetSeq]
+	if target.EventID != payload.TargetEventID || target.Checksum != payload.TargetChecksum {
+		return fmt.Errorf("%w: continuation target no longer matches ledger", ErrEventIntegrity)
+	}
+	for _, candidate := range events[:event.Seq] {
+		if candidate.Type != checkpointEventType || candidate.Checksum != payload.CheckpointHash {
+			continue
+		}
+		var checkpoint checkpointPayload
+		if err := json.Unmarshal(candidate.Payload, &checkpoint); err != nil ||
+			checkpoint.TargetEventID != payload.TargetEventID ||
+			checkpoint.TargetSeq != payload.TargetSeq ||
+			checkpoint.TargetChecksum != payload.TargetChecksum {
+			return fmt.Errorf("%w: continuation checkpoint no longer matches ledger", ErrEventIntegrity)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: continuation checkpoint not found", ErrEventIntegrity)
+}
+
+func validContinuationFields(payload continuationPayload) bool {
+	return strings.TrimSpace(payload.CheckpointHash) != "" &&
+		strings.TrimSpace(payload.TargetEventID) != "" &&
+		payload.TargetSeq >= 0 &&
+		strings.TrimSpace(payload.TargetChecksum) != "" &&
+		payload.ResumeCount >= 1
+}
+
+// decodeContinuationPayload accepts the pre-runner target_hash spelling for
+// immutable ledger history while normalizing all callers onto target_checksum.
+// The alias does not weaken validation: the referenced checkpoint and target
+// event are still verified against the canonical hash chain.
+func decodeContinuationPayload(raw json.RawMessage) (continuationPayload, error) {
+	var persisted struct {
+		continuationPayload
+		TargetHash string `json:"target_hash"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		return continuationPayload{}, err
+	}
+	payload := persisted.continuationPayload
+	if strings.TrimSpace(payload.TargetChecksum) == "" {
+		payload.TargetChecksum = strings.TrimSpace(persisted.TargetHash)
+	}
+	if !validContinuationFields(payload) {
+		return continuationPayload{}, ErrEventIntegrity
+	}
+	return payload, nil
 }
 
 func checkpointToView(event Event, payload checkpointPayload) CheckpointView {

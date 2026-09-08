@@ -161,22 +161,27 @@ def test_converse_propagates_and_validates_continuation_metadata(
                     metadata=(
                         ("x-code-agent-run-id", "run:durable-123"),
                         ("x-code-agent-resume", "true"),
+                        ("x-code-agent-surface-sha256", "surface:stable-123"),
                     ),
                 )
             )
             assert responses[-1].done.success is True
             assert runner.kwargs["run_id"] == "run:durable-123"
             assert runner.kwargs["resume"] is True
+            assert runner.kwargs["surface_sha256"] == "surface:stable-123"
 
             with pytest.raises(grpc.RpcError) as caught:
                 list(
                     stub.Converse(
                         iter([request]),
-                        metadata=(("x-code-agent-resume", "true"),),
+                        metadata=(
+                            ("x-code-agent-run-id", "run:durable-123"),
+                            ("x-code-agent-resume", "true"),
+                        ),
                     )
                 )
             assert caught.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-            assert "run id is required" in caught.value.details()
+            assert "surface sha256 is required" in caught.value.details()
     finally:
         server.stop(grace=0)
         app.close()

@@ -36,7 +36,7 @@ func sessionErrorStatus(err error) int {
 	if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, session.ErrSequenceConflict) {
+	if errors.Is(err, session.ErrSequenceConflict) || errors.Is(err, session.ErrSessionStateConflict) {
 		return http.StatusConflict
 	}
 	if errors.Is(err, session.ErrInvalidSessionInput) {

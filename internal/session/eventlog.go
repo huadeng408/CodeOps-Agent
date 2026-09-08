@@ -552,7 +552,9 @@ func (l *SQLiteEventLog) RewindWithState(ctx context.Context, sessionID string, 
 }
 
 // Surface replays only surface-marked events. Log-only events remain durable
-// and auditable but never become model input.
+// and auditable but never become model input. Rewind and continuation markers
+// select the exact historical projection at their target sequence, allowing a
+// later marker to recover a branch hidden by an earlier marker.
 func (l *SQLiteEventLog) Surface(ctx context.Context, sessionID string) ([]Event, error) {
 	if err := l.Verify(ctx, sessionID); err != nil {
 		return nil, err
@@ -561,22 +563,32 @@ func (l *SQLiteEventLog) Surface(ctx context.Context, sessionID string) ([]Event
 	if err != nil {
 		return nil, err
 	}
+	return projectSurface(events)
+}
+
+func projectSurface(events []Event) ([]Event, error) {
 	active := make([]Event, 0, len(events))
-	for _, event := range events {
+	projections := make([][]Event, len(events))
+	continuationCount := 0
+	for index, event := range events {
 		if event.SurfaceOp == nil {
-			if event.Type == "session/rewind" {
+			switch event.Type {
+			case "session/rewind":
 				var marker rewindPayload
-				if err := json.Unmarshal(event.Payload, &marker); err != nil || marker.TargetSeq < 0 {
+				if err := json.Unmarshal(event.Payload, &marker); err != nil || marker.TargetSeq < 0 || marker.TargetSeq >= int64(index) {
 					return nil, fmt.Errorf("%w: invalid rewind marker at seq %d", ErrEventIntegrity, event.Seq)
 				}
-				kept := active[:0]
-				for _, current := range active {
-					if current.Seq <= marker.TargetSeq {
-						kept = append(kept, current)
-					}
+				active = cloneEvents(projections[marker.TargetSeq])
+			case continuationEventType:
+				continuationCount++
+				if err := validateContinuation(events, event, continuationCount); err != nil {
+					return nil, err
 				}
-				active = kept
+				var receipt continuationPayload
+				_ = json.Unmarshal(event.Payload, &receipt)
+				active = cloneEvents(projections[receipt.TargetSeq])
 			}
+			projections[index] = cloneEvents(active)
 			continue
 		}
 		switch event.SurfaceOp.Op {
@@ -591,8 +603,13 @@ func (l *SQLiteEventLog) Surface(ctx context.Context, sessionID string) ([]Event
 			}
 			active = append(kept, event)
 		}
+		projections[index] = cloneEvents(active)
 	}
 	return active, nil
+}
+
+func cloneEvents(events []Event) []Event {
+	return append([]Event(nil), events...)
 }
 
 // Events returns an ordered immutable copy of a session's event stream.

@@ -205,6 +205,58 @@ func TestWorkbenchRestoreAppendsRewindAndKeepsHistory(t *testing.T) {
 	}
 }
 
+func TestWorkbenchReadsPreRunnerContinuationTargetHash(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "legacy continuation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "resume me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, target.ID, "legacy anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, map[string]any{
+		"checkpoint_hash": checkpoint.Hash,
+		"target_event_id": target.ID,
+		"target_seq":      target.Seq,
+		"target_hash":     target.Hash,
+		"resume_count":    1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatalf("read legacy continuation: %v", err)
+	}
+	if view.Status != "running" || view.Run != nil {
+		t.Fatalf("legacy continuation projection = %+v", view)
+	}
+	events, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatalf("render legacy continuation event: %v", err)
+	}
+	continued := events[len(events)-1]
+	if continued.Continuation == nil || continued.Continuation.TargetHash != target.Hash {
+		t.Fatalf("legacy continuation view = %+v", continued)
+	}
+
+	runner := NewSessionRunner(workbench, nil, nil, SessionRunnerOptions{})
+	defer runner.Close()
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatalf("recover with pre-runner continuation: %v", err)
+	}
+}
+
 func TestWorkbenchDeleteHidesSessionButKeepsLedgerHistory(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
@@ -235,5 +287,17 @@ func TestWorkbenchDeleteHidesSessionButKeepsLedgerHistory(t *testing.T) {
 	}
 	if len(events) != 2 || events[1].Type != "session/deleted" {
 		t.Fatalf("delete did not preserve its canonical history: %+v", events)
+	}
+}
+
+func TestWorkbenchCheckpointRejectsNonSurfaceEvent(t *testing.T) {
+	ctx := context.Background()
+	workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
+	created, err := workbench.Create(ctx, 7, "repo", "title", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 1, created.ID, "invalid lifecycle target"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("lifecycle checkpoint error = %v, want ErrSessionNotFound", err)
 	}
 }

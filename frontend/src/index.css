@@ -355,6 +355,10 @@ button:disabled {
   background: var(--dsw-alias-text-tertiary);
 }
 
+.status-dot.queued {
+  background: var(--dsw-static-amber-500);
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
@@ -428,6 +432,12 @@ button:disabled {
 .status-chip.running { background: var(--dsw-static-green-500); }
 .status-chip.paused { background: var(--dsw-static-amber-500); }
 .status-chip.done { background: var(--dsw-static-neutral-500); }
+.status-chip.queued { background: var(--dsw-static-amber-500); }
+
+.run-status.failed { color: var(--dsw-static-red-500); }
+.run-status.completed { color: var(--dsw-static-green-500); }
+.run-status.running { color: var(--dsw-static-green-500); }
+.run-status.queued { color: var(--dsw-static-amber-500); }
 
 .conversation-title {
   font-size: 14px;
@@ -652,6 +662,11 @@ button:disabled {
   margin-bottom: 7px;
   color: var(--dsw-alias-text-tertiary);
   font-size: 10px;
+}
+
+.checkpoint-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .empty-panel,

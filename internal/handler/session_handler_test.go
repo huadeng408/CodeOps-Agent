@@ -50,6 +50,7 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench) *gin.Engine {
 	sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
 	sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
 	sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
+	sessions.POST("/:id/continue", eventHandler.ContinueSession)
 	return router
 }
 
@@ -140,5 +141,61 @@ func TestAppendEventReturns409ForStaleExpectedSequence(t *testing.T) {
 	}
 	if len(events) != 2 {
 		t.Fatalf("stale append changed canonical ledger: %+v", events)
+	}
+}
+
+func TestContinueSessionRouteReturnsDurableResumeReceipt(t *testing.T) {
+	workbench, ledger := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "title", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(context.Background(), 7, created.ID, 1, "checkpoint input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.CreateCheckpoint(context.Background(), 7, created.ID, 2, message.ID, "continue here"); err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(context.Background(), 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(7, workbench)
+	response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/continue", map[string]any{
+		"expectedSeq": int64(4),
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("continue status = %d; body=%s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"type":"session/continued"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`resume #1`)) {
+		t.Fatalf("continue response lacks resume receipt: %s", response.Body.String())
+	}
+	stale := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/continue", map[string]any{
+		"expectedSeq": int64(4),
+	})
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale continue status = %d, want 409; body=%s", stale.Code, stale.Body.String())
+	}
+	events, err := ledger.Events(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 5 || events[4].Type != "session/continued" {
+		t.Fatalf("continue changed canonical history unexpectedly: %+v", events)
+	}
+}
+
+func TestContinueSessionRouteHidesForeignSessionLikeMissing(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "title", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := sessionTestRouter(8, workbench)
+	body := map[string]any{"expectedSeq": int64(1)}
+	foreign := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/continue", body)
+	missing := performSessionRequest(router, http.MethodPost, "/sessions/missing/continue", body)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d %q missing=%d %q; continue must not enumerate sessions", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
 	}
 }

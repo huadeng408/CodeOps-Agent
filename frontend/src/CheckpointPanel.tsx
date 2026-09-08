@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Session, SessionCheckpoint, SessionEvent } from './types';
 import { api, ApiError } from './api';
 
@@ -16,22 +16,51 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
   const [selectedEventId, setSelectedEventId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const requestIds = useRef(new Map<string, string>());
 
   const load = async () => {
     setError('');
     try {
       const [checkpointData, eventData] = await Promise.all([
         api.listCheckpoints(session.id),
-        api.listEvents(session.id, { limit: 256 }),
+        api.listEvents(session.id),
       ]);
       setCheckpoints(checkpointData);
-      setEvents(eventData.filter((event) => event.type !== 'session/deleted'));
+      const marker = [...eventData].reverse().find((event) => event.rewindTargetSeq !== undefined || event.continuation !== undefined);
+      const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
+      setEvents(eventData.filter((event) => {
+        const surfaceEvent = ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(event.type);
+        return surfaceEvent && (!marker || targetSeq === undefined || event.seq <= targetSeq || event.seq >= marker.seq);
+      }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '加载失败');
     }
   };
 
   useEffect(() => { void load(); }, [session.id, refreshKey]);
+
+  // A checkpoint form belongs to one session. Reset its draft when the user
+  // switches sessions so an event id from the previous ledger cannot be sent
+  // to the newly selected session.
+  useEffect(() => {
+    setIsCreating(false);
+    setNewLabel('');
+    setSelectedEventId('');
+    setError('');
+  }, [session.id]);
+
+  useEffect(() => {
+    if (!session.run || (session.run.status !== 'queued' && session.run.status !== 'running')) return undefined;
+    const timer = window.setInterval(() => { void onChanged(); }, 1000);
+    return () => window.clearInterval(timer);
+  }, [session.id, session.run?.runId, session.run?.status, onChanged]);
+
+  useEffect(() => {
+    if (session.run?.status !== 'failed') return;
+    const requestKey = `${session.id}:${session.run.checkpointHash}`;
+    requestIds.current.delete(requestKey);
+    localStorage.removeItem(`continuation-request:${requestKey}`);
+  }, [session.id, session.run?.checkpointHash, session.run?.status]);
 
   const handleCreateCheckpoint = async () => {
     if (!newLabel.trim() || !selectedEventId || busy) return;
@@ -65,6 +94,37 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
         ? '会话已更新，请刷新后重试'
         : cause instanceof Error ? cause.message : '恢复失败');
       await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleContinue = async (checkpoint: SessionCheckpoint) => {
+    if (busy || session.status !== 'paused') return;
+    setBusy(true);
+    setError('');
+    const requestKey = `${session.id}:${checkpoint.hash}`;
+    const storageKey = `continuation-request:${requestKey}`;
+    let requestId = requestIds.current.get(requestKey) || localStorage.getItem(storageKey) || '';
+    if (!requestId) {
+      requestId = `browser:${crypto.randomUUID()}`;
+      requestIds.current.set(requestKey, requestId);
+      localStorage.setItem(storageKey, requestId);
+    }
+    try {
+      await api.continueSession(session.id, session.eventCount, checkpoint.hash, requestId);
+    } catch (cause) {
+      setError(cause instanceof ApiError && cause.status === 409
+        ? '会话已更新，请刷新后重试'
+        : cause instanceof Error ? cause.message : '继续失败');
+      await onChanged().catch(() => undefined);
+      setBusy(false);
+      return;
+    }
+    try {
+      await onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? `继续请求已受理，刷新状态失败：${cause.message}` : '继续请求已受理，刷新状态失败');
     } finally {
       setBusy(false);
     }
@@ -108,9 +168,14 @@ export function CheckpointPanel({ session, refreshKey, onChanged }: CheckpointPa
             <div className="checkpoint-item" key={checkpoint.id}>
               <div className="checkpoint-title">{checkpoint.label}</div>
               <div className="checkpoint-meta">事件 #{checkpoint.seq} · {new Date(checkpoint.createdAt).toLocaleString()}</div>
-              <button className="subtle-btn" type="button" onClick={() => void handleRestore(checkpoint)} disabled={busy}>
-                恢复
-              </button>
+              <div className="checkpoint-actions">
+                <button className="subtle-btn" type="button" onClick={() => void handleRestore(checkpoint)} disabled={busy}>
+                  恢复
+                </button>
+                <button className="subtle-btn" type="button" onClick={() => void handleContinue(checkpoint)} disabled={busy || session.status !== 'paused'}>
+                  {session.run?.checkpointHash === checkpoint.hash && (session.run.status === 'running' || session.run.status === 'queued') ? '运行中' : session.run?.checkpointHash === checkpoint.hash && session.run.status === 'failed' ? '重试' : '继续'}
+                </button>
+              </div>
             </div>
           ))}
         </div>

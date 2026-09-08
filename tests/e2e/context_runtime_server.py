@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -71,6 +72,17 @@ class DeterministicContextLLM(LLMClient):
                     if recovered
                     else f"RECOVERY_MISSING:{os.getpid()}"
                 ),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
+        if latest_user == "BROWSER_TRANSPORT_RECOVERY":
+            if os.environ.get("CODE_AGENT_CONTEXT_E2E_STAGE", "").strip().lower() == "block":
+                ready_path = os.environ.get("CODE_AGENT_CONTEXT_E2E_BLOCK_READY", "").strip()
+                if ready_path:
+                    Path(ready_path).write_text(f"{os.getpid()}\n", encoding="utf-8")
+                await asyncio.sleep(3600)
+            return ChatResponse(
+                text=f"TRANSPORT_RECOVERED:{os.getpid()}",
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 

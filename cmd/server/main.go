@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -17,14 +18,18 @@ import (
 	"time"
 
 	"code-agent/internal/handler"
+	"code-agent/internal/identity"
 	"code-agent/internal/middleware"
 	"code-agent/internal/model"
+	harnessorch "code-agent/internal/orchestrator"
+	"code-agent/internal/permission"
 	"code-agent/internal/pipeline"
 	"code-agent/internal/repository"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
 	"code-agent/internal/session"
 	"code-agent/internal/telemetry/genai"
+	"code-agent/internal/tools"
 	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
 	"code-agent/pkg/embedding"
@@ -205,6 +210,64 @@ func main() {
 	}
 	defer ledger.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
+	// Browser continuations use the Go-owned SessionRunner. The gRPC client is
+	// connection-only; actor, run identity, history, and callbacks are supplied
+	// per request so concurrent Sessions cannot cross-write one another.
+	continuationTarget := strings.TrimSpace(os.Getenv("CODE_AGENT_ORCHESTRATOR_ADDR"))
+	if continuationTarget == "" {
+		continuationTarget = "127.0.0.1:50051"
+	}
+	continuationClient, continuationErr := harnessorch.NewClient(continuationTarget)
+	if continuationErr != nil {
+		log.Warnf("session continuation orchestrator unavailable: %v", continuationErr)
+	}
+	continuationRoot, rootErr := os.Getwd()
+	if rootErr != nil || strings.TrimSpace(continuationRoot) == "" {
+		continuationRoot = "."
+	}
+	continuationExecutor := tools.NewExecutor(continuationRoot)
+	if err := continuationExecutor.SetWorkingDir(continuationRoot); err != nil {
+		log.Warnf("session continuation working directory unavailable: %v", err)
+	}
+	continuationPermissions := continuationPermissionController()
+	continuationTools := session.ToolExecutionFunc(func(ctx context.Context, actor identity.Actor, sessionID string, call harnessorch.ToolCall) harnessorch.ToolResult {
+		var arguments map[string]any
+		if strings.TrimSpace(call.ParametersJSON) != "" {
+			if err := json.Unmarshal([]byte(call.ParametersJSON), &arguments); err != nil {
+				return harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid tool parameters", ExitCode: 1}
+			}
+		}
+		if arguments == nil {
+			arguments = map[string]any{}
+		}
+		if continuationPermissions.CheckFor(actor, call.Name, arguments) != permission.Approve {
+			return harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool permission not granted", ExitCode: 1}
+		}
+		result, err := continuationExecutor.Execute(ctx, tools.ToolRequest{
+			Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
+		})
+		out := harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
+		if err != nil && out.Error == "" {
+			out.Error = err.Error()
+		}
+		if err != nil && out.ExitCode == 0 {
+			out.ExitCode = 1
+		}
+		return out
+	})
+	continuationRunner := session.NewSessionRunner(workbench, continuationClient, continuationTools, session.SessionRunnerOptions{
+		WorkerID: "server:" + strings.TrimSpace(cfg.Server.Port),
+	})
+	if continuationErr == nil {
+		if err := continuationRunner.Recover(context.Background()); err != nil {
+			log.Warnf("session continuation recovery scan failed: %v", err)
+		}
+	}
+	defer continuationRunner.Close()
+	defer continuationExecutor.Close()
+	if continuationClient != nil {
+		defer continuationClient.Close()
+	}
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
 
 	// Telemetry: create tracer and wire into handlers and services.
@@ -321,12 +384,13 @@ func main() {
 			sessions.DELETE("/:id", sessionHandler.Delete)
 			sessions.POST("/:id/ws-ticket", sessionHandler.IssueWebSocketTicket)
 
-			eventHandler := handler.NewEventHandler(workbench)
+			eventHandler := handler.NewEventHandler(workbench, continuationRunner)
 			sessions.GET("/:id/events", eventHandler.ListEvents)
 			sessions.POST("/:id/events", eventHandler.CreateEvent)
 			sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
 			sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
 			sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
+			sessions.POST("/:id/continue", eventHandler.ContinueSession)
 
 		}
 		// WebSocket uses an opaque one-time ticket, not an access JWT in the URL.
@@ -406,6 +470,17 @@ func main() {
 		log.Fatalf("failed to shutdown server: %v", err)
 	}
 	log.Info("server stopped")
+}
+
+func continuationPermissionController() *permission.Controller {
+	levels := make(map[string]permission.Level, len(permission.DefaultPermissions))
+	for name, level := range permission.DefaultPermissions {
+		levels[name] = level
+	}
+	// The server config intentionally has no browser-side approval channel.
+	// Only AutoAllow tools can execute during a resumed run; mutating tools
+	// remain fail-closed until an explicit Harness approval surface is wired.
+	return permission.NewController(levels, nil)
 }
 
 func searchReadIndex(cfg serverconfig.Config) (string, error) {

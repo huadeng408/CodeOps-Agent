@@ -41,6 +41,11 @@ A durable recovery anchor for a known Session state. Restoring a Checkpoint
 changes the active Surface without deleting later Session Ledger facts.
 _Avoid_: backup, destructive rollback
 
+**Continuation**:
+The act of resuming an interrupted or paused Session from a verified Checkpoint
+while preserving every prior Session Ledger fact for recovery and audit.
+_Avoid_: retry from scratch, mutable resume flag
+
 **Subagent**:
 A child agent assigned a bounded outcome with its own Context, lifecycle,
 budget, and result that returns to a parent agent.
