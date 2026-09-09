@@ -2,12 +2,23 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
 
 type continuationHealth interface {
 	Health(context.Context) error
+}
+
+// ContinuationSupervisorStatus is a read-only runtime projection. It is not
+// persisted and never competes with the canonical session ledger.
+type ContinuationSupervisorStatus struct {
+	Attached         bool
+	Generation       uint64
+	LastHealthError  string
+	LastRecoveryAt   *time.Time
+	LastTransitionAt *time.Time
 }
 
 // ContinuationSupervisor maintains one live continuation module behind a
@@ -21,6 +32,7 @@ type ContinuationSupervisor struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	closed   bool
+	status   ContinuationSupervisorStatus
 }
 
 func NewContinuationSupervisor(slot *ContinuationSlot, interval time.Duration, connect func(context.Context) (ContinuationModule, error)) *ContinuationSupervisor {
@@ -62,21 +74,28 @@ func (s *ContinuationSupervisor) loop(ctx context.Context) {
 }
 
 func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
-	if current := s.slot.current(); current != nil {
+	if current, generation := s.slot.snapshot(); current != nil {
 		if health, ok := current.(continuationHealth); ok {
 			healthCtx, cancel := context.WithTimeout(ctx, s.interval)
 			err := health.Health(healthCtx)
 			cancel()
 			if err == nil {
+				s.recordHealth(nil, generation)
 				return
 			}
-			s.slot.Detach(current)
-			_ = current.Close()
+			s.recordHealth(err, generation)
+			if s.slot.detachIf(current, generation) {
+				s.recordTransition(false, generation)
+				_ = current.Close()
+			}
 		}
 		return
 	}
 	module, err := s.connect(ctx)
 	if err != nil || module == nil {
+		if err != nil {
+			s.recordHealth(err, 0)
+		}
 		return
 	}
 	if health, ok := module.(continuationHealth); ok {
@@ -84,15 +103,75 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		err = health.Health(healthCtx)
 		cancel()
 		if err != nil {
+			s.recordHealth(err, 0)
 			_ = module.Close()
 			return
 		}
 	}
 	if err := module.Recover(ctx); err != nil {
+		s.recordHealth(err, 0)
 		_ = module.Close()
 		return
 	}
-	s.slot.Attach(module)
+	generation := s.slot.Attach(module)
+	s.recordRecovery(generation)
+}
+
+func (s *ContinuationSupervisor) recordHealth(err error, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		s.status.LastHealthError = ""
+	} else {
+		s.status.LastHealthError = fmt.Sprint(err)
+	}
+	if generation != 0 {
+		s.status.Generation = generation
+	}
+}
+
+func (s *ContinuationSupervisor) recordTransition(attached bool, generation uint64) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	s.status.Attached = attached
+	s.status.Generation = generation
+	s.status.LastTransitionAt = &now
+	s.mu.Unlock()
+}
+
+func (s *ContinuationSupervisor) recordRecovery(generation uint64) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	s.status.Attached = true
+	s.status.Generation = generation
+	s.status.LastHealthError = ""
+	s.status.LastRecoveryAt = &now
+	s.status.LastTransitionAt = &now
+	s.mu.Unlock()
+}
+
+// Status returns a defensive copy of the runtime projection.
+func (s *ContinuationSupervisor) Status() ContinuationSupervisorStatus {
+	if s == nil {
+		return ContinuationSupervisorStatus{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := s.status
+	if status.LastRecoveryAt != nil {
+		t := *status.LastRecoveryAt
+		status.LastRecoveryAt = &t
+	}
+	if status.LastTransitionAt != nil {
+		t := *status.LastTransitionAt
+		status.LastTransitionAt = &t
+	}
+	if s.slot != nil {
+		_, generation := s.slot.snapshot()
+		status.Attached = s.slot.Available()
+		status.Generation = generation
+	}
+	return status
 }
 
 func (s *ContinuationSupervisor) Close() error {

@@ -99,3 +99,47 @@ func TestContinuationSupervisorReplacesUnhealthyModuleAndRecoversNewModule(t *te
 		t.Fatalf("second module recover count = %d, want 1", secondRecovers)
 	}
 }
+
+func TestContinuationSlotDetachIfRejectsStaleGeneration(t *testing.T) {
+	slot := NewContinuationSlot()
+	first := &slotModule{}
+	second := &slotModule{}
+	firstGeneration := slot.Attach(first)
+	secondGeneration := slot.Attach(second)
+	if firstGeneration == secondGeneration {
+		t.Fatalf("generation did not advance: first=%d second=%d", firstGeneration, secondGeneration)
+	}
+	if slot.detachIf(first, firstGeneration) {
+		t.Fatal("stale module detached replacement")
+	}
+	if !slot.Available() || slot.current() != second {
+		t.Fatal("replacement module was lost after stale detach")
+	}
+	if !slot.detachIf(second, secondGeneration) {
+		t.Fatal("current module was not detached")
+	}
+	if slot.Available() {
+		t.Fatal("slot remained available after current detach")
+	}
+}
+
+func TestContinuationSupervisorStatusIsRuntimeProjection(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &supervisorModule{healthy: true}
+	supervisor := NewContinuationSupervisor(slot, time.Hour, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	supervisor.reconcile(context.Background())
+	status := supervisor.Status()
+	if !status.Attached || status.Generation == 0 || status.LastRecoveryAt == nil {
+		t.Fatalf("unexpected attached status: %+v", status)
+	}
+	status.LastRecoveryAt = nil
+	if supervisor.Status().LastRecoveryAt == nil {
+		t.Fatal("status returned a mutable pointer into supervisor state")
+	}
+	if got := slot.Available(); !got {
+		t.Fatal("slot unexpectedly unavailable")
+	}
+	_ = supervisor.Close()
+}
