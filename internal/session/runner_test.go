@@ -459,6 +459,57 @@ func TestSessionRunnerRetrySearchesAllFailedPredecessorsForToolReceipt(t *testin
 	external.mu.Unlock()
 }
 
+func TestWorkbenchRunHistoryKeepsCreationOrderAfterLaterHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendContinuation := func(requestID, runID string, seq int64) {
+		t.Helper()
+		payload, payloadErr := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, requestID, runID, actor)
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		if _, appendErr := ledger.Append(ctx, created.ID, seq, continuationEventType, payload); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	appendContinuation("request-old", "run-old", 4)
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-old", RequestID: "request-old", LeaseID: "lease-old", WorkerID: "worker-old", Attempt: 1,
+		LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendContinuation("request-new", "run-new", 6)
+	if _, err := ledger.Append(ctx, created.ID, 7, runLeasedEventType, runLeasePayload{
+		RunID: "run-new", RequestID: "request-new", LeaseID: "lease-new", WorkerID: "worker-new", Attempt: 1,
+		LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 8, runHeartbeatEventType, runLeasePayload{
+		RunID: "run-old", RequestID: "request-old", LeaseID: "lease-old", WorkerID: "worker-old", Attempt: 1,
+		LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Runs) != 2 || view.Runs[0].RunID != "run-old" || view.Runs[1].RunID != "run-new" {
+		t.Fatalf("run history = %+v, want creation order old,new", view.Runs)
+	}
+	if view.Run == nil || view.Run.RunID != "run-new" {
+		t.Fatalf("current run = %+v, want run-new", view.Run)
+	}
+}
+
 func TestSessionRunnerGracefulCloseLeavesRunRecoverable(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

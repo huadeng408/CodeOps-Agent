@@ -585,13 +585,13 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	for _, run := range runs {
 		orderedRuns = append(orderedRuns, run)
 	}
-	sort.Slice(orderedRuns, func(i, j int) bool { return orderedRuns[i].order < orderedRuns[j].order })
+	sort.Slice(orderedRuns, func(i, j int) bool { return orderedRuns[i].createdOrder < orderedRuns[j].createdOrder })
 	for _, run := range orderedRuns {
 		candidate := run.view
 		view.Runs = append(view.Runs, candidate)
-		if view.Run == nil || run.order > latestOrder {
+		if view.Run == nil || run.createdOrder > latestOrder {
 			view.Run = &candidate
-			latestOrder = run.order
+			latestOrder = run.createdOrder
 		}
 	}
 	return view, nil

@@ -153,14 +153,15 @@ type toolResultPayload struct {
 }
 
 type runProjection struct {
-	view        RunView
-	leaseID     string
-	inputEvent  string
-	surfaceHash string
-	targetSeq   int64
-	actor       identity.Actor
-	terminal    bool
-	order       int64
+	view         RunView
+	leaseID      string
+	inputEvent   string
+	surfaceHash  string
+	targetSeq    int64
+	actor        identity.Actor
+	terminal     bool
+	order        int64
+	createdOrder int64
 }
 
 func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, tools ToolExecutionAdapter, options SessionRunnerOptions) *SessionRunner {
@@ -1118,7 +1119,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			runs[payload.RunID] = runProjection{view: RunView{
 				SessionID: event.SessionID, RunID: payload.RunID, RequestID: payload.RequestID,
 				Status: RunQueued, CheckpointHash: payload.CheckpointHash,
-			}, inputEvent: payload.InputEventID, surfaceHash: payload.SurfaceSHA256, targetSeq: payload.TargetSeq, actor: payload.Actor, order: event.Seq}
+			}, inputEvent: payload.InputEventID, surfaceHash: payload.SurfaceSHA256, targetSeq: payload.TargetSeq, actor: payload.Actor, order: event.Seq, createdOrder: event.Seq}
 		case runLeasedEventType, runHeartbeatEventType:
 			var payload runLeasePayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -1172,7 +1173,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 		}
 		candidates := make([]runProjection, 0)
 		for candidateID, candidate := range runs {
-			if candidateID == runID || !candidate.terminal || candidate.view.Status != RunFailed || candidate.view.CheckpointHash != checkpointHash || candidate.order >= current.order {
+			if candidateID == runID || !candidate.terminal || candidate.view.Status != RunFailed || candidate.view.CheckpointHash != checkpointHash || candidate.createdOrder >= current.createdOrder {
 				continue
 			}
 			if current.actor.ScopeKey() != "" && candidate.actor.ScopeKey() != current.actor.ScopeKey() {
@@ -1180,7 +1181,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			}
 			candidates = append(candidates, candidate)
 		}
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].order < candidates[j].order })
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].createdOrder < candidates[j].createdOrder })
 		if len(candidates) > 0 {
 			ids := make([]string, 0, len(candidates))
 			for _, candidate := range candidates {
