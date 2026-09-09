@@ -45,6 +45,16 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
     let attempt = 0;
     let generation = 0;
 
+    const scheduleReconnect = (connectionGeneration: number) => {
+      if (stopped || connectionGeneration !== generation) return;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 3), 8000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        void connect();
+      }, delay);
+    };
+
     const connect = async () => {
       if (stopped) return;
       const connectionGeneration = ++generation;
@@ -83,16 +93,15 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
           if (socket === currentSocket) socket = null;
           if (stopped) return;
           attempt += 1;
-          const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 3), 8000);
           setState('reconnecting');
-          reconnectTimer = setTimeout(connect, delay);
+          scheduleReconnect(connectionGeneration);
         };
       } catch (error) {
         if (stopped || connectionGeneration !== generation) return;
         attempt += 1;
         setLastError(error instanceof Error ? error.message : '实时连接失败');
         setState('reconnecting');
-        reconnectTimer = setTimeout(connect, Math.min(1000 * 2 ** Math.min(attempt - 1, 3), 8000));
+        scheduleReconnect(connectionGeneration);
       }
     };
 
@@ -100,7 +109,10 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
     return () => {
       stopped = true;
       generation += 1;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
       socket?.close();
       socket = null;
     };
