@@ -346,6 +346,9 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, sessionID := range ids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		events, readErr := r.workbench.ledger.Events(ctx, sessionID)
 		if readErr != nil {
 			return readErr
@@ -355,6 +358,9 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			return projectErr
 		}
 		for runID, run := range runs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if run.terminal {
 				continue
 			}

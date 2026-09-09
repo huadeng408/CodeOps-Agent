@@ -345,6 +345,18 @@ func TestSessionRunnerConcurrentRecoverSingleLeaseClaim(t *testing.T) {
 	}
 }
 
+func TestSessionRunnerRecoverStopsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, _, _ := pausedSessionWithCheckpoint(t, ledger)
+	runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "unused"}, nil, SessionRunnerOptions{WorkerID: "worker-canceled-recover"})
+	t.Cleanup(func() { _ = runner.Close() })
+	if err := runner.Recover(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("recover canceled error = %v, want context canceled", err)
+	}
+}
+
 func TestSessionRunnerRetriesTransportFailureAfterLeaseWithoutTerminalFailure(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
