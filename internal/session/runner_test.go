@@ -357,6 +357,29 @@ func TestSessionRunnerRecoverStopsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestSessionRunnerCloseClearsQueuedRuns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &SessionRunner{
+		ctx: ctx, cancel: cancel, queue: make(chan runKey, 1),
+		queued: make(map[runKey]struct{}),
+	}
+	key := runKey{sessionID: "session-close", runID: "run-close"}
+	runner.queued[key] = struct{}{}
+	runner.queue <- key
+	if err := runner.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	runner.queuedMu.Lock()
+	queued := len(runner.queued)
+	runner.queuedMu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queued runs after close = %d, want 0", queued)
+	}
+	if len(runner.queue) != 0 {
+		t.Fatalf("buffered runs after close = %d, want 0", len(runner.queue))
+	}
+}
+
 func TestSessionRunnerRetriesTransportFailureAfterLeaseWithoutTerminalFailure(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

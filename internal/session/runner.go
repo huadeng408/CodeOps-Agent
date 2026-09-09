@@ -380,7 +380,16 @@ func (r *SessionRunner) Close() error {
 	}
 	r.cancel()
 	r.wg.Wait()
-	return nil
+	r.queuedMu.Lock()
+	clear(r.queued)
+	for {
+		select {
+		case <-r.queue:
+		default:
+			r.queuedMu.Unlock()
+			return nil
+		}
+	}
 }
 
 func (r *SessionRunner) now() time.Time { return r.options.Now().UTC() }
