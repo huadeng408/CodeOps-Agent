@@ -355,6 +355,29 @@ func TestContinuationSupervisorSkipsReconnectWhenSlotClosed(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorDoesNotStartWhenSlotClosed(t *testing.T) {
+	slot := NewContinuationSlot()
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		connects++
+		return nil, errors.New("must not connect")
+	})
+	supervisor.Start(context.Background())
+	time.Sleep(10 * time.Millisecond)
+	if connects != 0 {
+		t.Fatalf("connect attempts after closed-slot start = %d, want 0", connects)
+	}
+	supervisor.mu.Lock()
+	running := supervisor.cancel != nil
+	supervisor.mu.Unlock()
+	if running {
+		t.Fatal("supervisor started a loop for a permanently closed slot")
+	}
+}
+
 func TestContinuationSupervisorDoesNotStartWithCanceledContext(t *testing.T) {
 	slot := NewContinuationSlot()
 	connects := 0
