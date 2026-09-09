@@ -380,6 +380,49 @@ func TestContinuationSupervisorCanRestartAfterParentContextEnds(t *testing.T) {
 	_ = supervisor.Close()
 }
 
+func TestContinuationSupervisorOldLoopCannotClearNewCancel(t *testing.T) {
+	slot := NewContinuationSlot()
+	supervisor := NewContinuationSupervisor(slot, time.Hour, func(context.Context) (ContinuationModule, error) {
+		return nil, errors.New("offline")
+	})
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	supervisor.Start(firstCtx)
+	supervisor.mu.Lock()
+	firstGeneration := supervisor.runGeneration
+	firstCancel := supervisor.cancel
+	supervisor.mu.Unlock()
+	if firstCancel == nil || firstGeneration == 0 {
+		t.Fatal("first supervisor loop did not start")
+	}
+	cancelFirst()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		supervisor.mu.Lock()
+		stopped := supervisor.cancel == nil
+		supervisor.mu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	supervisor.Start(context.Background())
+	supervisor.mu.Lock()
+	secondGeneration := supervisor.runGeneration
+	secondCancel := supervisor.cancel
+	supervisor.mu.Unlock()
+	if secondGeneration <= firstGeneration || secondCancel == nil {
+		t.Fatalf("second loop generation/cancel = %d/%v", secondGeneration, secondCancel != nil)
+	}
+	supervisor.clearRunAfterExit(firstGeneration)
+	supervisor.mu.Lock()
+	remainingCancel := supervisor.cancel
+	supervisor.mu.Unlock()
+	if remainingCancel == nil {
+		t.Fatal("old loop cleared new cancel handle")
+	}
+	_ = supervisor.Close()
+}
+
 func (m *blockingRecoverModule) Recover(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()

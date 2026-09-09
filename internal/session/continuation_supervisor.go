@@ -34,6 +34,7 @@ type ContinuationSupervisor struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	closed          bool
+	runGeneration   uint64
 	status          ContinuationSupervisorStatus
 	connectFailures int
 	nextConnectAt   time.Time
@@ -62,15 +63,17 @@ func (s *ContinuationSupervisor) Start(ctx context.Context) {
 		return
 	}
 	loopCtx, cancel := context.WithCancel(ctx)
+	s.runGeneration++
+	runGeneration := s.runGeneration
 	s.cancel = cancel
 	s.wg.Add(1)
 	s.mu.Unlock()
-	go s.loop(loopCtx)
+	go s.loop(loopCtx, runGeneration)
 }
 
-func (s *ContinuationSupervisor) loop(ctx context.Context) {
+func (s *ContinuationSupervisor) loop(ctx context.Context, runGeneration uint64) {
 	defer s.wg.Done()
-	defer s.clearRunAfterExit()
+	defer s.clearRunAfterExit(runGeneration)
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	if ctx.Err() != nil {
@@ -87,10 +90,10 @@ func (s *ContinuationSupervisor) loop(ctx context.Context) {
 	}
 }
 
-func (s *ContinuationSupervisor) clearRunAfterExit() {
+func (s *ContinuationSupervisor) clearRunAfterExit(runGeneration uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.closed {
+	if !s.closed && s.runGeneration == runGeneration {
 		s.cancel = nil
 	}
 }
