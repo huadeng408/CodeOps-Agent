@@ -166,6 +166,13 @@ func TestContinuationSupervisorCloseClosesAttachedModuleOnce(t *testing.T) {
 	if closed != 1 {
 		t.Fatalf("module close count = %d, want 1", closed)
 	}
+	status := supervisor.Status()
+	if status.Attached || status.LastRecoveryAt != nil || status.NextRetryAt != nil || status.ConsecutiveFailures != 0 {
+		t.Fatalf("closed status retained runtime state: %+v", status)
+	}
+	if status.LastHealthError != "continuation supervisor is closed" {
+		t.Fatalf("closed status error = %q", status.LastHealthError)
+	}
 }
 
 func TestContinuationSupervisorBacksOffFailedConnections(t *testing.T) {

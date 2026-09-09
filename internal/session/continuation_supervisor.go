@@ -230,6 +230,15 @@ func (s *ContinuationSupervisor) Status() ContinuationSupervisorStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.status
+	if s.closed {
+		status.Attached = false
+		status.LastHealthError = "continuation supervisor is closed"
+		status.LastRecoveryAt = nil
+		status.LastTransitionAt = nil
+		status.ConsecutiveFailures = 0
+		status.NextRetryAt = nil
+		return status
+	}
 	if status.LastRecoveryAt != nil {
 		t := *status.LastRecoveryAt
 		status.LastRecoveryAt = &t
