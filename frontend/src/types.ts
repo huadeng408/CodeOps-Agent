@@ -114,3 +114,13 @@ export interface ApiResponse<T> {
   message: string;
   data: T;
 }
+
+export interface ContinuationRuntimeStatus {
+  attached: boolean;
+  generation: number;
+  last_health_error?: string;
+  last_recovery_at?: string;
+  last_transition_at?: string;
+  consecutive_failures: number;
+  next_retry_at?: string;
+}

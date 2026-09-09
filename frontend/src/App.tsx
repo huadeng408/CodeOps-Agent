@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Session, SessionEvent } from './types';
+import type { ContinuationRuntimeStatus, Session, SessionEvent } from './types';
 import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
@@ -106,6 +106,7 @@ function App() {
   const [titleDraft, setTitleDraft] = useState('');
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
   const [showDetails, setShowDetails] = useState(false);
+  const [continuationHealth, setContinuationHealth] = useState<ContinuationRuntimeStatus | null>(null);
   const selectionGenerationRef = useRef(0);
   const canonicalSelectionRef = useRef('');
 
@@ -242,6 +243,21 @@ function App() {
   useEffect(() => {
     void syncSessions().catch((cause) => setError(errorMessage(cause, '会话加载失败'))).finally(() => setLoading(false));
   }, [syncSessions]);
+
+  useEffect(() => {
+    let stopped = false;
+    const refreshHealth = async () => {
+      try {
+        const health = await api.continuationHealth();
+        if (!stopped) setContinuationHealth(health);
+      } catch {
+        if (!stopped) setContinuationHealth(null);
+      }
+    };
+    void refreshHealth();
+    const timer = window.setInterval(() => { void refreshHealth(); }, 3000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, []);
 
   const handleCreateSession = async (event: FormEvent) => {
     event.preventDefault();
@@ -409,7 +425,8 @@ function App() {
             {selectedSession && <select aria-label="会话状态" value={statusDraft} onChange={(event) => { const next = event.target.value as Session['status']; setStatusDraft(next); void handleStatus(next); }} disabled={busy || selectedSession.status === 'queued'}>
               <option value="queued" disabled>排队中</option><option value="running">运行中</option><option value="paused">已暂停</option><option value="done">已完成</option>
             </select>}
-            {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && <button className="subtle-btn header-continue-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy}>{busy ? '继续中...' : '继续任务'}</button>}
+            {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && <button className="subtle-btn header-continue-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || continuationHealth?.attached === false}>{busy ? '继续中...' : continuationHealth?.attached === false ? '编排器恢复中...' : '继续任务'}</button>}
+            {continuationHealth?.attached === false && <span className="continuation-health recovering" role="status">编排器恢复中</span>}
             <button className="icon-btn" type="button" title="切换主题" aria-label="切换主题" onClick={() => setIsDarkTheme((value) => !value)}>{isDarkTheme ? '☀' : '◐'}</button>
             <button className="icon-btn" type="button" title="打开会话详情" aria-label="打开会话详情" onClick={() => setShowDetails((value) => !value)}>▣</button>
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}

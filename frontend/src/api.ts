@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ContinuationRuntimeStatus, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -69,6 +69,15 @@ class ApiClient {
 
   async refresh(): Promise<void> {
     await this.request('POST', '/auth/refreshToken', { body: {} });
+  }
+
+  async continuationHealth(): Promise<ContinuationRuntimeStatus> {
+    const response = await fetch('/healthz', { credentials: 'include' });
+    const payload = await response.json().catch(() => undefined) as { continuation?: ContinuationRuntimeStatus } | undefined;
+    if (!response.ok || !payload?.continuation) {
+      throw new ApiError(response.status || 503, 'continuation health unavailable', payload);
+    }
+    return payload.continuation;
   }
 
   async listSessions(): Promise<Session[]> {
