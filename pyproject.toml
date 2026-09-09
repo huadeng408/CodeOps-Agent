@@ -87,6 +87,11 @@ orchestrator = ["prompts/templates/*.txt"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+# The repository does not depend on Phoenix's global pytest plugin. Disabling
+# the externally installed entry point keeps the canonical test command
+# isolated from optional tracing packages and their MCP client versions.
+addopts = ["-p", "no:phoenix"]
 markers = [
     "integration: explicit tests that require local external runtimes",
 ]
