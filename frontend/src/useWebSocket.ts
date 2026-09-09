@@ -31,23 +31,28 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
+    let generation = 0;
 
     const connect = async () => {
       if (stopped) return;
+      const connectionGeneration = ++generation;
       setState(attempt === 0 ? 'connecting' : 'reconnecting');
       try {
         const { ticket } = await api.issueWebSocketTicket(sessionId);
-        if (stopped) return;
+        if (stopped || connectionGeneration !== generation) return;
         const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const url = `${scheme}://${window.location.host}/api/v1/sessions/${encodeURIComponent(sessionId)}/ws?ticket=${encodeURIComponent(ticket)}&after=${afterRef.current}`;
-        socket = new WebSocket(url);
+        const currentSocket = new WebSocket(url);
+        socket = currentSocket;
 
-        socket.onopen = () => {
+        currentSocket.onopen = () => {
+          if (stopped || connectionGeneration !== generation) return;
           attempt = 0;
           setLastError('');
           setState('connected');
         };
-        socket.onmessage = (event) => {
+        currentSocket.onmessage = (event) => {
+          if (stopped || connectionGeneration !== generation) return;
           try {
             const parsed = JSON.parse(event.data) as SessionEvent;
             if (parsed && parsed.id) callbackRef.current?.(parsed);
@@ -55,12 +60,14 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
             setLastError('收到无法识别的实时事件');
           }
         };
-        socket.onerror = () => {
+        currentSocket.onerror = () => {
+          if (stopped || connectionGeneration !== generation) return;
           setLastError('实时连接暂时不可用');
           setState('error');
         };
-        socket.onclose = () => {
-          socket = null;
+        currentSocket.onclose = () => {
+          if (connectionGeneration !== generation) return;
+          if (socket === currentSocket) socket = null;
           if (stopped) return;
           attempt += 1;
           const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 3), 8000);
@@ -68,7 +75,7 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
           reconnectTimer = setTimeout(connect, delay);
         };
       } catch (error) {
-        if (stopped) return;
+        if (stopped || connectionGeneration !== generation) return;
         attempt += 1;
         setLastError(error instanceof Error ? error.message : '实时连接失败');
         setState('reconnecting');
@@ -79,6 +86,7 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
     void connect();
     return () => {
       stopped = true;
+      generation += 1;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket?.close();
       socket = null;
