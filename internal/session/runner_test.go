@@ -256,6 +256,95 @@ func TestSessionRunnerRecoverClaimsExpiredLeaseWithNextAttempt(t *testing.T) {
 	}
 }
 
+func TestSessionRunnerConcurrentRecoverSingleLeaseClaim(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-concurrent-recover", "run-concurrent-recover", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-concurrent-recover", RequestID: "request-concurrent-recover", LeaseID: "expired-concurrent-lease",
+		WorkerID: "dead-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstConversation := &recordingConversationAdapter{reply: "recovered"}
+	secondConversation := &recordingConversationAdapter{reply: "recovered"}
+	first := NewSessionRunner(workbench, firstConversation, nil, SessionRunnerOptions{WorkerID: "worker-concurrent-1", LeaseDuration: time.Second})
+	second := NewSessionRunner(workbench, secondConversation, nil, SessionRunnerOptions{WorkerID: "worker-concurrent-2", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = first.Recover(ctx) }()
+	go func() { defer wg.Done(); _ = second.Recover(ctx) }()
+	wg.Wait()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events, readErr := ledger.Events(ctx, created.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		projection, projectErr := projectRun(events, "run-concurrent-recover")
+		if projectErr != nil {
+			t.Fatal(projectErr)
+		}
+		if projection.terminal && projection.view.Status == RunCompleted {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := projectRun(events, "run-concurrent-recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !projection.terminal || projection.view.Status != RunCompleted {
+		t.Fatalf("concurrent recovery projection = %+v", projection.view)
+	}
+	var leases, assistantMessages int
+	for _, event := range events {
+		switch event.Type {
+		case runLeasedEventType:
+			var lease runLeasePayload
+			if json.Unmarshal(event.Payload, &lease) == nil && lease.RunID == "run-concurrent-recover" && lease.Attempt == 2 {
+				leases++
+			}
+		case "assistant/message":
+			var message messagePayload
+			if json.Unmarshal(event.Payload, &message) == nil && message.RunID == "run-concurrent-recover" {
+				assistantMessages++
+			}
+		}
+	}
+	if leases != 1 {
+		t.Fatalf("attempt-2 lease events = %d, want 1", leases)
+	}
+	if assistantMessages != 1 {
+		t.Fatalf("assistant messages = %d, want 1", assistantMessages)
+	}
+	firstConversation.mu.Lock()
+	firstCalls := len(firstConversation.requests)
+	firstConversation.mu.Unlock()
+	secondConversation.mu.Lock()
+	secondCalls := len(secondConversation.requests)
+	secondConversation.mu.Unlock()
+	if firstCalls+secondCalls != 1 {
+		t.Fatalf("conversation calls = %d, want 1", firstCalls+secondCalls)
+	}
+}
+
 func TestSessionRunnerRetriesTransportFailureAfterLeaseWithoutTerminalFailure(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
