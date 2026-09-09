@@ -106,6 +106,8 @@ type ContinuationView struct {
 	TargetSeq      int64  `json:"targetSeq"`
 	TargetHash     string `json:"targetHash"`
 	ResumeCount    int    `json:"resumeCount"`
+	RequestID      string `json:"requestId,omitempty"`
+	RunID          string `json:"runId,omitempty"`
 }
 
 // CheckpointView identifies an immutable checkpoint fact and the canonical
@@ -628,6 +630,8 @@ func eventToView(event Event) (EventView, error) {
 			TargetSeq:      payload.TargetSeq,
 			TargetHash:     payload.TargetChecksum,
 			ResumeCount:    payload.ResumeCount,
+			RequestID:      payload.RequestID,
+			RunID:          payload.RunID,
 		}
 	}
 	return view, nil

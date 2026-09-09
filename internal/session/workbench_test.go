@@ -2,10 +2,12 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openWorkbenchTestLedger(t *testing.T) *SQLiteEventLog {
@@ -225,6 +227,7 @@ func TestWorkbenchReadsPreRunnerContinuationTargetHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, map[string]any{
+		"request_id": "legacy-request",
 		"checkpoint_hash": checkpoint.Hash,
 		"target_event_id": target.ID,
 		"target_seq":      target.Seq,
@@ -249,11 +252,35 @@ func TestWorkbenchReadsPreRunnerContinuationTargetHash(t *testing.T) {
 	if continued.Continuation == nil || continued.Continuation.TargetHash != target.Hash {
 		t.Fatalf("legacy continuation view = %+v", continued)
 	}
+	if continued.Continuation.RequestID != "legacy-request" || continued.Continuation.RunID != "" {
+		t.Fatalf("continuation lineage = %+v", continued.Continuation)
+	}
 
 	runner := NewSessionRunner(workbench, nil, nil, SessionRunnerOptions{})
 	defer runner.Close()
 	if err := runner.Recover(ctx); err != nil {
 		t.Fatalf("recover with pre-runner continuation: %v", err)
+	}
+}
+
+func TestEventToViewPreservesContinuationLineage(t *testing.T) {
+	payload, err := json.Marshal(continuationPayload{
+		RequestID: "request-production", RunID: "run-production",
+		CheckpointHash: "checkpoint-hash", TargetEventID: "event-target",
+		TargetSeq: 2, TargetChecksum: "target-hash", ResumeCount: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := eventToView(Event{
+		EventID: "event-continuation", SessionID: "session-1", Seq: 3,
+		Type: continuationEventType, Payload: payload, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("event projection: %v", err)
+	}
+	if view.Continuation == nil || view.Continuation.RequestID != "request-production" || view.Continuation.RunID != "run-production" {
+		t.Fatalf("continuation lineage = %+v", view.Continuation)
 	}
 }
 

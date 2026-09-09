@@ -50,6 +50,8 @@ export interface SessionEvent {
     targetSeq: number;
     targetHash: string;
     resumeCount: number;
+    requestId?: string;
+    runId?: string;
   };
 }
 
