@@ -248,18 +248,25 @@ function App() {
   useEffect(() => {
     let stopped = false;
     const controller = new AbortController();
+    let inFlight = false;
+    let healthGeneration = 0;
     const refreshHealth = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      const generation = ++healthGeneration;
       try {
         const health = await api.continuationHealth(controller.signal);
-        if (!stopped) {
+        if (!stopped && generation === healthGeneration) {
           setContinuationHealth(health);
           setContinuationHealthKnown(true);
         }
       } catch {
-        if (!stopped) {
+        if (!stopped && generation === healthGeneration) {
           setContinuationHealth(null);
           setContinuationHealthKnown(false);
         }
+      } finally {
+        inFlight = false;
       }
     };
     void refreshHealth();
