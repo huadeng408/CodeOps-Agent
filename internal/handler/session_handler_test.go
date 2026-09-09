@@ -40,6 +40,12 @@ func TestSessionErrorStatusMapsContinuationUnavailableTo503(t *testing.T) {
 	}
 }
 
+func TestSessionErrorStatusMapsSessionRunnerClosedTo503(t *testing.T) {
+	if got := sessionErrorStatus(session.ErrSessionRunnerClosed); got != http.StatusServiceUnavailable {
+		t.Fatalf("session runner closed status = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
 func TestWriteSessionErrorUsesStableContinuationUnavailableMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

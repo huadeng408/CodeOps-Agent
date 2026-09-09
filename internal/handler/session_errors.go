@@ -42,7 +42,7 @@ func sessionErrorStatus(err error) int {
 	if errors.Is(err, session.ErrInvalidSessionInput) {
 		return http.StatusBadRequest
 	}
-	if errors.Is(err, session.ErrContinuationUnavailable) {
+	if errors.Is(err, session.ErrContinuationUnavailable) || errors.Is(err, session.ErrSessionRunnerClosed) {
 		return http.StatusServiceUnavailable
 	}
 	message := strings.ToLower(err.Error())
@@ -55,7 +55,7 @@ func sessionErrorStatus(err error) int {
 func writeSessionError(c *gin.Context, err error, fallback string) {
 	status := sessionErrorStatus(err)
 	message := fallback
-	if errors.Is(err, session.ErrContinuationUnavailable) {
+	if errors.Is(err, session.ErrContinuationUnavailable) || errors.Is(err, session.ErrSessionRunnerClosed) {
 		message = "agent continuation is unavailable"
 	} else if status == http.StatusBadRequest || status == http.StatusConflict {
 		message = err.Error()
