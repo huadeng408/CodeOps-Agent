@@ -27,8 +27,9 @@ const (
 )
 
 var (
-	ErrRunNotFound = errors.New("session run not found")
-	ErrLeaseLost   = errors.New("session run lease lost")
+	ErrRunNotFound         = errors.New("session run not found")
+	ErrLeaseLost           = errors.New("session run lease lost")
+	ErrSessionRunnerClosed = errors.New("session runner is closed")
 )
 
 type RunStatus string
@@ -110,6 +111,8 @@ type SessionRunner struct {
 	queue        chan runKey
 	queuedMu     sync.Mutex
 	queued       map[runKey]struct{}
+	lifecycleMu  sync.RWMutex
+	closed       bool
 	wg           sync.WaitGroup
 }
 
@@ -197,6 +200,11 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 func (r *SessionRunner) RequestContinuation(ctx context.Context, command ContinueCommand) (RunView, error) {
 	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
 		return RunView{}, errors.New("session runner requires a workbench")
+	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.closed {
+		return RunView{}, ErrSessionRunnerClosed
 	}
 	if r.conversation == nil {
 		return RunView{}, errors.New("session runner requires an orchestrator")
@@ -341,6 +349,11 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
 		return errors.New("session runner requires a workbench")
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.closed {
+		return ErrSessionRunnerClosed
+	}
 	ids, err := r.workbench.ledger.SessionIDs(ctx)
 	if err != nil {
 		return err
@@ -375,10 +388,27 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 }
 
 func (r *SessionRunner) Close() error {
-	if r == nil || r.cancel == nil {
+	if r == nil {
 		return nil
 	}
-	r.cancel()
+	r.lifecycleMu.Lock()
+	if r.closed {
+		r.lifecycleMu.Unlock()
+		return nil
+	}
+	r.closed = true
+	cancel := r.cancel
+	r.lifecycleMu.Unlock()
+	if cancel == nil {
+		r.queuedMu.Lock()
+		clear(r.queued)
+		for len(r.queue) > 0 {
+			<-r.queue
+		}
+		r.queuedMu.Unlock()
+		return nil
+	}
+	cancel()
 	r.wg.Wait()
 	r.queuedMu.Lock()
 	clear(r.queued)

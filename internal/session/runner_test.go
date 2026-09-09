@@ -380,6 +380,29 @@ func TestSessionRunnerCloseClearsQueuedRuns(t *testing.T) {
 	}
 }
 
+func TestSessionRunnerRejectsContinuationAfterClose(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "unused"}, nil, SessionRunnerOptions{WorkerID: "worker-closed-request"})
+	if err := runner.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-after-close", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	}); !errors.Is(err, ErrSessionRunnerClosed) {
+		t.Fatalf("request after close error = %v, want %v", err, ErrSessionRunnerClosed)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("request after close changed canonical ledger: %d events", len(events))
+	}
+}
+
 func TestSessionRunnerRetriesTransportFailureAfterLeaseWithoutTerminalFailure(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
