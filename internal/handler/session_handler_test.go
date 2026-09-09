@@ -34,6 +34,12 @@ func openHandlerTestWorkbench(t *testing.T) (*session.Workbench, *session.SQLite
 	return session.NewWorkbench(ledger, nil), ledger
 }
 
+func TestSessionErrorStatusMapsContinuationUnavailableTo503(t *testing.T) {
+	if got := sessionErrorStatus(session.ErrContinuationUnavailable); got != http.StatusServiceUnavailable {
+		t.Fatalf("continuation unavailable status = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
 func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*worktree.Manager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

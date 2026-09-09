@@ -42,6 +42,9 @@ func sessionErrorStatus(err error) int {
 	if errors.Is(err, session.ErrInvalidSessionInput) {
 		return http.StatusBadRequest
 	}
+	if errors.Is(err, session.ErrContinuationUnavailable) {
+		return http.StatusServiceUnavailable
+	}
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "not found") || strings.Contains(message, "does not belong") {
 		return http.StatusNotFound
