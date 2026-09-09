@@ -117,3 +117,13 @@ func TestValidateLiveEventCursorRejectsMissingEventIDAtKnownSequence(t *testing.
 		t.Fatal("known sequence without a previous event id must be rejected")
 	}
 }
+
+func TestIsLiveEventEnvelopeRecognizesLedgerFrameWithoutEventID(t *testing.T) {
+	event := session.EventView{Type: "user/message", Seq: 8, Content: "hello"}
+	if !isLiveEventEnvelope(event) {
+		t.Fatal("ledger-shaped frame without event id must still enter cursor validation")
+	}
+	if isLiveEventEnvelope(session.EventView{}) {
+		t.Fatal("an empty decoded object must remain a raw control payload")
+	}
+}

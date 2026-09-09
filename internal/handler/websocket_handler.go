@@ -537,10 +537,17 @@ func validateReplayBatch(last int64, batch []session.EventView) error {
 
 func (h *WebSocketHandler) writeRawEvent(conn *websocket.Conn, raw []byte, seenIDs map[string]struct{}) error {
 	var event session.EventView
-	if err := json.Unmarshal(raw, &event); err == nil && event.ID != "" {
+	if err := json.Unmarshal(raw, &event); err == nil && isLiveEventEnvelope(event) {
 		return h.writeEvent(conn, event.Seq, event.ID, raw, seenIDs)
 	}
 	return h.hub.Write(conn, websocket.TextMessage, raw)
+}
+
+// isLiveEventEnvelope identifies canonical ledger-shaped payloads before
+// validating their immutable identity. A malformed event must not bypass
+// cursor checks merely because its event ID is absent.
+func isLiveEventEnvelope(event session.EventView) bool {
+	return strings.TrimSpace(event.Type) != "" || strings.TrimSpace(event.SessionID) != ""
 }
 
 func (h *WebSocketHandler) writeEvent(conn *websocket.Conn, seq int64, eventID string, raw []byte, seenIDs map[string]struct{}) error {
