@@ -593,11 +593,13 @@ func healthzHandlerWithContinuation(statusFn func() string, continuationFn func(
 		if continuationFn != nil {
 			state := continuationFn()
 			body["continuation"] = gin.H{
-				"attached":           state.Attached,
-				"generation":         state.Generation,
-				"last_health_error":  state.LastHealthError,
-				"last_recovery_at":   state.LastRecoveryAt,
-				"last_transition_at": state.LastTransitionAt,
+				"attached":             state.Attached,
+				"generation":           state.Generation,
+				"last_health_error":    state.LastHealthError,
+				"last_recovery_at":     state.LastRecoveryAt,
+				"last_transition_at":   state.LastTransitionAt,
+				"consecutive_failures": state.ConsecutiveFailures,
+				"next_retry_at":        state.NextRetryAt,
 			}
 		}
 		c.JSON(http.StatusOK, body)

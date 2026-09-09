@@ -44,24 +44,25 @@ func (s *ContinuationSlot) Detach(module ContinuationModule) {
 	s.mu.Lock()
 	if s.module == module {
 		s.module = nil
+		s.generation++
 	}
 	s.mu.Unlock()
 }
 
 // detachIf removes module only when it is still the module observed at
 // generation. This prevents a stale health check from detaching a replacement.
-func (s *ContinuationSlot) detachIf(module ContinuationModule, generation uint64) bool {
+func (s *ContinuationSlot) detachIf(module ContinuationModule, generation uint64) (uint64, bool) {
 	if s == nil || module == nil {
-		return false
+		return 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.module != module || s.generation != generation {
-		return false
+		return s.generation, false
 	}
 	s.module = nil
 	s.generation++
-	return true
+	return s.generation, true
 }
 
 func (s *ContinuationSlot) current() ContinuationModule {
@@ -105,6 +106,9 @@ func (s *ContinuationSlot) Close() error {
 	s.mu.Lock()
 	m := s.module
 	s.module = nil
+	if m != nil {
+		s.generation++
+	}
 	s.mu.Unlock()
 	if m == nil {
 		return nil

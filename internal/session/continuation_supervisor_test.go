@@ -110,14 +110,18 @@ func TestContinuationSlotDetachIfRejectsStaleGeneration(t *testing.T) {
 	if firstGeneration == secondGeneration {
 		t.Fatalf("generation did not advance: first=%d second=%d", firstGeneration, secondGeneration)
 	}
-	if slot.detachIf(first, firstGeneration) {
+	if _, detached := slot.detachIf(first, firstGeneration); detached {
 		t.Fatal("stale module detached replacement")
 	}
 	if !slot.Available() || slot.current() != second {
 		t.Fatal("replacement module was lost after stale detach")
 	}
-	if !slot.detachIf(second, secondGeneration) {
+	detachedGeneration, detached := slot.detachIf(second, secondGeneration)
+	if !detached {
 		t.Fatal("current module was not detached")
+	}
+	if detachedGeneration <= secondGeneration {
+		t.Fatalf("detach generation = %d, want greater than %d", detachedGeneration, secondGeneration)
 	}
 	if slot.Available() {
 		t.Fatal("slot remained available after current detach")
@@ -172,6 +176,10 @@ func TestContinuationSupervisorBacksOffFailedConnections(t *testing.T) {
 		return nil, errors.New("orchestrator unavailable")
 	})
 	supervisor.reconcile(context.Background())
+	status := supervisor.Status()
+	if status.ConsecutiveFailures != 1 || status.NextRetryAt == nil {
+		t.Fatalf("retry status = %+v, want one failure and next retry", status)
+	}
 	supervisor.reconcile(context.Background())
 	if connects != 1 {
 		t.Fatalf("connect attempts = %d, want 1 while backoff is active", connects)

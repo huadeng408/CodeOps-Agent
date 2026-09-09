@@ -14,11 +14,13 @@ type continuationHealth interface {
 // ContinuationSupervisorStatus is a read-only runtime projection. It is not
 // persisted and never competes with the canonical session ledger.
 type ContinuationSupervisorStatus struct {
-	Attached         bool
-	Generation       uint64
-	LastHealthError  string
-	LastRecoveryAt   *time.Time
-	LastTransitionAt *time.Time
+	Attached            bool
+	Generation          uint64
+	LastHealthError     string
+	LastRecoveryAt      *time.Time
+	LastTransitionAt    *time.Time
+	ConsecutiveFailures int
+	NextRetryAt         *time.Time
 }
 
 // ContinuationSupervisor maintains one live continuation module behind a
@@ -86,8 +88,8 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 				return
 			}
 			s.recordHealth(err, generation)
-			if s.slot.detachIf(current, generation) {
-				s.recordTransition(false, generation)
+			if detachedGeneration, detached := s.slot.detachIf(current, generation); detached {
+				s.recordTransition(false, detachedGeneration)
 				_ = current.Close()
 			}
 		}
@@ -149,12 +151,17 @@ func (s *ContinuationSupervisor) scheduleConnectRetry() {
 		delay = time.Minute
 	}
 	s.nextConnectAt = time.Now().Add(delay)
+	s.status.ConsecutiveFailures = s.connectFailures
+	nextRetryAt := s.nextConnectAt.UTC()
+	s.status.NextRetryAt = &nextRetryAt
 }
 
 func (s *ContinuationSupervisor) resetConnectRetry() {
 	s.mu.Lock()
 	s.connectFailures = 0
 	s.nextConnectAt = time.Time{}
+	s.status.ConsecutiveFailures = 0
+	s.status.NextRetryAt = nil
 	s.mu.Unlock()
 }
 
@@ -206,6 +213,10 @@ func (s *ContinuationSupervisor) Status() ContinuationSupervisorStatus {
 	if status.LastTransitionAt != nil {
 		t := *status.LastTransitionAt
 		status.LastTransitionAt = &t
+	}
+	if status.NextRetryAt != nil {
+		t := *status.NextRetryAt
+		status.NextRetryAt = &t
 	}
 	if s.slot != nil {
 		_, generation := s.slot.snapshot()
