@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContinuationRuntimeStatus, RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
+import { createContinuationRequestId } from './continuationRequest';
 
 function readLocalStorage(key: string): string | null {
   try {
@@ -190,7 +191,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
     const storageKey = `continuation-request:${requestKey}`;
     let requestId = forceNewRequestId ? '' : requestIds.current.get(requestKey) || readLocalStorage(storageKey) || '';
     if (!requestId) {
-      requestId = `browser:${crypto.randomUUID()}`;
+      requestId = createContinuationRequestId();
       requestIds.current.set(requestKey, requestId);
       writeLocalStorage(storageKey, requestId);
     }

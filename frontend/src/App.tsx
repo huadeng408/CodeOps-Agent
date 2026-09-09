@@ -4,6 +4,7 @@ import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
 import { LoginPage } from './LoginPage';
+import { createContinuationRequestId } from './continuationRequest';
 
 function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
   const byID = new Map<string, SessionEvent>();
@@ -371,8 +372,8 @@ function App() {
     const storageKey = `continuation-request:${selectedSession.id}:${checkpointHash}`;
     const retryingFailedRun = selectedSession.run.status === 'failed';
     const requestId = retryingFailedRun
-      ? `browser:${crypto.randomUUID()}`
-      : readLocalStorage(storageKey) || `browser:${crypto.randomUUID()}`;
+      ? createContinuationRequestId()
+      : readLocalStorage(storageKey) || createContinuationRequestId();
     writeLocalStorage(storageKey, requestId);
     try {
       await api.continueSession(selectedSession.id, selectedSession.eventCount, checkpointHash, requestId);
