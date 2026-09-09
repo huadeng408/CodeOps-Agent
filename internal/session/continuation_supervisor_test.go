@@ -308,6 +308,25 @@ func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorDoesNotStartWithCanceledContext(t *testing.T) {
+	slot := NewContinuationSlot()
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		connects++
+		return nil, errors.New("should not connect")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	supervisor.Start(ctx)
+	time.Sleep(5 * time.Millisecond)
+	if connects != 0 {
+		t.Fatalf("connect attempts = %d, want 0", connects)
+	}
+	if supervisor.Status().Attached {
+		t.Fatal("canceled supervisor became attached")
+	}
+}
+
 func (m *blockingRecoverModule) Recover(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()

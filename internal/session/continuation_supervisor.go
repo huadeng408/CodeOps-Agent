@@ -50,6 +50,12 @@ func (s *ContinuationSupervisor) Start(ctx context.Context) {
 	if s == nil || s.slot == nil || s.connect == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	s.mu.Lock()
 	if s.closed || s.cancel != nil {
 		s.mu.Unlock()
