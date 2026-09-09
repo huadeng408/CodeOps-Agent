@@ -37,6 +37,22 @@ function sessionDraftKey(sessionId: string): string {
   return `codeops:draft:${sessionId}`;
 }
 
+function readLocalStorage(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalStorage(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Session continuity is ledger-backed; browser storage is only a hint.
+  }
+}
+
 // The ledger remains the transport cursor and audit history. The active UI
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
@@ -122,7 +138,7 @@ function App() {
     const data = await api.listSessions();
     setSessions(data);
     setSelectedSession((current) => {
-      const remembered = localStorage.getItem('codeops:selected-session');
+      const remembered = readLocalStorage('codeops:selected-session');
       const wanted = preferredID || current?.id || remembered;
       const next = (wanted && data.find((session) => session.id === wanted)) || data[0] || null;
       if (next) localStorage.setItem('codeops:selected-session', next.id);
@@ -147,7 +163,7 @@ function App() {
 
   const handleSelectSession = useCallback(async (session: Session) => {
     setSelectedSession(session);
-    localStorage.setItem('codeops:selected-session', session.id);
+    writeLocalStorage('codeops:selected-session', session.id);
     setStatusDraft(session.status);
     setEditingTitle(false);
     setError('');
@@ -264,8 +280,8 @@ function App() {
     setError('');
     const checkpointHash = selectedSession.run.checkpointHash;
     const storageKey = `continuation-request:${selectedSession.id}:${checkpointHash}`;
-    const requestId = localStorage.getItem(storageKey) || `browser:${crypto.randomUUID()}`;
-    localStorage.setItem(storageKey, requestId);
+    const requestId = readLocalStorage(storageKey) || `browser:${crypto.randomUUID()}`;
+    writeLocalStorage(storageKey, requestId);
     try {
       await api.continueSession(selectedSession.id, selectedSession.eventCount, checkpointHash, requestId);
       await refreshSelected();
