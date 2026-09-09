@@ -351,6 +351,10 @@ function App() {
 
   const handleContinueSession = async () => {
     if (!selectedSession || busy || selectedSession.status !== 'paused' || !selectedSession.run?.checkpointHash) return;
+    if (!continuationHealthKnown || continuationHealth?.attached !== true) {
+      setError('编排器正在恢复，暂不能继续任务');
+      return;
+    }
     setBusy(true);
     setError('');
     const checkpointHash = selectedSession.run.checkpointHash;
