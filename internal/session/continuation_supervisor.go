@@ -70,6 +70,7 @@ func (s *ContinuationSupervisor) Start(ctx context.Context) {
 
 func (s *ContinuationSupervisor) loop(ctx context.Context) {
 	defer s.wg.Done()
+	defer s.clearRunAfterExit()
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	if ctx.Err() != nil {
@@ -83,6 +84,14 @@ func (s *ContinuationSupervisor) loop(ctx context.Context) {
 		case <-ticker.C:
 			s.reconcile(ctx)
 		}
+	}
+}
+
+func (s *ContinuationSupervisor) clearRunAfterExit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.cancel = nil
 	}
 }
 

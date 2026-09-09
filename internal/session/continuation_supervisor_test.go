@@ -327,6 +327,59 @@ func TestContinuationSupervisorDoesNotStartWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorCanRestartAfterParentContextEnds(t *testing.T) {
+	slot := NewContinuationSlot()
+	var mu sync.Mutex
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		mu.Lock()
+		connects++
+		mu.Unlock()
+		return nil, errors.New("offline")
+	})
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	supervisor.Start(firstCtx)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		attempts := connects
+		mu.Unlock()
+		if attempts > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancelFirst()
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		supervisor.mu.Lock()
+		stopped := supervisor.cancel == nil
+		supervisor.mu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	supervisor.Start(context.Background())
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		attempts := connects
+		mu.Unlock()
+		if attempts > 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	finalAttempts := connects
+	mu.Unlock()
+	if finalAttempts < 2 {
+		t.Fatalf("connect attempts after restart = %d, want at least 2", finalAttempts)
+	}
+	_ = supervisor.Close()
+}
+
 func (m *blockingRecoverModule) Recover(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
