@@ -204,10 +204,12 @@ function App() {
       || runStatus === 'running';
     if (!sessionId || !active) return undefined;
     let stopped = false;
+    let pollGeneration = 0;
     const refresh = async () => {
+      const generation = ++pollGeneration;
       try {
         const fresh = await api.getSession(sessionId);
-        if (stopped) return;
+        if (stopped || generation !== pollGeneration) return;
         setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
         setSelectedSession((current) => {
           if (!current || current.id !== fresh.id) return current;
@@ -221,7 +223,7 @@ function App() {
         });
         setStatusDraft(fresh.status);
       } catch (cause) {
-        if (!stopped) setError(errorMessage(cause, '运行状态同步失败'));
+        if (!stopped && generation === pollGeneration) setError(errorMessage(cause, '运行状态同步失败'));
       }
     };
     const timer = window.setInterval(() => { void refresh(); }, 2000);
