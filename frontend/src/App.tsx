@@ -359,7 +359,10 @@ function App() {
     setError('');
     const checkpointHash = selectedSession.run.checkpointHash;
     const storageKey = `continuation-request:${selectedSession.id}:${checkpointHash}`;
-    const requestId = readLocalStorage(storageKey) || `browser:${crypto.randomUUID()}`;
+    const retryingFailedRun = selectedSession.run.status === 'failed';
+    const requestId = retryingFailedRun
+      ? `browser:${crypto.randomUUID()}`
+      : readLocalStorage(storageKey) || `browser:${crypto.randomUUID()}`;
     writeLocalStorage(storageKey, requestId);
     try {
       await api.continueSession(selectedSession.id, selectedSession.eventCount, checkpointHash, requestId);
