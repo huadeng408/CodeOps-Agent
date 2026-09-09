@@ -2,6 +2,30 @@ import { useEffect, useRef, useState } from 'react';
 import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
 
+function readLocalStorage(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalStorage(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Canonical continuation state lives in the ledger; storage is only a hint.
+  }
+}
+
+function removeLocalStorage(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Best effort only; a new request id remains safe without browser storage.
+  }
+}
+
 interface CheckpointPanelProps {
   session: Session;
   refreshKey: number;
@@ -87,7 +111,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
     if (session.run?.status !== 'failed') return;
     const requestKey = `${session.id}:${session.run.checkpointHash}`;
     requestIds.current.delete(requestKey);
-    localStorage.removeItem(`continuation-request:${requestKey}`);
+    removeLocalStorage(`continuation-request:${requestKey}`);
   }, [session.id, session.run?.checkpointHash, session.run?.status]);
 
   const rewindEvents = events.filter((event) => event.type === 'session/rewind' && event.rewindTargetSeq !== undefined);
@@ -160,11 +184,11 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
     setError('');
     const requestKey = `${session.id}:${checkpoint.hash}`;
     const storageKey = `continuation-request:${requestKey}`;
-    let requestId = forceNewRequestId ? '' : requestIds.current.get(requestKey) || localStorage.getItem(storageKey) || '';
+    let requestId = forceNewRequestId ? '' : requestIds.current.get(requestKey) || readLocalStorage(storageKey) || '';
     if (!requestId) {
       requestId = `browser:${crypto.randomUUID()}`;
       requestIds.current.set(requestKey, requestId);
-      localStorage.setItem(storageKey, requestId);
+      writeLocalStorage(storageKey, requestId);
     }
     try {
       await api.continueSession(session.id, session.eventCount, checkpoint.hash, requestId);
