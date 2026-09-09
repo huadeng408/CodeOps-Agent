@@ -266,6 +266,48 @@ type blockingRecoverModule struct {
 	*supervisorModule
 }
 
+type gatedRecoverModule struct {
+	*supervisorModule
+	started chan struct{}
+	release chan struct{}
+}
+
+func (m *gatedRecoverModule) Recover(context.Context) error {
+	close(m.started)
+	<-m.release
+	return nil
+}
+
+func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &gatedRecoverModule{
+		supervisorModule: &supervisorModule{healthy: true},
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	done := make(chan struct{})
+	go func() {
+		supervisor.reconcile(context.Background())
+		close(done)
+	}()
+	<-module.started
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(module.release)
+	<-done
+	if slot.Available() {
+		t.Fatal("late recovery attached after supervisor close")
+	}
+	_, _, closed := module.snapshot()
+	if closed != 1 {
+		t.Fatalf("late module close count = %d, want 1", closed)
+	}
+}
+
 func (m *blockingRecoverModule) Recover(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()

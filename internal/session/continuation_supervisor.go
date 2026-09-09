@@ -128,19 +128,32 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		s.scheduleConnectRetry()
 		return
 	}
-	if s.isClosed() {
+	if !s.attachRecovered(module) {
 		_ = module.Close()
-		return
 	}
-	generation := s.slot.Attach(module)
-	s.resetConnectRetry()
-	s.recordRecovery(generation)
 }
 
-func (s *ContinuationSupervisor) isClosed() bool {
+// attachRecovered makes the shutdown check and slot attach one atomic
+// supervisor transition. Close cannot mark the supervisor closed between the
+// check and attach, so a late Recover result never resurrects a closed slot.
+func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closed
+	if s.closed || module == nil {
+		return false
+	}
+	generation := s.slot.Attach(module)
+	now := time.Now().UTC()
+	s.connectFailures = 0
+	s.nextConnectAt = time.Time{}
+	s.status.Attached = true
+	s.status.Generation = generation
+	s.status.LastHealthError = ""
+	s.status.LastRecoveryAt = &now
+	s.status.LastTransitionAt = &now
+	s.status.ConsecutiveFailures = 0
+	s.status.NextRetryAt = nil
+	return true
 }
 
 func (s *ContinuationSupervisor) shouldAttemptConnect(now time.Time) bool {
@@ -166,15 +179,6 @@ func (s *ContinuationSupervisor) scheduleConnectRetry() {
 	s.status.NextRetryAt = &nextRetryAt
 }
 
-func (s *ContinuationSupervisor) resetConnectRetry() {
-	s.mu.Lock()
-	s.connectFailures = 0
-	s.nextConnectAt = time.Time{}
-	s.status.ConsecutiveFailures = 0
-	s.status.NextRetryAt = nil
-	s.mu.Unlock()
-}
-
 func (s *ContinuationSupervisor) recordHealth(err error, generation uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -193,17 +197,6 @@ func (s *ContinuationSupervisor) recordTransition(attached bool, generation uint
 	s.mu.Lock()
 	s.status.Attached = attached
 	s.status.Generation = generation
-	s.status.LastTransitionAt = &now
-	s.mu.Unlock()
-}
-
-func (s *ContinuationSupervisor) recordRecovery(generation uint64) {
-	now := time.Now().UTC()
-	s.mu.Lock()
-	s.status.Attached = true
-	s.status.Generation = generation
-	s.status.LastHealthError = ""
-	s.status.LastRecoveryAt = &now
 	s.status.LastTransitionAt = &now
 	s.mu.Unlock()
 }
