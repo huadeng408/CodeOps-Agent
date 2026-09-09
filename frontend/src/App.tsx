@@ -141,6 +141,26 @@ function App() {
     setRefreshKey((value) => value + 1);
   }, [selectedSession, syncSessions]);
 
+  const handleSelectSession = useCallback(async (session: Session) => {
+    setSelectedSession(session);
+    localStorage.setItem('codeops:selected-session', session.id);
+    setStatusDraft(session.status);
+    setEditingTitle(false);
+    setError('');
+    // Sidebar entries are a convenient index, not the recovery source. Read
+    // the canonical ledger projection whenever a task is reopened so run,
+    // checkpoint, retry lineage and status survive browser reloads.
+    try {
+      const fresh = await api.getSession(session.id);
+      setSelectedSession(fresh);
+      setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
+      setStatusDraft(fresh.status);
+      setRefreshKey((value) => value + 1);
+    } catch (cause) {
+      setError(errorMessage(cause, '会话恢复状态加载失败'));
+    }
+  }, []);
+
   useEffect(() => {
     void syncSessions().catch((cause) => setError(errorMessage(cause, '会话加载失败'))).finally(() => setLoading(false));
   }, [syncSessions]);
@@ -285,13 +305,7 @@ function App() {
         )}
         <div className="session-list">
           {Object.entries(sessionsByProject).map(([projectName, projectSessions]) => (
-            <ProjectFolder key={projectName} projectName={projectName} sessions={projectSessions} selectedSessionId={selectedSession?.id} onSelectSession={(session) => {
-              setSelectedSession(session);
-              localStorage.setItem('codeops:selected-session', session.id);
-              setStatusDraft(session.status);
-              setEditingTitle(false);
-              setError('');
-            }} />
+            <ProjectFolder key={projectName} projectName={projectName} sessions={projectSessions} selectedSessionId={selectedSession?.id} onSelectSession={(session) => { void handleSelectSession(session); }} />
           ))}
           {sessions.length === 0 && <div className="empty-panel">暂无会话</div>}
         </div>
