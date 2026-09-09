@@ -310,8 +310,8 @@ func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
 		t.Fatal("late recovery attached after supervisor close")
 	}
 	_, _, closed := module.snapshot()
-	if closed != 1 {
-		t.Fatalf("late module close count = %d, want 1", closed)
+	if closed != 0 {
+		t.Fatalf("uncreated module close count = %d, want 0", closed)
 	}
 }
 
@@ -335,6 +335,23 @@ func TestContinuationSupervisorDoesNotProjectAttachmentWhenSlotClosed(t *testing
 	_, _, closed := module.snapshot()
 	if closed != 1 {
 		t.Fatalf("late module close count = %d, want 1", closed)
+	}
+}
+
+func TestContinuationSupervisorSkipsReconnectWhenSlotClosed(t *testing.T) {
+	slot := NewContinuationSlot()
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		connects++
+		return &supervisorModule{healthy: true}, nil
+	})
+	supervisor.reconcile(context.Background())
+	supervisor.reconcile(context.Background())
+	if connects != 0 {
+		t.Fatalf("connect attempts after slot close = %d, want 0", connects)
 	}
 }
 

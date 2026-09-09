@@ -102,6 +102,9 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 	if s == nil || s.slot == nil || s.connect == nil {
 		return
 	}
+	if s.slot.isClosed() {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

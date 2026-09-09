@@ -22,6 +22,15 @@ func NewContinuationSlot() *ContinuationSlot { return &ContinuationSlot{} }
 // Available reports whether a live continuation module is currently attached.
 func (s *ContinuationSlot) Available() bool { return s.current() != nil }
 
+func (s *ContinuationSlot) isClosed() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
 func (s *ContinuationSlot) Attach(module ContinuationModule) uint64 {
 	if s == nil || module == nil {
 		return 0
