@@ -8,6 +8,18 @@ interface UseWebSocketOptions {
   onMessage?: (event: SessionEvent) => void;
 }
 
+function persistedCursor(sessionId: string, fallback: number): number {
+  if (fallback >= 0) return fallback;
+  try {
+    const raw = localStorage.getItem("codeops:ledger-cursor:" + sessionId);
+    if (raw === null) return fallback;
+    const cursor = Number.parseInt(raw, 10);
+    return Number.isSafeInteger(cursor) && cursor >= -1 ? cursor : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export type WebSocketState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 // The browser never receives an access JWT. Each connection obtains a
@@ -41,7 +53,8 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
         const { ticket } = await api.issueWebSocketTicket(sessionId);
         if (stopped || connectionGeneration !== generation) return;
         const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const url = `${scheme}://${window.location.host}/api/v1/sessions/${encodeURIComponent(sessionId)}/ws?ticket=${encodeURIComponent(ticket)}&after=${afterRef.current}`;
+        const resumeAfter = persistedCursor(sessionId, afterRef.current);
+        const url = `${scheme}://${window.location.host}/api/v1/sessions/${encodeURIComponent(sessionId)}/ws?ticket=${encodeURIComponent(ticket)}&after=${resumeAfter}`;
         const currentSocket = new WebSocket(url);
         socket = currentSocket;
 
