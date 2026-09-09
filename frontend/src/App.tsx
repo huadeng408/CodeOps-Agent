@@ -82,6 +82,7 @@ function App() {
   const [titleDraft, setTitleDraft] = useState('');
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
   const [showDetails, setShowDetails] = useState(false);
+  const selectionGenerationRef = useRef(0);
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -135,13 +136,16 @@ function App() {
       await syncSessions();
       return;
     }
+    const generation = ++selectionGenerationRef.current;
     const fresh = await api.getSession(selectedSession.id);
+    if (generation !== selectionGenerationRef.current) return;
     setSelectedSession(fresh);
     setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
     setRefreshKey((value) => value + 1);
   }, [selectedSession, syncSessions]);
 
   const handleSelectSession = useCallback(async (session: Session) => {
+    const generation = ++selectionGenerationRef.current;
     setSelectedSession(session);
     localStorage.setItem('codeops:selected-session', session.id);
     setStatusDraft(session.status);
@@ -152,6 +156,7 @@ function App() {
     // checkpoint, retry lineage and status survive browser reloads.
     try {
       const fresh = await api.getSession(session.id);
+      if (generation !== selectionGenerationRef.current) return;
       setSelectedSession(fresh);
       setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
       setStatusDraft(fresh.status);
