@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -62,6 +63,7 @@ func TestEventHandlerContinuationSelectionIsSafeDuringReplacement(t *testing.T) 
 	second := &testContinuationModule{}
 	h.SetContinuation(first)
 	var wg sync.WaitGroup
+	errs := make(chan error, 1)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -74,11 +76,20 @@ func TestEventHandlerContinuationSelectionIsSafeDuringReplacement(t *testing.T) 
 		defer wg.Done()
 		for i := 0; i < 2000; i++ {
 			if got := h.continuationSnapshot(); got != first && got != second {
-				t.Fatalf("unexpected continuation snapshot: %T", got)
+				select {
+				case errs <- fmt.Errorf("unexpected continuation snapshot: %T", got):
+				default:
+				}
+				return
 			}
 		}
 	}()
 	wg.Wait()
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
+	}
 }
 
 func TestWriteSessionErrorUsesStableContinuationUnavailableMessage(t *testing.T) {

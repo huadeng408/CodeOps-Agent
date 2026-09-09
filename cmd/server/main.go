@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/handler"
 	"code-agent/internal/identity"
 	"code-agent/internal/middleware"
@@ -262,10 +263,31 @@ func main() {
 	}
 	defer ledger.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
-	// Workspace recovery is read-only and scoped to active agent worktrees.
-	// The manager is intentionally separate from the session ledger; it only
-	// supplies git status for leases already bound to a session.
-	workspaceManager := worktree.NewManager(".", "HEAD")
+	workspaceRoot, rootErr := os.Getwd()
+	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
+		workspaceRoot = "."
+	}
+	// WorktreeManager is only a runtime index. The canonical ledger owns the
+	// active lease and terminal lifecycle facts; replay it before accepting
+	// browser continuations so a restart cannot orphan an agent checkout.
+	workspaceManager := worktree.NewManager(workspaceRoot, "HEAD")
+	if err := restorePersistedWorktrees(context.Background(), ledger, workspaceManager); err != nil {
+		log.Errorf("restore persisted agent worktrees: %v", err)
+		return
+	}
+	if reaped, err := workspaceManager.ReapExpired(context.Background(), time.Now()); err != nil {
+		log.Errorf("reap expired persisted agent worktrees: %v", err)
+		return
+	} else {
+		for _, tree := range reaped {
+			tree.Active = false
+			tree.Status = worktree.AgentWorktreeReaped
+			if err := appendPersistedWorktreeEvent(context.Background(), ledger, tree.ParentSessionID, persistedWorktreeTerminalEvent, tree, "expired lease recovered"); err != nil {
+				log.Errorf("persist reaped agent worktree %s: %v", tree.Name, err)
+				return
+			}
+		}
+	}
 	// Browser continuations use the Go-owned SessionRunner. The gRPC client is
 	// connection-only; actor, run identity, history, and callbacks are supplied
 	// per request so concurrent Sessions cannot cross-write one another.
@@ -273,10 +295,7 @@ func main() {
 	if continuationTarget == "" {
 		continuationTarget = "127.0.0.1:50051"
 	}
-	continuationRoot, rootErr := os.Getwd()
-	if rootErr != nil || strings.TrimSpace(continuationRoot) == "" {
-		continuationRoot = "."
-	}
+	continuationRoot := workspaceRoot
 	continuationExecutor := tools.NewExecutor(continuationRoot)
 	if err := continuationExecutor.SetWorkingDir(continuationRoot); err != nil {
 		log.Warnf("session continuation working directory unavailable: %v", err)
@@ -313,6 +332,55 @@ func main() {
 		client, err := harnessorch.NewClient(continuationTarget)
 		if err != nil {
 			return nil, err
+		}
+		client.OnAgentSpawn = func(spawnCtx context.Context, spawn *codeagentpb.AgentSpawn) error {
+			if spawn == nil {
+				return fmt.Errorf("agent spawn payload is required")
+			}
+			tree, spawnErr := workspaceManager.SpawnAgent(spawnCtx, worktree.AgentSpawnRequest{
+				RequestID: spawn.GetRequestId(), ParentSessionID: spawn.GetParentSessionId(),
+				ChildSessionID: spawn.GetChildSessionId(), WorktreeName: spawn.GetWorktreeName(), BaseRef: spawn.GetBaseRef(),
+			})
+			if spawnErr != nil {
+				return spawnErr
+			}
+			if persistErr := appendPersistedWorktreeEvent(spawnCtx, ledger, tree.ParentSessionID, persistedWorktreeActiveEvent, tree, "spawned"); persistErr != nil {
+				_ = workspaceManager.CleanupAgent(context.Background(), tree.RequestID, true, "ledger-persist-failed")
+				return fmt.Errorf("persist agent worktree lease: %w", persistErr)
+			}
+			return nil
+		}
+		client.OnAgentLifecycle = func(lifecycleCtx context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
+			if lifecycle == nil {
+				return fmt.Errorf("agent lifecycle payload is required")
+			}
+			tree, ok := workspaceManager.FindAgent(lifecycle.GetRequestId())
+			if !ok {
+				return nil
+			}
+			if leaseID := strings.TrimSpace(lifecycle.GetLeaseId()); leaseID != "" && leaseID != tree.LeaseID {
+				return fmt.Errorf("agent lifecycle lease does not match active worktree")
+			}
+			if childID := strings.TrimSpace(lifecycle.GetChildSessionId()); childID != "" && childID != tree.ChildSessionID {
+				return fmt.Errorf("agent lifecycle child does not match active worktree")
+			}
+			status := strings.ToLower(strings.TrimSpace(lifecycle.GetStatus()))
+			if status == "ok" {
+				status = worktree.AgentWorktreeReleased
+			}
+			if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
+				return fmt.Errorf("unsupported agent lifecycle status")
+			}
+			discard := status != worktree.AgentWorktreeReleased && status != "completed"
+			if cleanupErr := workspaceManager.CleanupAgent(lifecycleCtx, tree.RequestID, discard, lifecycle.GetReason()); cleanupErr != nil {
+				return cleanupErr
+			}
+			tree.Active = false
+			tree.Status = status
+			if persistErr := appendPersistedWorktreeEvent(lifecycleCtx, ledger, tree.ParentSessionID, persistedWorktreeTerminalEvent, tree, lifecycle.GetReason()); persistErr != nil {
+				return fmt.Errorf("persist agent worktree lifecycle: %w", persistErr)
+			}
+			return nil
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{WorkerID: workerID})
 		return &managedContinuation{runner: runner, client: client}, nil

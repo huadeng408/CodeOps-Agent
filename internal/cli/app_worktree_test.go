@@ -42,13 +42,13 @@ func TestAppAgentWorktreeCallbacksPersistAndCleanLifecycle(t *testing.T) {
 	if err := app.handleAgentLifecycle(context.Background(), &codeagentpb.AgentLifecycle{
 		RequestId:      "request-app",
 		ChildSessionId: "child-app",
-		Status:         "completed",
+		Status:         "ok",
 		Reason:         "done",
 	}); err != nil {
 		t.Fatalf("handle agent lifecycle: %v", err)
 	}
 	terminal := store.Current()
-	if len(manager.List()) != 0 || len(terminal.Worktrees) != 0 || len(terminal.WorktreeEvents) != 2 || terminal.WorktreeEvents[1].Status != "completed" {
+	if len(manager.List()) != 0 || len(terminal.Worktrees) != 0 || len(terminal.WorktreeEvents) != 2 || terminal.WorktreeEvents[1].Status != worktree.AgentWorktreeReleased {
 		t.Fatalf("terminal cleanup was not persisted: trees=%#v events=%#v", manager.List(), terminal.WorktreeEvents)
 	}
 }

@@ -653,10 +653,10 @@ func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.A
 	if status == "ok" {
 		status = worktree.AgentWorktreeReleased
 	}
-	if status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
+	if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
 		return errors.New("unsupported agent lifecycle status")
 	}
-	discard := status != "completed"
+	discard := status != worktree.AgentWorktreeReleased && status != "completed"
 	if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
 		return err
 	}

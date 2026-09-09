@@ -114,10 +114,10 @@ func TestHealthzReportsContinuationRuntimeProjection(t *testing.T) {
 	}
 	var body struct {
 		Continuation struct {
-			Attached       bool       `json:"attached"\`
-			Generation     uint64     `json:"generation"\`
-			LastRecoveryAt *time.Time `json:"last_recovery_at"\`
-		} `json:"continuation"\`
+			Attached       bool       `json:"attached"`
+			Generation     uint64     `json:"generation"`
+			LastRecoveryAt *time.Time `json:"last_recovery_at"`
+		} `json:"continuation"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
