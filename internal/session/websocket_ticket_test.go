@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,5 +38,40 @@ func TestWebSocketTicketExpiresAndCannotBeReused(t *testing.T) {
 	}
 	if _, err := tickets.Consume(raw, "session-a"); !errors.Is(err, ErrWebSocketTicketInvalid) {
 		t.Fatalf("expired ticket remained reusable: %v", err)
+	}
+}
+
+func TestWebSocketTicketConcurrentConsumeSucceedsOnce(t *testing.T) {
+	tickets := NewWebSocketTickets(time.Minute)
+	raw, _, err := tickets.Issue(7, "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const consumers = 16
+	results := make(chan error, consumers)
+	var wg sync.WaitGroup
+	wg.Add(consumers)
+	for i := 0; i < consumers; i++ {
+		go func() {
+			defer wg.Done()
+			_, consumeErr := tickets.Consume(raw, "session-a")
+			results <- consumeErr
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var success, invalid int
+	for consumeErr := range results {
+		switch {
+		case consumeErr == nil:
+			success++
+		case errors.Is(consumeErr, ErrWebSocketTicketInvalid):
+			invalid++
+		default:
+			t.Fatalf("unexpected concurrent consume error: %v", consumeErr)
+		}
+	}
+	if success != 1 || invalid != consumers-1 {
+		t.Fatalf("concurrent consume results = success:%d invalid:%d, want 1/%d", success, invalid, consumers-1)
 	}
 }
