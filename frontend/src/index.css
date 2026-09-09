@@ -434,6 +434,32 @@ button:disabled {
 .status-chip.done { background: var(--dsw-static-neutral-500); }
 .status-chip.queued { background: var(--dsw-static-amber-500); }
 
+.continuation-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--dsw-static-amber-500);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--dsw-static-amber-500);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.continuation-health.recovering::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+  animation: continuation-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes continuation-pulse {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
+
 .run-status.failed { color: var(--dsw-static-red-500); }
 .run-status.completed { color: var(--dsw-static-green-500); }
 .run-status.running { color: var(--dsw-static-green-500); }
