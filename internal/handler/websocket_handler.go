@@ -573,14 +573,20 @@ func validateLiveEventCursor(lastSeq int64, lastEventID string, seq int64, event
 	if seq < 0 {
 		return fmt.Errorf("websocket live sequence is invalid: %d", seq)
 	}
+	if strings.TrimSpace(eventID) == "" {
+		return errors.New("websocket live event id is required")
+	}
 	if lastSeq < 0 {
 		if seq != 0 {
 			return fmt.Errorf("websocket live sequence gap: expected 0, got %d", seq)
 		}
 		return nil
 	}
+	if strings.TrimSpace(lastEventID) == "" {
+		return errors.New("websocket live cursor event id is missing")
+	}
 	if seq == lastSeq {
-		if strings.TrimSpace(lastEventID) == "" || strings.TrimSpace(eventID) == "" || lastEventID == eventID {
+		if lastEventID == eventID {
 			return nil
 		}
 		return fmt.Errorf("websocket live sequence conflict: seq %d has event ids %q and %q", seq, lastEventID, eventID)

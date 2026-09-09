@@ -108,3 +108,12 @@ func TestValidateLiveEventCursorRejectsInvalidFirstLiveSequence(t *testing.T) {
 		t.Fatalf("first sequence zero should be accepted: %v", err)
 	}
 }
+
+func TestValidateLiveEventCursorRejectsMissingEventIDAtKnownSequence(t *testing.T) {
+	if err := validateLiveEventCursor(7, "event-7", 7, ""); err == nil {
+		t.Fatal("same sequence without an event id must be rejected")
+	}
+	if err := validateLiveEventCursor(7, "", 7, "event-7"); err == nil {
+		t.Fatal("known sequence without a previous event id must be rejected")
+	}
+}
