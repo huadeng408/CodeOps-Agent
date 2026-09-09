@@ -222,6 +222,30 @@ func TestContinuationSupervisorBacksOffHealthAndRecoveryFailures(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorKeepsExponentialBackoffUntilAttach(t *testing.T) {
+	slot := NewContinuationSlot()
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		return &recoverFailModule{
+			supervisorModule: &supervisorModule{healthy: true},
+			err:              errors.New("recover failed"),
+		}, nil
+	})
+
+	supervisor.reconcile(context.Background())
+	supervisor.mu.Lock()
+	firstFailures := supervisor.connectFailures
+	supervisor.nextConnectAt = time.Time{}
+	supervisor.mu.Unlock()
+	supervisor.reconcile(context.Background())
+	supervisor.mu.Lock()
+	secondFailures := supervisor.connectFailures
+	supervisor.mu.Unlock()
+
+	if firstFailures != 1 || secondFailures != 2 {
+		t.Fatalf("connect failures = (%d, %d), want (1, 2)", firstFailures, secondFailures)
+	}
+}
+
 type recoverFailModule struct {
 	*supervisorModule
 	err error

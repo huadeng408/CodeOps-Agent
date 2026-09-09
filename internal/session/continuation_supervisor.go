@@ -104,7 +104,6 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		s.scheduleConnectRetry()
 		return
 	}
-	s.resetConnectRetry()
 	if health, ok := module.(continuationHealth); ok {
 		healthCtx, cancel := context.WithTimeout(ctx, s.interval)
 		err = health.Health(healthCtx)
@@ -123,6 +122,7 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		return
 	}
 	generation := s.slot.Attach(module)
+	s.resetConnectRetry()
 	s.recordRecovery(generation)
 }
 
