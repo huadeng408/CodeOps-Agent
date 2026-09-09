@@ -513,6 +513,33 @@ func TestWorktreeManagerDoesNotRenewLeaseWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestWorktreeManagerDoesNotReapLeaseWithCanceledContext(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	spawned, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-canceled-reap",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "canceled-reap",
+	})
+	if err != nil {
+		t.Fatalf("spawn lease: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := manager.ReapExpired(ctx, spawned.LeaseExpiresAt.Add(time.Second)); err != context.Canceled {
+		t.Fatalf("reap with canceled context error = %v, want context canceled", err)
+	}
+	current, ok := manager.FindAgent(spawned.RequestID)
+	if !ok || current.Status != worktree.AgentWorktreeActive {
+		t.Fatalf("canceled reap changed agent worktree: %#v", current)
+	}
+	if _, err := os.Stat(spawned.Path); err != nil {
+		t.Fatalf("canceled reap removed worktree: %v", err)
+	}
+}
+
 func seedGitRepo(t *testing.T, repo string) {
 	t.Helper()
 	runGit(t, repo, "init")

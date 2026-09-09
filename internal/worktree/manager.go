@@ -240,6 +240,11 @@ func (m *Manager) ReapExpired(ctx context.Context, now time.Time) ([]Worktree, e
 	if m == nil {
 		return nil, errors.New("worktree manager is nil")
 	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -247,6 +252,11 @@ func (m *Manager) ReapExpired(ctx context.Context, now time.Time) ([]Worktree, e
 	defer m.mu.Unlock()
 	var reaped []Worktree
 	for name, tree := range m.trees {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return reaped, err
+			}
+		}
 		if tree.Status != AgentWorktreeActive || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
 			continue
 		}
