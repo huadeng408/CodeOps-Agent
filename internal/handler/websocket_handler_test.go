@@ -66,3 +66,15 @@ func TestValidateReplayBatchRejectsSequenceGaps(t *testing.T) {
 		t.Fatalf("sequence zero should be valid after an empty cursor: %v", err)
 	}
 }
+
+func TestNormalizeReplayCursorFallsBackWhenClientCursorExceedsLedgerHead(t *testing.T) {
+	if got := normalizeReplayCursor(8, 99); got != -1 {
+		t.Fatalf("cursor above head = %d, want -1 full replay", got)
+	}
+	if got := normalizeReplayCursor(8, 8); got != 8 {
+		t.Fatalf("cursor at head = %d, want 8", got)
+	}
+	if got := normalizeReplayCursor(-1, 3); got != -1 {
+		t.Fatalf("cursor above empty ledger head = %d, want -1", got)
+	}
+}

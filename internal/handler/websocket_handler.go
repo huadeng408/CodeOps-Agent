@@ -393,7 +393,6 @@ func (h *WebSocketHandler) authenticate(c *gin.Context, sessionID string) (uint,
 }
 
 func (h *WebSocketHandler) replay(ctx context.Context, conn *websocket.Conn, sessionID string, owner uint, cursor int64) error {
-	h.hub.SetCursor(conn, cursor, "")
 	head := cursor
 	if h.workbench != nil {
 		view, err := h.workbench.Get(ctx, owner, sessionID)
@@ -401,7 +400,9 @@ func (h *WebSocketHandler) replay(ctx context.Context, conn *websocket.Conn, ses
 			return err
 		}
 		head = int64(view.EventCount - 1)
+		cursor = normalizeReplayCursor(head, cursor)
 	}
+	h.hub.SetCursor(conn, cursor, "")
 	last := cursor
 	for {
 		batch, err := h.listAfter(ctx, sessionID, owner, last, websocketReplayPage)
@@ -440,6 +441,16 @@ func (h *WebSocketHandler) replay(ctx context.Context, conn *websocket.Conn, ses
 		}
 	}
 	return nil
+}
+
+// normalizeReplayCursor treats a client cursor beyond the immutable ledger
+// head as corrupt rather than authoritative. Restarting from -1 rebuilds the
+// browser's canonical surface and prevents all later events being skipped.
+func normalizeReplayCursor(head, cursor int64) int64 {
+	if cursor > head {
+		return -1
+	}
+	return cursor
 }
 
 func (h *WebSocketHandler) listAfter(ctx context.Context, sessionID string, owner uint, after int64, limit int) ([]session.EventView, error) {
