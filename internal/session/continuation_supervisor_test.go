@@ -310,8 +310,8 @@ func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
 		t.Fatal("late recovery attached after supervisor close")
 	}
 	_, _, closed := module.snapshot()
-	if closed != 0 {
-		t.Fatalf("uncreated module close count = %d, want 0", closed)
+	if closed != 1 {
+		t.Fatalf("late module close count = %d, want 1", closed)
 	}
 }
 
@@ -333,8 +333,8 @@ func TestContinuationSupervisorDoesNotProjectAttachmentWhenSlotClosed(t *testing
 		t.Fatalf("supervisor projected attachment after slot close: %+v", status)
 	}
 	_, _, closed := module.snapshot()
-	if closed != 1 {
-		t.Fatalf("late module close count = %d, want 1", closed)
+	if closed != 0 {
+		t.Fatalf("uncreated module close count = %d, want 0", closed)
 	}
 }
 

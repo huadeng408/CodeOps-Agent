@@ -12,6 +12,7 @@ var ErrContinuationUnavailable = errors.New("agent continuation is unavailable")
 // orchestrator reconnects. It never creates a synthetic run or sidecar fact.
 type ContinuationSlot struct {
 	mu         sync.RWMutex
+	calls      sync.RWMutex
 	module     ContinuationModule
 	generation uint64
 	closed     bool
@@ -49,7 +50,9 @@ func (s *ContinuationSlot) Attach(module ContinuationModule) uint64 {
 	generation := s.generation
 	s.mu.Unlock()
 	if previous != nil && previous != module {
+		s.calls.Lock()
 		_ = previous.Close()
+		s.calls.Unlock()
 	}
 	return generation
 }
@@ -73,13 +76,20 @@ func (s *ContinuationSlot) detachIf(module ContinuationModule, generation uint64
 		return 0, false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.module != module || s.generation != generation {
-		return s.generation, false
+		currentGeneration := s.generation
+		s.mu.Unlock()
+		return currentGeneration, false
 	}
 	s.module = nil
 	s.generation++
-	return s.generation, true
+	currentGeneration := s.generation
+	s.mu.Unlock()
+	// No later slot call can select the detached module. Wait for calls that
+	// selected it before the detach to finish before its owner closes it.
+	s.calls.Lock()
+	s.calls.Unlock()
+	return currentGeneration, true
 }
 
 func (s *ContinuationSlot) current() ContinuationModule {
@@ -101,6 +111,11 @@ func (s *ContinuationSlot) snapshot() (ContinuationModule, uint64) {
 }
 
 func (s *ContinuationSlot) RequestContinuation(ctx context.Context, cmd ContinueCommand) (RunView, error) {
+	if s == nil {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	s.calls.RLock()
+	defer s.calls.RUnlock()
 	m := s.current()
 	if m == nil {
 		return RunView{}, ErrContinuationUnavailable
@@ -109,6 +124,11 @@ func (s *ContinuationSlot) RequestContinuation(ctx context.Context, cmd Continue
 }
 
 func (s *ContinuationSlot) Recover(ctx context.Context) error {
+	if s == nil {
+		return ErrContinuationUnavailable
+	}
+	s.calls.RLock()
+	defer s.calls.RUnlock()
 	m := s.current()
 	if m == nil {
 		return ErrContinuationUnavailable
@@ -135,5 +155,7 @@ func (s *ContinuationSlot) Close() error {
 	if m == nil {
 		return nil
 	}
+	s.calls.Lock()
+	defer s.calls.Unlock()
 	return m.Close()
 }
