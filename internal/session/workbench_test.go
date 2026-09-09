@@ -56,6 +56,18 @@ func TestWorkbenchAppendsMessageOnlyToCanonicalLedger(t *testing.T) {
 	}
 }
 
+func TestWorkbenchEventsAfterRejectsNegativeLimit(t *testing.T) {
+	ctx := context.Background()
+	workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
+	created, err := workbench.Create(ctx, 7, "repo", "pagination", "goal")
+	if err != nil {
+		t.Fatalf("create workbench session: %v", err)
+	}
+	if _, err := workbench.EventsAfter(ctx, 7, created.ID, -1, -2); !errors.Is(err, ErrInvalidSessionInput) {
+		t.Fatalf("negative event limit error = %v, want ErrInvalidSessionInput", err)
+	}
+}
+
 func TestWorkbenchForeignOwnerIsIndistinguishableFromMissing(t *testing.T) {
 	ctx := context.Background()
 	workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)

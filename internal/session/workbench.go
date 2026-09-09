@@ -438,6 +438,9 @@ func (w *Workbench) ContinueFromCheckpoint(ctx context.Context, ownerID uint, se
 
 // Events returns a verified owner-scoped projection of the full ledger.
 func (w *Workbench) Events(ctx context.Context, ownerID uint, sessionID string, limit int) ([]EventView, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("%w: invalid event limit", ErrInvalidSessionInput)
+	}
 	if _, err := w.Get(ctx, ownerID, sessionID); err != nil {
 		return nil, err
 	}
@@ -461,6 +464,9 @@ func (w *Workbench) Events(ctx context.Context, ownerID uint, sessionID string, 
 
 // EventsAfter returns a verified suffix after an inclusive cursor.
 func (w *Workbench) EventsAfter(ctx context.Context, ownerID uint, sessionID string, afterSeq int64, limit int) ([]EventView, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("%w: invalid event limit", ErrInvalidSessionInput)
+	}
 	if _, err := w.Get(ctx, ownerID, sessionID); err != nil {
 		return nil, err
 	}
