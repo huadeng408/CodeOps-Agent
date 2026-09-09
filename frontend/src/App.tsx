@@ -196,6 +196,42 @@ function App() {
   }, [selectedSession?.id]);
 
   useEffect(() => {
+    const sessionId = selectedSession?.id;
+    const runStatus = selectedSession?.run?.status;
+    const active = selectedSession?.status === 'queued'
+      || selectedSession?.status === 'running'
+      || runStatus === 'queued'
+      || runStatus === 'running';
+    if (!sessionId || !active) return undefined;
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const fresh = await api.getSession(sessionId);
+        if (stopped) return;
+        setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
+        setSelectedSession((current) => {
+          if (!current || current.id !== fresh.id) return current;
+          const changed = current.status !== fresh.status
+            || current.eventCount !== fresh.eventCount
+            || current.run?.runId !== fresh.run?.runId
+            || current.run?.status !== fresh.run?.status
+            || current.run?.attempt !== fresh.run?.attempt;
+          if (changed) setRefreshKey((value) => value + 1);
+          return fresh;
+        });
+        setStatusDraft(fresh.status);
+      } catch (cause) {
+        if (!stopped) setError(errorMessage(cause, '运行状态同步失败'));
+      }
+    };
+    const timer = window.setInterval(() => { void refresh(); }, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedSession?.id, selectedSession?.status, selectedSession?.run?.status]);
+
+  useEffect(() => {
     void syncSessions().catch((cause) => setError(errorMessage(cause, '会话加载失败'))).finally(() => setLoading(false));
   }, [syncSessions]);
 
