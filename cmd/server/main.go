@@ -365,7 +365,7 @@ func main() {
 	})
 	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
 	r.Use(middleware.RequestLogger(), gin.Recovery())
-	r.GET("/healthz", healthzHandler(func() string { return embeddingPreflightStatus }))
+	r.GET("/healthz", healthzHandlerWithContinuation(func() string { return embeddingPreflightStatus }, continuationSupervisor.Status))
 
 	apiV1 := r.Group("/api/v1")
 	{
@@ -585,8 +585,23 @@ func resolveTraceIndexForStartup(ctx context.Context, strict bool, readAlias, ex
 // preflight status (from statusFn) alongside the base ok status so
 // ops/automation can judge whether retrieval is fully healthy.
 func healthzHandler(statusFn func() string) gin.HandlerFunc {
+	return healthzHandlerWithContinuation(statusFn, nil)
+}
+
+func healthzHandlerWithContinuation(statusFn func() string, continuationFn func() session.ContinuationSupervisorStatus) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "embedding_preflight": statusFn()})
+		body := gin.H{"status": "ok", "embedding_preflight": statusFn()}
+		if continuationFn != nil {
+			state := continuationFn()
+			body["continuation"] = gin.H{
+				"attached":           state.Attached,
+				"generation":         state.Generation,
+				"last_health_error":  state.LastHealthError,
+				"last_recovery_at":   state.LastRecoveryAt,
+				"last_transition_at": state.LastTransitionAt,
+			}
+		}
+		c.JSON(http.StatusOK, body)
 	}
 }
 

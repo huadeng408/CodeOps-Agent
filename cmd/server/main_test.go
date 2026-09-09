@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"code-agent/internal/serverconfig"
+	"code-agent/internal/session"
 
 	"github.com/gin-gonic/gin"
 )
@@ -94,6 +96,33 @@ func TestHealthzReportsEmbeddingPreflightDegraded(t *testing.T) {
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	if body.EmbeddingPreflight != "degraded: embedding preflight failed" {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestHealthzReportsContinuationRuntimeProjection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	now := time.Date(2026, 9, 9, 8, 0, 0, 0, time.UTC)
+	router.GET("/healthz", healthzHandlerWithContinuation(func() string { return "ok" }, func() session.ContinuationSupervisorStatus {
+		return session.ContinuationSupervisorStatus{Attached: true, Generation: 7, LastRecoveryAt: &now}
+	}))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	var body struct {
+		Continuation struct {
+			Attached       bool       `json:"attached"\`
+			Generation     uint64     `json:"generation"\`
+			LastRecoveryAt *time.Time `json:"last_recovery_at"\`
+		} `json:"continuation"\`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Continuation.Attached || body.Continuation.Generation != 7 || body.Continuation.LastRecoveryAt == nil {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
