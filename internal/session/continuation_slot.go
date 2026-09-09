@@ -114,12 +114,11 @@ func (s *ContinuationSlot) RequestContinuation(ctx context.Context, cmd Continue
 	if s == nil {
 		return RunView{}, ErrContinuationUnavailable
 	}
-	s.calls.RLock()
-	defer s.calls.RUnlock()
-	m := s.current()
-	if m == nil {
+	m, release := s.acquire()
+	if release == nil {
 		return RunView{}, ErrContinuationUnavailable
 	}
+	defer release()
 	return m.RequestContinuation(ctx, cmd)
 }
 
@@ -127,13 +126,28 @@ func (s *ContinuationSlot) Recover(ctx context.Context) error {
 	if s == nil {
 		return ErrContinuationUnavailable
 	}
-	s.calls.RLock()
-	defer s.calls.RUnlock()
-	m := s.current()
-	if m == nil {
+	m, release := s.acquire()
+	if release == nil {
 		return ErrContinuationUnavailable
 	}
+	defer release()
 	return m.Recover(ctx)
+}
+
+// acquire establishes the same slot-then-call lock order used by Attach,
+// detachIf and Close. Holding the slot read lock while taking the calls read
+// lock prevents a request from racing into the inverse order and deadlocking
+// with a replacement or shutdown.
+func (s *ContinuationSlot) acquire() (ContinuationModule, func()) {
+	s.mu.RLock()
+	if s.closed || s.module == nil {
+		s.mu.RUnlock()
+		return nil, nil
+	}
+	s.calls.RLock()
+	m := s.module
+	s.mu.RUnlock()
+	return m, s.calls.RUnlock
 }
 
 func (s *ContinuationSlot) Close() error {
