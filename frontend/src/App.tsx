@@ -107,6 +107,7 @@ function App() {
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
   const [showDetails, setShowDetails] = useState(false);
   const [continuationHealth, setContinuationHealth] = useState<ContinuationRuntimeStatus | null>(null);
+  const [continuationHealthKnown, setContinuationHealthKnown] = useState(false);
   const selectionGenerationRef = useRef(0);
   const canonicalSelectionRef = useRef('');
 
@@ -249,9 +250,15 @@ function App() {
     const refreshHealth = async () => {
       try {
         const health = await api.continuationHealth();
-        if (!stopped) setContinuationHealth(health);
+        if (!stopped) {
+          setContinuationHealth(health);
+          setContinuationHealthKnown(true);
+        }
       } catch {
-        if (!stopped) setContinuationHealth(null);
+        if (!stopped) {
+          setContinuationHealth(null);
+          setContinuationHealthKnown(false);
+        }
       }
     };
     void refreshHealth();
@@ -425,8 +432,8 @@ function App() {
             {selectedSession && <select aria-label="会话状态" value={statusDraft} onChange={(event) => { const next = event.target.value as Session['status']; setStatusDraft(next); void handleStatus(next); }} disabled={busy || selectedSession.status === 'queued'}>
               <option value="queued" disabled>排队中</option><option value="running">运行中</option><option value="paused">已暂停</option><option value="done">已完成</option>
             </select>}
-            {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && <button className="subtle-btn header-continue-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || continuationHealth?.attached === false}>{busy ? '继续中...' : continuationHealth?.attached === false ? '编排器恢复中...' : '继续任务'}</button>}
-            {continuationHealth?.attached === false && <span className="continuation-health recovering" role="status">编排器恢复中</span>}
+            {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && <button className="subtle-btn header-continue-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || !continuationHealthKnown || continuationHealth?.attached !== true}>{busy ? '继续中...' : !continuationHealthKnown ? '检查编排器...' : continuationHealth?.attached !== true ? '编排器恢复中...' : '继续任务'}</button>}
+            {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && !continuationHealthKnown && <span className="continuation-health recovering" role="status">等待编排器健康状态</span>}
             <button className="icon-btn" type="button" title="切换主题" aria-label="切换主题" onClick={() => setIsDarkTheme((value) => !value)}>{isDarkTheme ? '☀' : '◐'}</button>
             <button className="icon-btn" type="button" title="打开会话详情" aria-label="打开会话详情" onClick={() => setShowDetails((value) => !value)}>▣</button>
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}
