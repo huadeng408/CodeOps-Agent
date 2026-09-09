@@ -247,9 +247,10 @@ function App() {
 
   useEffect(() => {
     let stopped = false;
+    const controller = new AbortController();
     const refreshHealth = async () => {
       try {
-        const health = await api.continuationHealth();
+        const health = await api.continuationHealth(controller.signal);
         if (!stopped) {
           setContinuationHealth(health);
           setContinuationHealthKnown(true);
@@ -263,7 +264,7 @@ function App() {
     };
     void refreshHealth();
     const timer = window.setInterval(() => { void refreshHealth(); }, 3000);
-    return () => { stopped = true; window.clearInterval(timer); };
+    return () => { stopped = true; controller.abort(); window.clearInterval(timer); };
   }, []);
 
   const handleCreateSession = async (event: FormEvent) => {

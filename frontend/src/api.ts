@@ -71,14 +71,17 @@ class ApiClient {
     await this.request('POST', '/auth/refreshToken', { body: {} });
   }
 
-  async continuationHealth(): Promise<ContinuationRuntimeStatus> {
+  async continuationHealth(signal?: AbortSignal): Promise<ContinuationRuntimeStatus> {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 1500);
+    const abortFromCaller = () => controller.abort();
+    signal?.addEventListener('abort', abortFromCaller, { once: true });
     let response: Response;
     try {
       response = await fetch('/healthz', { credentials: 'include', signal: controller.signal });
     } finally {
       window.clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortFromCaller);
     }
     const payload = await response.json().catch(() => undefined) as { continuation?: ContinuationRuntimeStatus } | undefined;
     if (!response.ok || !payload?.continuation) {
