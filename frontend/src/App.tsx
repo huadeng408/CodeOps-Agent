@@ -83,6 +83,7 @@ function App() {
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
   const [showDetails, setShowDetails] = useState(false);
   const selectionGenerationRef = useRef(0);
+  const canonicalSelectionRef = useRef('');
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -145,26 +146,30 @@ function App() {
   }, [selectedSession, syncSessions]);
 
   const handleSelectSession = useCallback(async (session: Session) => {
-    const generation = ++selectionGenerationRef.current;
     setSelectedSession(session);
     localStorage.setItem('codeops:selected-session', session.id);
     setStatusDraft(session.status);
     setEditingTitle(false);
     setError('');
-    // Sidebar entries are a convenient index, not the recovery source. Read
-    // the canonical ledger projection whenever a task is reopened so run,
-    // checkpoint, retry lineage and status survive browser reloads.
-    try {
-      const fresh = await api.getSession(session.id);
+  }, []);
+
+  useEffect(() => {
+    const sessionId = selectedSession?.id;
+    if (!sessionId || canonicalSelectionRef.current === sessionId) return;
+    canonicalSelectionRef.current = sessionId;
+    const generation = ++selectionGenerationRef.current;
+    // Sidebar/list data is only an index. Re-open from the canonical ledger
+    // projection so run status, checkpoint and retry lineage survive reloads.
+    void api.getSession(sessionId).then((fresh) => {
       if (generation !== selectionGenerationRef.current) return;
       setSelectedSession(fresh);
       setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
       setStatusDraft(fresh.status);
       setRefreshKey((value) => value + 1);
-    } catch (cause) {
-      setError(errorMessage(cause, '会话恢复状态加载失败'));
-    }
-  }, []);
+    }).catch((cause) => {
+      if (generation === selectionGenerationRef.current) setError(errorMessage(cause, '会话恢复状态加载失败'));
+    });
+  }, [selectedSession?.id]);
 
   useEffect(() => {
     void syncSessions().catch((cause) => setError(errorMessage(cause, '会话加载失败'))).finally(() => setLoading(false));
