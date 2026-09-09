@@ -173,6 +173,12 @@ func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool
 		return false
 	}
 	generation := s.slot.Attach(module)
+	if generation == 0 {
+		// The slot may have been closed independently while recovery was
+		// in flight. Treat a rejected attach as a failed transition so the
+		// caller closes the late module and status never claims attachment.
+		return false
+	}
 	now := time.Now().UTC()
 	s.connectFailures = 0
 	s.nextConnectAt = time.Time{}

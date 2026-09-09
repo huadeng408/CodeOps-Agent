@@ -315,6 +315,29 @@ func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorDoesNotProjectAttachmentWhenSlotClosed(t *testing.T) {
+	slot := NewContinuationSlot()
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	module := &supervisorModule{healthy: true}
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	supervisor.reconcile(context.Background())
+	if slot.Available() {
+		t.Fatal("closed slot became available")
+	}
+	status := supervisor.Status()
+	if status.Attached {
+		t.Fatalf("supervisor projected attachment after slot close: %+v", status)
+	}
+	_, _, closed := module.snapshot()
+	if closed != 1 {
+		t.Fatalf("late module close count = %d, want 1", closed)
+	}
+}
+
 func TestContinuationSupervisorDoesNotStartWithCanceledContext(t *testing.T) {
 	slot := NewContinuationSlot()
 	connects := 0
