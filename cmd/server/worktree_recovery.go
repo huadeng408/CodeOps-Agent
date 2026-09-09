@@ -94,6 +94,9 @@ func restorePersistedWorktrees(ctx context.Context, ledger session.EventLog, man
 			if strings.TrimSpace(payload.RequestID) == "" || strings.TrimSpace(payload.Name) == "" || strings.TrimSpace(payload.Path) == "" || strings.TrimSpace(payload.Status) == "" {
 				return fmt.Errorf("%w: incomplete worktree recovery payload at seq %d", session.ErrEventIntegrity, event.Seq)
 			}
+			if strings.TrimSpace(payload.ParentSessionID) != strings.TrimSpace(sessionID) {
+				return fmt.Errorf("%w: worktree parent session mismatch at seq %d", session.ErrEventIntegrity, event.Seq)
+			}
 			key := sessionID + "\x00" + payload.RequestID
 			if event.Type == persistedWorktreeTerminalEvent || !payload.Active || payload.Status != worktree.AgentWorktreeActive {
 				delete(active, key)

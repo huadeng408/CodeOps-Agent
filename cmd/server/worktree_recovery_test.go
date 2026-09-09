@@ -74,3 +74,28 @@ func TestRestorePersistedWorktreesRejectsCorruptEvent(t *testing.T) {
 		t.Fatalf("restore corrupt event error = %v, want ErrEventIntegrity", err)
 	}
 }
+
+func TestRestorePersistedWorktreesRejectsCrossSessionParent(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "browser", "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 1, persistedWorktreeActiveEvent, persistedWorktreeEvent{
+		Name: "cross-session", Path: filepath.Join(t.TempDir(), ".agent", "worktrees", "cross-session"), BaseRef: "HEAD", Active: true,
+		RequestID: "request-cross-session", ParentSessionID: "other-session", ChildSessionID: "child-session",
+		LeaseID: "lease-22222222222222222222222222222222", LeaseExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), Status: worktree.AgentWorktreeActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = restorePersistedWorktrees(ctx, ledger, worktree.NewManager(t.TempDir(), "HEAD"))
+	if !errors.Is(err, session.ErrEventIntegrity) {
+		t.Fatalf("restore cross-session parent error = %v, want ErrEventIntegrity", err)
+	}
+}
