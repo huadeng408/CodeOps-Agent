@@ -162,3 +162,24 @@ func TestContinuationSupervisorCloseClosesAttachedModuleOnce(t *testing.T) {
 		t.Fatalf("module close count = %d, want 1", closed)
 	}
 }
+
+func TestContinuationSupervisorBacksOffFailedConnections(t *testing.T) {
+	slot := NewContinuationSlot()
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		connects++
+		return nil, errors.New("orchestrator unavailable")
+	})
+	supervisor.reconcile(context.Background())
+	supervisor.reconcile(context.Background())
+	if connects != 1 {
+		t.Fatalf("connect attempts = %d, want 1 while backoff is active", connects)
+	}
+	supervisor.mu.Lock()
+	supervisor.nextConnectAt = time.Time{}
+	supervisor.mu.Unlock()
+	supervisor.reconcile(context.Background())
+	if connects != 2 {
+		t.Fatalf("connect attempts after backoff reset = %d, want 2", connects)
+	}
+}

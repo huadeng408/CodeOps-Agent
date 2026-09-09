@@ -25,14 +25,16 @@ type ContinuationSupervisorStatus struct {
 // stable slot. Unhealthy modules are detached and closed; replacements are
 // recovered before attach so the canonical ledger and run lineage are kept.
 type ContinuationSupervisor struct {
-	slot     *ContinuationSlot
-	interval time.Duration
-	connect  func(context.Context) (ContinuationModule, error)
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	closed   bool
-	status   ContinuationSupervisorStatus
+	slot            *ContinuationSlot
+	interval        time.Duration
+	connect         func(context.Context) (ContinuationModule, error)
+	mu              sync.Mutex
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	closed          bool
+	status          ContinuationSupervisorStatus
+	connectFailures int
+	nextConnectAt   time.Time
 }
 
 func NewContinuationSupervisor(slot *ContinuationSlot, interval time.Duration, connect func(context.Context) (ContinuationModule, error)) *ContinuationSupervisor {
@@ -91,13 +93,18 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		}
 		return
 	}
+	if !s.nextConnectAt.IsZero() && time.Now().Before(s.nextConnectAt) {
+		return
+	}
 	module, err := s.connect(ctx)
 	if err != nil || module == nil {
 		if err != nil {
 			s.recordHealth(err, 0)
 		}
+		s.scheduleConnectRetry()
 		return
 	}
+	s.resetConnectRetry()
 	if health, ok := module.(continuationHealth); ok {
 		healthCtx, cancel := context.WithTimeout(ctx, s.interval)
 		err = health.Health(healthCtx)
@@ -115,6 +122,27 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 	}
 	generation := s.slot.Attach(module)
 	s.recordRecovery(generation)
+}
+
+func (s *ContinuationSupervisor) scheduleConnectRetry() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connectFailures++
+	delay := s.interval
+	for i := 1; i < s.connectFailures && delay < time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > time.Minute {
+		delay = time.Minute
+	}
+	s.nextConnectAt = time.Now().Add(delay)
+}
+
+func (s *ContinuationSupervisor) resetConnectRetry() {
+	s.mu.Lock()
+	s.connectFailures = 0
+	s.nextConnectAt = time.Time{}
+	s.mu.Unlock()
 }
 
 func (s *ContinuationSupervisor) recordHealth(err error, generation uint64) {
