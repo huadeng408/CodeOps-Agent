@@ -78,3 +78,12 @@ func TestNormalizeReplayCursorFallsBackWhenClientCursorExceedsLedgerHead(t *test
 		t.Fatalf("cursor above empty ledger head = %d, want -1", got)
 	}
 }
+
+func TestValidateLiveEventCursorRejectsConflictingEventAtSameSequence(t *testing.T) {
+	if err := validateLiveEventCursor(7, "event-7", 7, "other-event-7"); err == nil {
+		t.Fatal("same sequence with a different event id must be rejected")
+	}
+	if err := validateLiveEventCursor(7, "event-7", 7, "event-7"); err != nil {
+		t.Fatalf("duplicate delivery should remain idempotent: %v", err)
+	}
+}

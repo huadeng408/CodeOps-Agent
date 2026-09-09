@@ -544,7 +544,10 @@ func (h *WebSocketHandler) writeRawEvent(conn *websocket.Conn, raw []byte, seenI
 }
 
 func (h *WebSocketHandler) writeEvent(conn *websocket.Conn, seq int64, eventID string, raw []byte, seenIDs map[string]struct{}) error {
-	last, _ := h.hub.Cursor(conn)
+	last, lastEventID := h.hub.Cursor(conn)
+	if err := validateLiveEventCursor(last, lastEventID, seq, eventID); err != nil {
+		return err
+	}
 	if eventID != "" {
 		if _, exists := seenIDs[eventID]; exists {
 			return nil
@@ -561,6 +564,16 @@ func (h *WebSocketHandler) writeEvent(conn *websocket.Conn, seq int64, eventID s
 	}
 	h.hub.SetCursor(conn, seq, eventID)
 	return nil
+}
+
+// validateLiveEventCursor keeps the live stream fail-closed when a producer
+// attempts to reuse a sequence number for a different immutable event.
+// Re-delivery of the same event remains idempotent so reconnects are safe.
+func validateLiveEventCursor(lastSeq int64, lastEventID string, seq int64, eventID string) error {
+	if seq < 0 || lastSeq < 0 || seq != lastSeq || strings.TrimSpace(lastEventID) == "" || strings.TrimSpace(eventID) == "" || lastEventID == eventID {
+		return nil
+	}
+	return fmt.Errorf("websocket live sequence conflict: seq %d has event ids %q and %q", seq, lastEventID, eventID)
 }
 
 func (h *WebSocketHandler) keepAlive(conn *websocket.Conn, done chan struct{}) {
