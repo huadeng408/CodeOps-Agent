@@ -110,3 +110,17 @@ func TestContinuationSlotReplacementWaitsForActiveRequest(t *testing.T) {
 		t.Fatal("replacement closed module while request was active")
 	}
 }
+
+func TestContinuationSlotDetachClosesModuleOnce(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &slotModule{}
+	slot.Attach(module)
+	slot.Detach(module)
+	if module.closeCount != 1 {
+		t.Fatalf("detached module close count = %d, want 1", module.closeCount)
+	}
+	slot.Detach(module)
+	if module.closeCount != 1 {
+		t.Fatalf("detached module close count after repeat = %d, want 1", module.closeCount)
+	}
+}

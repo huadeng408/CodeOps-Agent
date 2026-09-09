@@ -62,11 +62,18 @@ func (s *ContinuationSlot) Detach(module ContinuationModule) {
 		return
 	}
 	s.mu.Lock()
-	if s.module == module {
-		s.module = nil
-		s.generation++
+	if s.module != module {
+		s.mu.Unlock()
+		return
 	}
+	s.module = nil
+	s.generation++
 	s.mu.Unlock()
+	// No later slot call can select the detached module. Wait for calls that
+	// selected it before the detach to finish before closing its transport.
+	s.calls.Lock()
+	defer s.calls.Unlock()
+	_ = module.Close()
 }
 
 // detachIf removes module only when it is still the module observed at
