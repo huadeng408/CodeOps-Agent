@@ -158,18 +158,20 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		s.scheduleConnectRetry()
 		return
 	}
-	if !s.attachRecovered(module) {
-		_ = module.Close()
-	}
+	s.attachRecovered(module)
 }
 
-// attachRecovered makes the shutdown check and slot attach one atomic
-// supervisor transition. Close cannot mark the supervisor closed between the
-// check and attach, so a late Recover result never resurrects a closed slot.
+// attachRecovered owns module once called. It makes the shutdown check and
+// slot attach one atomic supervisor transition and closes rejected modules
+// exactly once. Close cannot mark the supervisor closed between the check and
+// attach, so a late Recover result never resurrects a closed slot.
 func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || module == nil {
+		s.mu.Unlock()
+		if module != nil {
+			_ = module.Close()
+		}
 		return false
 	}
 	generation := s.slot.Attach(module)
@@ -177,6 +179,7 @@ func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool
 		// The slot may have been closed independently while recovery was
 		// in flight. Treat a rejected attach as a failed transition so the
 		// caller closes the late module and status never claims attachment.
+		s.mu.Unlock()
 		return false
 	}
 	now := time.Now().UTC()
@@ -189,6 +192,7 @@ func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool
 	s.status.LastTransitionAt = &now
 	s.status.ConsecutiveFailures = 0
 	s.status.NextRetryAt = nil
+	s.mu.Unlock()
 	return true
 }
 
