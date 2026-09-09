@@ -14,6 +14,7 @@ type ContinuationSlot struct {
 	mu         sync.RWMutex
 	module     ContinuationModule
 	generation uint64
+	closed     bool
 }
 
 func NewContinuationSlot() *ContinuationSlot { return &ContinuationSlot{} }
@@ -26,6 +27,13 @@ func (s *ContinuationSlot) Attach(module ContinuationModule) uint64 {
 		return 0
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		// The slot owns the lifecycle of attached modules. A late attach
+		// racing with shutdown must not resurrect a continuation after Close.
+		_ = module.Close()
+		return 0
+	}
 	previous := s.module
 	s.module = module
 	s.generation++
@@ -104,6 +112,11 @@ func (s *ContinuationSlot) Close() error {
 		return nil
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
 	m := s.module
 	s.module = nil
 	if m != nil {
