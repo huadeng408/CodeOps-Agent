@@ -53,6 +53,14 @@ function writeLocalStorage(key: string, value: string): void {
   }
 }
 
+function removeLocalStorage(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Session continuity is ledger-backed; browser storage is only a hint.
+  }
+}
+
 // The ledger remains the transport cursor and audit history. The active UI
 // surface hides only the stale branch between the latest rewind target and its
 // marker, so later events can continue to stream without losing locality.
@@ -85,7 +93,7 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [message, setMessage] = useState('');
-  const [isDarkTheme, setIsDarkTheme] = useState(() => localStorage.getItem('theme') === 'dark');
+  const [isDarkTheme, setIsDarkTheme] = useState(() => readLocalStorage('theme') === 'dark');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -103,7 +111,7 @@ function App() {
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
-    localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
+    writeLocalStorage('theme', isDarkTheme ? 'dark' : 'light');
   }, [isDarkTheme]);
 
   useEffect(() => {
@@ -116,7 +124,7 @@ function App() {
       return;
     }
     try {
-      setMessage(localStorage.getItem(sessionDraftKey(selectedSession.id)) || '');
+      setMessage(readLocalStorage(sessionDraftKey(selectedSession.id)) || '');
     } catch {
       setMessage('');
     }
@@ -126,8 +134,8 @@ function App() {
     if (!selectedSession) return;
     try {
       const draft = message.trim();
-      if (draft) localStorage.setItem(sessionDraftKey(selectedSession.id), message);
-      else localStorage.removeItem(sessionDraftKey(selectedSession.id));
+      if (draft) writeLocalStorage(sessionDraftKey(selectedSession.id), message);
+      else removeLocalStorage(sessionDraftKey(selectedSession.id));
     } catch {
       // Draft persistence is a convenience; canonical ledger recovery does
       // not depend on browser storage being available.
@@ -141,8 +149,8 @@ function App() {
       const remembered = readLocalStorage('codeops:selected-session');
       const wanted = preferredID || current?.id || remembered;
       const next = (wanted && data.find((session) => session.id === wanted)) || data[0] || null;
-      if (next) localStorage.setItem('codeops:selected-session', next.id);
-      else localStorage.removeItem('codeops:selected-session');
+      if (next) writeLocalStorage('codeops:selected-session', next.id);
+      else removeLocalStorage('codeops:selected-session');
       return next;
     });
     return data;
@@ -264,7 +272,7 @@ function App() {
     try {
       await api.createEvent(selectedSession.id, content, selectedSession.eventCount);
       setMessage('');
-      try { localStorage.removeItem(sessionDraftKey(selectedSession.id)); } catch { /* best effort */ }
+      removeLocalStorage(sessionDraftKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
       setError(errorMessage(cause, '消息发送失败'));
