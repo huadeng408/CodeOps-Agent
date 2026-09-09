@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -253,6 +254,65 @@ func TestSessionRunnerRecoverClaimsExpiredLeaseWithNextAttempt(t *testing.T) {
 	terminal := waitForRunStatus(t, runner, created.ID, "run-recover", RunCompleted)
 	if terminal.Attempt != 2 || terminal.WorkerID != "worker-recovery" {
 		t.Fatalf("recovered run = %+v", terminal)
+	}
+}
+
+type recoverSessionErrorLog struct {
+	EventLog
+	badSessionID string
+	healthyID    string
+	err          error
+}
+
+func (l *recoverSessionErrorLog) SessionIDs(context.Context) ([]string, error) {
+	return []string{l.badSessionID, l.healthyID}, nil
+}
+
+func (l *recoverSessionErrorLog) Events(ctx context.Context, sessionID string) ([]Event, error) {
+	if sessionID == l.badSessionID {
+		return nil, l.err
+	}
+	return l.EventLog.Events(ctx, sessionID)
+}
+
+func TestSessionRunnerRecoverContinuesHealthySessionsAfterOneLedgerFailure(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	seedWorkbench := NewWorkbench(ledger, nil)
+	_, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	if created.ID == "healthy-session" {
+		t.Fatal("test fixture unexpectedly used reserved session id")
+	}
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, seedWorkbench, created.ID, checkpoint.Hash, "request-recover-after-error", "run-recover-after-error", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-recover-after-error", RequestID: "request-recover-after-error", LeaseID: "expired-recover-after-error",
+		WorkerID: "dead-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	corruptErr := fmt.Errorf("corrupt session ledger")
+	recoverLedger := &recoverSessionErrorLog{EventLog: ledger, badSessionID: "bad-session", healthyID: created.ID, err: corruptErr}
+	workbench := NewWorkbench(recoverLedger, nil)
+	conversation := &recordingConversationAdapter{reply: "recovered despite neighboring failure"}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-recover-after-error", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	if err := runner.Recover(ctx); !errors.Is(err, corruptErr) {
+		t.Fatalf("recover error = %v, want joined corrupt ledger error", err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, "run-recover-after-error", RunCompleted)
+	if terminal.Attempt != 2 || terminal.WorkerID != "worker-recover-after-error" {
+		t.Fatalf("healthy session was not recovered after neighboring failure: %+v", terminal)
 	}
 }
 

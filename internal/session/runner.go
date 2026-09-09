@@ -358,17 +358,20 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var recoverErrs []error
 	for _, sessionID := range ids {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		events, readErr := r.workbench.ledger.Events(ctx, sessionID)
 		if readErr != nil {
-			return readErr
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s events: %w", sessionID, readErr))
+			continue
 		}
 		runs, projectErr := projectRuns(events)
 		if projectErr != nil {
-			return projectErr
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s runs: %w", sessionID, projectErr))
+			continue
 		}
 		for runID, run := range runs {
 			if err := ctx.Err(); err != nil {
@@ -384,7 +387,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			r.enqueue(runKey{sessionID: sessionID, runID: runID}, wakeAt)
 		}
 	}
-	return nil
+	return errors.Join(recoverErrs...)
 }
 
 func (r *SessionRunner) Close() error {
