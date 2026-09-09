@@ -12,6 +12,11 @@
 3 warnings`）。远端 `release-gate` job 按项目决策保持禁用，因为它依赖仓库外部
 provider/scorer receipt；本地验证仍是当前可执行门禁。
 
+本轮新增删除执行 fence：恢复流程会先投影 Session 生命周期，已删除 Session 的未完成
+run 不会在进程重启后复活；claim、heartbeat 和 assistant/tool 事件写入在发现 tombstone
+后统一 fail closed。新增回归测试覆盖“删除后恢复不调用模型”和“删除 in-flight run
+取消 conversation 且不写入终态事实”。变更提交为 `13489a19`，并已推送至 `origin/main`。
+
 本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt、竞态检查或外部 scorer
 指标标为 `VERIFIED`；缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
 
