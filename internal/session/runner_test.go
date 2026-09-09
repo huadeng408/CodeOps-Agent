@@ -21,7 +21,8 @@ type recordingConversationAdapter struct {
 }
 
 type blockingConversationAdapter struct {
-	started chan struct{}
+	started  chan struct{}
+	finished chan struct{}
 }
 
 type recoverableConversationAdapter struct {
@@ -64,6 +65,9 @@ func (a *countingToolAdapter) Execute(context.Context, identity.Actor, string, o
 func (a *blockingConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, _ orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	close(a.started)
 	<-ctx.Done()
+	if a.finished != nil {
+		close(a.finished)
+	}
 	return orchestrator.ConversationResult{}, ctx.Err()
 }
 
@@ -254,6 +258,95 @@ func TestSessionRunnerRecoverClaimsExpiredLeaseWithNextAttempt(t *testing.T) {
 	terminal := waitForRunStatus(t, runner, created.ID, "run-recover", RunCompleted)
 	if terminal.Attempt != 2 || terminal.WorkerID != "worker-recovery" {
 		t.Fatalf("recovered run = %+v", terminal)
+	}
+}
+
+func TestSessionRunnerRecoverDoesNotResurrectDeletedSession(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-deleted", "run-deleted", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-deleted", RequestID: "request-deleted", LeaseID: "expired-deleted",
+		WorkerID: "dead-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.Delete(ctx, 7, created.ID, 6); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := &recordingConversationAdapter{reply: "must not run"}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-after-delete", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatalf("recover deleted session: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	conversation.mu.Lock()
+	calls := len(conversation.requests)
+	conversation.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("deleted session was resurrected with %d model calls", calls)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 7 || events[len(events)-1].Type != "session/deleted" {
+		t.Fatalf("deleted session history changed during recovery: %+v", events)
+	}
+}
+
+func TestSessionRunnerDeletionCancelsInFlightConversation(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	blocking := &blockingConversationAdapter{started: make(chan struct{}), finished: make(chan struct{})}
+	runner := NewSessionRunner(workbench, blocking, nil, SessionRunnerOptions{
+		WorkerID: "worker-delete-in-flight", LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	if _, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-delete-in-flight", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("conversation did not start")
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.Delete(ctx, 7, created.ID, int64(len(events))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.finished:
+	case <-time.After(time.Second):
+		history, _ := ledger.Events(ctx, created.ID)
+		t.Fatalf("deleted in-flight run was not canceled: %+v", history)
+	}
+	history, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != len(events)+1 || history[len(history)-1].Type != "session/deleted" {
+		t.Fatalf("deletion appended execution facts after cancellation: %+v", history)
 	}
 }
 

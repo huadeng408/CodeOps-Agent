@@ -388,6 +388,18 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s events: %w", sessionID, readErr))
 			continue
 		}
+		// A deleted session remains in the append-only ledger for auditability,
+		// but its unfinished runs must never be resurrected after a process
+		// restart. Re-project the lifecycle state before scheduling any work so
+		// deletion is a durable execution fence rather than only a UI tombstone.
+		view, viewErr := reduceSessionView(events)
+		if viewErr != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s projection: %w", sessionID, viewErr))
+			continue
+		}
+		if view.Status == "deleted" {
+			continue
+		}
 		runs, projectErr := projectRuns(events)
 		if projectErr != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s runs: %w", sessionID, projectErr))
@@ -642,6 +654,13 @@ func (r *SessionRunner) claim(ctx context.Context, key runKey) (runLeasePayload,
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
 			return runLeasePayload{}, time.Time{}, err
+		}
+		view, viewErr := reduceSessionView(events)
+		if viewErr != nil {
+			return runLeasePayload{}, time.Time{}, viewErr
+		}
+		if view.Status == "deleted" {
+			return runLeasePayload{}, time.Time{}, ErrSessionNotFound
 		}
 		projection, err := projectRun(events, key.runID)
 		if err != nil {
@@ -1011,6 +1030,13 @@ func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lea
 		if err != nil {
 			return err
 		}
+		view, viewErr := reduceSessionView(events)
+		if viewErr != nil {
+			return viewErr
+		}
+		if view.Status == "deleted" {
+			return ErrSessionNotFound
+		}
 		projection, err := projectRun(events, key.runID)
 		if err != nil {
 			return err
@@ -1035,6 +1061,13 @@ func (r *SessionRunner) appendLeasedFact(ctx context.Context, key runKey, leaseI
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
 			return err
+		}
+		view, viewErr := reduceSessionView(events)
+		if viewErr != nil {
+			return viewErr
+		}
+		if view.Status == "deleted" {
+			return ErrSessionNotFound
 		}
 		projection, err := projectRun(events, key.runID)
 		if err != nil {
