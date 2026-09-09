@@ -1,10 +1,9 @@
 name: CodeOps-Agent release gate
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # Evidence-backed release eligibility depends on external scorer and provider
+  # receipts. Run it deliberately from Actions when a release candidate exists.
+  workflow_dispatch:
 
 concurrency:
   group: release-gate-${{ github.workflow }}-${{ github.ref }}
