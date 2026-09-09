@@ -93,7 +93,7 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		}
 		return
 	}
-	if !s.nextConnectAt.IsZero() && time.Now().Before(s.nextConnectAt) {
+	if !s.shouldAttemptConnect(time.Now()) {
 		return
 	}
 	module, err := s.connect(ctx)
@@ -112,16 +112,24 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		if err != nil {
 			s.recordHealth(err, 0)
 			_ = module.Close()
+			s.scheduleConnectRetry()
 			return
 		}
 	}
 	if err := module.Recover(ctx); err != nil {
 		s.recordHealth(err, 0)
 		_ = module.Close()
+		s.scheduleConnectRetry()
 		return
 	}
 	generation := s.slot.Attach(module)
 	s.recordRecovery(generation)
+}
+
+func (s *ContinuationSupervisor) shouldAttemptConnect(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextConnectAt.IsZero() || !now.Before(s.nextConnectAt)
 }
 
 func (s *ContinuationSupervisor) scheduleConnectRetry() {

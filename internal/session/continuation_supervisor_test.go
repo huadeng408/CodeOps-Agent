@@ -183,3 +183,48 @@ func TestContinuationSupervisorBacksOffFailedConnections(t *testing.T) {
 		t.Fatalf("connect attempts after backoff reset = %d, want 2", connects)
 	}
 }
+
+func TestContinuationSupervisorBacksOffHealthAndRecoveryFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		module     *supervisorModule
+		recoverErr error
+	}{
+		{name: "health", module: &supervisorModule{healthy: false}},
+		{name: "recovery", module: &supervisorModule{healthy: true}, recoverErr: errors.New("recover failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := NewContinuationSlot()
+			connects := 0
+			module := tc.module
+			if tc.recoverErr != nil {
+				module = &supervisorModule{healthy: true}
+			}
+			supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+				connects++
+				return module, nil
+			})
+			if tc.recoverErr == nil {
+				supervisor.reconcile(context.Background())
+			} else {
+				// A recover failure is injected through a small wrapper module.
+				supervisor.connect = func(context.Context) (ContinuationModule, error) {
+					connects++
+					return &recoverFailModule{supervisorModule: module, err: tc.recoverErr}, nil
+				}
+				supervisor.reconcile(context.Background())
+			}
+			supervisor.reconcile(context.Background())
+			if connects != 1 {
+				t.Fatalf("connect attempts = %d, want 1 while backoff is active", connects)
+			}
+		})
+	}
+}
+
+type recoverFailModule struct {
+	*supervisorModule
+	err error
+}
+
+func (m *recoverFailModule) Recover(context.Context) error { return m.err }
