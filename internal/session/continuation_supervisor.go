@@ -96,7 +96,9 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 	if !s.shouldAttemptConnect(time.Now()) {
 		return
 	}
-	module, err := s.connect(ctx)
+	connectCtx, cancelConnect := context.WithTimeout(ctx, s.interval)
+	module, err := s.connect(connectCtx)
+	cancelConnect()
 	if err != nil || module == nil {
 		if err != nil {
 			s.recordHealth(err, 0)
@@ -115,7 +117,10 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 			return
 		}
 	}
-	if err := module.Recover(ctx); err != nil {
+	recoverCtx, cancelRecover := context.WithTimeout(ctx, s.interval)
+	err = module.Recover(recoverCtx)
+	cancelRecover()
+	if err != nil {
 		s.recordHealth(err, 0)
 		_ = module.Close()
 		s.scheduleConnectRetry()

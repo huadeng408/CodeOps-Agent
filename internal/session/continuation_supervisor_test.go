@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -252,3 +253,37 @@ type recoverFailModule struct {
 }
 
 func (m *recoverFailModule) Recover(context.Context) error { return m.err }
+
+type blockingRecoverModule struct {
+	*supervisorModule
+}
+
+func (m *blockingRecoverModule) Recover(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestContinuationSupervisorBoundsRecovery(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &blockingRecoverModule{supervisorModule: &supervisorModule{healthy: true}}
+	supervisor := NewContinuationSupervisor(slot, 10*time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+
+	started := time.Now()
+	supervisor.reconcile(context.Background())
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("recovery exceeded bound: %s", elapsed)
+	}
+	if slot.Available() {
+		t.Fatal("module attached after recovery timeout")
+	}
+	status := supervisor.Status()
+	if !strings.Contains(status.LastHealthError, context.DeadlineExceeded.Error()) {
+		t.Fatalf("last health error = %q, want deadline exceeded", status.LastHealthError)
+	}
+	_, _, closed := module.snapshot()
+	if closed != 1 {
+		t.Fatalf("module close count = %d, want 1", closed)
+	}
+}
