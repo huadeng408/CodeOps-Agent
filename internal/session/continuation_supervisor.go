@@ -128,9 +128,19 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 		s.scheduleConnectRetry()
 		return
 	}
+	if s.isClosed() {
+		_ = module.Close()
+		return
+	}
 	generation := s.slot.Attach(module)
 	s.resetConnectRetry()
 	s.recordRecovery(generation)
+}
+
+func (s *ContinuationSupervisor) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *ContinuationSupervisor) shouldAttemptConnect(now time.Time) bool {
