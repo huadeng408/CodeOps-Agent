@@ -166,7 +166,11 @@ func (m *Manager) SpawnAgent(ctx context.Context, request AgentSpawnRequest) (Wo
 
 // RenewAgentLease extends an active agent lease without changing its path.
 func (m *Manager) RenewAgentLease(ctx context.Context, leaseID string) (Worktree, error) {
-	_ = ctx
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return Worktree{}, err
+		}
+	}
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
 		return Worktree{}, errors.New("agent lease id is required")
