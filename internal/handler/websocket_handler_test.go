@@ -87,3 +87,12 @@ func TestValidateLiveEventCursorRejectsConflictingEventAtSameSequence(t *testing
 		t.Fatalf("duplicate delivery should remain idempotent: %v", err)
 	}
 }
+
+func TestValidateLiveEventCursorRejectsLiveSequenceGap(t *testing.T) {
+	if err := validateLiveEventCursor(7, "event-7", 9, "event-9"); err == nil {
+		t.Fatal("live sequence gap must be rejected")
+	}
+	if err := validateLiveEventCursor(7, "event-7", 8, "event-8"); err != nil {
+		t.Fatalf("next contiguous event should be accepted: %v", err)
+	}
+}

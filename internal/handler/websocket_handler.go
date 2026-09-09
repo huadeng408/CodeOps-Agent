@@ -570,10 +570,19 @@ func (h *WebSocketHandler) writeEvent(conn *websocket.Conn, seq int64, eventID s
 // attempts to reuse a sequence number for a different immutable event.
 // Re-delivery of the same event remains idempotent so reconnects are safe.
 func validateLiveEventCursor(lastSeq int64, lastEventID string, seq int64, eventID string) error {
-	if seq < 0 || lastSeq < 0 || seq != lastSeq || strings.TrimSpace(lastEventID) == "" || strings.TrimSpace(eventID) == "" || lastEventID == eventID {
+	if seq < 0 || lastSeq < 0 {
 		return nil
 	}
-	return fmt.Errorf("websocket live sequence conflict: seq %d has event ids %q and %q", seq, lastEventID, eventID)
+	if seq == lastSeq {
+		if strings.TrimSpace(lastEventID) == "" || strings.TrimSpace(eventID) == "" || lastEventID == eventID {
+			return nil
+		}
+		return fmt.Errorf("websocket live sequence conflict: seq %d has event ids %q and %q", seq, lastEventID, eventID)
+	}
+	if seq > lastSeq+1 {
+		return fmt.Errorf("websocket live sequence gap: expected %d, got %d", lastSeq+1, seq)
+	}
+	return nil
 }
 
 func (h *WebSocketHandler) keepAlive(conn *websocket.Conn, done chan struct{}) {
