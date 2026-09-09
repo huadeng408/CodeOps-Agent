@@ -72,7 +72,14 @@ class ApiClient {
   }
 
   async continuationHealth(): Promise<ContinuationRuntimeStatus> {
-    const response = await fetch('/healthz', { credentials: 'include' });
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    let response: Response;
+    try {
+      response = await fetch('/healthz', { credentials: 'include', signal: controller.signal });
+    } finally {
+      window.clearTimeout(timeout);
+    }
     const payload = await response.json().catch(() => undefined) as { continuation?: ContinuationRuntimeStatus } | undefined;
     if (!response.ok || !payload?.continuation) {
       throw new ApiError(response.status || 503, 'continuation health unavailable', payload);
