@@ -55,7 +55,9 @@ func sessionErrorStatus(err error) int {
 func writeSessionError(c *gin.Context, err error, fallback string) {
 	status := sessionErrorStatus(err)
 	message := fallback
-	if status == http.StatusBadRequest || status == http.StatusConflict {
+	if errors.Is(err, session.ErrContinuationUnavailable) {
+		message = "agent continuation is unavailable"
+	} else if status == http.StatusBadRequest || status == http.StatusConflict {
 		message = err.Error()
 	}
 	c.JSON(status, gin.H{"code": status, "message": message, "data": nil})

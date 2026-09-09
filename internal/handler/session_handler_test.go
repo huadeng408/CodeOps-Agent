@@ -40,6 +40,21 @@ func TestSessionErrorStatusMapsContinuationUnavailableTo503(t *testing.T) {
 	}
 }
 
+func TestWriteSessionErrorUsesStableContinuationUnavailableMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/error", func(c *gin.Context) {
+		writeSessionError(c, session.ErrContinuationUnavailable, "failed to continue session")
+	})
+	response := performSessionRequest(router, http.MethodGet, "/error", nil)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("continuation unavailable response status = %d", response.Code)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"message":"agent continuation is unavailable"`)) {
+		t.Fatalf("continuation unavailable response body = %s", response.Body.String())
+	}
+}
+
 func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*worktree.Manager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
