@@ -334,6 +334,26 @@ func TestContinuationSupervisorDoesNotStartWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorReconcileSkipsCanceledContextAndMissingDependencies(t *testing.T) {
+	connects := 0
+	supervisor := NewContinuationSupervisor(NewContinuationSlot(), time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		connects++
+		return nil, errors.New("should not connect")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	supervisor.reconcile(ctx)
+	supervisor.reconcile(context.Background())
+	if connects != 1 {
+		t.Fatalf("connect attempts after canceled reconcile = %d, want 1", connects)
+	}
+	var nilSupervisor *ContinuationSupervisor
+	nilSupervisor.reconcile(context.Background())
+	NewContinuationSupervisor(nil, time.Millisecond, func(context.Context) (ContinuationModule, error) {
+		return nil, nil
+	}).reconcile(context.Background())
+}
+
 func TestContinuationSupervisorCanRestartAfterParentContextEnds(t *testing.T) {
 	slot := NewContinuationSlot()
 	var mu sync.Mutex
