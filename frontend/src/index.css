@@ -657,6 +657,20 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.continuation-runtime-card {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--dsw-static-amber-500) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-static-amber-500) 8%, transparent);
+}
+
+.continuation-runtime-card .recovery-summary-meta {
+  margin-top: 6px;
+  color: var(--dsw-static-red-500);
+  overflow-wrap: anywhere;
+}
 .continue-session-btn { width: 100%; margin-top: 4px; }
 .mono-value { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
 
