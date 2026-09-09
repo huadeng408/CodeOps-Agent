@@ -205,7 +205,10 @@ function App() {
     if (!sessionId || !active) return undefined;
     let stopped = false;
     let pollGeneration = 0;
+    let inFlight = false;
     const refresh = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
       const generation = ++pollGeneration;
       try {
         const fresh = await api.getSession(sessionId);
@@ -224,8 +227,11 @@ function App() {
         setStatusDraft(fresh.status);
       } catch (cause) {
         if (!stopped && generation === pollGeneration) setError(errorMessage(cause, '运行状态同步失败'));
+      } finally {
+        inFlight = false;
       }
     };
+    void refresh();
     const timer = window.setInterval(() => { void refresh(); }, 2000);
     return () => {
       stopped = true;
