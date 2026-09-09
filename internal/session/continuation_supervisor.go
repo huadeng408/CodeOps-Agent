@@ -57,7 +57,7 @@ func (s *ContinuationSupervisor) Start(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
-	if s.closed || s.cancel != nil {
+	if s.closed || s.cancel != nil || ctx.Err() != nil {
 		s.mu.Unlock()
 		return
 	}
@@ -72,6 +72,9 @@ func (s *ContinuationSupervisor) loop(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
+	if ctx.Err() != nil {
+		return
+	}
 	s.reconcile(ctx)
 	for {
 		select {
