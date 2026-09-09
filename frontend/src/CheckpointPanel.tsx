@@ -49,6 +49,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
   const [error, setError] = useState('');
   const requestIds = useRef(new Map<string, string>());
   const loadVersionRef = useRef(0);
+  const continuationInFlightRef = useRef(false);
 
   const load = async () => {
     const loadVersion = ++loadVersionRef.current;
@@ -181,7 +182,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
   };
 
   const handleContinue = async (checkpoint: SessionCheckpoint, forceNewRequestId = false) => {
-    if (busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true) return;
+    if (busy || continuationInFlightRef.current || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true) return;
+    continuationInFlightRef.current = true;
     setBusy(true);
     setError('');
     const requestKey = `${session.id}:${checkpoint.hash}`;
@@ -199,6 +201,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
         ? '会话已更新，请刷新后重试'
         : cause instanceof Error ? cause.message : '继续失败');
       await onChanged().catch(() => undefined);
+      continuationInFlightRef.current = false;
       setBusy(false);
       return;
     }
@@ -207,6 +210,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
     } catch (cause) {
       setError(cause instanceof Error ? `继续请求已受理，刷新状态失败：${cause.message}` : '继续请求已受理，刷新状态失败');
     } finally {
+      continuationInFlightRef.current = false;
       setBusy(false);
     }
   };

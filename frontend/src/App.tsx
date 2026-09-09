@@ -110,6 +110,7 @@ function App() {
   const [continuationHealthKnown, setContinuationHealthKnown] = useState(false);
   const selectionGenerationRef = useRef(0);
   const canonicalSelectionRef = useRef('');
+  const continuationInFlightRef = useRef(false);
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -358,11 +359,12 @@ function App() {
   };
 
   const handleContinueSession = async () => {
-    if (!selectedSession || busy || selectedSession.status !== 'paused' || !selectedSession.run?.checkpointHash) return;
+    if (!selectedSession || busy || continuationInFlightRef.current || selectedSession.status !== 'paused' || !selectedSession.run?.checkpointHash) return;
     if (!continuationHealthKnown || continuationHealth?.attached !== true) {
       setError('编排器正在恢复，暂不能继续任务');
       return;
     }
+    continuationInFlightRef.current = true;
     setBusy(true);
     setError('');
     const checkpointHash = selectedSession.run.checkpointHash;
@@ -379,6 +381,7 @@ function App() {
       setError(errorMessage(cause, '继续历史任务失败'));
       await refreshSelected().catch(() => undefined);
     } finally {
+      continuationInFlightRef.current = false;
       setBusy(false);
     }
   };
