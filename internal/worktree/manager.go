@@ -213,6 +213,11 @@ func (m *Manager) FindAgent(requestID string) (Worktree, bool) {
 // CleanupAgent releases one agent worktree. A missing request is treated as
 // an idempotent success so duplicate completion/recovery messages are safe.
 func (m *Manager) CleanupAgent(ctx context.Context, requestID string, discard bool, reason string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		return errors.New("agent request id is required")
@@ -222,6 +227,11 @@ func (m *Manager) CleanupAgent(ctx context.Context, requestID string, discard bo
 	for name, tree := range m.trees {
 		if tree.RequestID != requestID {
 			continue
+		}
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if err := m.removeGitWorktree(ctx, tree, discard); err != nil {
 			return fmt.Errorf("cleanup agent worktree %s: %w", name, err)

@@ -540,6 +540,33 @@ func TestWorktreeManagerDoesNotReapLeaseWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestWorktreeManagerDoesNotCleanupAgentWithCanceledContext(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	spawned, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{
+		RequestID:       "request-canceled-cleanup",
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		WorktreeName:    "canceled-cleanup",
+	})
+	if err != nil {
+		t.Fatalf("spawn lease: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.CleanupAgent(ctx, spawned.RequestID, true, "shutdown"); err != context.Canceled {
+		t.Fatalf("cleanup with canceled context error = %v, want context canceled", err)
+	}
+	current, ok := manager.FindAgent(spawned.RequestID)
+	if !ok || current.Path != spawned.Path {
+		t.Fatalf("canceled cleanup lost agent worktree: %#v", current)
+	}
+	if _, err := os.Stat(spawned.Path); err != nil {
+		t.Fatalf("canceled cleanup removed worktree: %v", err)
+	}
+}
+
 func seedGitRepo(t *testing.T, repo string) {
 	t.Helper()
 	runGit(t, repo, "init")
