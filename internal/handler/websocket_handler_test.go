@@ -96,3 +96,15 @@ func TestValidateLiveEventCursorRejectsLiveSequenceGap(t *testing.T) {
 		t.Fatalf("next contiguous event should be accepted: %v", err)
 	}
 }
+
+func TestValidateLiveEventCursorRejectsInvalidFirstLiveSequence(t *testing.T) {
+	if err := validateLiveEventCursor(-1, "", 2, "event-2"); err == nil {
+		t.Fatal("first live event must start at sequence zero")
+	}
+	if err := validateLiveEventCursor(-1, "", -1, "event-negative"); err == nil {
+		t.Fatal("negative live sequence must be rejected")
+	}
+	if err := validateLiveEventCursor(-1, "", 0, "event-0"); err != nil {
+		t.Fatalf("first sequence zero should be accepted: %v", err)
+	}
+}
