@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,15 @@ func openHandlerTestWorkbench(t *testing.T) (*session.Workbench, *session.SQLite
 	return session.NewWorkbench(ledger, nil), ledger
 }
 
+type testContinuationModule struct{}
+
+func (m *testContinuationModule) RequestContinuation(context.Context, session.ContinueCommand) (session.RunView, error) {
+	return session.RunView{RunID: "test-run"}, nil
+}
+
+func (m *testContinuationModule) Recover(context.Context) error { return nil }
+func (m *testContinuationModule) Close() error                  { return nil }
+
 func TestSessionErrorStatusMapsContinuationUnavailableTo503(t *testing.T) {
 	if got := sessionErrorStatus(session.ErrContinuationUnavailable); got != http.StatusServiceUnavailable {
 		t.Fatalf("continuation unavailable status = %d, want %d", got, http.StatusServiceUnavailable)
@@ -44,6 +54,31 @@ func TestSessionErrorStatusMapsSessionRunnerClosedTo503(t *testing.T) {
 	if got := sessionErrorStatus(session.ErrSessionRunnerClosed); got != http.StatusServiceUnavailable {
 		t.Fatalf("session runner closed status = %d, want %d", got, http.StatusServiceUnavailable)
 	}
+}
+
+func TestEventHandlerContinuationSelectionIsSafeDuringReplacement(t *testing.T) {
+	h := NewEventHandler(nil)
+	first := &testContinuationModule{}
+	second := &testContinuationModule{}
+	h.SetContinuation(first)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			h.SetContinuation(first)
+			h.SetContinuation(second)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			if got := h.continuationSnapshot(); got != first && got != second {
+				t.Fatalf("unexpected continuation snapshot: %T", got)
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 func TestWriteSessionErrorUsesStableContinuationUnavailableMessage(t *testing.T) {

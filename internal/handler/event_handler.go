@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"code-agent/internal/identity"
 	"code-agent/internal/model"
@@ -19,9 +20,10 @@ import (
 // checkpoint facts. Tool/assistant events are produced by the orchestrator,
 // never selected by an untrusted browser request.
 type EventHandler struct {
-	workbench    session.WorkbenchModule
-	continuation session.ContinuationModule
-	slot         *session.ContinuationSlot
+	workbench      session.WorkbenchModule
+	continuationMu sync.RWMutex
+	continuation   session.ContinuationModule
+	slot           *session.ContinuationSlot
 }
 
 func NewEventHandler(workbench session.WorkbenchModule, continuation ...session.ContinuationModule) *EventHandler {
@@ -45,7 +47,18 @@ func (h *EventHandler) SetContinuation(continuation session.ContinuationModule) 
 	if h == nil {
 		return
 	}
+	h.continuationMu.Lock()
+	defer h.continuationMu.Unlock()
 	h.continuation = continuation
+}
+
+func (h *EventHandler) continuationSnapshot() session.ContinuationModule {
+	if h == nil {
+		return nil
+	}
+	h.continuationMu.RLock()
+	defer h.continuationMu.RUnlock()
+	return h.continuation
 }
 
 type createEventRequest struct {
@@ -217,7 +230,7 @@ func (h *EventHandler) ContinueSession(c *gin.Context) {
 		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("requestId and expectedSeq are required")), "requestId and expectedSeq are required")
 		return
 	}
-	continuation := h.continuation
+	continuation := h.continuationSnapshot()
 	if h.slot != nil {
 		continuation = h.slot
 	}
