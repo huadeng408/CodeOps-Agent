@@ -353,6 +353,11 @@ func (m *Manager) CleanupContextDiscard(ctx context.Context, name string) error 
 }
 
 func (m *Manager) cleanupContext(ctx context.Context, name string, discard bool) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	name, err := normalizeName(name)
 	if err != nil {
 		return err
@@ -363,6 +368,11 @@ func (m *Manager) cleanupContext(ctx context.Context, name string, discard bool)
 	removed, ok := m.trees[name]
 	if !ok {
 		return errors.New("worktree not found")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if err := m.removeGitWorktree(ctx, removed, discard); err != nil {
 		return err

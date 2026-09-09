@@ -567,6 +567,28 @@ func TestWorktreeManagerDoesNotCleanupAgentWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestWorktreeManagerDoesNotCleanupWorktreeWithCanceledContext(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	created, err := manager.CreateContext(context.Background(), "canceled-generic-cleanup")
+	if err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.CleanupContextDiscard(ctx, created.Name); err != context.Canceled {
+		t.Fatalf("cleanup with canceled context error = %v, want context canceled", err)
+	}
+	trees := manager.List()
+	if len(trees) != 1 || trees[0].Name != created.Name {
+		t.Fatalf("canceled cleanup lost worktree state: %#v", trees)
+	}
+	if _, err := os.Stat(created.Path); err != nil {
+		t.Fatalf("canceled cleanup removed worktree: %v", err)
+	}
+}
+
 func seedGitRepo(t *testing.T, repo string) {
 	t.Helper()
 	runGit(t, repo, "init")
