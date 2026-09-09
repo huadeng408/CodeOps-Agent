@@ -143,3 +143,22 @@ func TestContinuationSupervisorStatusIsRuntimeProjection(t *testing.T) {
 	}
 	_ = supervisor.Close()
 }
+
+func TestContinuationSupervisorCloseClosesAttachedModuleOnce(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &supervisorModule{healthy: true}
+	supervisor := NewContinuationSupervisor(slot, time.Hour, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	supervisor.reconcile(context.Background())
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	_, _, closed := module.snapshot()
+	if closed != 1 {
+		t.Fatalf("module close count = %d, want 1", closed)
+	}
+}

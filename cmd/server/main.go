@@ -320,7 +320,6 @@ func main() {
 	continuationSupervisor := session.NewContinuationSupervisor(continuationSlot, 5*time.Second, connectContinuation)
 	continuationSupervisor.Start(context.Background())
 	defer continuationSupervisor.Close()
-	defer continuationSlot.Close()
 	defer continuationExecutor.Close()
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
 
