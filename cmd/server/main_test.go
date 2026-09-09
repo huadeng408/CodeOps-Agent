@@ -127,6 +127,34 @@ func TestHealthzReportsContinuationRuntimeProjection(t *testing.T) {
 	}
 }
 
+func TestHealthzReportsContinuationRecoveryBackoff(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	nextRetry := time.Date(2026, 9, 9, 8, 0, 5, 0, time.UTC)
+	router.GET("/healthz", healthzHandlerWithContinuation(func() string { return "ok" }, func() session.ContinuationSupervisorStatus {
+		return session.ContinuationSupervisorStatus{
+			Attached: false, Generation: 8, ConsecutiveFailures: 2,
+			LastHealthError: "orchestrator unavailable", NextRetryAt: &nextRetry,
+		}
+	}))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	continuation, ok := body["continuation"].(map[string]any)
+	if !ok {
+		t.Fatalf("continuation projection missing: %s", recorder.Body.String())
+	}
+	if continuation["attached"] != false || continuation["generation"] != float64(8) || continuation["consecutive_failures"] != float64(2) || continuation["next_retry_at"] == nil {
+		t.Fatalf("continuation projection = %#v", continuation)
+	}
+}
+
 func TestSearchReadIndexUsesConfiguredCorpusReadAlias(t *testing.T) {
 	cfg := serverconfig.Config{
 		Elasticsearch: serverconfig.ElasticsearchConfig{IndexName: "knowledge_base"},
