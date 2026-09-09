@@ -255,6 +255,10 @@ func TestContinuationSupervisorAttachesAfterPartialSessionRecovery(t *testing.T)
 	if !status.Attached || !strings.Contains(status.LastHealthError, "session ledger damaged") {
 		t.Fatalf("partial recovery status = %+v", status)
 	}
+	supervisor.reconcile(context.Background())
+	if status = supervisor.Status(); !strings.Contains(status.LastHealthError, "session ledger damaged") {
+		t.Fatalf("health probe cleared partial recovery warning: %+v", status)
+	}
 	_, _, closed := module.snapshot()
 	if closed != 0 {
 		t.Fatalf("partially recovered module was closed %d times", closed)

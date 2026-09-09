@@ -39,6 +39,7 @@ type ContinuationSupervisor struct {
 	status          ContinuationSupervisorStatus
 	connectFailures int
 	nextConnectAt   time.Time
+	partialWarning  string
 }
 
 func NewContinuationSupervisor(slot *ContinuationSlot, interval time.Duration, connect func(context.Context) (ContinuationModule, error)) *ContinuationSupervisor {
@@ -166,7 +167,7 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 			// healthy sessions are already queued and the transport remains
 			// usable. Attach while retaining the warning in health status.
 			if s.attachRecovered(module) {
-				s.recordHealth(err, s.Status().Generation)
+				s.recordPartialRecovery(err, s.Status().Generation)
 				return
 			}
 			_ = module.Close()
@@ -207,6 +208,7 @@ func (s *ContinuationSupervisor) attachRecovered(module ContinuationModule) bool
 	s.status.Attached = true
 	s.status.Generation = generation
 	s.status.LastHealthError = ""
+	s.partialWarning = ""
 	s.status.LastRecoveryAt = &now
 	s.status.LastTransitionAt = &now
 	s.status.ConsecutiveFailures = 0
@@ -241,11 +243,24 @@ func (s *ContinuationSupervisor) scheduleConnectRetry() {
 func (s *ContinuationSupervisor) recordHealth(err error, generation uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err == nil {
+	if err == nil && s.partialWarning == "" {
 		s.status.LastHealthError = ""
-	} else {
+	} else if err != nil {
 		s.status.LastHealthError = fmt.Sprint(err)
 	}
+	if generation != 0 {
+		s.status.Generation = generation
+	}
+}
+
+func (s *ContinuationSupervisor) recordPartialRecovery(err error, generation uint64) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.partialWarning = fmt.Sprint(err)
+	s.status.LastHealthError = s.partialWarning
 	if generation != 0 {
 		s.status.Generation = generation
 	}
