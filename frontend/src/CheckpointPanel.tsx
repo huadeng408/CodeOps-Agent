@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
+import type { ContinuationRuntimeStatus, RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
 
 function readLocalStorage(key: string): string | null {
@@ -31,9 +31,11 @@ interface CheckpointPanelProps {
   refreshKey: number;
   onChanged: () => Promise<void>;
   onRunChanged?: (run: SessionRun) => void;
+  continuationHealth: ContinuationRuntimeStatus | null;
+  continuationHealthKnown: boolean;
 }
 
-export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }: CheckpointPanelProps) {
+export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, continuationHealth, continuationHealthKnown }: CheckpointPanelProps) {
   const [checkpoints, setCheckpoints] = useState<SessionCheckpoint[]>([]);
   const [manifest, setManifest] = useState<RecoveryManifest | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
@@ -179,7 +181,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
   };
 
   const handleContinue = async (checkpoint: SessionCheckpoint, forceNewRequestId = false) => {
-    if (busy || session.status !== 'paused') return;
+    if (busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true) return;
     setBusy(true);
     setError('');
     const requestKey = `${session.id}:${checkpoint.hash}`;
@@ -294,7 +296,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
               {run.retryOfRunId && <div className="recovery-summary-meta">承接 {run.retryOfRunId.slice(0, 12)}…</div>}
               {run.error && <div className="recovery-summary-meta">{run.error}</div>}
               <button className="subtle-btn" type="button" onClick={() => void handleRefreshRun(run)} disabled={busy}>刷新状态</button>
-              {run.status === 'failed' && <button className="subtle-btn" type="button" onClick={() => void handleRetryRun(run)} disabled={busy || session.status !== 'paused'}>再次运行</button>}
+              {run.status === 'failed' && <button className="subtle-btn" type="button" onClick={() => void handleRetryRun(run)} disabled={busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true}>再次运行</button>}
             </div>
           ))}
         </div>
@@ -324,8 +326,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged }
                 <button className="subtle-btn" type="button" onClick={() => void handleRestore(checkpoint)} disabled={busy}>
                   恢复
                 </button>
-                <button className="subtle-btn" type="button" onClick={() => void handleContinue(checkpoint)} disabled={busy || session.status !== 'paused'}>
-                  {session.run?.checkpointHash === checkpoint.hash && (session.run.status === 'running' || session.run.status === 'queued') ? '运行中' : session.run?.checkpointHash === checkpoint.hash && session.run.status === 'failed' ? '重试' : '继续'}
+                <button className="subtle-btn" type="button" onClick={() => void handleContinue(checkpoint)} disabled={busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true}>
+                  {!continuationHealthKnown ? '检查编排器...' : continuationHealth?.attached !== true ? '编排器恢复中...' : session.run?.checkpointHash === checkpoint.hash && (session.run.status === 'running' || session.run.status === 'queued') ? '运行中' : session.run?.checkpointHash === checkpoint.hash && session.run.status === 'failed' ? '重试' : '继续'}
                 </button>
               </div>
             </div>

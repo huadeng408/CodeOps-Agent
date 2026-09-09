@@ -458,7 +458,7 @@ function App() {
         <div className="task-list">
           {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} /> : <div className="empty-panel">未选择</div>}
         </div>
-        {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} onRunChanged={(run) => {
+        {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} onRunChanged={(run) => {
           setSelectedSession((current) => current && current.id === run.sessionId ? { ...current, run } : current);
           setSessions((items) => items.map((item) => item.id === run.sessionId ? { ...item, run } : item));
         }} />}
