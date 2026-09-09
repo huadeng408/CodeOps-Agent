@@ -2,7 +2,20 @@
 
 执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-07 当前快照）
 
-## 当前验证快照（2026-09-07）
+## 当前验证快照（2026-09-10）
+
+本轮修复了 checkpoint 恢复后的续跑状态缺口：`session/rewind` 现在由
+`reduceSessionView` 投影为 `paused`，因此即使恢复前会话是 `done` 或仍处于运行态，
+恢复后也能通过既有 continuation seam 继续；新增回归测试覆盖
+`done -> restore -> paused -> continue` 完整链路。定向 Go 测试、全量 Go 测试、
+`go vet ./...`、前端生产构建和 Python 全量测试均通过（`2251 passed, 15 skipped,
+3 warnings`）。远端 `release-gate` job 按项目决策保持禁用，因为它依赖仓库外部
+provider/scorer receipt；本地验证仍是当前可执行门禁。
+
+本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt、竞态检查或外部 scorer
+指标标为 `VERIFIED`；缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
+
+## 历史验证快照（2026-09-07）
 
 本轮代码变更基线为 `5033625e`。P0/P1/P2 的代码路径已完成定向验证：Python
 上下文、记忆、工作流、工具和 Agent Loop 全量测试 `2234 passed, 16 skipped`；Go

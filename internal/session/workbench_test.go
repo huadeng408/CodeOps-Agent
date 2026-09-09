@@ -219,6 +219,44 @@ func TestWorkbenchRestoreAppendsRewindAndKeepsHistory(t *testing.T) {
 	}
 }
 
+func TestWorkbenchRestoreProjectsPausedForContinuation(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "resume", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "continue after restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "restore point")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 3, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.RestoreCheckpoint(ctx, 7, created.ID, checkpoint.Hash, 4); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != "paused" {
+		t.Fatalf("restored status = %q, want paused", restored.Status)
+	}
+	continued, err := workbench.ContinueFromCheckpoint(ctx, 7, created.ID, checkpoint.Hash, 5)
+	if err != nil {
+		t.Fatalf("continue after restore: %v", err)
+	}
+	if continued.Type != continuationEventType {
+		t.Fatalf("continued event type = %q, want %q", continued.Type, continuationEventType)
+	}
+}
+
 func TestWorkbenchReadsPreRunnerContinuationTargetHash(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
@@ -239,7 +277,7 @@ func TestWorkbenchReadsPreRunnerContinuationTargetHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, map[string]any{
-		"request_id": "legacy-request",
+		"request_id":      "legacy-request",
 		"checkpoint_hash": checkpoint.Hash,
 		"target_event_id": target.ID,
 		"target_seq":      target.Seq,

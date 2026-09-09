@@ -14,6 +14,10 @@ permissions:
 
 jobs:
   release-gate:
+    # Disabled by project decision: the hosted gate depends on external
+    # provider/scorer receipts that are not available in this repository's CI
+    # environment. Local release verification remains the authoritative path.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

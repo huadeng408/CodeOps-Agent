@@ -586,6 +586,12 @@ func reduceSessionView(events []Event) (SessionView, error) {
 			view.Status = "done"
 		case runFailedEventType:
 			view.Status = "paused"
+		case "session/rewind":
+			// Restoring a checkpoint is an explicit user intervention. The
+			// immutable rewind marker changes the active surface, and the
+			// resulting session must be paused so a subsequent continuation
+			// can be accepted regardless of the pre-rewind terminal status.
+			view.Status = "paused"
 		}
 	}
 	var latestOrder int64 = -1
