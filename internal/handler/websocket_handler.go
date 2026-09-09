@@ -461,6 +461,7 @@ func (h *WebSocketHandler) listAfter(ctx context.Context, sessionID string, owne
 }
 
 func (h *WebSocketHandler) writeLoop(ctx context.Context, sessionID string, owner uint, conn *websocket.Conn, queue chan []byte, hints chan struct{}, done chan struct{}) {
+	defer func() { _ = conn.Close() }()
 	seenIDs := make(map[string]struct{})
 	// Replay was queued while the gate was closed. Its cursor already records
 	// the last canonical sequence included in that replay, so these frames are

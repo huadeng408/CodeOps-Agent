@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,4 +129,43 @@ func TestIsLiveEventEnvelopeRecognizesLedgerFrameWithoutEventID(t *testing.T) {
 	if isLiveEventEnvelope(session.EventView{}) {
 		t.Fatal("an empty decoded object must remain a raw control payload")
 	}
+}
+
+func TestWebSocketWriteLoopClosesConnectionAfterLedgerError(t *testing.T) {
+	hub := NewWebSocketHub()
+	handler := NewWebSocketHandlerWithWorkbench(hub, nil, nil)
+	returned := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := sessionUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		hub.AddConnection("s", conn)
+		defer func() {
+			hub.RemoveConnection("s", conn)
+			_ = conn.Close()
+		}()
+		queue := hub.Queue("s", conn)
+		queue <- []byte(`{"type":"user/message","seq":9,"content":"gap"}`)
+		handler.writeLoop(context.Background(), "s", 1, conn, queue, hub.Hint(conn), hub.Done(conn))
+		close(returned)
+		<-release
+	}))
+	defer server.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer client.Close()
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("write loop did not return after ledger error")
+	}
+	if _, _, err := client.ReadMessage(); err == nil {
+		t.Fatal("client remained connected after ledger write error")
+	}
+	close(release)
 }
