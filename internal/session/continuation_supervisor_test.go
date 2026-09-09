@@ -238,6 +238,30 @@ func TestContinuationSupervisorBacksOffHealthAndRecoveryFailures(t *testing.T) {
 	}
 }
 
+func TestContinuationSupervisorAttachesAfterPartialSessionRecovery(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &recoverFailModule{
+		supervisorModule: &supervisorModule{healthy: true},
+		err:              &PartialRecoveryError{Err: errors.New("session ledger damaged")},
+	}
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	supervisor.reconcile(context.Background())
+	if !slot.Available() {
+		t.Fatal("partial recovery detached the healthy continuation module")
+	}
+	status := supervisor.Status()
+	if !status.Attached || !strings.Contains(status.LastHealthError, "session ledger damaged") {
+		t.Fatalf("partial recovery status = %+v", status)
+	}
+	_, _, closed := module.snapshot()
+	if closed != 0 {
+		t.Fatalf("partially recovered module was closed %d times", closed)
+	}
+	_ = supervisor.Close()
+}
+
 func TestContinuationSupervisorKeepsExponentialBackoffUntilAttach(t *testing.T) {
 	slot := NewContinuationSlot()
 	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {

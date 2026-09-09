@@ -32,6 +32,26 @@ var (
 	ErrSessionRunnerClosed = errors.New("session runner is closed")
 )
 
+// PartialRecoveryError means the runner recovered all valid sessions it could
+// inspect, while one or more independent session histories failed integrity
+// checks. Callers should keep the runner available and surface the error as a
+// health warning instead of tearing down healthy continuation work.
+type PartialRecoveryError struct{ Err error }
+
+func (e *PartialRecoveryError) Error() string {
+	if e == nil || e.Err == nil {
+		return "partial session recovery failed"
+	}
+	return "partial session recovery failed: " + e.Err.Error()
+}
+
+func (e *PartialRecoveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type RunStatus string
 
 const (
@@ -387,7 +407,10 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			r.enqueue(runKey{sessionID: sessionID, runID: runID}, wakeAt)
 		}
 	}
-	return errors.Join(recoverErrs...)
+	if err := errors.Join(recoverErrs...); err != nil {
+		return &PartialRecoveryError{Err: err}
+	}
+	return nil
 }
 
 func (r *SessionRunner) Close() error {

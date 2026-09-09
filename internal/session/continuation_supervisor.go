@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -159,6 +160,18 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 	err = module.Recover(recoverCtx)
 	cancelRecover()
 	if err != nil {
+		var partial *PartialRecoveryError
+		if errors.As(err, &partial) {
+			// A corrupt or unreadable session is isolated by SessionRunner;
+			// healthy sessions are already queued and the transport remains
+			// usable. Attach while retaining the warning in health status.
+			if s.attachRecovered(module) {
+				s.recordHealth(err, s.Status().Generation)
+				return
+			}
+			_ = module.Close()
+			return
+		}
 		s.recordHealth(err, 0)
 		_ = module.Close()
 		s.scheduleConnectRetry()
