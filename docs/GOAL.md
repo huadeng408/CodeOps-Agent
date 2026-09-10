@@ -1,5 +1,16 @@
 # CodeOps-Agent Goal
 
+2026-09-11 current follow-up: fixed the real Anthropic two-system-message
+compaction boundary bug with a red-to-green regression. An 8192-token browser
+probe now commits canonical summaries (221 source events, then recompaction)
+and retains the tested constraints. Both services were restarted and the browser
+refreshed under normal configuration before further real dialogue. Python:
+2271 passed, 15 skipped. Browser: 140 requests / 137 replies / 879 events;
+request 140 retained all ten checked constraint values after restart and refresh.
+200 successful replies, legacy long-term-memory checksum
+failure handling, and Markdown presentation remain open. See the latest interview
+receipt; execution remains ACTIVE and full acceptance remains BLOCKED.
+
 2026-09-11 follow-up: compaction now validates exact canonical source prefixes,
 tool-pair boundaries and current-run ownership, then appends a `context/compaction`
 Surface operation; continuation can expand these summaries before integrity

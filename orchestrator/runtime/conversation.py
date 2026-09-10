@@ -3527,8 +3527,15 @@ class ConversationRunner:
             current = list(messages)
             max_attempts = 1 if force else self.compactor.compaction_retries + 1
             for attempt in range(max_attempts):
+                # Anthropic splits static and dynamic runtime instructions.
+                # Sourced system summaries belong to history, not this prefix.
+                history_start = 1
+                while (history_start < len(current)
+                       and current[history_start].role == "system"
+                       and not current[history_start].source_events):
+                    history_start += 1
                 select_kwargs = {
-                    "history_start": 1,
+                    "history_start": history_start,
                     "model": model,
                     "context_window": route_context_window,
                     "provider": provider,
@@ -3577,7 +3584,8 @@ class ConversationRunner:
                 source_events = tuple(dict.fromkeys(
                     ref for message in compactable for ref in message.source_events
                 ))
-                current = [current[0], ChatMessage(role="system", content=summary, source_events=source_events), *recent]
+                summary_message = ChatMessage(role="system", content=summary, source_events=source_events)
+                current = [*current[:selected_start], summary_message, *recent]
                 after_tokens = self.compactor.estimate_tokens(current)
                 if session_id.strip():
                     self._persist_event(
@@ -3585,7 +3593,7 @@ class ConversationRunner:
                         "compaction/summary",
                         {
                             "replaced_tokens": self.compactor.estimate_tokens(compactable),
-                            "summary_tokens": self.compactor.estimate_tokens([current[1]]),
+                            "summary_tokens": self.compactor.estimate_tokens([summary_message]),
                             "summary_sha256": self._digest_value(summary),
                             "attempt": attempt + 1,
                             "summary_mode": summary_mode,
@@ -3599,7 +3607,7 @@ class ConversationRunner:
                         {
                             "status": "completed",
                             "replaced_tokens": max(0, before_tokens - after_tokens),
-                            "summary_tokens": self.compactor.estimate_tokens([current[1]]),
+                            "summary_tokens": self.compactor.estimate_tokens([summary_message]),
                             "summary_mode": summary_mode,
                             "provider": provider,
                             "model": model,

@@ -11,6 +11,38 @@ from orchestrator.llm.providers.openai import OpenAIClient
 import json
 
 
+def test_compaction_preserves_anthropic_system_prefix_and_canonical_count(tmp_path):
+    from orchestrator.prompts.system import build_with_cache_breaks
+
+    prefix = build_with_cache_breaks(
+        {"identity": "static rules", "session": "dynamic request context"},
+        provider="anthropic",
+    )
+    assert len(prefix) == 2
+    history = ConversationRunner._history_messages([
+        {"role": "user", "content": f"fact-{i} " + "x" * 80,
+         "event_id": f"event-{i}", "event_checksum": str(i) * 64}
+        for i in range(8)
+    ], bounded=False)
+    runner = ConversationRunner(
+        graph=build_graph(), llm=None, tool_registry=ToolRegistry(),
+        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
+        compactor=Compactor(max_chars=100000, max_messages=100),
+    )
+    current = runner._compact_messages([*prefix, *history], force=True)
+    update = list(runner._emit_compaction_updates())[0].compaction_update
+    assert current[:2] == prefix
+    assert update.removed_messages == len(update.source_events)
+    assert current[2].source_events == tuple(
+        (ref.event_id, ref.checksum) for ref in update.source_events
+    )
+    # A sourced system summary is history, not part of the runtime prefix.
+    current = runner._compact_messages(current, force=True)
+    assert current[:2] == prefix
+    assert len(list(runner._emit_compaction_updates())) == 1
+
+
 def test_compaction_preserves_exact_canonical_sources_across_recompaction(tmp_path):
     history = [{"role": "user", "content": f"fact-{i} " + "x" * 80,
                 "event_id": f"event-{i}", "event_checksum": str(i) * 64}

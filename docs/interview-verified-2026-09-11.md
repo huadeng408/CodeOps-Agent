@@ -4,6 +4,46 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Anthropic Prefix Pressure Regression
+
+The v8 server pressure probe used an 8192-token Python context window and the
+configured real Anthropic-compatible provider. Request 121 failed closed:
+Anthropic creates two runtime system messages, but compaction started at index
+one and counted the second, unsourced system message as canonical history.
+The regression in `tests/test_compaction_provenance.py` failed before the fix.
+Compaction now preserves the complete unsourced system prefix while allowing
+sourced system summaries to be compacted again. Go source validation is unchanged.
+
+Request 122 completed through the real browser. Canonical events 763 and 764
+contain two `context/compaction` replacements, covering 221 events and then the
+previous summary respectively. Raw events remain in the ledger. At completion:
+122 user requests, 119 assistant replies, 770 events, final sequence 769, hash
+`2cdd3848677b6f41ead50dbb7cc27175cc7a97e4caf5c99357540db339aa1610`.
+The answer retained the project marker, location, database, prohibited component,
+acceptance phrase, and the full 7300 -> 8500 -> 8200 budget revision sequence.
+Screenshot: `output/playwright/compaction-pressure-success.png` (local only).
+
+The normal configuration was restored, both Go and Python restarted, and the
+browser refreshed before continuing the same session. Full Python regression:
+2271 passed, 15 skipped, 3 warnings. The preceding full Go race and vet processes
+were polled to exit zero in this follow-up, not merely inferred from progress.
+
+Post-restart requests 123-140 all completed, including another browser refresh
+after request 125. Request 140 passed all ten literal recall checks without
+including their answers in the prompt. Final receipt: 140 requests, 137 replies,
+879 events, sequence 878, hash
+`a29671cbd5ea303155a735cc56a4055d97deeb689a6a3ac874b8480e65e3b97e`.
+The ledger retains four failed run attempts (three unanswered requests); these
+are not counted as successful turns. Screenshot:
+`output/playwright/interview-140-after-compaction-restart.png` (local only).
+This is a repeated-constraint recall test, not proof of arbitrary retention.
+
+Boundaries: 200 successful replies remain pending. A separate read-only probe
+found a checksum mismatch in the legacy long-term memory table; canonical
+conversation history reads remain available. That memory record was neither
+deleted nor accepted by bypassing validation. The UI also renders Markdown tables
+as plain text. Neither long-term memory nor complete UI acceptance is claimed.
+
 ## Follow-up: Ledger-Backed Compaction
 
 The compaction callback is now connected through SessionRunner. A summary is
