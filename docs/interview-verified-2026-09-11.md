@@ -92,6 +92,17 @@ The persisted event cursor stayed unchanged at 1279 and no duplicate event was
 observed. A direct manual process launch without inherited provider environment
 was intentionally discarded; the helper restored the authorized configuration.
 
+## Follow-up: Browser API Boundary Checks
+
+From the authenticated browser context, both
+`GET /api/v1/sessions/foreign-browser-check` and
+`GET /api/v1/sessions/missing-browser-check` returned byte-identical `404`
+responses (`session not found`). A valid session returned `200` from
+`POST /api/v1/sessions/{id}/ws-ticket` with a ticket field; a foreign session
+returned the same stable `404`. A stale status update with `expectedSeq=1`
+returned `409` and reported the actual sequence 1280. Ticket values and auth
+material were not read or recorded.
+
 Boundaries: 200 successful replies remain pending. A separate read-only probe
 found a checksum mismatch in the legacy long-term memory table; canonical
 conversation history reads remain available. That memory record was neither
