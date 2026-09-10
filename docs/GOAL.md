@@ -1,5 +1,13 @@
 # CodeOps-Agent Goal
 
+2026-09-11 follow-up: the real-provider browser session now has 60 user turns,
+60 assistant replies and 383 events. Refresh after turn 50 and complete budget
+revision recall at turn 60 passed. 200 turns remain pending. Source inspection
+also identified an unconnected Compaction callback in the web SessionRunner;
+canonical range identity, leased summary replacement and recovery validation
+must be implemented together before claiming durable pressure compaction.
+See `docs/interview-verified-2026-09-11.md` for the receipt and next P0 boundary.
+
 2026-09-11 follow-up: real-browser continuation reached 42 user/assistant turns.
 Turn 41 exposed Python's remaining legacy history caps: it could recall the
 current budget but not the original amount or adjustments. Three runner

@@ -4,6 +4,43 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: 60 Real Turns
+
+On commit 0cf7f092, the same browser session completed turns 43 through 60 with
+real provider replies. All sends used the UI textbox and Send button, waiting
+for the assistant message before continuing. Refresh after turn 50 retained
+all 100 user/assistant messages, and turn 51 continued normally.
+
+Turn 60 asked for the complete budget revision history without supplying any
+numbers. The answer retained Qingzhu, 7300 -> +1200 -> 8500 -> -300 -> 8200,
+Hangzhou, SQLite, no Redis and MINT-482. This extends the corrected-history
+evidence; it does not erase the failed turn 41 below.
+
+The authenticated browser events API returned 383 events, 60 user messages and
+60 assistant messages; last sequence 382 was session/run-completed. The final
+answer was sequence 381. SHA-256 of UTF-8 JSON.stringify(response.data):
+`f9879da4e50a78d8e9e5900071c18268800a2af467cef20219f237a4a4e422b0`.
+Local screenshot: output/playwright/interview-60-turns-desktop.png.
+
+No application code changed in this follow-up. It does not repeat the full
+test gates from the preceding implementation stage. 200 turns remain pending.
+
+### Next P0: Durable Compaction Integration
+
+Current source inspection found that SessionRunner's ConversationHandlers only
+sets Tool, leaving Compaction unset. The gRPC client only invokes the compaction
+callback when non-nil, so the web path has no canonical summary replacement
+write at that boundary. This is source evidence, not a forced-pressure browser
+reproduction. The 256k-window dialogue above does not exercise this branch.
+
+The existing CompactionUpdate protocol carries summary and message counts,
+not canonical event boundaries or source Surface identity. Meanwhile
+validateContinuationSurface requires the checkpoint prefix to remain intact.
+Wiring the legacy CLI handler directly would therefore be insufficient.
+The next change must establish exact source-range identity, leased/CAS
+append-only replacement, and restart/retry validation of that replacement,
+then prove them with failing-to-passing tests and forced-pressure browser E2E.
+
 ## Follow-up: Python History Loss Reproduced And Fixed
 
 The same session now contains 42 user messages and 42 real assistant replies,
