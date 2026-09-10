@@ -25,9 +25,23 @@ canonical `session/deleted` 已成功提交后发送 coalesced hint，`SessionRu
 本次完整门禁为：Go 全量与 `go vet ./...` 通过，Python `2250 passed, 16 skipped`，前端
 生产构建与 `git diff --check` 通过。`CGO_ENABLED=1 go test -race ./internal/session -count=1`
 在本机因 `%PATH%` 中没有可执行的 `gcc` 阻塞；错误为 `cgo: C compiler "gcc" not found`，
-因此竞态检查仍不能标为通过。
+因此在该次快照中竞态检查不能标为通过。
 
-本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt、竞态检查或外部 scorer
+本轮继续封闭 worktree/lineage 恢复缺口：`e8718d3e` 使进程重启时不再把 tombstoned
+Session 的 active worktree lease 恢复进运行时索引；`4fe3e5c9` 使 worktree 生命周期写入
+在父 Session 缺失或已删除时统一返回 `ErrSessionNotFound`，不会创建孤儿事件流，也不会在
+`session/deleted` 后追加 late worktree 事实。retry lineage 不再由第二套浅 helper 重算，
+orchestrator 请求直接复用 canonical run projection，只接受创建顺序严格早于当前 run 的
+同 actor、同 checkpoint 失败前驱。三个缺口均有先失败后转绿的回归测试，相关恢复、收据
+复用和 lineage 用例连续 10 次通过。
+
+本阶段完整门禁为：`go test ./... -count=1`、`go vet ./...`、前端生产构建、
+`git diff --check` 均通过，Python 为 `2251 passed, 15 skipped, 31 warnings`。已通过
+`winget` 安装 WinLibs POSIX/UCRT GCC 16.1，并实际通过
+`CGO_ENABLED=1 go test -race ./internal/session -count=1`；此前缺少 C 编译器的竞态检查
+阻塞已经解除。代码提交与远端 `origin/main` 均为 `4fe3e5c9`。
+
+本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt 或外部 scorer
 指标标为 `VERIFIED`；缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
 
 ## 历史验证快照（2026-09-07）
