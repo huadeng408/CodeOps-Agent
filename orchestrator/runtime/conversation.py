@@ -1948,7 +1948,6 @@ class ConversationRunner:
         if self.layered_context is not None and session_id.strip():
             try:
                 snapshot = self.layered_context.load(session_id)
-                long_term = self.layered_context.search_memory(user_text, limit=5)
             except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
                 layered = f"Event-sourced context unavailable: {type(exc).__name__}"
             else:
@@ -1956,6 +1955,12 @@ class ConversationRunner:
                 layered = "\n".join(
                     ("Event-sourced context:", snapshot.p0, snapshot.p1, event_text)
                 )
+            # Independently verified sources must not share a failure boundary.
+            try:
+                long_term = self.layered_context.search_memory(user_text, limit=5)
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                layered += f"\nLong-term memory unavailable: {type(exc).__name__}"
+            else:
                 if long_term:
                     layered += "\n" + self._long_term_memory_context(long_term)
         memory_text = self._memory_context(memories) or "_No relevant memories found._"

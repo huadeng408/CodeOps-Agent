@@ -4,6 +4,23 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Memory Failure Isolation
+
+Long-term memory search and event-context loading formerly shared one exception
+handler: one invalid memory discarded an already verified event snapshot and
+reported the wrong source as unavailable. These reads now fail independently.
+Invalid memory is still rejected; its content and exception details are not
+injected into the prompt. A regression using a real SQLite store, valid event,
+and modified memory row fails against the previous `_initial_messages` function
+and passes with the fix. Related checks: 46 passed, 1 skipped.
+
+A read-only diagnostic of the local legacy memory table found four rows whose
+checksums match a serialization excluding `created_at`; 705 rows matched the
+current format at that observation. This fingerprint is not proof that timestamps
+or provenance are trustworthy. No record was deleted, rewritten, re-signed, or
+accepted under a weaker checksum algorithm. Legacy memory migration/recovery
+remains open; the fix isolates its failure, not repairs the records themselves.
+
 ## Follow-up: Anthropic Prefix Pressure Regression
 
 The v8 server pressure probe used an 8192-token Python context window and the

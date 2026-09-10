@@ -462,6 +462,42 @@ def test_initial_messages_bound_long_term_memory_injection(tmp_path: Path) -> No
     store.close()
 
 
+def test_invalid_memory_does_not_discard_verified_event_context(tmp_path: Path) -> None:
+    from orchestrator.graph.main_graph import build_graph
+    from orchestrator.memory.manager import MemoryManager
+    from orchestrator.runtime.conversation import ConversationRunner
+    from orchestrator.runtime.tools import ToolRegistry
+    from orchestrator.skills.manager import SkillManager
+    from orchestrator.todo.manager import TodoManager
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    store.append("session-1", "execution_result", {"status": "verified-event-marker"})
+    record = store.add_memory("session-1", "valid memory")
+    store._connection.execute(
+        "UPDATE long_term_memory SET content = ? WHERE id = ?",
+        ("untrusted-memory-marker", record.id),
+    )
+    store._connection.commit()
+    runner = ConversationRunner(
+        graph=build_graph(), llm=None, tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
+        layered_context=LayeredContext(store, tmp_path),
+    )
+    try:
+        rendered = "\n".join(message.content for message in runner._initial_messages(
+            "memory", 1, session_id="session-1",
+        ))
+        assert "execution_result" in rendered
+        assert "untrusted-memory-marker" not in rendered
+        assert "Long-term memory unavailable: ValueError" in rendered
+        assert "Event-sourced context unavailable" not in rendered
+        with pytest.raises(ValueError, match="checksum"):
+            store.search_memory("memory")
+    finally:
+        store.close()
+
+
 def test_layered_context_bounds_events_and_redacts_credential_shapes(tmp_path: Path) -> None:
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     provider_key_prefix = "sk-" + "proj-"
