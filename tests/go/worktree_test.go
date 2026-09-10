@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,57 @@ func TestWorktreeManagerRestoreNormalizesState(t *testing.T) {
 	}
 	if active != 1 {
 		t.Fatalf("expected one active worktree, got %#v", trees)
+	}
+}
+
+func TestWorktreeManagerRestoreCheckedFailurePreservesState(t *testing.T) {
+	cases := []struct {
+		name string
+		bad  worktree.Worktree
+	}{
+		{"invalid name", worktree.Worktree{Name: "../escape"}},
+		{"duplicate name", worktree.Worktree{Name: "replacement"}},
+		{"invalid base", worktree.Worktree{Name: "bad", BaseRef: "--unsafe"}},
+		{"outside path", worktree.Worktree{Name: "bad", Path: t.TempDir()}},
+		{"invalid agent", worktree.Worktree{Name: "bad", RequestID: "request"}},
+		{"invalid lease", worktree.Worktree{Name: "bad", RequestID: "request", ParentSessionID: "parent", ChildSessionID: "child"}},
+		{"missing expiry", worktree.Worktree{Name: "bad", RequestID: "request", ParentSessionID: "parent", ChildSessionID: "child", LeaseID: "lease"}},
+		{"invalid status", worktree.Worktree{Name: "bad", RequestID: "request", ParentSessionID: "parent", ChildSessionID: "child", LeaseID: "lease", LeaseExpiresAt: time.Now().Add(time.Hour), Status: "invalid"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := worktree.NewManager(t.TempDir(), "HEAD")
+			if err := manager.RestoreChecked([]worktree.Worktree{{Name: "original", Active: true}}); err != nil {
+				t.Fatal(err)
+			}
+			before := manager.List()
+			err := manager.RestoreChecked([]worktree.Worktree{{Name: "replacement", Active: true}, tc.bad})
+			if err == nil {
+				t.Fatal("invalid restore unexpectedly succeeded")
+			}
+			if after := manager.List(); !reflect.DeepEqual(before, after) {
+				t.Fatalf("failed restore changed existing state: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestWorktreeManagerRestoreCheckedReplacesStateOnSuccess(t *testing.T) {
+	manager := worktree.NewManager(t.TempDir(), "HEAD")
+	if err := manager.RestoreChecked([]worktree.Worktree{{Name: "original", Active: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RestoreChecked([]worktree.Worktree{{Name: "replacement", Active: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if trees := manager.List(); len(trees) != 1 || trees[0].Name != "replacement" || !trees[0].Active {
+		t.Fatalf("successful restore did not replace state: %#v", trees)
+	}
+	if err := manager.RestoreChecked(nil); err != nil {
+		t.Fatal(err)
+	}
+	if trees := manager.List(); len(trees) != 0 {
+		t.Fatalf("empty snapshot did not clear state: %#v", trees)
 	}
 }
 

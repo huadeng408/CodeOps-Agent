@@ -372,3 +372,23 @@ the verification account and browser session are local test artifacts.
 For a concise demonstration, create a session, give it three constraints, revise
 one constraint, refresh and ask it to recall the latest values, then ask it to
 read CONTEXT.md. Normal messages require no manual checkpoint.
+
+## Worktree Restore Atomicity Follow-up
+
+`Manager.RestoreChecked` previously replaced its current map before validating
+the complete snapshot. An invalid later entry discarded the previous state or
+left a partial replacement. It now validates a candidate map under the existing
+lock and installs it only after every entry passes.
+
+- Red: `TestWorktreeManagerRestoreCheckedFailurePreservesState` failed in all
+  eight cases before the implementation change (name, duplicate, base revision,
+  path, agent identity, lease identity, expiry and status).
+- Green: the same eight cases pass; successful replacement and an empty snapshot
+  are separately covered.
+- Passed: `go test ./tests/go ./internal/cli ./internal/worktree -run 'Worktree' -count=1`,
+  `go vet ./internal/worktree ./internal/cli`, and `git diff --check`.
+- Scope: metadata restoration only. No filesystem rollback, new persistence
+  source or browser workflow was added. Browser Git/patch recovery acceptance
+  remains BLOCKED; this result does not satisfy that broader goal item.
+- The full-suite results above are historical, not a fresh full-suite run for
+  this follow-up.

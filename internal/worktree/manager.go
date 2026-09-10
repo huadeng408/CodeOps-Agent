@@ -428,14 +428,15 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.trees = make(map[string]Worktree, len(trees))
+	// Validate the entire snapshot before replacing the current state.
+	restored := make(map[string]Worktree, len(trees))
 	activeSeen := false
 	for _, tree := range trees {
 		name, err := normalizeName(tree.Name)
 		if err != nil {
 			return fmt.Errorf("restore worktree %q: %w", tree.Name, err)
 		}
-		if _, exists := m.trees[name]; exists {
+		if _, exists := restored[name]; exists {
 			return fmt.Errorf("restore worktree %q: duplicate name", name)
 		}
 		tree.Name = name
@@ -446,11 +447,9 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 			tree.BaseRef = m.baseRef
 		}
 		if err := validateBaseRef(tree.BaseRef); err != nil {
-			m.trees = make(map[string]Worktree)
 			return fmt.Errorf("restore worktree %q: %w", tree.Name, err)
 		}
 		if err := ensureContainedPath(m.root, tree.Path); err != nil {
-			m.trees = make(map[string]Worktree)
 			return err
 		}
 		if tree.RequestID != "" {
@@ -458,22 +457,18 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 				RequestID: tree.RequestID, ParentSessionID: tree.ParentSessionID,
 				ChildSessionID: tree.ChildSessionID, WorktreeName: tree.Name,
 			}); err != nil {
-				m.trees = make(map[string]Worktree)
 				return fmt.Errorf("restore agent worktree %q: %w", tree.Name, err)
 			}
 			if err := validateLeaseID(tree.LeaseID); err != nil {
-				m.trees = make(map[string]Worktree)
 				return fmt.Errorf("restore agent worktree %q: %w", tree.Name, err)
 			}
 			if tree.LeaseExpiresAt.IsZero() {
-				m.trees = make(map[string]Worktree)
 				return fmt.Errorf("restore agent worktree %q: lease expiry is required", tree.Name)
 			}
 			if tree.Status == "" {
 				tree.Status = AgentWorktreeActive
 			}
 			if tree.Status != AgentWorktreeActive {
-				m.trees = make(map[string]Worktree)
 				return fmt.Errorf("restore agent worktree %q: status must be active", tree.Name)
 			}
 		}
@@ -484,8 +479,9 @@ func (m *Manager) RestoreChecked(trees []Worktree) error {
 				activeSeen = true
 			}
 		}
-		m.trees[tree.Name] = tree
+		restored[tree.Name] = tree
 	}
+	m.trees = restored
 	return nil
 }
 
