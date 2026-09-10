@@ -112,6 +112,7 @@ function App() {
   const selectionGenerationRef = useRef(0);
   const canonicalSelectionRef = useRef('');
   const continuationInFlightRef = useRef(false);
+  const retiredSessionIDsRef = useRef(new Set<string>());
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -184,19 +185,23 @@ function App() {
   useEffect(() => {
     const sessionId = selectedSession?.id;
     if (!sessionId || canonicalSelectionRef.current === sessionId) return;
+    const controller = new AbortController();
     canonicalSelectionRef.current = sessionId;
     const generation = ++selectionGenerationRef.current;
     // Sidebar/list data is only an index. Re-open from the canonical ledger
     // projection so run status, checkpoint and retry lineage survive reloads.
-    void api.getSession(sessionId).then((fresh) => {
+    void api.getSession(sessionId, controller.signal).then((fresh) => {
       if (generation !== selectionGenerationRef.current) return;
       setSelectedSession(fresh);
       setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
       setStatusDraft(fresh.status);
       setRefreshKey((value) => value + 1);
     }).catch((cause) => {
-      if (generation === selectionGenerationRef.current) setError(errorMessage(cause, '会话恢复状态加载失败'));
+      if (generation === selectionGenerationRef.current && !retiredSessionIDsRef.current.has(sessionId)) {
+        setError(errorMessage(cause, '会话恢复状态加载失败'));
+      }
     });
+    return () => controller.abort();
   }, [selectedSession?.id]);
 
   useEffect(() => {
@@ -208,6 +213,7 @@ function App() {
       || runStatus === 'running';
     if (!sessionId || !active) return undefined;
     let stopped = false;
+    const controller = new AbortController();
     let pollGeneration = 0;
     let inFlight = false;
     const refresh = async () => {
@@ -215,7 +221,7 @@ function App() {
       inFlight = true;
       const generation = ++pollGeneration;
       try {
-        const fresh = await api.getSession(sessionId);
+        const fresh = await api.getSession(sessionId, controller.signal);
         if (stopped || generation !== pollGeneration) return;
         setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
         setSelectedSession((current) => {
@@ -230,7 +236,9 @@ function App() {
         });
         setStatusDraft(fresh.status);
       } catch (cause) {
-        if (!stopped && generation === pollGeneration) setError(errorMessage(cause, '运行状态同步失败'));
+        if (!stopped && generation === pollGeneration && !retiredSessionIDsRef.current.has(sessionId)) {
+          setError(errorMessage(cause, '运行状态同步失败'));
+        }
       } finally {
         inFlight = false;
       }
@@ -239,6 +247,7 @@ function App() {
     const timer = window.setInterval(() => { void refresh(); }, 2000);
     return () => {
       stopped = true;
+      controller.abort();
       window.clearInterval(timer);
     };
   }, [selectedSession?.id, selectedSession?.status, selectedSession?.run?.status]);
@@ -327,14 +336,29 @@ function App() {
 
   const handleDelete = async () => {
     if (!selectedSession || busy || !window.confirm('删除后会话只会标记删除，事件仍保留。继续吗？')) return;
+    const retiringSession = selectedSession;
+    const sessionID = retiringSession.id;
+    retiredSessionIDsRef.current.add(sessionID);
+    selectionGenerationRef.current += 1;
+    canonicalSelectionRef.current = '';
+    setSelectedSession(null);
     setBusy(true);
     setError('');
+    let deleted = false;
     try {
-      await api.deleteSession(selectedSession.id, selectedSession.eventCount);
+      await api.deleteSession(sessionID, retiringSession.eventCount);
+      deleted = true;
       await syncSessions();
+      setError('');
     } catch (cause) {
-      setError(errorMessage(cause, '删除会话失败'));
-      await refreshSelected().catch(() => undefined);
+      if (!deleted) {
+        retiredSessionIDsRef.current.delete(sessionID);
+        setSelectedSession(retiringSession);
+        writeLocalStorage('codeops:selected-session', sessionID);
+        setError(errorMessage(cause, '删除会话失败'));
+      } else {
+        setError(errorMessage(cause, '会话列表刷新失败'));
+      }
     } finally {
       setBusy(false);
     }

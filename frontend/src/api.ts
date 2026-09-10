@@ -100,8 +100,8 @@ class ApiClient {
     return result.data;
   }
 
-  async getSession(sessionId: string): Promise<Session> {
-    const result = await this.request<Session>('GET', `/sessions/${encodeURIComponent(sessionId)}`);
+  async getSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
+    const result = await this.request<Session>('GET', `/sessions/${encodeURIComponent(sessionId)}`, { signal });
     return result.data;
   }
 
