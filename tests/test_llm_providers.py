@@ -52,6 +52,18 @@ def _json_server(response_payload: dict[str, object]):
     return server, captured
 
 
+def test_anthropic_stream_error_does_not_become_success(monkeypatch) -> None:
+    response = io.BytesIO(b'data: {"type":"error","error":{"message":"private-provider-value"}}\n\n')
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: response)
+    client = AnthropicClient(api_key="test")
+
+    async def collect():
+        return [delta async for delta in client.stream(ChatRequest(model="test", messages=[ChatMessage(role="user", content="hello")]))]
+
+    with pytest.raises(RuntimeError, match="^Anthropic upstream stream error$"):
+        asyncio.run(collect())
+
+
 def _provider_messages() -> list[ChatMessage]:
     return [
         ChatMessage(role="system", content="system prompt"),

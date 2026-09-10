@@ -53,6 +53,7 @@ type WorkbenchModule interface {
 	CreateCheckpoint(context.Context, uint, string, int64, string, string) (CheckpointView, error)
 	ListCheckpoints(context.Context, uint, string) ([]CheckpointView, error)
 	RestoreCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
+	DecideToolApproval(context.Context, uint, string, ToolApprovalDecisionCommand) (EventView, error)
 	// ContinueFromCheckpoint is retained for older transports. New production
 	// callers must inject ContinuationModule so the request enters a durable run.
 	ContinueFromCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
@@ -85,20 +86,22 @@ type SessionView struct {
 
 // EventView is the browser-safe representation of one canonical ledger fact.
 type EventView struct {
-	ID              string            `json:"id"`
-	SessionID       string            `json:"sessionId"`
-	Seq             int64             `json:"seq"`
-	Type            string            `json:"type"`
-	Author          string            `json:"author"`
-	Content         string            `json:"content"`
-	ToolName        string            `json:"toolName,omitempty"`
-	ToolStatus      string            `json:"toolStatus,omitempty"`
-	ToolOutput      string            `json:"toolOutput,omitempty"`
-	Hash            string            `json:"hash"`
-	PrevHash        string            `json:"prevHash"`
-	CreatedAt       time.Time         `json:"createdAt"`
-	RewindTargetSeq *int64            `json:"rewindTargetSeq,omitempty"`
-	Continuation    *ContinuationView `json:"continuation,omitempty"`
+	ID               string                `json:"id"`
+	SessionID        string                `json:"sessionId"`
+	Seq              int64                 `json:"seq"`
+	Type             string                `json:"type"`
+	Author           string                `json:"author"`
+	Content          string                `json:"content"`
+	ToolName         string                `json:"toolName,omitempty"`
+	ToolStatus       string                `json:"toolStatus,omitempty"`
+	ToolOutput       string                `json:"toolOutput,omitempty"`
+	Hash             string                `json:"hash"`
+	PrevHash         string                `json:"prevHash"`
+	CreatedAt        time.Time             `json:"createdAt"`
+	RewindTargetSeq  *int64                `json:"rewindTargetSeq,omitempty"`
+	Continuation     *ContinuationView     `json:"continuation,omitempty"`
+	Approval         *ToolApprovalView     `json:"approval,omitempty"`
+	CodeModification *CodeModificationView `json:"codeModification,omitempty"`
 }
 
 // ContinuationView is the typed, browser-safe recovery receipt. Callers never
@@ -135,9 +138,10 @@ type sessionCreatedPayload struct {
 }
 
 type messagePayload struct {
-	Author  string `json:"author"`
-	Content string `json:"content"`
-	RunID   string `json:"run_id,omitempty"`
+	Author    string `json:"author"`
+	Content   string `json:"content"`
+	RunID     string `json:"run_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type checkpointPayload struct {
@@ -145,6 +149,8 @@ type checkpointPayload struct {
 	TargetSeq      int64  `json:"target_seq"`
 	TargetChecksum string `json:"target_checksum"`
 	Label          string `json:"label"`
+	RequestID      string `json:"request_id,omitempty"`
+	Automatic      bool   `json:"automatic,omitempty"`
 }
 
 // continuationPayload is the durable receipt for a Codex-style resume. The
@@ -507,6 +513,9 @@ func (w *Workbench) ListCheckpoints(ctx context.Context, ownerID uint, sessionID
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return nil, fmt.Errorf("%w: invalid checkpoint payload at seq %d", ErrEventIntegrity, event.Seq)
 		}
+		if payload.Automatic {
+			continue
+		}
 		checkpoints = append(checkpoints, checkpointToView(event, payload))
 	}
 	sort.SliceStable(checkpoints, func(i, j int) bool {
@@ -691,6 +700,45 @@ func eventToView(event Event) (EventView, error) {
 			RequestID:      payload.RequestID,
 			RunID:          payload.RunID,
 		}
+	case "tool/call", "tool/dispatched":
+		var payload toolCallPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return EventView{}, fmt.Errorf("%w: invalid tool call", ErrEventIntegrity)
+		}
+		view.ToolName = payload.ToolName
+		view.ToolStatus = strings.TrimPrefix(event.Type, "tool/")
+		view.Content = payload.ToolName + " " + payload.ArgumentsJSON
+	case "tool/result":
+		var payload toolResultPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return EventView{}, fmt.Errorf("%w: invalid tool result", ErrEventIntegrity)
+		}
+		view.ToolName = payload.ToolName
+		view.ToolStatus = "completed"
+		view.Content = payload.ToolName
+		view.ToolOutput = payload.Output
+		if payload.Error != "" || payload.ExitCode != 0 {
+			view.ToolStatus = "failed"
+			view.ToolOutput = strings.TrimSpace(payload.Output + "\n" + payload.Error)
+		}
+	case approvalPendingEventType, approvalApprovedEventType, approvalDeniedEventType:
+		approval, err := approvalEventView(event)
+		if err != nil {
+			return EventView{}, err
+		}
+		view.Content = approvalContent(approval)
+		view.ToolName = approval.ToolName
+		view.ToolStatus = string(approval.Decision)
+		view.Approval = &approval
+	case codeModifiedEventType:
+		modification, err := codeModificationEventView(event)
+		if err != nil {
+			return EventView{}, err
+		}
+		view.Content = modification.Summary
+		view.ToolName = modification.ToolName
+		view.ToolStatus = "modified"
+		view.CodeModification = &modification
 	}
 	return view, nil
 }

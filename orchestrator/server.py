@@ -62,6 +62,9 @@ class ServerConfig:
 class OrchestratorServer:
     def __init__(self, config: ServerConfig | None = None) -> None:
         load_dotenv()
+        from .config.provider_file import apply_provider_file
+        if read_env('CODE_AGENT_PROVIDER_CONFIG'):
+            apply_provider_file(read_env('CODE_AGENT_PROVIDER_CONFIG'), read_env('CODE_AGENT_PROVIDER_PROFILE'))
         self.config = config or ServerConfig()
         self._otel_shutdown = configure_otel()
         self.project_root = str(Path(self.config.project_root).resolve())

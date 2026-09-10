@@ -129,6 +129,18 @@ func (s *ContinuationSlot) RequestContinuation(ctx context.Context, cmd Continue
 	return m.RequestContinuation(ctx, cmd)
 }
 
+func (s *ContinuationSlot) SubmitMessage(ctx context.Context, cmd SubmitMessageCommand) (RunView, error) {
+	if s == nil {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	m, release := s.acquire()
+	if release == nil {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	defer release()
+	return m.SubmitMessage(ctx, cmd)
+}
+
 func (s *ContinuationSlot) Recover(ctx context.Context) error {
 	if s == nil {
 		return ErrContinuationUnavailable

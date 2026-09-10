@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "active_profile": "primary",
+  "profiles": {
+    "primary": {
+      "env": {
+        "LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_AUTH_TOKEN": "REPLACE_LOCALLY",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-6",
+        "ANTHROPIC_TIMEOUT": 60,
+        "ANTHROPIC_MAX_RETRIES": 1,
+        "ANTHROPIC_MAX_TOKENS": 4096,
+        "MODEL_FAST": "",
+        "THINKING_ENABLED": false
+      }
+    }
+  }
+}

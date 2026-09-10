@@ -62,6 +62,13 @@ func (m *managedContinuation) RequestContinuation(ctx context.Context, cmd sessi
 	return m.runner.RequestContinuation(ctx, cmd)
 }
 
+func (m *managedContinuation) SubmitMessage(ctx context.Context, cmd session.SubmitMessageCommand) (session.RunView, error) {
+	if m == nil || m.runner == nil {
+		return session.RunView{}, session.ErrContinuationUnavailable
+	}
+	return m.runner.SubmitMessage(ctx, cmd)
+}
+
 func (m *managedContinuation) Recover(ctx context.Context) error {
 	if m == nil || m.runner == nil {
 		return session.ErrContinuationUnavailable
@@ -311,13 +318,13 @@ func main() {
 		if arguments == nil {
 			arguments = map[string]any{}
 		}
-		if continuationPermissions.CheckFor(actor, call.Name, arguments) != permission.Approve {
-			return harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool permission not granted", ExitCode: 1}
-		}
 		result, err := continuationExecutor.Execute(ctx, tools.ToolRequest{
 			Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
 		})
 		out := harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
+		for _, change := range result.Changes {
+			out.Changes = append(out.Changes, harnessorch.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
+		}
 		if err != nil && out.Error == "" {
 			out.Error = err.Error()
 		}
@@ -382,7 +389,9 @@ func main() {
 			}
 			return nil
 		}
-		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{WorkerID: workerID})
+		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
+			WorkerID: workerID, Permissions: continuationPermissions,
+		})
 		return &managedContinuation{runner: runner, client: client}, nil
 	}
 	continuationSupervisor := session.NewContinuationSupervisor(continuationSlot, 5*time.Second, connectContinuation)
@@ -512,10 +521,12 @@ func main() {
 			eventHandler := handler.NewEventHandlerWithContinuationSlot(workbench, continuationSlot)
 			sessions.GET("/:id/events", eventHandler.ListEvents)
 			sessions.POST("/:id/events", eventHandler.CreateEvent)
+			sessions.POST("/:id/messages", eventHandler.SubmitMessage)
 			sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
 			sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
 			sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
 			sessions.POST("/:id/continue", eventHandler.ContinueSession)
+			sessions.POST("/:id/approvals/:runId/:toolCallId", eventHandler.DecideToolApproval)
 
 		}
 		// WebSocket uses an opaque one-time ticket, not an access JWT in the URL.
@@ -602,9 +613,8 @@ func continuationPermissionController() *permission.Controller {
 	for name, level := range permission.DefaultPermissions {
 		levels[name] = level
 	}
-	// The server config intentionally has no browser-side approval channel.
-	// Only AutoAllow tools can execute during a resumed run; mutating tools
-	// remain fail-closed until an explicit Harness approval surface is wired.
+	// The SessionRunner projects AskSession and AlwaysAsk decisions through the
+	// canonical ledger before this controller can authorize execution.
 	return permission.NewController(levels, nil)
 }
 

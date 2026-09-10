@@ -53,6 +53,24 @@ export interface SessionEvent {
     requestId?: string;
     runId?: string;
   };
+	approval?: {
+		runId: string;
+		toolCallId: string;
+		toolName: string;
+		argumentsJson: string;
+		decision: 'pending' | 'approved' | 'denied';
+	};
+	codeModification?: {
+		runId: string;
+		toolCallId: string;
+		toolName: string;
+		path: string;
+		operation: string;
+		summary: string;
+		beforeSha256: string;
+		afterSha256: string;
+		diffSha256: string;
+	};
 }
 
 export interface SessionCheckpoint {

@@ -15,6 +15,7 @@ import (
 
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/permission"
 )
 
 const (
@@ -111,6 +112,17 @@ type ContinueCommand struct {
 	Actor          identity.Actor
 }
 
+// SubmitMessageCommand is one durable natural-language turn. RequestID binds
+// the user message, its automatic recovery anchor, and the resulting run.
+type SubmitMessageCommand struct {
+	RequestID   string
+	SessionID   string
+	OwnerID     uint
+	ExpectedSeq int64
+	Content     string
+	Actor       identity.Actor
+}
+
 type RunView struct {
 	SessionID      string     `json:"sessionId"`
 	RunID          string     `json:"runId"`
@@ -130,6 +142,7 @@ type RunView struct {
 // ContinuationModule is the small transport-facing interface of the deep
 // SessionRunner module.
 type ContinuationModule interface {
+	SubmitMessage(context.Context, SubmitMessageCommand) (RunView, error)
 	RequestContinuation(context.Context, ContinueCommand) (RunView, error)
 	Recover(context.Context) error
 	Close() error
@@ -157,6 +170,7 @@ type SessionRunnerOptions struct {
 	HeartbeatInterval time.Duration
 	QueueSize         int
 	Now               func() time.Time
+	Permissions       *permission.Controller
 }
 
 type SessionRunner struct {
@@ -256,11 +270,18 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 }
 
 func (r *SessionRunner) RequestContinuation(ctx context.Context, command ContinueCommand) (RunView, error) {
-	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+	if r == nil {
 		return RunView{}, errors.New("session runner requires a workbench")
 	}
 	r.lifecycleMu.RLock()
 	defer r.lifecycleMu.RUnlock()
+	return r.requestContinuation(ctx, command, true)
+}
+
+func (r *SessionRunner) requestContinuation(ctx context.Context, command ContinueCommand, requirePaused bool) (RunView, error) {
+	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+		return RunView{}, errors.New("session runner requires a workbench")
+	}
 	if r.closed {
 		return RunView{}, ErrSessionRunnerClosed
 	}
@@ -297,7 +318,7 @@ func (r *SessionRunner) RequestContinuation(ctx context.Context, command Continu
 	if err != nil {
 		return RunView{}, err
 	}
-	if current.Status != "paused" {
+	if requirePaused && current.Status != "paused" {
 		return RunView{}, fmt.Errorf("%w: session must be paused before continuation", ErrSessionStateConflict)
 	}
 	runID := runIDForRequest(command.SessionID, command.RequestID)
@@ -330,6 +351,177 @@ func (r *SessionRunner) RequestContinuation(ctx context.Context, command Continu
 	}
 	r.enqueue(runKey{sessionID: command.SessionID, runID: runID}, time.Time{})
 	return view, nil
+}
+
+// SubmitMessage persists and starts one ordinary user turn without exposing
+// checkpoint choreography to the caller. Every durable stage is keyed by the
+// same request ID, so a retry after interruption resumes instead of duplicating
+// the message or creating an unrelated run.
+func (r *SessionRunner) SubmitMessage(ctx context.Context, command SubmitMessageCommand) (RunView, error) {
+	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+		return RunView{}, errors.New("session runner requires a workbench")
+	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.closed {
+		return RunView{}, ErrSessionRunnerClosed
+	}
+	if r.conversation == nil {
+		return RunView{}, errors.New("session runner requires an orchestrator")
+	}
+	command.RequestID = strings.TrimSpace(command.RequestID)
+	command.SessionID = strings.TrimSpace(command.SessionID)
+	command.Content = strings.TrimSpace(command.Content)
+	if command.RequestID == "" || command.SessionID == "" || command.Content == "" || command.ExpectedSeq < 0 {
+		return RunView{}, fmt.Errorf("%w: requestId, sessionId, content, and expectedSeq are required", ErrInvalidSessionInput)
+	}
+	if _, err := r.workbench.Get(ctx, command.OwnerID, command.SessionID); err != nil {
+		return RunView{}, err
+	}
+	actor, err := command.Actor.BindSession(command.SessionID)
+	if err != nil {
+		return RunView{}, fmt.Errorf("%w: invalid message actor", ErrInvalidSessionInput)
+	}
+
+	for attempt := 0; attempt < 32; attempt++ {
+		events, err := r.workbench.ledger.Events(ctx, command.SessionID)
+		if err != nil {
+			return RunView{}, err
+		}
+		message, boundMessage, messageExists, err := userMessageForRequest(events, command.RequestID)
+		if err != nil {
+			return RunView{}, err
+		}
+		if messageExists && boundMessage.Content != command.Content {
+			return RunView{}, fmt.Errorf("%w: requestId is already bound to different message content", ErrSessionStateConflict)
+		}
+		if existing, ok, projectErr := runForRequest(events, command.RequestID); projectErr != nil {
+			return RunView{}, projectErr
+		} else if ok {
+			if !messageExists || existing.actor.ScopeKey() != actor.ScopeKey() {
+				return RunView{}, fmt.Errorf("%w: requestId is already bound to another turn", ErrSessionStateConflict)
+			}
+			r.enqueue(runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
+			return existing.view, nil
+		}
+		if active, projectErr := hasActiveRun(events); projectErr != nil {
+			return RunView{}, projectErr
+		} else if active {
+			return RunView{}, fmt.Errorf("%w: another session run is active", ErrSessionStateConflict)
+		}
+		if !messageExists {
+			if int64(len(events)) != command.ExpectedSeq {
+				return RunView{}, fmt.Errorf("%w: session=%s expected=%d actual=%d", ErrSequenceConflict, command.SessionID, command.ExpectedSeq, len(events))
+			}
+			_, err = r.workbench.ledger.AppendSurface(ctx, command.SessionID, command.ExpectedSeq, userMessageEventType, messagePayload{
+				Author: "user", Content: command.Content, RequestID: command.RequestID,
+			}, SurfaceOperation{Op: "append"})
+			if errors.Is(err, ErrSequenceConflict) {
+				continue
+			}
+			if err != nil {
+				return RunView{}, err
+			}
+			r.workbench.signal(command.SessionID)
+			continue
+		}
+
+		checkpoint, boundCheckpoint, checkpointExists, err := automaticCheckpointForRequest(events, command.RequestID)
+		if err != nil {
+			return RunView{}, err
+		}
+		if checkpointExists {
+			if boundCheckpoint.TargetEventID != message.EventID || boundCheckpoint.TargetChecksum != message.Checksum || boundCheckpoint.TargetSeq != message.Seq {
+				return RunView{}, fmt.Errorf("%w: automatic checkpoint changed message identity", ErrEventIntegrity)
+			}
+		} else {
+			surface, surfaceErr := r.workbench.ledger.Surface(ctx, command.SessionID)
+			if surfaceErr != nil {
+				return RunView{}, surfaceErr
+			}
+			if len(surface) == 0 || surface[len(surface)-1].EventID != message.EventID {
+				return RunView{}, fmt.Errorf("%w: another user turn changed the active surface", ErrSessionStateConflict)
+			}
+			payload := checkpointPayload{
+				TargetEventID: message.EventID, TargetSeq: message.Seq, TargetChecksum: message.Checksum,
+				Label: "automatic user turn", RequestID: command.RequestID, Automatic: true,
+			}
+			checkpoint, err = r.workbench.ledger.Append(ctx, command.SessionID, int64(len(events)), checkpointEventType, payload)
+			if errors.Is(err, ErrSequenceConflict) {
+				continue
+			}
+			if err != nil {
+				return RunView{}, err
+			}
+			r.workbench.signal(command.SessionID)
+			continue
+		}
+
+		return r.requestContinuation(ctx, ContinueCommand{
+			RequestID: command.RequestID, SessionID: command.SessionID, CheckpointHash: checkpoint.Checksum,
+			OwnerID: command.OwnerID, ExpectedSeq: int64(len(events)), Actor: actor,
+		}, false)
+	}
+	return RunView{}, ErrSequenceConflict
+}
+
+func userMessageForRequest(events []Event, requestID string) (Event, messagePayload, bool, error) {
+	var found Event
+	var foundPayload messagePayload
+	foundOne := false
+	for _, event := range events {
+		if event.Type != userMessageEventType {
+			continue
+		}
+		var payload messagePayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return Event{}, messagePayload{}, false, fmt.Errorf("%w: invalid user message at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		if payload.RequestID != requestID {
+			continue
+		}
+		if foundOne {
+			return Event{}, messagePayload{}, false, fmt.Errorf("%w: duplicate message requestId", ErrEventIntegrity)
+		}
+		found, foundPayload, foundOne = event, payload, true
+	}
+	return found, foundPayload, foundOne, nil
+}
+
+func automaticCheckpointForRequest(events []Event, requestID string) (Event, checkpointPayload, bool, error) {
+	var found Event
+	var foundPayload checkpointPayload
+	foundOne := false
+	for _, event := range events {
+		if event.Type != checkpointEventType {
+			continue
+		}
+		var payload checkpointPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return Event{}, checkpointPayload{}, false, fmt.Errorf("%w: invalid checkpoint at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		if !payload.Automatic || payload.RequestID != requestID {
+			continue
+		}
+		if foundOne {
+			return Event{}, checkpointPayload{}, false, fmt.Errorf("%w: duplicate automatic checkpoint requestId", ErrEventIntegrity)
+		}
+		found, foundPayload, foundOne = event, payload, true
+	}
+	return found, foundPayload, foundOne, nil
+}
+
+func hasActiveRun(events []Event) (bool, error) {
+	runs, err := projectRuns(events)
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if !run.terminal {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func runIDForRequest(sessionID, requestID string) string {
@@ -424,6 +616,19 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		events, readErr := r.workbench.ledger.Events(ctx, sessionID)
 		if readErr != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s events: %w", sessionID, readErr))
+			continue
+		}
+		// SessionIDs is a read-side union of canonical ledger IDs and legacy
+		// snapshot IDs. A legacy-only Session has no canonical facts until an
+		// explicit import, so it has no run for this module to recover.
+		if len(events) == 0 {
+			continue
+		}
+		// The older event-store module shares the physical ledger but owns a
+		// different projection and lifecycle. Its streams are not runner work;
+		// unknown non-Workbench streams still fail below instead of being hidden.
+		switch events[0].Type {
+		case sessionStateEventType, "legacy/import", "session/fork/import":
 			continue
 		}
 		// A deleted session remains in the append-only ledger for auditability,
@@ -737,6 +942,9 @@ func (r *SessionRunner) heartbeat(ctx context.Context, key runKey, lease runLeas
 	ticker := time.NewTicker(r.options.HeartbeatInterval)
 	defer ticker.Stop()
 	fail := func(err error) {
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return
+		}
 		select {
 		case failure <- err:
 		default:
@@ -998,6 +1206,19 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
 		}
 	}
+	approval, approvalErr := r.awaitToolApproval(ctx, key, lease, actor, call)
+	if approvalErr != nil {
+		unsafe := ctx.Err() == nil
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: approvalErr.Error(), ExitCode: 1}, unsafe
+	}
+	if approval == ApprovalDenied {
+		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool approval denied", ExitCode: 1}
+		if err := r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID)); err != nil {
+			result.Error = "tool result persistence failed"
+			return result, true
+		}
+		return result, false
+	}
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed", ExitCode: 1}, true
 	}
@@ -1009,6 +1230,14 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	result := r.tools.Execute(ctx, actor, key.sessionID, call)
 	result.ToolCallID = call.ID
 	result.ToolName = call.Name
+	for _, modification := range codeModificationPayloads(result, key.runID) {
+		if err := r.appendLeasedFact(ctx, key, lease.LeaseID, codeModifiedEventType, modification); err != nil {
+			_ = r.appendLeasedFact(context.Background(), key, lease.LeaseID, toolUnknownEventType, callPayload)
+			result.Error = "code modification receipt persistence failed"
+			result.ExitCode = 1
+			return result, true
+		}
+	}
 	if err := r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID)); err != nil {
 		_ = r.appendLeasedFact(context.Background(), key, lease.LeaseID, toolUnknownEventType, callPayload)
 		result.Error = "tool result persistence failed"
@@ -1016,6 +1245,63 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return result, true
 	}
 	return result, false
+}
+
+func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall) (ApprovalDecision, error) {
+	for {
+		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+		if err != nil {
+			return "", fmt.Errorf("tool approval ledger unavailable: %w", err)
+		}
+		approval, err := projectToolApproval(events, key.runID, call.ID)
+		if err != nil {
+			return "", err
+		}
+		if approval.pending != nil {
+			if !toolApprovalMatchesCall(*approval.pending, toolCallPayload{
+				RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON,
+			}) {
+				return "", fmt.Errorf("%w: approval identity conflicts with tool call", ErrEventIntegrity)
+			}
+			if approval.decision != nil {
+				return approval.decision.Decision, nil
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
+		}
+
+		decision := permission.Approve
+		if r.options.Permissions != nil {
+			var arguments map[string]any
+			if err := json.Unmarshal([]byte(call.ParametersJSON), &arguments); err != nil {
+				return "", fmt.Errorf("invalid tool parameters: %w", err)
+			}
+			decision = r.options.Permissions.CheckFor(actor, call.Name, arguments)
+		}
+		switch decision {
+		case permission.Approve:
+			return ApprovalApproved, nil
+		case permission.Deny:
+			return ApprovalDenied, nil
+		case permission.AskUser:
+			pending := toolApprovalPayload{
+				RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name,
+				ArgumentsJSON: call.ParametersJSON, Decision: ApprovalPending,
+			}
+			if err := r.appendLeasedFact(ctx, key, lease.LeaseID, approvalPendingEventType, pending); err != nil {
+				if errors.Is(err, ErrSequenceConflict) {
+					continue
+				}
+				return "", fmt.Errorf("tool approval persistence failed: %w", err)
+			}
+		default:
+			return "", errors.New("unsupported tool permission decision")
+		}
+	}
 }
 
 func canonicalToolArguments(raw string) (string, error) {
@@ -1149,10 +1435,28 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 	return r.appendLeasedFact(ctx, key, lease.LeaseID, eventType, payload)
 }
 
-func (r *SessionRunner) fail(key runKey, lease runLeasePayload, _ error) {
+func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = r.appendTerminal(ctx, key, lease, runFailedEventType, "agent continuation failed")
+	_ = r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause))
+}
+
+// Persist only fixed categories: provider errors can contain credentials or URLs.
+func publicRunError(cause error) string {
+	if cause == nil {
+		return "agent continuation failed"
+	}
+	message := strings.ToLower(cause.Error())
+	switch {
+	case strings.Contains(message, "401"), strings.Contains(message, "authentication_error"):
+		return "model authentication failed; check provider credentials"
+	case strings.Contains(message, "429"):
+		return "model rate limit reached; retry later"
+	case errors.Is(cause, context.DeadlineExceeded), strings.Contains(message, "timed out"), strings.Contains(message, "timeout"):
+		return "model request timed out; retry this task"
+	default:
+		return "agent continuation failed"
+	}
 }
 
 func (r *SessionRunner) runView(ctx context.Context, sessionID, runID string) (RunView, error) {

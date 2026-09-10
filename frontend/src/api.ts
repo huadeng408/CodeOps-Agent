@@ -164,6 +164,14 @@ class ApiClient {
     return result.data;
   }
 
+  async submitMessage(sessionId: string, content: string, expectedSeq: number, requestId: string): Promise<SessionRun> {
+    const result = await this.request<SessionRun>(
+      'POST', `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { body: { content, expectedSeq, requestId } },
+    );
+    return result.data;
+  }
+
   async listCheckpoints(sessionId: string): Promise<SessionCheckpoint[]> {
     const result = await this.request<SessionCheckpoint[]>(
       'GET', `/sessions/${encodeURIComponent(sessionId)}/checkpoints`,
@@ -194,6 +202,15 @@ class ApiClient {
     );
     return result.data;
   }
+
+	async decideToolApproval(sessionId: string, runId: string, toolCallId: string, decision: 'approved' | 'denied', pendingEventId: string, pendingSeq: number): Promise<SessionEvent> {
+		const result = await this.request<SessionEvent>(
+			'POST',
+			`/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(toolCallId)}`,
+			{ body: { decision, pendingEventId, pendingSeq } },
+		);
+		return result.data;
+	}
 
   async issueWebSocketTicket(sessionId: string): Promise<{ ticket: string; expiresAt: string }> {
     const result = await this.request<{ ticket: string; expiresAt: string }>(

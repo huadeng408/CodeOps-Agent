@@ -69,6 +69,12 @@ type createEventRequest struct {
 	ExpectedSeq *int64 `json:"expectedSeq"`
 }
 
+type submitMessageRequest struct {
+	RequestID   string `json:"requestId"`
+	Content     string `json:"content"`
+	ExpectedSeq *int64 `json:"expectedSeq"`
+}
+
 type createCheckpointRequest struct {
 	EventID     string `json:"eventId"`
 	Label       string `json:"label"`
@@ -83,6 +89,12 @@ type continueSessionRequest struct {
 	RequestID      string `json:"requestId"`
 	CheckpointHash string `json:"checkpointHash"`
 	ExpectedSeq    *int64 `json:"expectedSeq"`
+}
+
+type decideToolApprovalRequest struct {
+	Decision       session.ApprovalDecision `json:"decision"`
+	PendingEventID string                   `json:"pendingEventId"`
+	PendingSeq     *int64                   `json:"pendingSeq"`
 }
 
 func (h *EventHandler) ListEvents(c *gin.Context) {
@@ -148,6 +160,44 @@ func (h *EventHandler) CreateEvent(c *gin.Context) {
 		return
 	}
 	writeSessionData(c, http.StatusOK, event)
+}
+
+// SubmitMessage turns one natural-language message into a durable Agent run.
+// The runner owns the automatic recovery anchor and idempotency choreography;
+// the browser supplies only user intent and the current ledger CAS.
+func (h *EventHandler) SubmitMessage(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	var req submitMessageRequest
+	if c.Request.Body == nil || c.ShouldBindJSON(&req) != nil || req.ExpectedSeq == nil {
+		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("requestId, content, and expectedSeq are required")), "requestId, content, and expectedSeq are required")
+		return
+	}
+	continuation := h.continuationSnapshot()
+	if h.slot != nil {
+		continuation = h.slot
+	}
+	if continuation == nil {
+		writeSessionError(c, session.ErrContinuationUnavailable, "failed to submit message")
+		return
+	}
+	actor, err := authenticatedActor(c, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	run, err := continuation.SubmitMessage(c.Request.Context(), session.SubmitMessageCommand{
+		RequestID: strings.TrimSpace(req.RequestID), SessionID: c.Param("id"), OwnerID: owner,
+		ExpectedSeq: *req.ExpectedSeq, Content: req.Content, Actor: actor,
+	})
+	if err != nil {
+		writeSessionError(c, err, "failed to submit message")
+		return
+	}
+	writeSessionData(c, http.StatusAccepted, run)
 }
 
 func (h *EventHandler) ListCheckpoints(c *gin.Context) {
@@ -262,6 +312,33 @@ func (h *EventHandler) ContinueSession(c *gin.Context) {
 		return
 	}
 	writeSessionData(c, http.StatusAccepted, continued)
+}
+
+// DecideToolApproval records an owner-scoped decision for one immutable
+// run/tool-call identity. The Workbench treats the pending event as the entity
+// CAS and hides unrelated ledger-head races from the transport.
+func (h *EventHandler) DecideToolApproval(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	var req decideToolApprovalRequest
+	if c.Request.Body == nil || c.ShouldBindJSON(&req) != nil || req.PendingSeq == nil {
+		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("decision and pending event are required")), "decision and pending event are required")
+		return
+	}
+	decided, err := h.workbench.DecideToolApproval(
+		c.Request.Context(), owner, c.Param("id"), session.ToolApprovalDecisionCommand{
+			RunID: c.Param("runId"), ToolCallID: c.Param("toolCallId"),
+			PendingEventID: req.PendingEventID, PendingSeq: *req.PendingSeq, Decision: req.Decision,
+		},
+	)
+	if err != nil {
+		writeSessionError(c, err, "failed to decide tool approval")
+		return
+	}
+	writeSessionData(c, http.StatusOK, decided)
 }
 
 func authenticatedActor(c *gin.Context, sessionID string) (identity.Actor, error) {

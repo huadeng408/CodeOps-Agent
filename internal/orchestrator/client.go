@@ -63,6 +63,15 @@ type ToolResult struct {
 	Truncated     bool
 	Spill         *SpillRef
 	ContentBlocks []ContentBlock
+	// Changes are Harness-local metadata used to produce content-free ledger
+	// receipts. They are not serialized back to the model transport.
+	Changes []CodeChange
+}
+
+type CodeChange struct {
+	Path   string
+	Before string
+	After  string
 }
 
 type SpillRef struct {
@@ -576,7 +585,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 	}
 
 	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(request.History))
-	for _, item := range trimConversationHistory(request.History) {
+	for _, item := range conversationRequestHistory(request) {
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
 			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
 			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
@@ -867,12 +876,24 @@ func conversationHistoryGroupChars(group []ConversationMessage) int {
 	return total
 }
 
+func conversationRequestHistory(request ConversationRequest) []ConversationMessage {
+	// Canonical history is budgeted by Python's context manager, not transport.
+	if request.Resume {
+		return request.History
+	}
+	return trimConversationHistory(request.History)
+}
+
 func truncateHistoryContent(content string) string {
 	content = strings.TrimSpace(content)
 	if len(content) <= maxHistoryMessageChars {
 		return content
 	}
-	return strings.TrimSpace(content[:maxHistoryMessageChars]) + "\n[history message truncated]"
+	end := maxHistoryMessageChars
+	for end > 0 && content[end]&0xc0 == 0x80 {
+		end--
+	}
+	return strings.TrimSpace(content[:end]) + "\n[history message truncated]"
 }
 
 func reverseConversationMessageGroups(groups [][]ConversationMessage) {

@@ -334,6 +334,134 @@ func TestEventToViewPreservesContinuationLineage(t *testing.T) {
 	}
 }
 
+func TestWorkbenchDecideToolApprovalPersistsOwnerScopedLedgerFact(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-approval", "run-approval", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{
+		RunID: "run-approval", RequestID: "request-approval", LeaseID: "lease-approval",
+		WorkerID: "worker-approval", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: "run-approval", ToolCallID: "call-write", ToolName: "Write", ArgumentsJSON: `{"content":"hello","path":"notes.txt"}`}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	pending := toolApprovalPayload{
+		RunID: call.RunID, ToolCallID: call.ToolCallID, ToolName: call.ToolName,
+		ArgumentsJSON: call.ArgumentsJSON, Decision: ApprovalPending,
+	}
+	pendingEvent, err := ledger.Append(ctx, created.ID, 7, approvalPendingEventType, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: call.RunID, ToolCallID: call.ToolCallID,
+		PendingEventID: "different-pending-event", PendingSeq: pendingEvent.Seq, Decision: ApprovalApproved,
+	}); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("mismatched pending identity error = %v, want ErrSessionStateConflict", err)
+	}
+
+	decided, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: call.RunID, ToolCallID: call.ToolCallID,
+		PendingEventID: pendingEvent.EventID, PendingSeq: pendingEvent.Seq, Decision: ApprovalApproved,
+	})
+	if err != nil {
+		t.Fatalf("approve tool call: %v", err)
+	}
+	if decided.Type != approvalApprovedEventType || decided.Approval == nil {
+		t.Fatalf("approval event view = %+v", decided)
+	}
+	if decided.Approval.RunID != call.RunID || decided.Approval.ToolCallID != call.ToolCallID || decided.Approval.Decision != ApprovalApproved {
+		t.Fatalf("approval identity = %+v", decided.Approval)
+	}
+	repeated, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: call.RunID, ToolCallID: call.ToolCallID,
+		PendingEventID: pendingEvent.EventID, PendingSeq: pendingEvent.Seq, Decision: ApprovalApproved,
+	})
+	if err != nil || repeated.ID != decided.ID {
+		t.Fatalf("idempotent approval = %+v err=%v, want event %s", repeated, err, decided.ID)
+	}
+	if _, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: call.RunID, ToolCallID: call.ToolCallID,
+		PendingEventID: pendingEvent.EventID, PendingSeq: pendingEvent.Seq, Decision: ApprovalDenied,
+	}); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("conflicting decision error = %v, want ErrSessionStateConflict", err)
+	}
+
+	events, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-1]
+	if last.ID != decided.ID || last.Approval == nil || last.Approval.ArgumentsJSON != call.ArgumentsJSON {
+		t.Fatalf("persisted approval projection = %+v", last)
+	}
+}
+
+func TestWorkbenchDecideToolApprovalSurvivesUnrelatedLedgerGrowth(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-approval-race", "run-approval-race", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{
+		RunID: "run-approval-race", RequestID: "request-approval-race", LeaseID: "lease-approval-race",
+		WorkerID: "worker-approval-race", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: lease.RunID, ToolCallID: "call-write-race", ToolName: "Write", ArgumentsJSON: `{"content":"hello","path":"notes.txt"}`}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	pending := toolApprovalPayload{
+		RunID: call.RunID, ToolCallID: call.ToolCallID, ToolName: call.ToolName,
+		ArgumentsJSON: call.ArgumentsJSON, Decision: ApprovalPending,
+	}
+	pendingEvent, err := ledger.Append(ctx, created.ID, 7, approvalPendingEventType, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 8, runHeartbeatEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	decided, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: call.RunID, ToolCallID: call.ToolCallID,
+		PendingEventID: pendingEvent.EventID, PendingSeq: pendingEvent.Seq, Decision: ApprovalApproved,
+	})
+	if err != nil {
+		t.Fatalf("approval should not conflict with unrelated heartbeat: %v", err)
+	}
+	if decided.Type != approvalApprovedEventType || decided.Approval == nil || decided.Approval.Decision != ApprovalApproved {
+		t.Fatalf("approval event view = %+v", decided)
+	}
+}
+
 func TestWorkbenchDeleteHidesSessionButKeepsLedgerHistory(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

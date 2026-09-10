@@ -20,6 +20,9 @@ type supervisorModule struct {
 func (m *supervisorModule) RequestContinuation(context.Context, ContinueCommand) (RunView, error) {
 	return RunView{RunID: "supervisor-run"}, nil
 }
+func (m *supervisorModule) SubmitMessage(context.Context, SubmitMessageCommand) (RunView, error) {
+	return RunView{RunID: "supervisor-run"}, nil
+}
 func (m *supervisorModule) Recover(context.Context) error {
 	m.mu.Lock()
 	m.recovers++

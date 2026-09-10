@@ -38,6 +38,26 @@ function sessionDraftKey(sessionId: string): string {
   return `codeops:draft:${sessionId}`;
 }
 
+function sessionMessageRequestKey(sessionId: string): string {
+  return `codeops:message-request:${sessionId}`;
+}
+
+function messageRequestId(sessionId: string, content: string): string {
+  const key = sessionMessageRequestKey(sessionId);
+  const stored = readLocalStorage(key);
+  if (stored) {
+    try {
+      const pending = JSON.parse(stored) as { content?: string; requestId?: string };
+      if (pending.content === content && pending.requestId) return pending.requestId;
+    } catch {
+      // Replace malformed browser hints; the Session Ledger remains canonical.
+    }
+  }
+  const requestId = createContinuationRequestId();
+  writeLocalStorage(key, JSON.stringify({ content, requestId }));
+  return requestId;
+}
+
 function readLocalStorage(key: string): string | null {
   try {
     return localStorage.getItem(key);
@@ -80,9 +100,9 @@ function errorMessage(cause: unknown, fallback: string): string {
 type EventKind = 'messages' | 'tools' | 'approvals' | 'code';
 
 function eventKind(event: SessionEvent): EventKind {
-  if (event.toolName || event.type.startsWith('tool/')) return 'tools';
-  if (event.type.includes('approval')) return 'approvals';
-  if (event.type.includes('patch') || event.type.includes('code')) return 'code';
+	if (event.type.includes('approval')) return 'approvals';
+	if (event.codeModification || event.type.startsWith('code/') || event.type.startsWith('patch/') || event.type.startsWith('workspace/patch')) return 'code';
+	if (event.toolName || event.type.startsWith('tool/')) return 'tools';
   return 'messages';
 }
 
@@ -113,6 +133,22 @@ function App() {
   const canonicalSelectionRef = useRef('');
   const continuationInFlightRef = useRef(false);
   const retiredSessionIDsRef = useRef(new Set<string>());
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const followMessagesRef = useRef(true);
+
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    followMessagesRef.current = true;
+    list.scrollTop = list.scrollHeight;
+    const onScroll = () => { followMessagesRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 100; };
+    const observer = new MutationObserver(() => {
+      if (followMessagesRef.current) list.scrollTop = list.scrollHeight;
+    });
+    observer.observe(list, { childList: true, subtree: true, characterData: true });
+    list.addEventListener('scroll', onScroll);
+    return () => { observer.disconnect(); list.removeEventListener('scroll', onScroll); };
+  }, [loading, selectedSession?.id]);
 
   useEffect(() => {
     document.body.toggleAttribute('data-ds-dark-theme', isDarkTheme);
@@ -370,10 +406,12 @@ function App() {
     const content = message.trim();
     setBusy(true);
     setError('');
+    const requestId = messageRequestId(selectedSession.id, content);
     try {
-      await api.createEvent(selectedSession.id, content, selectedSession.eventCount);
+      await api.submitMessage(selectedSession.id, content, selectedSession.eventCount, requestId);
       setMessage('');
       removeLocalStorage(sessionDraftKey(selectedSession.id));
+      removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
       setError(errorMessage(cause, '消息发送失败'));
@@ -483,13 +521,15 @@ function App() {
           </div>
         </header>
         {error && <div className="global-error" role="alert">{error}</div>}
-        <div className="message-list">
-          {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
+        {selectedSession?.run?.status === 'failed' && <div className="global-error" role="alert">{selectedSession.run.error || '任务执行失败'}。可点击“继续任务”重试。</div>}
+        {(selectedSession?.run?.status === 'queued' || selectedSession?.run?.status === 'running') && <div className="stream-status" role="status">{selectedSession.run.status === 'queued' ? '任务排队中...' : '正在处理，请稍候...'}</div>}
+        <div className="message-list" ref={messageListRef}>
+          {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} activeRun={selectedSession.run} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
           {selectedSession?.lastUserInput && !message && <button className="restore-input-btn" type="button" onClick={() => setMessage(selectedSession.lastUserInput || '')} disabled={busy}>恢复上次输入</button>}
-          <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <button className="send-btn" type="submit" disabled={!selectedSession || busy || !message.trim()}>{busy ? '处理中...' : '发送'}</button>
+          <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+          <button className="send-btn" type="submit" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '处理中...' : '发送'}</button>
         </form>
       </main>
 
@@ -546,11 +586,12 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
   </div>;
 }
 
-function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey: number }) {
+function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; refreshKey: number; activeRun?: Session['run'] }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code'>('all');
+  const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code'>('messages');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+	const [decidingApproval, setDecidingApproval] = useState('');
   const cursorRef = useRef(-1);
   const loadedSessionRef = useRef('');
   const loadEvents = useCallback(async (after = -1) => {
@@ -576,7 +617,7 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
     if (!sameSession) {
       loadedSessionRef.current = sessionId;
       cursorRef.current = -1;
-      setEventFilter('all');
+      setEventFilter('messages');
       setEvents([]);
       setLoading(true);
     }
@@ -589,10 +630,39 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
     if (kind === 'tools') summary.tools += 1;
     else if (kind === 'approvals') summary.approvals += 1;
     else if (kind === 'code') summary.codeChanges += 1;
-    else summary.messages += 1;
+    else if (event.type === 'user/message' || event.type === 'assistant/message') summary.messages += 1;
     return summary;
   }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0 });
-  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventKind(event) === eventFilter);
+  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventFilter === 'messages'
+    ? event.type === 'user/message' || event.type === 'assistant/message' || eventKind(event) !== 'messages'
+    : eventKind(event) === eventFilter);
+	const decidedApprovals = new Set(activeEvents
+		.filter((event) => event.approval && event.approval.decision !== 'pending')
+		.map((event) => `${event.approval?.runId}\0${event.approval?.toolCallId}`));
+	const handleApproval = useCallback(async (event: SessionEvent, decision: 'approved' | 'denied') => {
+		if (!event.approval || event.approval.decision !== 'pending') return;
+		const key = `${event.approval.runId}\0${event.approval.toolCallId}`;
+		setDecidingApproval(key);
+		try {
+			const decided = await api.decideToolApproval(
+				sessionId, event.approval.runId, event.approval.toolCallId,
+				decision, event.id, event.seq,
+			);
+			if (decided) {
+				setEvents((previous) => {
+					const merged = mergeEvents(previous, [decided]);
+					cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
+					persistedSessionCursor(sessionId, cursorRef.current);
+					return merged;
+				});
+			}
+			setError('');
+		} catch (cause) {
+			setError(errorMessage(cause, '审批失败'));
+		} finally {
+			setDecidingApproval('');
+		}
+	}, [sessionId]);
   const handleLiveEvent = useCallback((event: SessionEvent) => {
     const currentCursor = cursorRef.current;
     if (hasSequenceGap(currentCursor, [event])) {
@@ -614,10 +684,22 @@ function MessageList({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   return <div className="message-stream">
     <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => <article key={event.id} className={`message ${event.author}`}>
+	    {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => {
+			const approvalKey = event.approval ? `${event.approval.runId}\0${event.approval.toolCallId}` : '';
+			const approvalPending = event.approval?.decision === 'pending'
+				&& !decidedApprovals.has(approvalKey)
+				&& event.approval.runId === activeRun?.runId
+				&& (activeRun.status === 'queued' || activeRun.status === 'running');
+			return <article key={event.id} className={`message ${event.author} ${event.approval ? 'approval-event' : ''}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}<span className={`event-kind ${eventKind(event)}`}>{eventKindLabel(eventKind(event))}</span></span><time>#{event.seq}</time></div>
-      <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}</div>
-    </article>)}
+	      <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
+			{approvalPending && <div className="approval-actions" aria-label={`${event.approval?.toolName} 工具审批`}>
+				<button className="approval-btn approve" type="button" onClick={() => void handleApproval(event, 'approved')} disabled={decidingApproval !== ''}>批准</button>
+				<button className="approval-btn deny" type="button" onClick={() => void handleApproval(event, 'denied')} disabled={decidingApproval !== ''}>拒绝</button>
+				{decidingApproval === approvalKey && <span role="status">提交中...</span>}
+			</div>}
+	    </article>;
+		})}
   </div>;
 }
 

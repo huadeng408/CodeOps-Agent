@@ -17,6 +17,10 @@ func (m *slotModule) RequestContinuation(context.Context, ContinueCommand) (RunV
 	m.called = true
 	return RunView{RunID: "run-slot"}, nil
 }
+func (m *slotModule) SubmitMessage(context.Context, SubmitMessageCommand) (RunView, error) {
+	m.called = true
+	return RunView{RunID: "run-slot"}, nil
+}
 func (m *slotModule) Recover(context.Context) error { return nil }
 func (m *slotModule) Close() error                  { m.closeCount++; return nil }
 
@@ -71,6 +75,10 @@ func (m *activeSlotModule) RequestContinuation(context.Context, ContinueCommand)
 	<-m.release
 	m.requestActive.Store(false)
 	return RunView{RunID: "active-run"}, nil
+}
+
+func (m *activeSlotModule) SubmitMessage(context.Context, SubmitMessageCommand) (RunView, error) {
+	return m.RequestContinuation(context.Background(), ContinueCommand{})
 }
 
 func (m *activeSlotModule) Recover(context.Context) error { return nil }

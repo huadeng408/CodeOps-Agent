@@ -234,3 +234,6 @@ internal/cli/.agent/
 /docs/design/
 /docs/qrels/BUILD-*.md
 /docs/qrels/RUN-*.md
+
+# Local provider credentials; only the placeholder example is tracked.
+/configs/provider.local.*

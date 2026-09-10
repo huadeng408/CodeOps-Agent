@@ -386,7 +386,9 @@ button:disabled {
   background: var(--dsw-alias-bg-base);
   display: flex;
   flex-direction: column;
+  min-width: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .conversation-header {
@@ -478,6 +480,7 @@ button:disabled {
 
 .message-stream {
   max-width: 860px;
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -526,6 +529,7 @@ button:disabled {
   font-size: 14px;
   line-height: 1.6;
   color: var(--dsw-alias-text-primary);
+  overflow-wrap: anywhere;
 }
 
 .message.user .message-content {
@@ -561,6 +565,78 @@ button:disabled {
   font-family: var(--ds-font-family-code);
   font-size: 12px;
   white-space: pre-wrap;
+}
+
+.approval-event {
+	padding-left: 12px;
+	border-left: 2px solid var(--dsw-static-orange-500);
+}
+
+.approval-arguments {
+	max-height: 160px;
+	overflow: auto;
+}
+
+.approval-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 34px;
+	margin-top: 10px;
+}
+
+.approval-actions span {
+	color: var(--dsw-alias-text-tertiary);
+	font-size: 12px;
+}
+
+.approval-btn {
+	min-width: 64px;
+	height: 32px;
+	padding: 0 12px;
+	border: 1px solid var(--dsw-alias-border-l1);
+	border-radius: 5px;
+	background: var(--dsw-alias-bg-base);
+	color: var(--dsw-alias-text-primary);
+	cursor: pointer;
+}
+
+.approval-btn.approve {
+	border-color: var(--dsw-static-green-500);
+	color: var(--dsw-static-green-500);
+}
+
+.approval-btn.deny {
+	border-color: var(--dsw-static-red-500);
+	color: var(--dsw-static-red-500);
+}
+
+.approval-btn:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.code-receipt {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 8px;
+	padding: 7px 0;
+	border-top: 1px solid var(--dsw-alias-border-l1);
+	color: var(--dsw-alias-text-secondary);
+	font-size: 12px;
+}
+
+.code-receipt span {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.code-receipt code {
+	flex: 0 0 auto;
+	font-family: var(--ds-font-family-code);
+	color: var(--dsw-alias-text-tertiary);
 }
 
 .input-area {
@@ -615,6 +691,21 @@ button:disabled {
 .input-area { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); width: min(850px, calc(100% - 48px)); z-index: 2; border: 1px solid var(--dsw-alias-border-l1); border-radius: 16px; background: var(--dsw-alias-bg-l1); box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 .input-box { min-height: 48px; background: transparent; border: 0; }
 .input-box:focus { border: 0; }
+
+@media (min-width: 1101px) {
+  .app-frame.details-open {
+    grid-template-columns: 322px minmax(0, 1fr) minmax(300px, 340px);
+  }
+
+  .app-frame.details-open .task-panel {
+    grid-column: 3;
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: 100vh;
+    box-shadow: none;
+  }
+}
 
 .task-panel-header {
   padding: 16px;
@@ -810,17 +901,28 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
-  body { overflow: auto; }
-  .app-frame { grid-template-columns: 230px minmax(0, 1fr); min-height: 100vh; height: auto; }
+  body { overflow: hidden; }
+  .app-frame { grid-template-columns: 230px minmax(0, 1fr); min-height: 0; height: 100dvh; }
   .task-panel { grid-column: auto; min-height: 0; border-top: 0; border-left: 1px solid var(--dsw-alias-border-l1); }
-  .checkpoint-panel { max-height: none; }
+  .checkpoint-panel { max-height: 55dvh; }
+}
+
+@media (max-width: 1100px) {
+  .task-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, calc(100vw - 24px));
+    height: 100dvh;
+  }
 }
 
 @media (max-width: 640px) {
-  .app-frame { display: block; }
-  .sidebar { max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-  .conversation { min-height: 62vh; }
-  .message-list { padding: 14px; }
+  .app-frame { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(100px, 24dvh) minmax(0, 1fr); }
+  .sidebar { min-height: 0; max-height: none; border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+  .conversation { min-height: 0; }
+  .message-list { padding: 14px 14px 130px; }
   .input-area { padding: 10px 14px; bottom: 12px; width: calc(100% - 22px); }
   .input-box { min-height: 48px; }
   .header-actions select { max-width: 90px; }

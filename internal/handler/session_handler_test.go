@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"code-agent/internal/identity"
+	"code-agent/internal/orchestrator"
+	"code-agent/internal/permission"
 	"code-agent/internal/session"
 	"code-agent/internal/worktree"
 	"code-agent/pkg/token"
@@ -38,7 +42,26 @@ func openHandlerTestWorkbench(t *testing.T) (*session.Workbench, *session.SQLite
 
 type testContinuationModule struct{}
 
+type handlerApprovalConversation struct{}
+
+func (handlerApprovalConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	result := handlers.Tool(ctx, orchestrator.ToolCall{ID: "handler-call", Name: "Write", ParametersJSON: `{"content":"ok","path":"handler.txt"}`})
+	if result.Error != "" {
+		return orchestrator.ConversationResult{}, errors.New(result.Error)
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "approved through HTTP"}, nil
+}
+
+type handlerApprovalTool struct{}
+
+func (handlerApprovalTool) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
+	return orchestrator.ToolResult{Output: "written"}
+}
+
 func (m *testContinuationModule) RequestContinuation(context.Context, session.ContinueCommand) (session.RunView, error) {
+	return session.RunView{RunID: "test-run"}, nil
+}
+func (m *testContinuationModule) SubmitMessage(context.Context, session.SubmitMessageCommand) (session.RunView, error) {
 	return session.RunView{RunID: "test-run"}, nil
 }
 
@@ -137,7 +160,86 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*
 	sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
 	sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
 	sessions.POST("/:id/continue", eventHandler.ContinueSession)
+	sessions.POST("/:id/approvals/:runId/:toolCallId", eventHandler.DecideToolApproval)
 	return router
+}
+
+func messageSubmissionRouter(ownerID uint, workbench *session.Workbench, continuation session.ContinuationModule) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("claims", &token.CustomClaims{UserID: ownerID, TokenType: token.TokenTypeAccess})
+		c.Next()
+	})
+	handler := NewEventHandler(workbench, continuation)
+	router.POST("/sessions/:id/messages", handler.SubmitMessage)
+	return router
+}
+
+func TestSubmitMessageRouteStartsNaturalLanguageTurnIdempotently(t *testing.T) {
+	ctx := context.Background()
+	workbench, ledger := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(ctx, 7, "repo", "natural language", "respond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := session.NewSessionRunner(workbench, handlerApprovalConversation{}, handlerApprovalTool{}, session.SessionRunnerOptions{WorkerID: "handler-message"})
+	t.Cleanup(func() { _ = runner.Close() })
+	router := messageSubmissionRouter(7, workbench, runner)
+	body := map[string]any{"requestId": "browser-message-1", "expectedSeq": int64(1), "content": "please answer this natural language request"}
+	response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/messages", body)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("submit message status=%d body=%s", response.Code, response.Body.String())
+	}
+	var accepted struct {
+		Data session.RunView `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil || accepted.Data.RunID == "" {
+		t.Fatalf("submit message response=%s err=%v", response.Body.String(), err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var completed session.RunView
+	for time.Now().Before(deadline) {
+		view, runErr := runner.Run(ctx, created.ID, accepted.Data.RunID)
+		if runErr != nil {
+			t.Fatalf("read submitted run: %v", runErr)
+		}
+		completed = view
+		if completed.Status == session.RunCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if completed.Status != session.RunCompleted {
+		t.Fatalf("submitted run status=%q, want %q", completed.Status, session.RunCompleted)
+	}
+	repeated := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/messages", body)
+	if repeated.Code != http.StatusAccepted || !bytes.Contains(repeated.Body.Bytes(), []byte(accepted.Data.RunID)) {
+		t.Fatalf("idempotent message status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userMessages := 0
+	for _, event := range events {
+		if event.Type == "user/message" {
+			userMessages++
+		}
+	}
+	if userMessages != 1 {
+		t.Fatalf("idempotent route persisted %d user messages", userMessages)
+	}
+
+	foreign := performSessionRequest(messageSubmissionRouter(8, workbench, runner), http.MethodPost, "/sessions/"+created.ID+"/messages", map[string]any{
+		"requestId": "browser-message-foreign", "expectedSeq": int64(len(events)), "content": "foreign",
+	})
+	missing := performSessionRequest(messageSubmissionRouter(8, workbench, runner), http.MethodPost, "/sessions/missing/messages", map[string]any{
+		"requestId": "browser-message-foreign", "expectedSeq": int64(len(events)), "content": "foreign",
+	})
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d %q missing=%d %q", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
+	}
 }
 
 func TestWorkspaceManifestIsSessionScopedAndReportsUnavailableCleanly(t *testing.T) {
@@ -537,5 +639,85 @@ func TestContinueSessionRouteHidesForeignSessionLikeMissing(t *testing.T) {
 	missing := performSessionRequest(router, http.MethodPost, "/sessions/missing/continue", body)
 	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
 		t.Fatalf("foreign=%d %q missing=%d %q; continue must not enumerate sessions", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
+	}
+}
+
+func TestToolApprovalRouteUsesOwnerRunCallAndLedgerCAS(t *testing.T) {
+	ctx := context.Background()
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(ctx, 7, "repo", "approval", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "write a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	permissions := permission.NewController(map[string]permission.Level{"Write": permission.AskSession}, nil)
+	runner := session.NewSessionRunner(workbench, handlerApprovalConversation{}, handlerApprovalTool{}, session.SessionRunnerOptions{
+		WorkerID: "handler-approval", LeaseDuration: 3 * time.Second,
+		HeartbeatInterval: time.Second, Permissions: permissions,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, session.ContinueCommand{
+		RequestID: "handler-approval-request", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: 4, CheckpointHash: checkpoint.Hash,
+		Actor: identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "alice", TenantID: "org:test", Roles: []string{"USER"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var pendingApproval *session.EventView
+	for time.Now().Before(deadline) {
+		events, readErr := workbench.Events(ctx, 7, created.ID, 0)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		found := false
+		for _, event := range events {
+			if event.Approval != nil && event.Approval.Decision == session.ApprovalPending {
+				copy := event
+				pendingApproval = &copy
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pendingApproval == nil {
+		t.Fatal("pending approval was not persisted")
+	}
+	path := "/sessions/" + created.ID + "/approvals/" + url.PathEscape(accepted.RunID) + "/handler-call"
+	body := map[string]any{"pendingEventId": pendingApproval.ID, "pendingSeq": pendingApproval.Seq, "decision": session.ApprovalApproved}
+	approved := performSessionRequest(sessionTestRouter(7, workbench), http.MethodPost, path, body)
+	if approved.Code != http.StatusOK || !bytes.Contains(approved.Body.Bytes(), []byte(`"decision":"approved"`)) {
+		t.Fatalf("approval status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	repeated := performSessionRequest(sessionTestRouter(7, workbench), http.MethodPost, path, body)
+	if repeated.Code != http.StatusOK || repeated.Body.String() != approved.Body.String() {
+		t.Fatalf("idempotent approval status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+	conflictingBody := map[string]any{"pendingEventId": pendingApproval.ID, "pendingSeq": pendingApproval.Seq, "decision": session.ApprovalDenied}
+	conflicting := performSessionRequest(sessionTestRouter(7, workbench), http.MethodPost, path, conflictingBody)
+	if conflicting.Code != http.StatusConflict {
+		t.Fatalf("conflicting approval status=%d body=%s", conflicting.Code, conflicting.Body.String())
+	}
+	foreign := performSessionRequest(sessionTestRouter(8, workbench), http.MethodPost, path, body)
+	missingPath := "/sessions/missing/approvals/" + url.PathEscape(accepted.RunID) + "/handler-call"
+	missing := performSessionRequest(sessionTestRouter(8, workbench), http.MethodPost, missingPath, body)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d %q missing=%d %q", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
 	}
 }

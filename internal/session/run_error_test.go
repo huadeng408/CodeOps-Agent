@@ -1,0 +1,24 @@
+package session
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestPublicRunErrorNeverIncludesProviderPayload(t *testing.T) {
+	for _, tc := range []struct {
+		cause error
+		want  string
+	}{
+		{errors.New("provider error 401: secret-token"), "model authentication failed; check provider credentials"},
+		{errors.New("provider error 429: secret-token"), "model rate limit reached; retry later"},
+		{context.DeadlineExceeded, "model request timed out; retry this task"},
+		{errors.New("secret-token"), "agent continuation failed"},
+		{nil, "agent continuation failed"},
+	} {
+		if got := publicRunError(tc.cause); got != tc.want {
+			t.Fatalf("public error=%q, want %q", got, tc.want)
+		}
+	}
+}

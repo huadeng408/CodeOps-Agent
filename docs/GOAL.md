@@ -1,5 +1,12 @@
 # CodeOps-Agent Goal
 
+2026-09-11: The interview conversation path now has a real-browser 23-turn
+provider-backed receipt, including long Chinese messages, constraint revisions,
+refresh, Go/Python restart, Glob/Read and failed-turn continuation. See
+`docs/interview-verified-2026-09-11.md`. This supersedes the earlier claim that
+the selected provider is currently unavailable. The broader Goal, including
+200-turn and full production acceptance, remains BLOCKED.
+
 执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-10 当前快照）
 
 ## 当前验证快照（2026-09-10）

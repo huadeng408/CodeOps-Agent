@@ -179,6 +179,9 @@ class AnthropicClient(LLMClient):
                     if value not in (None, ""):
                         identity_payload[key] = value
                 etype = evt.get("type") or current_event
+                if etype == "error":
+                    # Upstream bodies may contain secrets. Expose a fixed failure only.
+                    raise RuntimeError("Anthropic upstream stream error")
                 if etype == "message_start":
                     message = evt.get("message", {}) or {}
                     for key in ("model", "id", "system_fingerprint", "created"):

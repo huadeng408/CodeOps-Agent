@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/permission"
 )
 
 type recordingConversationAdapter struct {
@@ -36,6 +38,35 @@ type retryToolConversationAdapter struct {
 	toolResults []orchestrator.ToolResult
 }
 
+type approvalToolConversationAdapter struct {
+	result chan orchestrator.ToolResult
+}
+
+type cancelingHeartbeatEventLog struct {
+	EventLog
+	started chan struct{}
+}
+
+func (l *cancelingHeartbeatEventLog) Events(ctx context.Context, _ string) ([]Event, error) {
+	close(l.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (a *approvalToolConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	if handlers.Tool == nil {
+		return orchestrator.ConversationResult{}, errors.New("tool handler is missing")
+	}
+	result := handlers.Tool(ctx, orchestrator.ToolCall{
+		ID: "approval-call", Name: "Write",
+		ParametersJSON: `{"content":"approved","path":"runtime/approved.txt"}`,
+	})
+	if a.result != nil {
+		a.result <- result
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "approval completed"}, nil
+}
+
 func (a *retryToolConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	if handlers.Tool == nil {
 		return orchestrator.ConversationResult{}, errors.New("tool handler is missing")
@@ -54,6 +85,15 @@ func (a *retryToolConversationAdapter) RunConversation(ctx context.Context, _ or
 type countingToolAdapter struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type codeChangeToolAdapter struct{}
+
+func (codeChangeToolAdapter) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
+	return orchestrator.ToolResult{
+		Output:  "written",
+		Changes: []orchestrator.CodeChange{{Path: "src/example.txt", Before: "old-secret-content", After: "new-secret-content"}},
+	}
 }
 
 func (a *countingToolAdapter) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
@@ -198,6 +238,102 @@ func TestSessionRunnerContinuationIsIdempotentAndCommitsAssistantTerminal(t *tes
 	}
 	if got := surface[len(surface)-1].Type; got != "assistant/message" {
 		t.Fatalf("surface tail = %q", got)
+	}
+}
+
+func TestSessionRunnerSubmitMessageStartsNaturalLanguageTurnAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "natural language", "reply to users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := &recordingConversationAdapter{reply: "natural language reply"}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-natural"})
+	t.Cleanup(func() { _ = runner.Close() })
+	command := SubmitMessageCommand{
+		RequestID: "message-request-1", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: 1, Content: "please explain this repository", Actor: testRunnerActor(),
+	}
+	accepted, err := runner.SubmitMessage(ctx, command)
+	if err != nil {
+		t.Fatalf("submit message: %v", err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.RunID != accepted.RunID {
+		t.Fatalf("terminal run = %+v", terminal)
+	}
+	repeated, err := runner.SubmitMessage(ctx, command)
+	if err != nil || repeated.RunID != accepted.RunID {
+		t.Fatalf("idempotent submit = %+v err=%v", repeated, err)
+	}
+	if _, err := runner.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: command.RequestID, SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: 1, Content: "different content", Actor: testRunnerActor(),
+	}); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("request content conflict = %v, want ErrSessionStateConflict", err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		counts[event.Type]++
+	}
+	if counts[userMessageEventType] != 1 || counts[checkpointEventType] != 1 || counts[continuationEventType] != 1 || counts["assistant/message"] != 1 || counts[runCompletedEventType] != 1 {
+		t.Fatalf("natural language event counts = %+v", counts)
+	}
+	checkpoints, err := workbench.ListCheckpoints(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoints) != 0 {
+		t.Fatalf("automatic checkpoints leaked into manual list: %+v", checkpoints)
+	}
+}
+
+func TestSessionRunnerSubmitMessageRejectsSecondTurnWhileRunIsActive(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "active run", "serialize turns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := &blockingConversationAdapter{started: make(chan struct{}), finished: make(chan struct{})}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-active"})
+	t.Cleanup(func() { _ = runner.Close() })
+	if _, err := runner.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: "message-active-1", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: 1, Content: "first turn", Actor: testRunnerActor(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-conversation.started
+	view, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: "message-active-2", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(view.EventCount), Content: "second turn", Actor: testRunnerActor(),
+	}); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("active run submit error = %v, want ErrSessionStateConflict", err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageCount := 0
+	for _, event := range events {
+		if event.Type == userMessageEventType {
+			messageCount++
+		}
+	}
+	if messageCount != 1 {
+		t.Fatalf("active run accepted %d user messages, want 1", messageCount)
 	}
 }
 
@@ -356,6 +492,40 @@ type recoverSessionErrorLog struct {
 	badSessionID string
 	healthyID    string
 	err          error
+}
+
+type legacyOnlyRecoveryLog struct {
+	EventLog
+	events []Event
+}
+
+func (l *legacyOnlyRecoveryLog) SessionIDs(context.Context) ([]string, error) {
+	return []string{"legacy-only-session"}, nil
+}
+
+func (l *legacyOnlyRecoveryLog) Events(context.Context, string) ([]Event, error) {
+	return l.events, nil
+}
+
+func TestSessionRunnerRecoverIgnoresLegacyStateEventStreams(t *testing.T) {
+	legacy := &legacyOnlyRecoveryLog{events: []Event{{
+		SessionID: "legacy-only-session", Seq: 0, EventID: "legacy-state-event", Type: sessionStateEventType,
+	}}}
+	workbench := NewWorkbench(legacy, nil)
+	runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "must not run"}, nil, SessionRunnerOptions{WorkerID: "worker-legacy-state"})
+	t.Cleanup(func() { _ = runner.Close() })
+	if err := runner.Recover(context.Background()); err != nil {
+		t.Fatalf("legacy state streams are owned by the event-store module: %v", err)
+	}
+}
+
+func TestSessionRunnerRecoverIgnoresLegacyOnlySessionIDs(t *testing.T) {
+	workbench := NewWorkbench(&legacyOnlyRecoveryLog{}, nil)
+	runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "must not run"}, nil, SessionRunnerOptions{WorkerID: "worker-legacy-only"})
+	t.Cleanup(func() { _ = runner.Close() })
+	if err := runner.Recover(context.Background()); err != nil {
+		t.Fatalf("legacy-only IDs are not schedulable recovery failures: %v", err)
+	}
 }
 
 func (l *recoverSessionErrorLog) SessionIDs(context.Context) ([]string, error) {
@@ -678,6 +848,343 @@ func TestSessionRunnerRetryReusesCommittedToolResultWithoutExecutingAgain(t *tes
 	}
 	if currentResults != 1 {
 		t.Fatalf("current retry result receipts = %d, want 1", currentResults)
+	}
+}
+
+func TestSessionRunnerWaitsForDurableApprovalBeforeToolDispatch(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	conversation := &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}
+	external := &countingToolAdapter{}
+	permissions := permission.NewController(map[string]permission.Level{"Write": permission.AskSession}, nil)
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{
+		WorkerID: "worker-approval", LeaseDuration: 3 * time.Second,
+		HeartbeatInterval: time.Second, Permissions: permissions,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-approval", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var pending EventView
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		events, readErr := workbench.Events(ctx, 7, created.ID, 0)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, event := range events {
+			if event.Type == approvalPendingEventType {
+				pending = event
+				break
+			}
+		}
+		if pending.Approval != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pending.Approval == nil || pending.Approval.RunID != accepted.RunID || pending.Approval.ToolCallID != "approval-call" {
+		t.Fatalf("pending approval = %+v", pending)
+	}
+	external.mu.Lock()
+	beforeApproval := external.calls
+	external.mu.Unlock()
+	if beforeApproval != 0 {
+		t.Fatalf("tool executed before approval %d times", beforeApproval)
+	}
+	if _, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: accepted.RunID, ToolCallID: "approval-call",
+		PendingEventID: pending.ID, PendingSeq: pending.Seq, Decision: ApprovalApproved,
+	}); err != nil {
+		t.Fatalf("approve pending tool: %v", err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.Error != "" {
+		t.Fatalf("completed run = %+v", terminal)
+	}
+	select {
+	case result := <-conversation.result:
+		if result.Error != "" || result.Output != "unexpected external execution" {
+			t.Fatalf("approved tool result = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approved tool result was not returned")
+	}
+	external.mu.Lock()
+	afterApproval := external.calls
+	external.mu.Unlock()
+	if afterApproval != 1 {
+		t.Fatalf("approved tool executed %d times, want 1", afterApproval)
+	}
+
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{"tool/call", approvalPendingEventType, approvalApprovedEventType, toolDispatchedType, "tool/result"}
+	next := 0
+	for _, event := range events {
+		if next < len(wantOrder) && event.Type == wantOrder[next] {
+			next++
+		}
+	}
+	if next != len(wantOrder) {
+		t.Fatalf("approval execution order stopped at %d of %d: %+v", next, len(wantOrder), events)
+	}
+}
+
+func TestSessionRunnerPersistsContentFreeCodeModificationReceipt(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	conversation := &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}
+	runner := NewSessionRunner(workbench, conversation, codeChangeToolAdapter{}, SessionRunnerOptions{
+		WorkerID: "worker-code-receipt", LeaseDuration: time.Second,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-code-receipt", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	events, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modified EventView
+	for _, event := range events {
+		if event.Type == codeModifiedEventType {
+			modified = event
+			break
+		}
+	}
+	if modified.CodeModification == nil {
+		t.Fatalf("code modification receipt missing: %+v", events)
+	}
+	if modified.CodeModification.Path != "src/example.txt" || modified.CodeModification.Operation != "Write" || len(modified.CodeModification.DiffSHA256) != 64 {
+		t.Fatalf("code modification receipt = %+v", modified.CodeModification)
+	}
+	raw, err := json.Marshal(modified.CodeModification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "old-secret-content") || strings.Contains(string(raw), "new-secret-content") {
+		t.Fatalf("code receipt leaked file content: %s", raw)
+	}
+}
+
+func TestSessionRunnerDenialReturnsToolErrorWithoutDispatch(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	conversation := &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}
+	external := &countingToolAdapter{}
+	permissions := permission.NewController(map[string]permission.Level{"Write": permission.AlwaysAsk}, nil)
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{
+		WorkerID: "worker-denial", LeaseDuration: 3 * time.Second,
+		HeartbeatInterval: time.Second, Permissions: permissions,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-denial", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var pending EventView
+	for time.Now().Before(deadline) {
+		events, readErr := workbench.Events(ctx, 7, created.ID, 0)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		found := false
+		for _, event := range events {
+			if event.Type == approvalPendingEventType {
+				pending = event
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pending.Approval == nil {
+		t.Fatal("pending approval was not persisted")
+	}
+	if _, err := workbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: accepted.RunID, ToolCallID: "approval-call",
+		PendingEventID: pending.ID, PendingSeq: pending.Seq, Decision: ApprovalDenied,
+	}); err != nil {
+		t.Fatalf("deny pending tool: %v", err)
+	}
+	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	result := <-conversation.result
+	if result.Error != "tool approval denied" || result.ExitCode != 1 {
+		t.Fatalf("denied tool result = %+v", result)
+	}
+	external.mu.Lock()
+	toolCalls := external.calls
+	external.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("denied tool executed %d times", toolCalls)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var denied, resultSeen bool
+	for _, event := range events {
+		switch event.Type {
+		case approvalDeniedEventType:
+			denied = true
+		case toolDispatchedType:
+			t.Fatalf("denied tool was marked dispatched: %+v", event)
+		case "tool/result":
+			resultSeen = true
+		}
+	}
+	if !denied || !resultSeen {
+		t.Fatalf("denied approval/result facts missing: %+v", events)
+	}
+}
+
+func TestSessionRunnerRecoversPendingApprovalAfterLedgerReopen(t *testing.T) {
+	ctx := context.Background()
+	ledgerPath := filepath.Join(t.TempDir(), "approval-restart.sqlite")
+	firstLedger, err := OpenSQLiteEventLog(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstWorkbench, created, checkpoint := pausedSessionWithCheckpoint(t, firstLedger)
+	permissions := permission.NewController(map[string]permission.Level{"Write": permission.AskSession}, nil)
+	firstRunner := NewSessionRunner(firstWorkbench, &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}, &countingToolAdapter{}, SessionRunnerOptions{
+		WorkerID: "worker-before-restart", LeaseDuration: 120 * time.Millisecond,
+		HeartbeatInterval: 40 * time.Millisecond, Permissions: permissions,
+	})
+	accepted, err := firstRunner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-restart-approval", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var pending EventView
+	for time.Now().Before(deadline) {
+		events, readErr := firstWorkbench.Events(ctx, 7, created.ID, 0)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		found := false
+		for _, event := range events {
+			if event.Type == approvalPendingEventType {
+				pending = event
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pending.Approval == nil {
+		t.Fatal("pending approval was not persisted before restart")
+	}
+	if err := firstRunner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondLedger, err := OpenSQLiteEventLog(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWorkbench := NewWorkbench(secondLedger, nil)
+	if _, err := secondWorkbench.DecideToolApproval(ctx, 7, created.ID, ToolApprovalDecisionCommand{
+		RunID: accepted.RunID, ToolCallID: "approval-call",
+		PendingEventID: pending.ID, PendingSeq: pending.Seq, Decision: ApprovalApproved,
+	}); err != nil {
+		t.Fatalf("approve restored pending tool: %v", err)
+	}
+	external := &countingToolAdapter{}
+	secondRunner := NewSessionRunner(secondWorkbench, &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}, external, SessionRunnerOptions{
+		WorkerID: "worker-after-restart", LeaseDuration: 120 * time.Millisecond,
+		HeartbeatInterval: 40 * time.Millisecond, Permissions: permissions,
+	})
+	t.Cleanup(func() {
+		_ = secondRunner.Close()
+		_ = secondLedger.Close()
+	})
+	if err := secondRunner.Recover(ctx); err != nil {
+		t.Fatalf("recover approval run: %v", err)
+	}
+	terminal := waitForRunStatus(t, secondRunner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.RunID != accepted.RunID || terminal.Attempt < 2 {
+		t.Fatalf("recovered approval lineage = %+v", terminal)
+	}
+	external.mu.Lock()
+	toolCalls := external.calls
+	external.mu.Unlock()
+	if toolCalls != 1 {
+		t.Fatalf("restored approval executed tool %d times, want 1", toolCalls)
+	}
+	events, err := secondLedger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		counts[event.Type]++
+	}
+	for _, eventType := range []string{approvalPendingEventType, approvalApprovedEventType, toolDispatchedType, "tool/result"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s count = %d, want 1; counts=%+v", eventType, counts[eventType], counts)
+		}
+	}
+}
+
+func TestSessionRunnerHeartbeatCancellationDoesNotFailSuccessfulRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := openWorkbenchTestLedger(t)
+	ledger := &cancelingHeartbeatEventLog{EventLog: base, started: make(chan struct{})}
+	runner := &SessionRunner{
+		workbench: NewWorkbench(ledger, nil),
+		options: SessionRunnerOptions{
+			HeartbeatInterval: time.Millisecond,
+			LeaseDuration:     time.Second,
+			Now:               time.Now,
+		},
+	}
+	done := make(chan struct{})
+	failures := make(chan error, 1)
+	deletions := make(chan struct{})
+	go runner.heartbeat(ctx, runKey{sessionID: "session-cancel", runID: "run-cancel"}, runLeasePayload{
+		RunID: "run-cancel", LeaseID: "lease-cancel",
+	}, deletions, done, cancel, failures)
+	<-ledger.started
+	cancel()
+	<-done
+	select {
+	case err := <-failures:
+		t.Fatalf("normal heartbeat cancellation reported as run failure: %v", err)
+	default:
 	}
 }
 
