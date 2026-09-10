@@ -138,3 +138,65 @@ func TestRestorePersistedWorktreesDoesNotResurrectDeletedSession(t *testing.T) {
 		t.Fatalf("deleted session worktree was resurrected: %#v", got)
 	}
 }
+
+func TestAppendPersistedWorktreeEventRejectsDeletedSession(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "deleted", "reject late worktree facts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.Delete(ctx, 7, created.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	tree := worktree.Worktree{
+		Name: "late-agent", Path: filepath.Join(t.TempDir(), ".agent", "worktrees", "late-agent"),
+		BaseRef: "HEAD", Active: true, RequestID: "spawn-late", ParentSessionID: created.ID,
+		ChildSessionID: "child-late", LeaseID: "lease-44444444444444444444444444444444",
+		LeaseExpiresAt: time.Now().Add(time.Hour), Status: worktree.AgentWorktreeActive,
+	}
+
+	err = appendPersistedWorktreeEvent(ctx, ledger, created.ID, persistedWorktreeActiveEvent, tree, "spawned after delete")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("append after delete error = %v, want ErrSessionNotFound", err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[len(events)-1].Type != "session/deleted" {
+		t.Fatalf("deleted session history changed: %+v", events)
+	}
+}
+
+func TestAppendPersistedWorktreeEventRejectsMissingSession(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	tree := worktree.Worktree{
+		Name: "orphan-agent", Path: filepath.Join(t.TempDir(), ".agent", "worktrees", "orphan-agent"),
+		BaseRef: "HEAD", Active: true, RequestID: "spawn-orphan", ParentSessionID: "missing-session",
+		ChildSessionID: "child-orphan", LeaseID: "lease-55555555555555555555555555555555",
+		LeaseExpiresAt: time.Now().Add(time.Hour), Status: worktree.AgentWorktreeActive,
+	}
+
+	err = appendPersistedWorktreeEvent(ctx, ledger, tree.ParentSessionID, persistedWorktreeActiveEvent, tree, "spawned without parent")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("append without parent error = %v, want ErrSessionNotFound", err)
+	}
+	ids, err := ledger.SessionIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("missing parent created orphan session histories: %v", ids)
+	}
+}

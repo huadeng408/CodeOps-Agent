@@ -810,6 +810,59 @@ func TestWorkbenchRunHistoryKeepsCreationOrderAfterLaterHeartbeat(t *testing.T) 
 	}
 }
 
+func TestConversationRequestDoesNotTreatFutureFailureAsRetryAncestor(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPayload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-current", "run-current", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, currentPayload); err != nil {
+		t.Fatal(err)
+	}
+	currentLease := runLeasePayload{
+		RunID: "run-current", RequestID: "request-current", LeaseID: "lease-current",
+		WorkerID: "worker-current", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC(),
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, currentLease); err != nil {
+		t.Fatal(err)
+	}
+	futurePayload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-future", "run-future", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 6, continuationEventType, futurePayload); err != nil {
+		t.Fatal(err)
+	}
+	futureLease := runLeasePayload{
+		RunID: "run-future", RequestID: "request-future", LeaseID: "lease-future",
+		WorkerID: "worker-future", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}
+	if _, err := ledger.Append(ctx, created.ID, 7, runLeasedEventType, futureLease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 8, runFailedEventType, runTerminalPayload{
+		RunID: "run-future", RequestID: "request-future", LeaseID: "lease-future", Attempt: 1, Error: "future failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewSessionRunner(workbench, nil, nil, SessionRunnerOptions{WorkerID: "worker-current"})
+	t.Cleanup(func() { _ = runner.Close() })
+	request, err := runner.conversationRequest(ctx, runKey{sessionID: created.ID, runID: "run-current"}, currentLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.RetryOfRunID != "" || len(request.RetryOfRunIDs) != 0 {
+		t.Fatalf("future failure leaked into retry lineage: primary=%q all=%v", request.RetryOfRunID, request.RetryOfRunIDs)
+	}
+}
+
 func TestSessionRunnerGracefulCloseLeavesRunRecoverable(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

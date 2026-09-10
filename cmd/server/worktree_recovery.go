@@ -54,6 +54,14 @@ func appendPersistedWorktreeEvent(ctx context.Context, ledger session.EventLog, 
 		if err != nil {
 			return err
 		}
+		if len(events) == 0 {
+			return session.ErrSessionNotFound
+		}
+		for _, event := range events {
+			if event.Type == "session/deleted" {
+				return session.ErrSessionNotFound
+			}
+		}
 		if _, err := ledger.Append(ctx, sessionID, int64(len(events)), eventType, payload); err == nil {
 			return nil
 		} else if !errors.Is(err, session.ErrSequenceConflict) {

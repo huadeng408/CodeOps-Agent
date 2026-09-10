@@ -757,12 +757,10 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		if surfaceErr != nil || projection.surfaceHash != checksumSurface(checkpointSurface) {
 			return orchestrator.ConversationRequest{}, fmt.Errorf("%w: continuation surface has changed", ErrEventIntegrity)
 		}
-		retryOfRunIDs = failedRetryRunIDs(events, key.runID, projection.view.CheckpointHash, projection.actor.ScopeKey())
+		requestRetryOfRunID = projection.view.RetryOfRunID
+		retryOfRunIDs = append([]string(nil), projection.view.RetryOfRunIDs...)
 		if err := validateContinuationSurface(checkpointSurface, surface, key.runID, retryOfRunIDs...); err != nil {
 			return orchestrator.ConversationRequest{}, err
-		}
-		if len(retryOfRunIDs) > 0 {
-			requestRetryOfRunID = retryOfRunIDs[0]
 		}
 	}
 	history, input, err := conversationHistory(surface, events, key.runID, projection.inputEvent)
@@ -1148,46 +1146,6 @@ func runForRequest(events []Event, requestID string) (runProjection, bool, error
 		}
 	}
 	return runProjection{}, false, nil
-}
-
-// failedRetryRunIDs returns terminal failures for the same checkpoint in
-// lineage order. The oldest failure is the stable retry root: Python may have
-// persisted a checkpoint under any later attempt, or may still have the root
-// checkpoint after an attempt failed before its first checkpoint write.
-// Unrelated unfinished runs remain isolated.
-func failedRetryRunIDs(events []Event, currentRunID, checkpointHash string, actorScopes ...string) []string {
-	checkpointHash = strings.TrimSpace(checkpointHash)
-	if checkpointHash == "" {
-		return nil
-	}
-	runs, err := projectRuns(events)
-	if err != nil {
-		return nil
-	}
-	type candidate struct {
-		id    string
-		order int64
-	}
-	candidates := make([]candidate, 0)
-	actorScope := ""
-	if len(actorScopes) > 0 {
-		actorScope = strings.TrimSpace(actorScopes[0])
-	}
-	for runID, run := range runs {
-		if runID == currentRunID || !run.terminal || run.view.Status != RunFailed || run.view.CheckpointHash != checkpointHash {
-			continue
-		}
-		if actorScope != "" && run.actor.ScopeKey() != actorScope {
-			continue
-		}
-		candidates = append(candidates, candidate{id: runID, order: run.order})
-	}
-	sort.Slice(candidates, func(left, right int) bool { return candidates[left].order < candidates[right].order })
-	ids := make([]string, 0, len(candidates))
-	for _, item := range candidates {
-		ids = append(ids, item.id)
-	}
-	return ids
 }
 
 func normalizedRetryRunIDs(primary string, candidates []string) []string {
