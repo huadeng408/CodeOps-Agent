@@ -79,6 +79,12 @@ session from the visible list with no alert. This is a smoke check for create,
 select, delete and confirmation behavior; rename, status transitions, auth,
 WebSocket ticket/reconnect and CAS coverage remain separate acceptance items.
 
+The same browser session then renamed the long-dialogue session to
+`真实多轮演示0911-续跑验收`, saved it, changed its status to `paused`, and
+reloaded the page. Both the title and paused status persisted from the backend,
+with no visible alert. This verifies the rename/status persistence path; auth,
+WebSocket and CAS remain separate gates.
+
 Boundaries: 200 successful replies remain pending. A separate read-only probe
 found a checksum mismatch in the legacy long-term memory table; canonical
 conversation history reads remain available. That memory record was neither
