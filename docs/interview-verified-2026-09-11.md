@@ -12,7 +12,9 @@ reported the wrong source as unavailable. These reads now fail independently.
 Invalid memory is still rejected; its content and exception details are not
 injected into the prompt. A regression using a real SQLite store, valid event,
 and modified memory row fails against the previous `_initial_messages` function
-and passes with the fix. Related checks: 46 passed, 1 skipped.
+and passes with the fix. Related checks: 46 passed, 1 skipped. Frozen-source
+full regression: 2272 passed, 15 skipped, 3 warnings; Go tests, vet, and the
+frontend production build also passed in that source state.
 
 A read-only diagnostic of the local legacy memory table found four rows whose
 checksums match a serialization excluding `created_at`; 705 rows matched the
