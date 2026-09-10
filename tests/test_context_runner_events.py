@@ -858,6 +858,30 @@ def test_resume_allows_explicit_retry_of_failed_checkpoint(tmp_path: Path) -> No
     app.close()
 
 
+def test_resume_allows_retry_of_completed_model_after_checkpoint(tmp_path: Path) -> None:
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={"session_id": "run-done-retry", "run_id": "run:failed",
+                     "phase": "model_after", "turn": 1, "surface_sha256": "surface:done"},
+            response="durable provider result", done=True, next_node="done",
+        ), thread_id="run-done-retry",
+    )
+    runner = ConversationRunner(
+        graph=app.graph, llm=NoToolLLM(), tool_registry=app.tools,
+        todo_manager=app.todos, memory_manager=app.memory, skills=app.skills,
+        project_root=app.project_root, working_dir=app.working_dir,
+        token_budget=app.token_budget, layered_context=app.layered_context,
+    )
+    checkpoint = runner.load_checkpoint(
+        "run-done-retry", run_id="run:new", resume=True,
+        surface_sha256="surface:done", retry_of_run_id="run:failed",
+    )
+    assert checkpoint is not None
+    assert checkpoint.state.done is True
+    app.close()
+
+
 def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Path) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))

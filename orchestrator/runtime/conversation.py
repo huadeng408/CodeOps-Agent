@@ -419,8 +419,10 @@ class ConversationRunner:
                 if not state.done:
                     raise ValueError("checkpoint run id does not match request")
                 return None
-            if state.done:
-                raise ValueError("checkpoint run id does not match request")
+            # A completed model_after checkpoint can be the durable result of
+            # a failed Harness transport. An explicit retry of that lineage
+            # may replay it; rejecting all done states strands the task after
+            # the provider result was already persisted.
         if requested_run_id and resume and not checkpoint_run_id and not state.done:
             raise ValueError("checkpoint run id is missing")
         checkpoint_session = str(metadata.get("session_id", "")).strip()
