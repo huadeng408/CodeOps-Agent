@@ -314,7 +314,7 @@ func TestSessionRunnerDeletionCancelsInFlightConversation(t *testing.T) {
 	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
 	blocking := &blockingConversationAdapter{started: make(chan struct{}), finished: make(chan struct{})}
 	runner := NewSessionRunner(workbench, blocking, nil, SessionRunnerOptions{
-		WorkerID: "worker-delete-in-flight", LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond,
+		WorkerID: "worker-delete-in-flight", LeaseDuration: 10 * time.Second, HeartbeatInterval: 5 * time.Second,
 	})
 	t.Cleanup(func() { _ = runner.Close() })
 	if _, err := runner.RequestContinuation(ctx, ContinueCommand{
@@ -337,9 +337,9 @@ func TestSessionRunnerDeletionCancelsInFlightConversation(t *testing.T) {
 	}
 	select {
 	case <-blocking.finished:
-	case <-time.After(time.Second):
+	case <-time.After(500 * time.Millisecond):
 		history, _ := ledger.Events(ctx, created.ID)
-		t.Fatalf("deleted in-flight run was not canceled: %+v", history)
+		t.Fatalf("deleted in-flight run waited for its heartbeat instead of canceling immediately: %+v", history)
 	}
 	history, err := ledger.Events(ctx, created.ID)
 	if err != nil {

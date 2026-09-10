@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"code-agent/internal/identity"
@@ -60,8 +61,10 @@ type WorkbenchModule interface {
 // Workbench is the deep module used by browser transports. It keeps Session
 // authorization and projections local to the canonical append-only ledger.
 type Workbench struct {
-	ledger EventLog
-	notify EventNotifier
+	ledger         EventLog
+	notify         EventNotifier
+	deleteWatchMu  sync.Mutex
+	deleteWatchers map[string]map[chan struct{}]struct{}
 }
 
 // SessionView is the current owner-scoped projection of Session facts.
@@ -161,7 +164,7 @@ type continuationPayload struct {
 }
 
 func NewWorkbench(ledger EventLog, notify EventNotifier) *Workbench {
-	return &Workbench{ledger: ledger, notify: notify}
+	return &Workbench{ledger: ledger, notify: notify, deleteWatchers: make(map[string]map[chan struct{}]struct{})}
 }
 
 // Create starts a new Session with one immutable owner-bearing fact.
@@ -298,6 +301,7 @@ func (w *Workbench) Delete(ctx context.Context, ownerID uint, sessionID string, 
 	if _, err := w.ledger.Append(ctx, sessionID, expectedSeq, "session/deleted", map[string]string{"reason": "user_request"}); err != nil {
 		return err
 	}
+	w.signalDeletion(sessionID)
 	w.signal(sessionID)
 	return nil
 }
@@ -514,6 +518,48 @@ func (w *Workbench) ListCheckpoints(ctx context.Context, ownerID uint, sessionID
 func (w *Workbench) signal(sessionID string) {
 	if w.notify != nil {
 		w.notify.Notify(sessionID)
+	}
+}
+
+// watchDeletion returns a coalescible hint emitted only after a canonical
+// tombstone commits. Subscribers must still re-read the Session Ledger before
+// acting; the hint is not a competing fact source.
+func (w *Workbench) watchDeletion(sessionID string) (<-chan struct{}, func()) {
+	watcher := make(chan struct{}, 1)
+	w.deleteWatchMu.Lock()
+	if w.deleteWatchers == nil {
+		w.deleteWatchers = make(map[string]map[chan struct{}]struct{})
+	}
+	if w.deleteWatchers[sessionID] == nil {
+		w.deleteWatchers[sessionID] = make(map[chan struct{}]struct{})
+	}
+	w.deleteWatchers[sessionID][watcher] = struct{}{}
+	w.deleteWatchMu.Unlock()
+	var once sync.Once
+	return watcher, func() {
+		once.Do(func() {
+			w.deleteWatchMu.Lock()
+			delete(w.deleteWatchers[sessionID], watcher)
+			if len(w.deleteWatchers[sessionID]) == 0 {
+				delete(w.deleteWatchers, sessionID)
+			}
+			w.deleteWatchMu.Unlock()
+		})
+	}
+}
+
+func (w *Workbench) signalDeletion(sessionID string) {
+	w.deleteWatchMu.Lock()
+	watchers := make([]chan struct{}, 0, len(w.deleteWatchers[sessionID]))
+	for watcher := range w.deleteWatchers[sessionID] {
+		watchers = append(watchers, watcher)
+	}
+	w.deleteWatchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher <- struct{}{}:
+		default:
+		}
 	}
 }
 

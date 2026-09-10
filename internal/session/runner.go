@@ -511,6 +511,8 @@ func (r *SessionRunner) workerLoop() {
 }
 
 func (r *SessionRunner) execute(key runKey) {
+	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
+	defer stopWatching()
 	lease, waitUntil, err := r.claim(r.ctx, key)
 	if err != nil {
 		return
@@ -530,7 +532,7 @@ func (r *SessionRunner) execute(key runKey) {
 	defer cancel()
 	heartbeatDone := make(chan struct{})
 	heartbeatErr := make(chan error, 1)
-	go r.heartbeat(runCtx, key, lease, heartbeatDone, cancel, heartbeatErr)
+	go r.heartbeat(runCtx, key, lease, deletions, heartbeatDone, cancel, heartbeatErr)
 
 	request, err := r.conversationRequest(runCtx, key, lease)
 	if err != nil {
@@ -692,22 +694,40 @@ func (r *SessionRunner) claim(ctx context.Context, key runKey) (runLeasePayload,
 	return runLeasePayload{}, time.Time{}, ErrSequenceConflict
 }
 
-func (r *SessionRunner) heartbeat(ctx context.Context, key runKey, lease runLeasePayload, done chan<- struct{}, cancel context.CancelFunc, failure chan<- error) {
+func (r *SessionRunner) heartbeat(ctx context.Context, key runKey, lease runLeasePayload, deletions <-chan struct{}, done chan<- struct{}, cancel context.CancelFunc, failure chan<- error) {
 	defer close(done)
 	ticker := time.NewTicker(r.options.HeartbeatInterval)
 	defer ticker.Stop()
+	fail := func(err error) {
+		select {
+		case failure <- err:
+		default:
+		}
+		cancel()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-deletions:
+			events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+			if err != nil {
+				fail(err)
+				return
+			}
+			view, err := reduceSessionView(events)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if view.Status == "deleted" {
+				fail(ErrSessionNotFound)
+				return
+			}
 		case <-ticker.C:
 			lease.LeaseUntil = r.now().Add(r.options.LeaseDuration)
 			if err := r.appendLeasedFact(ctx, key, lease.LeaseID, runHeartbeatEventType, lease); err != nil {
-				select {
-				case failure <- err:
-				default:
-				}
-				cancel()
+				fail(err)
 				return
 			}
 		}
