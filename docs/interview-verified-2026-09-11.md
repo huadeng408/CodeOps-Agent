@@ -30,8 +30,10 @@ through the browser's `继续任务` action. Run `run:0eac60bbb40ca95299131f2dfc
 completed and appended `assistant/message` at sequence 1270, followed by
 `session/run-completed` at 1271. It remained in the same session lineage; no new
 session was created. Browser receipt is now 203 requests / 199 replies / 1272
-events, with 8 recorded failed attempts retained for audit. One successful reply
-is still needed to reach the 200-success threshold.
+events, with 8 recorded failed attempts retained for audit. Request 204 then
+completed with the exact answer `青竹`; final browser receipt is 204 requests /
+200 replies, with no visible alert. This meets the bounded 200-success target,
+but does not prove arbitrary long-context retention.
 
 ## Follow-up: Anthropic Prefix Pressure Regression
 

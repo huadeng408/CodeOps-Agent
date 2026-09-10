@@ -5,7 +5,7 @@ compaction boundary bug with a red-to-green regression. An 8192-token browser
 probe now commits canonical summaries (221 source events, then recompaction)
 and retains the tested constraints. Both services were restarted and the browser
 refreshed under normal configuration before further real dialogue. Python:
-2272 passed, 15 skipped. Browser: 203 requests / 199 replies / 1272 events;
+2272 passed, 15 skipped. Browser: 204 requests / 200 replies / 1278 events;
 request 140 retained all ten checked constraint values after restart and refresh.
 200 successful replies, legacy long-term-memory checksum
 failure handling, and Markdown presentation remain open. See the latest interview
