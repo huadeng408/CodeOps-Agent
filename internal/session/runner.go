@@ -42,7 +42,20 @@ func (e *PartialRecoveryError) Error() string {
 	if e == nil || e.Err == nil {
 		return "partial session recovery failed"
 	}
-	return "partial session recovery failed: " + e.Err.Error()
+	details := partialRecoveryDetails(e.Err)
+	if len(details) == 0 {
+		return "partial session recovery failed"
+	}
+	const visibleDetails = 3
+	visible := details
+	if len(visible) > visibleDetails {
+		visible = visible[:visibleDetails]
+	}
+	message := "partial session recovery failed: " + strings.Join(visible, "; ")
+	if remaining := len(details) - len(visible); remaining > 0 {
+		message += fmt.Sprintf("; and %d more", remaining)
+	}
+	return message
 }
 
 func (e *PartialRecoveryError) Unwrap() error {
@@ -50,6 +63,31 @@ func (e *PartialRecoveryError) Unwrap() error {
 		return nil
 	}
 	return e.Err
+}
+
+func partialRecoveryDetails(err error) []string {
+	if err == nil {
+		return nil
+	}
+	errorsToDescribe := []error{err}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errorsToDescribe = joined.Unwrap()
+	}
+	details := make([]string, 0, len(errorsToDescribe))
+	for _, item := range errorsToDescribe {
+		if item == nil {
+			continue
+		}
+		const maxRunes = 160
+		runes := []rune(strings.TrimSpace(item.Error()))
+		if len(runes) > maxRunes {
+			runes = append(runes[:maxRunes-3], '.', '.', '.')
+		}
+		if len(runes) > 0 {
+			details = append(details, string(runes))
+		}
+	}
+	return details
 }
 
 type RunStatus string

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -860,6 +861,29 @@ func TestConversationRequestDoesNotTreatFutureFailureAsRetryAncestor(t *testing.
 	}
 	if request.RetryOfRunID != "" || len(request.RetryOfRunIDs) != 0 {
 		t.Fatalf("future failure leaked into retry lineage: primary=%q all=%v", request.RetryOfRunID, request.RetryOfRunIDs)
+	}
+}
+
+func TestPartialRecoveryErrorBoundsHealthDetails(t *testing.T) {
+	recoveryErr := &PartialRecoveryError{Err: errors.Join(
+		errors.New("recover session first projection: session not found"),
+		errors.New("recover session second projection: session not found"),
+		errors.New("recover session third projection: session not found"),
+		errors.New("recover session fourth projection: session not found"),
+		errors.New(strings.Repeat("long detail ", 40)),
+	)}
+
+	message := recoveryErr.Error()
+	for _, expected := range []string{"session first", "session second", "session third", "and 2 more"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("bounded recovery error %q does not contain %q", message, expected)
+		}
+	}
+	if strings.Contains(message, "session fourth") || len([]rune(message)) > 560 {
+		t.Fatalf("partial recovery error was not bounded: %q", message)
+	}
+	if !errors.Is(recoveryErr, recoveryErr.Err) {
+		t.Fatal("bounded display must preserve the original recovery error chain")
 	}
 }
 
