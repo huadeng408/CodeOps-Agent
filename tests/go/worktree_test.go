@@ -76,6 +76,15 @@ func TestWorktreeDiffLinesCleanRepo(t *testing.T) {
 	}
 }
 
+func TestWorktreeDiffLinesAtRejectsUnmanagedContainedPath(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	if _, err := manager.DiffLinesAt(context.Background(), filepath.Join(repo, ".agent", "worktrees", "other")); err == nil || !strings.Contains(err.Error(), "not managed") {
+		t.Fatalf("expected unmanaged path rejection, got %v", err)
+	}
+}
+
 func TestWorktreeManagerRestoreNormalizesState(t *testing.T) {
 	root := t.TempDir()
 	manager := worktree.NewManager(root, "main")

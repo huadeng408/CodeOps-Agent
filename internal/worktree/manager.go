@@ -615,7 +615,28 @@ func (m *Manager) DiffLinesAt(ctx context.Context, path string) ([]string, error
 	if err := ensureContainedPath(m.root, path); err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
+	managed := false
+	for _, tree := range m.trees {
+		if samePath(tree.Path, path) {
+			managed = true
+			break
+		}
+	}
+	m.mu.Unlock()
+	if !managed {
+		return nil, fmt.Errorf("worktree path is not managed: %s", path)
+	}
 	return diffLinesAt(ctx, path)
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
 }
 
 func diffLinesAt(ctx context.Context, root string) ([]string, error) {
