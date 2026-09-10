@@ -23,6 +23,16 @@ or provenance are trustworthy. No record was deleted, rewritten, re-signed, or
 accepted under a weaker checksum algorithm. Legacy memory migration/recovery
 remains open; the fix isolates its failure, not repairs the records themselves.
 
+## Follow-up: Completed Checkpoint Retry
+
+After deploying the retry fix, the previously failed request 203 was continued
+through the browser's `继续任务` action. Run `run:0eac60bbb40ca95299131f2dfc8c05c7`
+completed and appended `assistant/message` at sequence 1270, followed by
+`session/run-completed` at 1271. It remained in the same session lineage; no new
+session was created. Browser receipt is now 203 requests / 199 replies / 1272
+events, with 8 recorded failed attempts retained for audit. One successful reply
+is still needed to reach the 200-success threshold.
+
 ## Follow-up: Anthropic Prefix Pressure Regression
 
 The v8 server pressure probe used an 8192-token Python context window and the
