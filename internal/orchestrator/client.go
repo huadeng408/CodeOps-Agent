@@ -139,6 +139,8 @@ type ConversationRequest struct {
 	// committed tool receipt from any earlier failed attempt.
 	RetryOfRunIDs []string
 	Resume        bool
+	// NewTurn is asserted only for a user message bound to this run's request.
+	NewTurn bool
 	// SurfaceSHA256 binds a resumed run to the immutable checkpoint Surface.
 	// Legal tool/result suffixes may grow while this identity remains stable.
 	SurfaceSHA256 string
@@ -394,12 +396,15 @@ func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error
 	return c.client.Health(ctx, &codeagentpb.Empty{})
 }
 
+// ErrCompactionPersistence distinguishes ledger failures from RPC transport failures.
+var ErrCompactionPersistence = errors.New("compaction persistence failed")
+
 // IsConnectionError reports whether err looks like a gRPC transport or stream
 // failure (a dead orchestrator, broken connection, deadlined RPC) rather than a
 // normal orchestrator-level result. The harness uses it to decide whether to
 // attempt an orchestrator restart and retry the in-flight turn.
 func IsConnectionError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrCompactionPersistence) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -564,6 +569,9 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 	}
 	if request.Resume {
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-resume", "true")
+		if request.NewTurn {
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-new-turn", "true")
+		}
 		surfaceSHA256 := strings.TrimSpace(request.SurfaceSHA256)
 		if surfaceSHA256 != "" {
 			ctx = metadata.AppendToOutgoingContext(ctx, "x-code-agent-surface-sha256", surfaceSHA256)
@@ -650,9 +658,12 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				handlers.Event(ctx, Event{SessionMeta: payload.SessionMeta})
 			}
 		case *codeagentpb.OrchestratorMessage_CompactionUpdate:
-			if payload.CompactionUpdate != nil && handlers.Compaction != nil {
+			if payload.CompactionUpdate != nil {
+				if handlers.Compaction == nil {
+					return "", fmt.Errorf("%w: handler is not configured", ErrCompactionPersistence)
+				}
 				if err := handlers.Compaction(payload.CompactionUpdate); err != nil {
-					return "", fmt.Errorf("persist compaction update: %w", err)
+					return "", fmt.Errorf("%w: %w", ErrCompactionPersistence, err)
 				}
 			}
 		case *codeagentpb.OrchestratorMessage_AgentSpawn:

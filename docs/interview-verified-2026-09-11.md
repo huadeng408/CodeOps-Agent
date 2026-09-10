@@ -4,6 +4,45 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Pressure Failure And New-Turn Recovery
+
+Normal-window browser dialogue reached 80 user messages and 80 assistant
+replies, 503 events. Refresh after turn 75 and full budget-history recall at
+turn 80 passed. These topic-switch probes still do not prove pressure retention.
+
+A real provider pressure probe temporarily configured Python's context window
+to 8192 tokens. Request 81 asked for budget recall followed by a CONTEXT.md read.
+It stopped at sequence 510 with the fixed public error
+`context compaction could not be persisted; task stopped`. Tool-call count
+remained 2 and assistant count remained 80: no subsequent Go tool executed.
+This verifies fail-closed behavior, NOT working durable compaction. The missing
+canonical summary replacement/range/recovery work below remains P0.
+
+The gRPC regression first proved that a missing Compaction handler silently
+allowed a later tool and success. It now rejects missing/failed persistence;
+successful persistence still allows the tool. A second red/green case proves
+a ledger connection error is not classified as retryable model transport.
+
+After restoring the normal 256k window, request 82 exposed another real bug:
+Python rejected a new user turn because an unfinished checkpoint belonged to
+the earlier failed run. Go now derives NewTurn from the ledger's matching
+user-message request identity and sends request-scoped metadata. Python only
+discards a foreign run cursor for an explicit independent new turn with a new
+Surface; ordinary retries and same-run recovery keep identity validation.
+A real gRPC regression failed before this fix and passed after it. Same-surface
+and retry/new-turn conflicts remain rejected.
+
+After rebuilding Go, restarting Python and refreshing the browser, request 83
+correctly recalled the entire budget process and all constraints. Final count:
+83 user requests, 81 assistant replies, 523 events; successful reply sequence
+521, run-completed sequence 522. Failed requests 81 and 82 remain in the ledger.
+No claim of 83 successful turns is made. The demo service is back on 256k.
+
+Local screenshots: output/playwright/compaction-pressure-fail-closed.png and
+output/playwright/new-turn-after-pressure-recovered.png. Gates passed: full Go
+tests, full Go race tests (CGO_ENABLED=1), go vet, frontend build, and Python
+(2266 passed, 15 skipped, 3 warnings). The 200-turn and full Goal remain unmet.
+
 ## Follow-up: 60 Real Turns
 
 On commit 0cf7f092, the same browser session completed turns 43 through 60 with

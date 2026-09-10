@@ -732,7 +732,50 @@ def test_explicit_run_id_rejects_unfinished_checkpoint_from_another_run(tmp_path
             resume=True,
             surface_sha256="surface:old",
         )
+    with pytest.raises(ValueError, match="new turn must have a new surface"):
+        runner.load_checkpoint("run-isolation", run_id="run:new", resume=True,
+                               surface_sha256="surface:old", new_turn=True)
+    with pytest.raises(ValueError, match="independent durable run"):
+        runner.load_checkpoint("run-isolation", run_id="run:new", resume=True,
+                               surface_sha256="surface:new", new_turn=True,
+                               retry_of_run_id="run:old")
+    assert runner.load_checkpoint("run-isolation", run_id="run:new", resume=True,
+                                  surface_sha256="surface:new", new_turn=True) is None
     app.close()
+
+
+def test_new_user_turn_can_follow_an_unfinished_foreign_checkpoint(tmp_path):
+    import grpc
+    from codeagent import orchestrator_pb2_grpc
+    from concurrent import futures
+    from orchestrator.server import OrchestratorService
+
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
+    app.llm = ResumeRecordingLLM()
+    app.fast_llm = None
+    app.provider_clients = {"default": app.llm}
+    app.graph.write_checkpoint(GraphState(metadata={
+        "session_id": "new-user-turn", "run_id": "run:old", "phase": "model_before",
+        "turn": 1, "surface_sha256": "surface:old",
+    }, done=False, next_node="route"), thread_id="new-user-turn")
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            responses = list(orchestrator_pb2_grpc.OrchestratorStub(channel).Converse(iter([
+                orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(
+                    text="A new instruction after the failed turn", session_id="new-user-turn",
+                    actor=orchestrator_pb2.ActorContext(schema_version=1, actor_id="user:7", subject="test", tenant_id="test", roles=["USER"], session_id="new-user-turn"),
+                )),
+            ]), metadata=[("x-code-agent-run-id", "run:new"), ("x-code-agent-resume", "true"),
+                          ("x-code-agent-surface-sha256", "surface:new"), ("x-code-agent-new-turn", "true")]))
+        assert responses[-1].done.success
+        assert app.llm.requests
+    finally:
+        server.stop(grace=0).wait()
+        app.close()
 
 
 def test_resume_allows_explicit_retry_of_failed_checkpoint(tmp_path: Path) -> None:

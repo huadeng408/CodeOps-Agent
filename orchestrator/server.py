@@ -371,6 +371,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         try:
             runner = self._new_runner()
             runner_actor = actor
+            new_turn_options = {}
+            if dict(context.invocation_metadata() or ()).get("x-code-agent-new-turn", "").lower() == "true":
+                new_turn_options["new_turn"] = True
             yield from runner.run(
                 user_text,
                 request_iterator,
@@ -384,6 +387,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 surface_sha256=surface_sha256,
                 retry_of_run_id=retry_of_run_id,
                 retry_of_run_ids=retry_of_run_ids,
+                **new_turn_options,
             )
         finally:
             lease.release()

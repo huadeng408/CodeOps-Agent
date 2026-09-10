@@ -3,7 +3,10 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+
+	"code-agent/internal/orchestrator"
 )
 
 func TestPublicRunErrorNeverIncludesProviderPayload(t *testing.T) {
@@ -11,6 +14,7 @@ func TestPublicRunErrorNeverIncludesProviderPayload(t *testing.T) {
 		cause error
 		want  string
 	}{
+		{fmt.Errorf("%w: secret-token", orchestrator.ErrCompactionPersistence), "context compaction could not be persisted; task stopped"},
 		{errors.New("provider error 401: secret-token"), "model authentication failed; check provider credentials"},
 		{errors.New("provider error 429: secret-token"), "model rate limit reached; retry later"},
 		{context.DeadlineExceeded, "model request timed out; retry this task"},

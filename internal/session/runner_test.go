@@ -264,6 +264,9 @@ func TestSessionRunnerSubmitMessageStartsNaturalLanguageTurnAndIsIdempotent(t *t
 	if terminal.RunID != accepted.RunID {
 		t.Fatalf("terminal run = %+v", terminal)
 	}
+	if !conversation.lastRequest(t).NewTurn {
+		t.Fatal("durable user message did not assert new-turn identity")
+	}
 	repeated, err := runner.SubmitMessage(ctx, command)
 	if err != nil || repeated.RunID != accepted.RunID {
 		t.Fatalf("idempotent submit = %+v err=%v", repeated, err)

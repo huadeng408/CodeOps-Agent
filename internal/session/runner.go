@@ -1013,8 +1013,20 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
+	newTurn := false
+	if len(retryOfRunIDs) == 0 {
+		for _, event := range events {
+			if event.EventID == projection.inputEvent && event.Type == userMessageEventType {
+				var payload messagePayload
+				if json.Unmarshal(event.Payload, &payload) != nil {
+					return orchestrator.ConversationRequest{}, ErrEventIntegrity
+				}
+				newTurn = payload.RequestID != "" && payload.RequestID == projection.view.RequestID
+			}
+		}
+	}
 	return orchestrator.ConversationRequest{
-		Input: input, SessionID: key.sessionID, RunID: key.runID, Resume: true, SurfaceSHA256: projection.surfaceHash,
+		Input: input, SessionID: key.sessionID, RunID: key.runID, Resume: true, NewTurn: newTurn, SurfaceSHA256: projection.surfaceHash,
 		RetryOfRunID: requestRetryOfRunID, RetryOfRunIDs: retryOfRunIDs,
 		Actor: projection.actor, History: history,
 	}, nil
@@ -1448,6 +1460,8 @@ func publicRunError(cause error) string {
 	}
 	message := strings.ToLower(cause.Error())
 	switch {
+	case errors.Is(cause, orchestrator.ErrCompactionPersistence):
+		return "context compaction could not be persisted; task stopped"
 	case strings.Contains(message, "401"), strings.Contains(message, "authentication_error"):
 		return "model authentication failed; check provider credentials"
 	case strings.Contains(message, "429"):

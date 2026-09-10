@@ -1,5 +1,15 @@
 # CodeOps-Agent Goal
 
+2026-09-11 follow-up: normal dialogue reached 80 paired turns. A forced 8192-token
+browser probe now fails closed on missing compaction persistence with no later
+tool execution, instead of silently proceeding. Durable summary replacement
+is still P0 and NOT implemented. The probe also exposed failure-to-new-turn
+checkpoint isolation: explicit ledger-bound new user turns now bypass only a
+foreign cursor, while retries retain strict identity checks. Request 83 recovered
+after restoring 256k; 83 user requests / 81 replies / 523 events include two
+failed requests. Go tests/race/vet, frontend build and Python 2266 passed.
+See the current interview receipt for exact scope; execution remains ACTIVE.
+
 2026-09-11 follow-up: the real-provider browser session now has 60 user turns,
 60 assistant replies and 383 events. Refresh after turn 50 and complete budget
 revision recall at turn 60 passed. 200 turns remain pending. Source inspection

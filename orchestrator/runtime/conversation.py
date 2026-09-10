@@ -288,6 +288,7 @@ class ConversationRunner:
     _active_retry_root_run_id: str = field(default="", init=False, repr=False)
     _active_surface_sha256: str = field(default="", init=False, repr=False)
     _resume_requested: bool = field(default=False, init=False, repr=False)
+    _new_turn_requested: bool = field(default=False, init=False, repr=False)
     _replay_response: ChatResponse | None = field(default=None, init=False, repr=False)
     _replay_checkpoint_turn: bool = field(default=False, init=False, repr=False)
 
@@ -355,6 +356,7 @@ class ConversationRunner:
         surface_sha256: str = "",
         retry_of_run_id: str = "",
         retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
+        new_turn: bool = False,
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
@@ -390,6 +392,17 @@ class ConversationRunner:
         metadata = state.metadata if isinstance(state.metadata, dict) else {}
         checkpoint_run_id = str(metadata.get("run_id", "")).strip()
         checkpoint_retry_root_run_id = str(metadata.get("retry_root_run_id", "")).strip()
+        if new_turn:
+            if not resume or not requested_run_id or not requested_surface_sha256 or requested_retry_of_run_ids:
+                raise ValueError("new turn requires an independent durable run")
+            if str(metadata.get("session_id", "")).strip() != session_id:
+                raise ValueError("checkpoint session id does not match request")
+            if checkpoint_run_id and checkpoint_run_id != requested_run_id:
+                if str(metadata.get("surface_sha256", "")).strip() == requested_surface_sha256:
+                    raise ValueError("new turn must have a new surface")
+                # Go has committed a new user-message/CAS turn. The old cursor
+                # belongs to a different run; never replay its pending model/tool.
+                return None
         if requested_run_id and checkpoint_run_id and checkpoint_run_id != requested_run_id:
             # A failed Harness continuation may be retried with a fresh
             # request/run identity, but only when Go explicitly identifies the
@@ -470,6 +483,7 @@ class ConversationRunner:
         surface_sha256: str = "",
         retry_of_run_id: str = "",
         retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
+        new_turn: bool = False,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
@@ -495,6 +509,7 @@ class ConversationRunner:
         )
         self._active_retry_root_run_id = self._active_retry_of_run_id
         self._resume_requested = bool(resume)
+        self._new_turn_requested = bool(new_turn)
         self._active_surface_sha256 = str(surface_sha256).strip()
         if self._resume_requested and not self._active_run_id:
             raise ValueError("continuation run id is required when resume is true")
@@ -502,6 +517,8 @@ class ConversationRunner:
             raise ValueError("continuation surface sha256 is required when resume is true")
         if self._active_retry_of_run_ids and not self._resume_requested:
             raise ValueError("continuation retry run id requires resume")
+        if new_turn and (not resume or not str(user_text).strip() or self._active_retry_of_run_ids):
+            raise ValueError("new turn requires user input and cannot be a retry")
         self._replay_response = None
         self._replay_checkpoint_turn = False
         if actor is not None:
@@ -610,6 +627,7 @@ class ConversationRunner:
             self._active_retry_root_run_id = ""
             self._active_surface_sha256 = ""
             self._resume_requested = False
+            self._new_turn_requested = False
             self._replay_response = None
             self._replay_checkpoint_turn = False
 
@@ -667,6 +685,7 @@ class ConversationRunner:
             surface_sha256=self._active_surface_sha256,
             retry_of_run_id=self._active_retry_of_run_id,
             retry_of_run_ids=self._active_retry_of_run_ids,
+            new_turn=self._new_turn_requested,
         )
         start_turn = 1
         if checkpoint is not None and checkpoint.resumable:
