@@ -17,6 +17,16 @@ run 不会在进程重启后复活；claim、heartbeat 和 assistant/tool 事件
 后统一 fail closed。新增回归测试覆盖“删除后恢复不调用模型”和“删除 in-flight run
 取消 conversation 且不写入终态事实”。变更提交为 `13489a19`，并已推送至 `origin/main`。
 
+本轮又将删除取消从 heartbeat 轮询深化为 tombstone change hint：`Workbench.Delete` 仅在
+canonical `session/deleted` 已成功提交后发送 coalesced hint，`SessionRunner` 收到提示仍会
+重读并验证 Session Ledger，再立即取消对应 in-flight conversation。回归测试把 heartbeat
+设为 5 秒并要求 500ms 内取消，先稳定失败后转绿；工具收据重用与 retry lineage 用例重复
+10 次均通过，避免通用 change hint 干扰普通执行事实。变更提交为 `0597115e` 并已推送。
+本次完整门禁为：Go 全量与 `go vet ./...` 通过，Python `2250 passed, 16 skipped`，前端
+生产构建与 `git diff --check` 通过。`CGO_ENABLED=1 go test -race ./internal/session -count=1`
+在本机因 `%PATH%` 中没有可执行的 `gcc` 阻塞；错误为 `cgo: C compiler "gcc" not found`，
+因此竞态检查仍不能标为通过。
+
 本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt、竞态检查或外部 scorer
 指标标为 `VERIFIED`；缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
 
