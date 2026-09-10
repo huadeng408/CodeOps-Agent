@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import os
 import subprocess
 import sys
@@ -882,7 +883,52 @@ def test_resume_allows_retry_of_completed_model_after_checkpoint(tmp_path: Path)
     app.close()
 
 
-def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retry_run_id", ["run:original", "run:retry"])
+def test_completed_response_replays_after_reopen_without_model_call(tmp_path: Path, retry_run_id: str) -> None:
+    config = ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    app = OrchestratorServer(config)
+    try:
+        runner = ConversationRunner(
+            graph=app.graph, llm=NoToolLLM(), tool_registry=app.tools,
+            todo_manager=app.todos, memory_manager=app.memory, skills=app.skills,
+            project_root=app.project_root, working_dir=app.working_dir,
+            token_budget=app.token_budget, layered_context=app.layered_context,
+        )
+        original = list(runner.run(
+            "hello", iter(()), session_id="replay-completed", run_id="run:original",
+            surface_sha256="surface:original",
+        ))
+        assert original[-1].done.success
+        expected = "".join(item.text.text for item in original if item.HasField("text"))
+        assert expected == "done"
+    finally:
+        app.close()
+
+    app = OrchestratorServer(config)
+    try:
+        llm = CountingNoToolLLM()
+        runner = ConversationRunner(
+            graph=app.graph, llm=llm, tool_registry=app.tools,
+            todo_manager=app.todos, memory_manager=app.memory, skills=app.skills,
+            project_root=app.project_root, working_dir=app.working_dir,
+            token_budget=app.token_budget, layered_context=app.layered_context,
+        )
+        replayed = list(runner.run(
+            "hello", iter(()), session_id="replay-completed", run_id=retry_run_id,
+            resume=True, surface_sha256="surface:original", retry_of_run_id="run:original",
+        ))
+        assert replayed[-1].done.success
+        assert llm.requests == 0
+        assert "".join(item.text.text for item in replayed if item.HasField("text")) == expected
+        checkpoint = app.graph.get_checkpoint("replay-completed")
+        assert checkpoint.metadata["retry_root_run_id"] == "run:original"
+        assert checkpoint.metadata["run_id"] == "run:original"
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("done", [False, True])
+def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Path, done: bool) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
     )
@@ -896,7 +942,7 @@ def test_model_after_checkpoint_without_replay_payload_fails_closed(tmp_path: Pa
                 "history_sha256": ConversationRunner._digest_value([]),
                 "surface_sha256": "surface:unreplayable",
             },
-            done=False,
+            done=done,
             next_node="route",
         ),
         thread_id="unreplayable-model-after",
@@ -996,6 +1042,24 @@ def test_normal_conversation_fails_closed_when_checkpoint_cannot_be_read(tmp_pat
     with pytest.raises(sqlite3.DatabaseError, match="corrupt"):
         list(runner.run("continue", iter(()), session_id="corrupt-checkpoint"))
     app.close()
+
+
+def test_completed_response_replays_across_python_processes(tmp_path: Path) -> None:
+    script = Path(__file__).parent / "e2e" / "conversation_checkpoint_process.py"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    command = [sys.executable, str(script), "--root", str(tmp_path),
+               "--marker", str(tmp_path / "unused.marker"), "--completed-result"]
+    original = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
+    assert original.returncode == 0, original.stderr
+    retried = subprocess.run(command + ["--resume"], env=environment, capture_output=True, text=True, timeout=60)
+    assert retried.returncode == 0, retried.stderr
+    assert json.loads(original.stdout.splitlines()[-1]) == {
+        "done": True, "text": "resumed", "model_calls": 1, "retry_root": "run:original",
+    }
+    assert json.loads(retried.stdout.splitlines()[-1]) == {
+        "done": True, "text": "resumed", "model_calls": 0, "retry_root": "run:original",
+    }
 
 
 def test_normal_conversation_checkpoint_survives_python_process_restart(tmp_path: Path) -> None:

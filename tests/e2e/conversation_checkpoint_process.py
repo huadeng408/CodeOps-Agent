@@ -14,7 +14,11 @@ from orchestrator.server import OrchestratorServer, ServerConfig
 class NoToolLLM:
     model = "fake-process-provider"
 
+    def __init__(self):
+        self.calls = 0
+
     async def chat(self, _request):
+        self.calls += 1
         return ChatResponse(text="resumed")
 
 
@@ -38,6 +42,7 @@ def main() -> int:
     parser.add_argument("--root", required=True)
     parser.add_argument("--marker", required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--completed-result", action="store_true")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -45,6 +50,21 @@ def main() -> int:
         ServerConfig(project_root=str(root), memory_dir=str(root / "memory"))
     )
     try:
+        if args.completed_result:
+            runner = _runner(app)
+            messages = list(runner.run(
+                "hello", iter(()), session_id="completed-process-e2e",
+                run_id="run:retry" if args.resume else "run:original",
+                resume=args.resume, surface_sha256="surface:process",
+                retry_of_run_id="run:original" if args.resume else "",
+            ))
+            print(json.dumps({
+                "done": bool(messages[-1].done.success),
+                "text": "".join(item.text.text for item in messages if item.HasField("text")),
+                "model_calls": runner.llm.calls,
+                "retry_root": app.graph.get_checkpoint("completed-process-e2e").metadata["retry_root_run_id"],
+            }), flush=True)
+            return 0
         if not args.resume:
             app.graph.write_checkpoint(
                 GraphState(

@@ -1,5 +1,29 @@
 # CodeOps-Agent Goal
 
+## Latest Verified Follow-up (2026-09-11)
+
+Execution remains ACTIVE; full goal acceptance remains BLOCKED. The entries
+below this section are historical progress notes, not the current gate counts.
+
+- Completed-result recovery now caches the pending response in the existing
+  execution checkpoint, validates run/Surface identity, and re-emits its text on
+  explicit resume. Canonical conversation history remains owned by the Go ledger.
+- A red-to-green real-run regression exposed the previous extra model call.
+  Reopening storage and two independent Python processes now replay the same
+  result with zero retry model calls and the original lineage root.
+- Fresh frozen-source gates passed: Go full tests, Go race tests (CGO enabled),
+  `go vet ./...`, frontend build, and Python 2277 passed / 15 skipped / 3 warnings.
+- Real browser: three provider-backed turns in a new isolated session, refresh,
+  orchestrator restart, exact preservation of 13 pre-restart event IDs, and
+  post-restart recall of the revised constraints. Desktop/mobile screenshots
+  were inspected. This is not a browser transport-failure/retry test.
+- Still open: browser failure/retry lineage acceptance, Git/patch restoration,
+  legacy memory migration, complete tool/approval side-effect acceptance and
+  remaining production goal requirements. Legacy response-less checkpoints
+  cannot recover a result that was never stored; they fail closed on replay.
+
+See `docs/interview-verified-2026-09-11.md` for test names and browser evidence.
+
 2026-09-11 current follow-up: fixed the real Anthropic two-system-message
 compaction boundary bug with a red-to-green regression. An 8192-token browser
 probe now commits canonical summaries (221 source events, then recompaction)

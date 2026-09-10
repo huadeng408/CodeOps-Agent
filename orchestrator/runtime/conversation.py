@@ -205,10 +205,10 @@ class CachedToolResult:
 class ConversationCheckpoint:
     """Typed recovery view over the durable LangGraph state.
 
-    The checkpoint intentionally contains lifecycle metadata and digests only;
-    the Harness remains the source of truth for message contents.  A pending
-    checkpoint therefore tells the runner which model/tool turn to retry while
-    the caller supplies the structured history projection again.
+    The Harness remains the source of truth for conversation history. A
+    model_after checkpoint also caches the pending provider result so transport
+    recovery can deliver it without another model call. It is replayed only
+    after validating the requested run lineage and Surface identity.
     """
 
     state: GraphState
@@ -360,10 +360,9 @@ class ConversationRunner:
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
-        Message bodies are deliberately not reconstructed here.  They belong
-        to the Go Harness session ledger and are sent back as the structured
-        ``history`` projection on the next RPC.  This method only exposes the
-        typed lifecycle cursor needed to resume safely after a process exit.
+        Conversation history comes from the Go Harness session ledger. This
+        method validates the lifecycle cursor and pending-result cache before
+        the runner may replay an undelivered model response.
         """
 
         session_id = session_id.strip()
@@ -690,7 +689,10 @@ class ConversationRunner:
             new_turn=self._new_turn_requested,
         )
         start_turn = 1
-        if checkpoint is not None and checkpoint.resumable:
+        if checkpoint is not None and (
+            checkpoint.resumable
+            or (self._resume_requested and checkpoint.phase == "model_after")
+        ):
             metadata = checkpoint.state.metadata if isinstance(checkpoint.state.metadata, dict) else {}
             checkpoint_retry_root_run_id = str(metadata.get("retry_root_run_id", "")).strip()
             if checkpoint_retry_root_run_id:
@@ -2140,6 +2142,8 @@ class ConversationRunner:
             # provider call that could produce different tool arguments.
             if response_box is not None:
                 response_box.append(replay)
+            if replay.text:
+                yield self._text(replay.text)
             return
         route = (
             self._active_route
@@ -3111,6 +3115,7 @@ class ConversationRunner:
                     }
                 )
         state = GraphState(
+            response=response if phase == "model_after" else "",
             metadata={
                 "session_id": session_id,
                 "run_id": self._active_run_id,

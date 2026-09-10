@@ -392,3 +392,46 @@ lock and installs it only after every entry passes.
   remains BLOCKED; this result does not satisfy that broader goal item.
 - The full-suite results above are historical, not a fresh full-suite run for
   this follow-up.
+
+## Completed-response Replay Follow-up
+
+The earlier completed-checkpoint test only called `load_checkpoint`. It did not
+prove replay: `run` skipped done checkpoints, the normal checkpoint writer did
+not retain response text, and the replay branch did not emit text to the Harness.
+All three paths are now connected. The existing graph checkpoint is a pending
+execution-result cache, not a writable replacement for canonical conversation
+history. No new store or conversation-history writer was introduced.
+
+- `test_completed_response_replays_after_reopen_without_model_call` first failed
+  with one retry model call instead of zero. It now covers both same-run resume
+  and a fresh retry run with the original predecessor, using the production
+  checkpoint writer and reopened SQLite storage. Exact text and persisted root
+  lineage are asserted.
+- `test_completed_response_replays_across_python_processes` runs two independent
+  processes: original model calls = 1, retry model calls = 0, identical response
+  text, and original retry root. This uses a deterministic fake provider, not an
+  upstream SLA or a browser transport-fault injection.
+- Missing replay payloads fail closed for both unfinished and done checkpoints.
+  Old response-less checkpoints cannot reconstruct the missing result. A normal
+  new user turn remains separate from explicit checkpoint replay.
+- Related tests: 47 passed. Frozen-source full gates: `go test ./... -count=1`,
+  `go test -race ./... -count=1` (`CGO_ENABLED=1`), `go vet ./...`, and
+  `npm --prefix frontend run build` all exited 0. `python -m pytest -q` exited 0:
+  2277 passed, 15 skipped, 3 warnings in 265.57 seconds. No source edits or commits
+  occurred while these gate processes were running.
+
+Browser session `12c118f818cae371cc30a18a631c1cf4` was created using the actual UI
+under the already authenticated test account. Three actual form submissions
+returned provider-backed answers: project Baihua (Chinese name in the UI),
+budget 9100 then 9700, deployment Suzhou, no Redis. Refresh retained the first
+answer; after restarting the orchestrator with the standard launcher, the
+ordered 13 pre-restart event IDs matched exactly (13 unique, last seq 12).
+The third, mobile-viewport submission still returned budget 9700 and the other
+constraints. The UI then showed 19 events / 6 messages and a completed run.
+
+The two-turn desktop and 390x844 mobile screenshots were inspected:
+`output/playwright/replay-followup-desktop.png` and
+`output/playwright/replay-followup-mobile.png` (ignored local artifacts).
+Message text and the composer did not overlap in these views. No claim is made
+that every button, browser failure/retry lineage, or Git restoration passed in
+this follow-up. Those broader acceptance items remain open.
