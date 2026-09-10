@@ -89,12 +89,17 @@ func (m *Manager) Restore(entries []Entry) {
 }
 
 func ApplyEntry(root string, entry Entry) error {
-	for i := len(entry.Changes) - 1; i >= 0; i-- {
-		change := entry.Changes[i]
+	paths := make([]string, len(entry.Changes))
+	for i, change := range entry.Changes {
 		abs, err := workspacePath(root, change.Path)
 		if err != nil {
 			return err
 		}
+		paths[i] = abs
+	}
+	for i := len(entry.Changes) - 1; i >= 0; i-- {
+		change := entry.Changes[i]
+		abs := paths[i]
 		if change.Before == "" {
 			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("remove %s: %w", change.Path, err)

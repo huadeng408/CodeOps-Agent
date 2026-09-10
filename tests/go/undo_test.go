@@ -77,3 +77,25 @@ func TestApplyEntryRejectsWorkspaceEscape(t *testing.T) {
 		t.Fatalf("expected workspace escape error, got %v", err)
 	}
 }
+
+func TestApplyEntryValidatesAllPathsBeforeMutating(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "safe.txt")
+	if err := os.WriteFile(path, []byte("after"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := undo.ApplyEntry(root, undo.Entry{Changes: []undo.Change{
+		{Path: "../outside.txt", Before: "unsafe"},
+		{Path: "safe.txt", Before: "before"},
+	}})
+	if err == nil {
+		t.Fatal("expected invalid path error")
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != "after" {
+		t.Fatalf("failed validation mutated file: %q", data)
+	}
+}
