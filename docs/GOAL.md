@@ -1,5 +1,14 @@
 # CodeOps-Agent Goal
 
+2026-09-11 follow-up: real-browser continuation reached 42 user/assistant turns.
+Turn 41 exposed Python's remaining legacy history caps: it could recall the
+current budget but not the original amount or adjustments. Three runner
+regressions reproduced the loss; durable Surface conversion now bypasses those
+caps before model-aware compaction. After Python restart and browser refresh,
+turn 42 recalled the original budget and both adjustments without new hints.
+See `docs/interview-verified-2026-09-11.md` for failed/successful event sequences.
+Execution stays ACTIVE; 200 turns and full production acceptance are not met.
+
 2026-09-11: The interview conversation path now has a real-browser 23-turn
 provider-backed receipt, including long Chinese messages, constraint revisions,
 refresh, Go/Python restart, Glob/Read and failed-turn continuation. See

@@ -4,6 +4,45 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Python History Loss Reproduced And Fixed
+
+The same session now contains 42 user messages and 42 real assistant replies,
+274 canonical events (last sequence 273, session/run-completed). This is not
+42 successful memory probes: turn 41 failed to recall the original budget and
+both adjustments. Turn 40 retained the current values but could not establish
+their earlier history. Repeated current-value probes had masked this defect.
+
+Python's legacy history conversion still capped message count, per-message
+characters and total characters before model-aware compaction. Three real-runner
+regression cases failed with a 256k context window, proving that facts were lost
+before reaching the model even without context pressure. Durable resume now
+bypasses those legacy caps; model-aware compaction remains responsible for
+budgeting. Legacy non-resume callers keep their existing limits.
+
+After restarting Python and refreshing the browser, turn 42 correctly recalled
+7300 -> +1200 -> 8500 -> -300 -> 8200, without supplying those numbers again.
+The failed answer is ledger sequence 265; the corrected answer is sequence 272.
+Additional topic-switch turns covered idempotency, SQLite, WebSocket cursors,
+lineage, approvals, summaries and Git diff; the page was also refreshed at turn 25.
+
+Browser GET /api/v1/sessions/dde16a9e3b2ca12420dcae4d0eb2a0b2/events returned
+HTTP 200. SHA-256 of UTF-8 JSON.stringify(response.data) at sequence 273:
+`94b42ba7430f7045326b98e0803570b310decc599ae5ce63a33211b21704ed4a`.
+This pins the local receipt, not a portable copy of the underlying ledger.
+
+Local screenshots (not committed):
+- output/playwright/history-truncation-before.png
+- output/playwright/history-truncation-after-desktop.png (1440x1000)
+- output/playwright/history-truncation-after-mobile.png (390x844)
+
+Focused runner/server tests: 74 passed. The new three-case regression was run
+red before the fix and green afterward. Follow-up gates passed: full Go tests,
+go vet, frontend build, diff whitespace checks, and Python (2265 passed,
+15 skipped, 3 warnings). Full Go race checks passed in the preceding stage;
+this follow-up changes Python and documentation only and did not repeat race.
+The 200-turn requirement and pressure-triggered real-provider compaction
+retention remain unverified.
+
 ## Provider
 
 The selected local configuration resolves to `https://beeapi.dev/anthropic`,

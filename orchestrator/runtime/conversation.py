@@ -1984,7 +1984,7 @@ class ConversationRunner:
                     )
                 ]
         messages = list(system_messages)
-        messages.extend(self._history_messages(history))
+        messages.extend(self._history_messages(history, bounded=not self._resume_requested))
         # A continuation request may intentionally carry no new user input:
         # the durable Surface and checkpoint are the work to resume. Appending
         # an empty user turn would change the provider transcript and make the
@@ -2442,14 +2442,16 @@ class ConversationRunner:
         return "\n".join(lines)
 
     @staticmethod
-    def _history_messages(history: list[dict[str, str]]) -> list[ChatMessage]:
+    def _history_messages(
+        history: list[dict[str, str]], *, bounded: bool = True,
+    ) -> list[ChatMessage]:
         cleaned: list[ChatMessage] = []
         for item in history:
             role = str(item.get("role", "")).strip().lower()
             content = str(item.get("content", "")).strip()
             if role not in {"user", "assistant", "system", "tool"}:
                 role = "system"
-            if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+            if bounded and len(content) > MAX_HISTORY_MESSAGE_CHARS:
                 content = content[:MAX_HISTORY_MESSAGE_CHARS].rstrip() + "\n[history message truncated]"
             raw_calls = item.get("tool_calls", [])
             calls: list[ToolCall] = []
@@ -2481,6 +2483,12 @@ class ConversationRunner:
                     is_error=bool(item.get("is_error", False)),
                 )
             )
+
+        # A durable Surface is already selected by the canonical ledger. Let
+        # the model-aware compactor budget it, without silently losing facts
+        # or splitting tool call/result groups at a legacy transport limit.
+        if not bounded:
+            return cleaned
 
         selected: list[ChatMessage] = []
         used_chars = 0

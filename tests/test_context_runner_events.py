@@ -81,6 +81,37 @@ class ResumeRecordingLLM(NoToolLLM):
         return ChatResponse(text="resumed after tool")
 
 
+@pytest.mark.parametrize("history", [
+    [{"role": "user", "content": f"fact-{index}"} for index in range(45)],
+    [{"role": "user", "content": "x" * 5000 + " exact-tail-fact"}],
+    [{"role": "user", "content": f"fact-{index}:" + "x" * 3000} for index in range(15)],
+])
+def test_durable_runner_preserves_surface_before_context_budgeting(tmp_path, history):
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    llm = ResumeRecordingLLM()
+    runner = ConversationRunner(
+        graph=app.graph, llm=llm, tool_registry=app.tools,
+        todo_manager=app.todos, memory_manager=app.memory, skills=app.skills,
+        project_root=app.project_root, working_dir=app.working_dir,
+        token_budget=app.token_budget, layered_context=app.layered_context,
+        context_window=256_000,
+    )
+    try:
+        results = list(runner.run(
+            "Recall the original facts", iter(()), session_id="durable-history",
+            history=history, run_id="run:durable-history", resume=True,
+            surface_sha256="surface:durable-history",
+        ))
+        assert results[-1].done.success
+        assert llm.requests
+        supplied = [message.content for message in llm.requests[0].messages if message.role == "user"]
+        assert supplied == [item["content"] for item in history] + ["Recall the original facts"]
+    finally:
+        app.close()
+
+
 class ToolThenFailLLM:
     model = "fake"
 
