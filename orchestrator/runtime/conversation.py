@@ -2500,6 +2500,8 @@ class ConversationRunner:
                     tool_call_id=str(item.get("tool_call_id", "")).strip() or None,
                     tool_calls=calls,
                     is_error=bool(item.get("is_error", False)),
+                    source_events=((str(item["event_id"]), str(item["event_checksum"])),)
+                    if item.get("event_id") and item.get("event_checksum") else (),
                 )
             )
 
@@ -3572,7 +3574,10 @@ class ConversationRunner:
                             {"status": "failed"},
                         )
                     raise
-                current = [current[0], ChatMessage(role="system", content=summary), *recent]
+                source_events = tuple(dict.fromkeys(
+                    ref for message in compactable for ref in message.source_events
+                ))
+                current = [current[0], ChatMessage(role="system", content=summary, source_events=source_events), *recent]
                 after_tokens = self.compactor.estimate_tokens(current)
                 if session_id.strip():
                     self._persist_event(
@@ -3607,6 +3612,7 @@ class ConversationRunner:
                     estimated_before_tokens=before_tokens,
                     estimated_after_tokens=after_tokens,
                     trigger=trigger,
+                    source_events=source_events,
                 )
                 if force:
                     return current
@@ -3832,6 +3838,7 @@ class ConversationRunner:
         estimated_before_tokens: int,
         estimated_after_tokens: int,
         trigger: str,
+        source_events: tuple[tuple[str, str], ...] = (),
     ) -> None:
         pending = getattr(self, "_pending_compaction_updates", None)
         if pending is None:
@@ -3844,6 +3851,8 @@ class ConversationRunner:
                 "estimated_before_tokens": max(0, int(estimated_before_tokens)),
                 "estimated_after_tokens": max(0, int(estimated_after_tokens)),
                 "trigger": trigger,
+                "source_events": [{"event_id": event_id, "checksum": checksum}
+                                  for event_id, checksum in source_events],
             }
         )
 

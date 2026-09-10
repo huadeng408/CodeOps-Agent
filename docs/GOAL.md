@@ -1,5 +1,13 @@
 # CodeOps-Agent Goal
 
+2026-09-11 follow-up: canonical event ID/checksum now travels with history and
+returns in compaction source references, with Go/Python gRPC and recompaction
+tests. Durable summary replacement is still disabled pending validated ranges,
+lease/CAS and recovery integration. Real-browser receipt: 101 requests,
+99 replies, 632 events, including prior failures; request-100 refresh and
+request-101 after service restart retained complete budget history. Full gates
+passed (Python 2270 passed). Execution stays ACTIVE; full acceptance is unmet.
+
 2026-09-11 follow-up: normal dialogue reached 80 paired turns. A forced 8192-token
 browser probe now fails closed on missing compaction persistence with no later
 tool execution, instead of silently proceeding. Durable summary replacement

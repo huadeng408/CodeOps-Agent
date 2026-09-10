@@ -77,7 +77,7 @@ $deadline = (Get-Date).AddSeconds(60)
 do {
     try {
         $health = Invoke-RestMethod 'http://127.0.0.1:8081/healthz' -TimeoutSec 3
-        if ($health.continuation.attached -and (Listening 3000)) {
+        if ($health.continuation.attached -and (Listening 50051) -and (Listening 3000)) {
             Write-Output 'Workbench ready: http://127.0.0.1:3000/'
             return
         }

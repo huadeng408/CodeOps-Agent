@@ -94,6 +94,8 @@ message ConversationMessage {
   string tool_call_id = 6;
   repeated ConversationToolCall tool_calls = 7;
   bool is_error = 8;
+  string event_id = 9;
+  string event_checksum = 10;
 }
 
 message ConversationToolCall {
@@ -205,6 +207,12 @@ message CompactionUpdate {
   int64 estimated_before_tokens = 4;
   int64 estimated_after_tokens = 5;
   string trigger = 6;
+  repeated CanonicalEventReference source_events = 7;
+}
+
+message CanonicalEventReference {
+  string event_id = 1;
+  string checksum = 2;
 }
 
 message ToolRequestBatch {

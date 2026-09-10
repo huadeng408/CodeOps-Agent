@@ -4,6 +4,43 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Canonical Compaction Provenance Transport
+
+ConversationMessage now carries optional event_id/event_checksum, and
+CompactionUpdate carries source_events (event ID + checksum). Go derives these
+from ledger events for message and tool history. Python retains references
+through history conversion, pruning and summary recompaction, returning them
+over gRPC. Provider adapters do not include this metadata in model payloads.
+Legacy messages have no invented provenance; empty new fields do not change
+legacy history digests. Protobuf code was regenerated using the repo script.
+
+Tests cover ledger projection identity, Go gRPC round trip, Python gRPC
+compaction, repeated summary provenance and provider-payload exclusion.
+The initial source-loss tests failed before implementation and passed after it.
+This is transport groundwork only: source references are NOT authorization,
+and do not yet prove range completeness or that every selected message has a
+canonical source. Summary replacement remains disabled/fail-closed pending
+lease/CAS validation, complete-range checks, tool pairing, ordered Surface
+projection and checkpoint/retry handling. No successful durable compaction is
+claimed by this stage.
+
+Browser dialogue reached request 100 with 98 replies, 626 events. Complete
+budget recall and refresh at request 100 passed. After deploying the new Go and
+Python protocol code, the first request-101 send was rejected before persistence
+while Python was not listening; the draft remained intact. The startup helper
+now requires the Python port as well as attached health before reporting ready.
+Once services were available, clicking Send again completed request 101 with
+correct budget history and constraints, with no duplicate user message.
+
+Final API receipt: 101 requests, 99 replies, 632 events, sequence 631
+session/run-completed. SHA-256 of UTF-8 JSON.stringify(response.data):
+`8f291d0ec155dea47ea94ab1ff782ee186f619402a9ff02bcde5136d13dbeed2`.
+Screenshot: output/playwright/interview-101-requests-desktop.png (local only).
+Gates: full Go tests/race/vet, frontend build, Python 2270 passed / 15 skipped /
+3 warnings, and diff checks passed. Startup helper ran successfully after its
+readiness correction. The two earlier failed requests remain in the count;
+200 successful paired turns and full production acceptance are not complete.
+
 ## Follow-up: Pressure Failure And New-Turn Recovery
 
 Normal-window browser dialogue reached 80 user messages and 80 assistant

@@ -31,6 +31,8 @@ type ConversationMessage struct {
 	ToolCallID    string
 	ToolCalls     []ConversationToolCall
 	IsError       bool
+	EventID       string
+	EventChecksum string
 }
 
 type ConversationToolCall struct {
@@ -472,6 +474,7 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
 			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
 			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
+			EventId: item.EventID, EventChecksum: item.EventChecksum,
 			ToolCalls: conversationToolCalls(item.ToolCalls),
 		})
 	}
@@ -597,6 +600,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
 			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
 			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
+			EventId: item.EventID, EventChecksum: item.EventChecksum,
 			ToolCalls: conversationToolCalls(item.ToolCalls),
 		})
 	}

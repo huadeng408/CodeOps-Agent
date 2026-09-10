@@ -224,6 +224,8 @@ class ChatMessage:
     thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     is_error: bool = False
     cache_control: str = ""  # "ephemeral" triggers provider-specific cache marking
+    # Harness-owned identity, never part of the provider payload.
+    source_events: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(slots=True)

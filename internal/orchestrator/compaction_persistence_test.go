@@ -18,11 +18,16 @@ type compactionThenToolServer struct {
 }
 
 func (compactionThenToolServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
-	if _, err := stream.Recv(); err != nil {
+	input, err := stream.Recv()
+	if err != nil {
 		return err
 	}
+	var sources []*codeagentpb.CanonicalEventReference
+	for _, item := range input.GetUserInput().GetHistory() {
+		sources = append(sources, &codeagentpb.CanonicalEventReference{EventId: item.GetEventId(), Checksum: item.GetEventChecksum()})
+	}
 	for _, message := range []*codeagentpb.OrchestratorMessage{
-		{Payload: &codeagentpb.OrchestratorMessage_CompactionUpdate{CompactionUpdate: &codeagentpb.CompactionUpdate{Summary: "original constraints", RemovedMessages: 2, KeepRecentMessages: 1}}},
+		{Payload: &codeagentpb.OrchestratorMessage_CompactionUpdate{CompactionUpdate: &codeagentpb.CompactionUpdate{Summary: "original constraints", RemovedMessages: 2, KeepRecentMessages: 1, SourceEvents: sources}}},
 		{Payload: &codeagentpb.OrchestratorMessage_ToolRequest{ToolRequest: &codeagentpb.ToolRequest{ToolName: "Write", ToolCallId: "after-compaction", ParametersJson: `{}`}}},
 	} {
 		if err := stream.Send(message); err != nil {
@@ -63,7 +68,10 @@ func TestCompactionMustPersistBeforeSubsequentTool(t *testing.T) {
 				return ToolResult{Output: "written"}
 			}}
 			if mode != "missing" {
-				handlers.Compaction = func(*codeagentpb.CompactionUpdate) error {
+				handlers.Compaction = func(update *codeagentpb.CompactionUpdate) error {
+					if len(update.SourceEvents) != 1 || update.SourceEvents[0].EventId != "canonical-event" || update.SourceEvents[0].Checksum != strings.Repeat("a", 64) {
+						t.Error("canonical source identity was lost across gRPC")
+					}
 					if mode == "failed-transport" {
 						return errors.New("ledger connection refused")
 					}
@@ -76,7 +84,7 @@ func TestCompactionMustPersistBeforeSubsequentTool(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			result, err := client.RunConversation(ctx, ConversationRequest{Input: "continue", SessionID: "compaction-test", RunID: "run-1", Resume: true, SurfaceSHA256: "surface-test", Actor: identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "test", TenantID: "test", Roles: []string{"USER"}}}, handlers)
+			result, err := client.RunConversation(ctx, ConversationRequest{Input: "continue", SessionID: "compaction-test", RunID: "run-1", Resume: true, SurfaceSHA256: "surface-test", Actor: identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "test", TenantID: "test", Roles: []string{"USER"}}, History: []ConversationMessage{{Role: "user", Content: "original fact", EventID: "canonical-event", EventChecksum: strings.Repeat("a", 64)}}}, handlers)
 			if mode == "persisted" {
 				if err != nil || !result.Success || !persisted || calls != 1 {
 					t.Fatalf("persisted=%v calls=%d result=%+v err=%v", persisted, calls, result, err)

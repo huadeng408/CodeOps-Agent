@@ -1112,6 +1112,7 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 			}
 			history = append(history, orchestrator.ConversationMessage{
 				Role: payload.Author, Content: payload.Content, CreatedAt: event.CreatedAt.Format(time.RFC3339Nano), SchemaVersion: 1,
+				EventID: event.EventID, EventChecksum: event.Checksum,
 			})
 		case "tool/call":
 			var payload toolCallPayload
@@ -1127,6 +1128,7 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 			}
 			history = append(history, orchestrator.ConversationMessage{
 				Role: "assistant", CreatedAt: event.CreatedAt.Format(time.RFC3339Nano), SchemaVersion: 1,
+				EventID: event.EventID, EventChecksum: event.Checksum,
 				ToolCalls: []orchestrator.ConversationToolCall{{ID: payload.ToolCallID, Name: payload.ToolName, ArgumentsJSON: payload.ArgumentsJSON}},
 			})
 		case "tool/result":
@@ -1136,6 +1138,7 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 			}
 			history = append(history, orchestrator.ConversationMessage{
 				Role: "tool", Content: payload.Output, CreatedAt: event.CreatedAt.Format(time.RFC3339Nano), SchemaVersion: 1,
+				EventID: event.EventID, EventChecksum: event.Checksum,
 				Name: payload.ToolName, ToolCallID: payload.ToolCallID, IsError: payload.Error != "",
 			})
 		}

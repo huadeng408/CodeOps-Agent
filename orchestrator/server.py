@@ -271,6 +271,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     for call in item.tool_calls
                 ],
                 "is_error": item.is_error,
+                **({"event_id": item.event_id, "event_checksum": item.event_checksum}
+                   if item.event_id or item.event_checksum else {}),
             }
             for item in request.history
         ]
@@ -327,6 +329,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                             for call in item.tool_calls
                         ],
                         "is_error": item.is_error,
+                        **({"event_id": item.event_id, "event_checksum": item.event_checksum}
+                           if item.event_id or item.event_checksum else {}),
                     }
                     for item in user_input.history
                 ]
