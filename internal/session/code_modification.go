@@ -46,7 +46,7 @@ func codeModificationPayloads(result orchestrator.ToolResult, runID string) []co
 	out := make([]codeModificationPayload, 0, len(result.Changes))
 	for _, change := range result.Changes {
 		path := filepath.ToSlash(strings.TrimSpace(change.Path))
-		if path == "" {
+		if path == "" || filepath.IsAbs(filepath.FromSlash(path)) || strings.HasPrefix(path, "../") || path == ".." {
 			continue
 		}
 		out = append(out, codeModificationPayload{
@@ -77,6 +77,10 @@ func validateCodeModificationPayload(payload codeModificationPayload) error {
 	}
 	if payload.Operation != payload.ToolName || strings.TrimSpace(payload.Summary) == "" {
 		return fmt.Errorf("code modification operation is invalid")
+	}
+	path := filepath.Clean(filepath.FromSlash(payload.Path))
+	if filepath.IsAbs(path) || strings.HasPrefix(payload.Path, "/") || path == "." || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("code modification path must stay within workspace")
 	}
 	for _, digest := range []string{payload.BeforeSHA256, payload.AfterSHA256, payload.DiffSHA256} {
 		if len(digest) != sha256.Size*2 {
