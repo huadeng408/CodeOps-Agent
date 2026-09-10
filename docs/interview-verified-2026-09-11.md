@@ -92,8 +92,6 @@ The persisted event cursor stayed unchanged at 1279 and no duplicate event was
 observed. A direct manual process launch without inherited provider environment
 was intentionally discarded; the helper restored the authorized configuration.
 
-## Follow-up: Browser API Boundary Checks
-
 ## Follow-up: Browser Authentication
 
 The browser completed the real registration form, automatically entered the
@@ -102,20 +100,46 @@ account. A page reload retained the authenticated workbench and logout control.
 No visible alert was observed. Credentials are local test artifacts and are not
 included in this receipt.
 
-From the authenticated browser context, both
+## Follow-up: Browser API Boundary Checks
+
+The original probe used two nonexistent identifiers:
 `GET /api/v1/sessions/foreign-browser-check` and
 `GET /api/v1/sessions/missing-browser-check` returned byte-identical `404`
-responses (`session not found`). A valid session returned `200` from
-`POST /api/v1/sessions/{id}/ws-ticket` with a ticket field; a foreign session
-returned the same stable `404`. A stale status update with `expectedSeq=1`
-returned `409` and reported the actual sequence 1280. Ticket values and auth
-material were not read or recorded.
+responses (`session not found`). Despite its name, `foreign-browser-check` was
+not a proven foreign session. That probe alone did not verify owner isolation.
+A valid session returned `200` from `POST /api/v1/sessions/{id}/ws-ticket` with
+a ticket field; the nonexistent session returned `404`. A stale status update
+with `expectedSeq=1` returned `409` and reported the actual sequence 1280.
+Ticket values were not printed or persisted in this receipt.
 
-Boundaries: 200 successful replies remain pending. A separate read-only probe
+The subsequent real cross-owner probe verified `/api/v1/users/me` returned 200
+with user ID 10. The existing session `dde16a9e3b2ca12420dcae4d0eb2a0b2` belongs
+to owner 9 according to its canonical `session/created` event. Browser fetches
+under user 10 compared that real foreign session with `missing-cross-owner-0911`.
+Every endpoint below returned 404 for both, with byte-identical response bodies:
+
+| Method | Session Endpoint Suffix | Foreign / Missing |
+| --- | --- | --- |
+| GET | (session detail) | 404 / 404 |
+| GET | /events | 404 / 404 |
+| GET | /runs | 404 / 404 |
+| GET | /recovery-manifest | 404 / 404 |
+| GET | /workspace-manifest | 404 / 404 |
+| GET | /checkpoints | 404 / 404 |
+| POST | /ws-ticket | 404 / 404 |
+
+After these probes, the production Go ledger Verify and Surface projection both
+passed: 1280 events, 200 assistant messages, 204 user messages, Surface size 188,
+last sequence 1279, checksum
+`fe06bc6f5554d89365da282765824589872aec678d69c5df91c1be7603998ae2`.
+These are browser-origin API boundary checks, not UI-button interaction tests.
+
+Boundaries: 200 successful replies were reached as recorded above. A read-only probe
 found a checksum mismatch in the legacy long-term memory table; canonical
 conversation history reads remain available. That memory record was neither
-deleted nor accepted by bypassing validation. The UI also renders Markdown tables
-as plain text. Neither long-term memory nor complete UI acceptance is claimed.
+deleted nor accepted by bypassing validation. Markdown rendering was added later,
+but the previous zero-table DOM observation did not verify a rendered table.
+Neither long-term memory nor complete UI acceptance is claimed.
 
 ## Follow-up: Ledger-Backed Compaction
 
