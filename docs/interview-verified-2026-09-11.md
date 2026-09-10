@@ -94,6 +94,14 @@ was intentionally discarded; the helper restored the authorized configuration.
 
 ## Follow-up: Browser API Boundary Checks
 
+## Follow-up: Browser Authentication
+
+The browser completed the real registration form, automatically entered the
+workbench, logged out to the login page, then logged in with the same test
+account. A page reload retained the authenticated workbench and logout control.
+No visible alert was observed. Credentials are local test artifacts and are not
+included in this receipt.
+
 From the authenticated browser context, both
 `GET /api/v1/sessions/foreign-browser-check` and
 `GET /api/v1/sessions/missing-browser-check` returned byte-identical `404`
