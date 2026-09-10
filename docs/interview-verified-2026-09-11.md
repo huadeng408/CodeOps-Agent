@@ -69,6 +69,16 @@ are not counted as successful turns. Screenshot:
 `output/playwright/interview-140-after-compaction-restart.png` (local only).
 This is a repeated-constraint recall test, not proof of arbitrary retention.
 
+## Follow-up: Browser Session CRUD Smoke
+
+Using the real browser session, a temporary `临时验收会话` was created through
+the `+ 新建` form, appeared in the project list with one event, and became the
+selected session. Clicking `删除会话` showed the destructive-action confirmation
+(`删除后会话只会标记删除，事件仍保留。继续吗？`). Confirming it removed the
+session from the visible list with no alert. This is a smoke check for create,
+select, delete and confirmation behavior; rename, status transitions, auth,
+WebSocket ticket/reconnect and CAS coverage remain separate acceptance items.
+
 Boundaries: 200 successful replies remain pending. A separate read-only probe
 found a checksum mismatch in the legacy long-term memory table; canonical
 conversation history reads remain available. That memory record was neither
