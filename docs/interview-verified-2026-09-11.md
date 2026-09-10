@@ -85,6 +85,13 @@ reloaded the page. Both the title and paused status persisted from the backend,
 with no visible alert. This verifies the rename/status persistence path; auth,
 WebSocket and CAS remain separate gates.
 
+The browser WebSocket was also exercised across a real Go server restart. The
+UI changed to `重连中` with `Bad Gateway` while the process was down, then the
+standard helper restarted the configured server and the UI returned to `实时`.
+The persisted event cursor stayed unchanged at 1279 and no duplicate event was
+observed. A direct manual process launch without inherited provider environment
+was intentionally discarded; the helper restored the authorized configuration.
+
 Boundaries: 200 successful replies remain pending. A separate read-only probe
 found a checksum mismatch in the legacy long-term memory table; canonical
 conversation history reads remain available. That memory record was neither
