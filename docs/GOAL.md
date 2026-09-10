@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-07 当前快照）
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-10 当前快照）
 
 ## 当前验证快照（2026-09-10）
 
@@ -41,8 +41,24 @@ orchestrator 请求直接复用 canonical run projection，只接受创建顺序
 `CGO_ENABLED=1 go test -race ./internal/session -count=1`；此前缺少 C 编译器的竞态检查
 阻塞已经解除。代码提交与远端 `origin/main` 均为 `4fe3e5c9`。
 
-本快照仍不能把真实浏览器 200 turns、后端重启/重连 receipt 或外部 scorer
-指标标为 `VERIFIED`；缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
+本轮完成真实浏览器的 200 条用户消息持久化压力检查：独立 Session 通过页面输入框和
+“发送”按钮依次写入 `browser-long-001` 至 `browser-long-200`，加创建事实共投影为
+`201 events`。页面刷新后仍显示 201 条 article，末条仍为 `#200 browser-long-200`；随后
+终止后端进程，浏览器状态从“实时”进入“重连中”，以新进程启动同一生产入口后恢复为
+“实时”，事件数和末条内容均未变化。该证据只证明 200 条用户消息及 WebSocket
+刷新/重连的持久化连续性；当前没有可用 orchestrator/model continuation，不能据此声称
+完成了 200 轮 assistant 对话记忆或“不遗忘”。
+
+浏览器删除流程还暴露并修复了一个前端竞态：DELETE 成功后，旧 Session 的 canonical
+load/status poll 可能稍后收到 404 并显示 `session not found`。现在选择切换会 abort 旧请求，
+删除前先退休 Session ID 并清除选择，只有 DELETE 自身失败才恢复选择；真实页面回归中，
+删除临时 Session 后等待 3 秒再选择存活 Session，页面没有 alert，也没有新增 404 console
+记录。前端生产构建和完整门禁通过，修复提交 `526edb1e` 已推送 `origin/main`。
+
+本快照仍不能把真正的 200-turn assistant 长对话、真实 tool/approval/code-modification
+执行记录、运行中 Python gRPC orchestrator 的 continue/retry lineage、桌面/移动截图、
+409 CAS 与 foreign/missing 一致 404 浏览器收据或外部 scorer 指标标为 `VERIFIED`；
+缺少这些新鲜证据时，整体验收继续保持 `BLOCKED`。
 
 ## 历史验证快照（2026-09-07）
 
