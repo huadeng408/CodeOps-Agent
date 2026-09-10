@@ -83,6 +83,16 @@ func restorePersistedWorktrees(ctx context.Context, ledger session.EventLog, man
 		if err != nil {
 			return err
 		}
+		deleted := false
+		for _, event := range events {
+			if event.Type == "session/deleted" {
+				deleted = true
+				break
+			}
+		}
+		if deleted {
+			continue
+		}
 		for _, event := range events {
 			if event.Type != persistedWorktreeActiveEvent && event.Type != persistedWorktreeTerminalEvent {
 				continue
