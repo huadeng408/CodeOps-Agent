@@ -1,10 +1,43 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { ContinuationRuntimeStatus, Session, SessionEvent } from './types';
 import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
 import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
+
+function renderInlineMarkdown(value: string): ReactNode {
+  const parts = value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>;
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function renderMessageMarkdown(value: string): ReactNode {
+  const lines = value.split(/\r?\n/);
+  const nodes: React.ReactNode[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const next = lines[index + 1];
+    if (line?.trim().startsWith('|') && next?.trim().match(/^\|?\s*:?-{3,}/)) {
+      const headers = line.split('|').slice(1, -1).map((cell) => cell.trim());
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim().startsWith('|')) {
+        rows.push(lines[index].split('|').slice(1, -1).map((cell) => cell.trim()));
+        index += 1;
+      }
+      nodes.push(<table key={`table-${index}`}><thead><tr>{headers.map((cell) => <th key={cell}>{renderInlineMarkdown(cell)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{renderInlineMarkdown(cell)}</td>)}</tr>)}</tbody></table>);
+      index -= 1;
+      continue;
+    }
+    if (line.trim()) nodes.push(<p key={index}>{renderInlineMarkdown(line)}</p>);
+  }
+  return nodes;
+}
 
 function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
   const byID = new Map<string, SessionEvent>();
@@ -692,7 +725,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 				&& (activeRun.status === 'queued' || activeRun.status === 'running');
 			return <article key={event.id} className={`message ${event.author} ${event.approval ? 'approval-event' : ''}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}<span className={`event-kind ${eventKind(event)}`}>{eventKindLabel(eventKind(event))}</span></span><time>#{event.seq}</time></div>
-	      <div className="message-content">{event.content || event.type}{event.toolOutput && <pre>{event.toolOutput}</pre>}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
+	      <div className="message-content">{renderMessageMarkdown(event.content || event.type)}{event.toolOutput && <pre>{event.toolOutput}</pre>}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
 			{approvalPending && <div className="approval-actions" aria-label={`${event.approval?.toolName} 工具审批`}>
 				<button className="approval-btn approve" type="button" onClick={() => void handleApproval(event, 'approved')} disabled={decidingApproval !== ''}>批准</button>
 				<button className="approval-btn deny" type="button" onClick={() => void handleApproval(event, 'denied')} disabled={decidingApproval !== ''}>拒绝</button>
