@@ -4,6 +4,26 @@ Verified on 2026-09-11 (Asia/Shanghai), using the production Go server, Python
 orchestrator, real provider and browser UI. Scope: the interview conversation
 path below; the broader production Harness Goal remains BLOCKED.
 
+## Follow-up: Ledger-Backed Compaction
+
+The compaction callback is now connected through SessionRunner. A summary is
+accepted only when its reported event ID/checksum list exactly matches a
+contiguous current Surface prefix, excludes the active input, and contains no
+open tool call. The ledger appends a `context/compaction` Surface operation with
+the verified source range; projection yields summary plus the untouched tail.
+Repeated summaries retain nested source provenance, and continuation expands
+only current-run summaries before prefix validation. Foreign runs, missing or
+duplicate sources, orphan tool results, split tool pairs and invalid boundaries
+fail closed. Provider payloads remain free of provenance metadata.
+
+Regression coverage first failed on the unconnected callback and unsafe source
+cases, then passed after the implementation. Full Go tests, vet, frontend
+build, Python 2270 passed and full CGO race tests passed. The browser session
+continued normally after deployment preparation; its latest verified receipt
+is request 101 / 99 replies / 632 events. A forced-pressure browser probe was
+previously fail-closed before persistence; a successful real-provider summary
+replacement and post-restart compressed-history recall are still pending.
+
 ## Follow-up: Canonical Compaction Provenance Transport
 
 ConversationMessage now carries optional event_id/event_checksum, and

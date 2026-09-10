@@ -592,6 +592,12 @@ func projectSurface(events []Event) ([]Event, error) {
 			continue
 		}
 		switch event.SurfaceOp.Op {
+		case "compact":
+			var err error
+			active, err = applyCompaction(active, event)
+			if err != nil {
+				return nil, err
+			}
 		case "append":
 			active = append(active, event)
 		case "replace":
@@ -824,6 +830,11 @@ func validateSurfaceOperation(eventType string, operation SurfaceOperation) erro
 		return fmt.Errorf("event type %q is not surface-eligible", eventType)
 	}
 	switch operation.Op {
+	case "compact":
+		if eventType != compactionEventType {
+			return errors.New("compact operation requires a compaction event")
+		}
+		return nil
 	case "append":
 		return nil
 	case "replace":
@@ -838,7 +849,7 @@ func validateSurfaceOperation(eventType string, operation SurfaceOperation) erro
 
 func surfaceEligibleEventType(eventType string) bool {
 	switch eventType {
-	case "user/message", "assistant/message", "tool/call", "tool/result":
+	case "user/message", "assistant/message", "tool/call", "tool/result", compactionEventType:
 		return true
 	default:
 		return false

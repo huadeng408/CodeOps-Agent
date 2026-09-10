@@ -1,5 +1,11 @@
 # CodeOps-Agent Goal
 
+2026-09-11 follow-up: compaction now validates exact canonical source prefixes,
+tool-pair boundaries and current-run ownership, then appends a `context/compaction`
+Surface operation; continuation can expand these summaries before integrity
+checks. New runner and provenance tests pass. Real provider pressure still needs
+a successful summary replacement and restart recall; Goal remains ACTIVE.
+
 2026-09-11 follow-up: canonical event ID/checksum now travels with history and
 returns in compaction source references, with Go/Python gRPC and recompaction
 tests. Durable summary replacement is still disabled pending validated ranges,

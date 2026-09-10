@@ -673,6 +673,12 @@ func eventToView(event Event) (EventView, error) {
 		Author: "system", CreatedAt: event.CreatedAt,
 	}
 	switch event.Type {
+	case compactionEventType:
+		var payload compactionPayload
+		if json.Unmarshal(event.Payload, &payload) != nil {
+			return view, ErrEventIntegrity
+		}
+		view.Content = payload.Summary
 	case userMessageEventType, "assistant/message":
 		var payload messagePayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
@@ -798,6 +799,9 @@ func (r *SessionRunner) execute(key runKey) {
 	var blocked atomic.Bool
 	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
 	handlers := orchestrator.ConversationHandlers{
+		Compaction: func(update *codeagentpb.CompactionUpdate) error {
+			return r.persistCompaction(runCtx, key, lease, update)
+		},
 		Tool: func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, call, retryRunIDs...)
 			if unsafe {
@@ -1005,7 +1009,11 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		}
 		requestRetryOfRunID = projection.view.RetryOfRunID
 		retryOfRunIDs = append([]string(nil), projection.view.RetryOfRunIDs...)
-		if err := validateContinuationSurface(checkpointSurface, surface, key.runID, retryOfRunIDs...); err != nil {
+		expanded, expandErr := expandContinuationCompactions(checkpointSurface, surface, events, append([]string{key.runID}, retryOfRunIDs...)...)
+		if expandErr != nil {
+			return orchestrator.ConversationRequest{}, expandErr
+		}
+		if err := validateContinuationSurface(checkpointSurface, expanded, key.runID, retryOfRunIDs...); err != nil {
 			return orchestrator.ConversationRequest{}, err
 		}
 	}
@@ -1101,6 +1109,12 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 	input := ""
 	for _, event := range surface {
 		switch event.Type {
+		case compactionEventType:
+			var payload compactionPayload
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return nil, "", ErrEventIntegrity
+			}
+			history = append(history, orchestrator.ConversationMessage{Role: "system", Content: payload.Summary, EventID: event.EventID, EventChecksum: event.Checksum, SchemaVersion: 1})
 		case userMessageEventType, "assistant/message":
 			var payload messagePayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
