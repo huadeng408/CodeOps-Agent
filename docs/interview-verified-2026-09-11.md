@@ -469,3 +469,22 @@ TestSessionRunnerRecoversPendingApprovalAfterLedgerReopen (pending approval was
 not observed once; the recovered run ended failed once). The isolated race test
 then passed 20 consecutive runs and the final full run passed. This is recorded
 as intermittent evidence rather than silently treated as a deterministic fix.
+
+## Atomic Workspace Restore Primitive (2026-09-11)
+
+Commit c77c4346 adds internal/worktree/restore.go with a small, deep restore
+interface for file transitions. It validates every path beneath the workspace,
+resolves existing parent symlinks, preflights every current file against its
+expected After content, and performs no writes when any transition conflicts.
+After a complete preflight it restores the previous Before contents, including
+creation of nested parent directories. Regression coverage passes for successful
+restore, multi-file conflict with zero partial writes, path traversal rejection,
+and cancellation checks; the symlink case is skipped on this Windows runner
+because creating symlinks requires an unavailable privilege.
+
+Fresh checks for this primitive: go test ./internal/worktree ./internal/session
+./internal/handler -count=1 exit 0 and the same packages under
+go test -race ... -count=1 exit 0. This is a reusable filesystem primitive,
+not proof of browser-visible Git/patch recovery: it is not yet wired to the
+canonical Session ledger, checkpoint payloads, or a restore endpoint. The
+broader filesystem/Git patch acceptance therefore remains BLOCKED.
