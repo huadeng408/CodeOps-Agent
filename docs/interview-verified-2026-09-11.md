@@ -561,3 +561,25 @@ Ignored local screenshots are
 at 1365x900 and 390x844. This receipt does not close the broader 200-turn,
 workspace/Git restoration, every-button, or production-grade memory goals;
 those remain BLOCKED.
+
+## Long-dialogue continuation stress (2026-09-11, fresh browser run)
+
+Using a newly registered account and a real Chromium page, the same session
+`200轮长对话` was driven through the visible textarea and `发送` button. The
+first run reached turn 50 (109 messages, 473 ledger events) before the
+upstream continuation entered `paused` with the public error
+`agent continuation failed`. Clicking the visible `继续任务` control after
+the orchestrator was restarted (`/healthz` reported `attached=true`,
+generation 3) preserved the same session and run lineage; it completed the
+retry and advanced the session to 110 messages and 484 events. A second
+attempt then reached turn 57 (122 messages, 534 events) and again failed
+closed, with the retry action still available after refresh.
+
+This is positive evidence for durable history, restart recovery, and
+failure/retry lineage, but it is not a 200-turn success. The acceptance for
+200 turns and the stronger "does not forget" claim therefore remain
+**BLOCKED** pending a provider/runtime configuration that can sustain the
+full workload and a fresh end-to-end run. Screenshots from this run are
+`output/playwright/long-dialog-after-restart.png` and
+`output/playwright/long-dialog-200-final.png` (runtime artifacts, intentionally
+not committed).
