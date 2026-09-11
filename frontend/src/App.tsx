@@ -159,9 +159,20 @@ function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
-type EventKind = 'messages' | 'tools' | 'approvals' | 'code';
+type EventKind = 'messages' | 'tools' | 'approvals' | 'code' | 'progress';
 
-function eventKind(event: SessionEvent): EventKind {
+function renderProgressContent(event: SessionEvent): ReactNode {
+  if (!event.progress) return null;
+  return (
+    <div className={`progress-card ${event.progress.kind}`} role="status" aria-label="任务阶段性进展">
+      <div className="progress-card-title">{event.progress.title}</div>
+      <div className="progress-card-summary">{event.progress.summary}</div>
+    </div>
+  );
+}
+
+function eventKind(event: SessionEvent): EventKind | 'progress' {
+	if (event.progress || event.type === 'session/progress') return 'progress';
 	if (event.type.includes('approval')) return 'approvals';
 	if (event.codeModification || event.type.startsWith('code/') || event.type.startsWith('patch/') || event.type.startsWith('workspace/patch')) return 'code';
 	if (event.toolName || event.type.startsWith('tool/')) return 'tools';
@@ -169,7 +180,7 @@ function eventKind(event: SessionEvent): EventKind {
 }
 
 function eventKindLabel(kind: EventKind): string {
-  return kind === 'tools' ? '工具' : kind === 'approvals' ? '审批' : kind === 'code' ? '修改' : '消息';
+  return kind === 'tools' ? '工具' : kind === 'approvals' ? '审批' : kind === 'code' ? '修改' : kind === 'progress' ? '进展' : '消息';
 }
 
 function App() {
@@ -633,6 +644,11 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
       : session.run?.status === 'completed' ? '已完成'
         : session.run?.status === 'failed' ? '失败' : '';
   return <div className="session-status">
+    {session.planTodo && <details className="plan-todo-panel" open={session.status === 'running' || session.status === 'queued'}>
+      <summary>任务进度 <span className="plan-todo-revision">v{session.planTodo.revision}</span></summary>
+      {session.planTodo.plan.steps && session.planTodo.plan.steps.length > 0 && <div className="plan-summary">阶段 {Math.min(session.planTodo.plan.currentIndex + 1, session.planTodo.plan.steps.length)}/{session.planTodo.plan.steps.length}：{session.planTodo.plan.steps[session.planTodo.plan.currentIndex] || '已完成'}</div>}
+      <div className="todo-items">{session.planTodo.todos.map((item, index) => <div className="todo-item" key={`${item.content}-${index}`}><span className={`todo-state ${item.status}`}>{item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}</span><span>{item.activeForm || item.content}</span></div>)}</div>
+    </details>}
     <div className="status-row"><span>项目</span><strong>{session.projectName}</strong></div>
     <div className="status-row"><span>事件</span><strong>{session.eventCount}</strong></div>
     <div className="status-row"><span>更新</span><strong>{new Date(session.updatedAt).toLocaleString()}</strong></div>
@@ -650,7 +666,7 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
 
 function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; refreshKey: number; activeRun?: Session['run'] }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code'>('messages');
+  const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code' | 'progress'>('messages');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 	const [decidingApproval, setDecidingApproval] = useState('');
@@ -692,15 +708,22 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
     if (kind === 'tools') summary.tools += 1;
     else if (kind === 'approvals') summary.approvals += 1;
     else if (kind === 'code') summary.codeChanges += 1;
+    else if (kind === 'progress') summary.progress += 1;
     else if (event.type === 'user/message' || event.type === 'assistant/message') summary.messages += 1;
     return summary;
-  }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0 });
-  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventFilter === 'messages'
-    ? event.type === 'user/message' || event.type === 'assistant/message' || eventKind(event) !== 'messages'
-    : eventKind(event) === eventFilter);
+  }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0, progress: 0 });
+  const progressEvents = activeEvents.filter((event) => event.progress);
+  const latestProgress = progressEvents[progressEvents.length - 1];
 	const decidedApprovals = new Set(activeEvents
 		.filter((event) => event.approval && event.approval.decision !== 'pending')
 		.map((event) => `${event.approval?.runId}\0${event.approval?.toolCallId}`));
+  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventFilter === 'messages'
+    ? event.type === 'user/message' || event.type === 'assistant/message'
+      || (event.approval?.decision === 'pending'
+        && !decidedApprovals.has(`${event.approval.runId}\0${event.approval.toolCallId}`)
+        && event.approval.runId === activeRun?.runId
+        && (activeRun.status === 'queued' || activeRun.status === 'running'))
+    : eventKind(event) === eventFilter);
 	const handleApproval = useCallback(async (event: SessionEvent, decision: 'approved' | 'denied') => {
 		if (!event.approval || event.approval.decision !== 'pending') return;
 		const key = `${event.approval.runId}\0${event.approval.toolCallId}`;
@@ -744,7 +767,8 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
   const socket = useWebSocket({ sessionId, after: cursor, onMessage: handleLiveEvent });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
-    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
+    <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges} · 进展 {executionSummary.progress}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option><option value="progress">进展</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
+    {latestProgress?.progress && <div className="latest-progress" role="status" aria-label="当前进展"><span className="latest-progress-label">当前进展</span><strong>{latestProgress.progress.title}</strong><span>{latestProgress.progress.summary}</span>{progressEvents.length > 1 && <details><summary>查看历史进展（{progressEvents.length}）</summary><div className="progress-history">{progressEvents.slice(0, -1).reverse().map((event) => event.progress && <div key={event.id}><b>{event.progress.title}</b><span>{event.progress.summary}</span></div>)}</div></details>}</div>}
     {error && <div className="inline-error" role="alert">{error}</div>}
 	    {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => {
 			const approvalKey = event.approval ? `${event.approval.runId}\0${event.approval.toolCallId}` : '';
@@ -754,7 +778,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 				&& (activeRun.status === 'queued' || activeRun.status === 'running');
 			return <article key={event.id} className={`message ${event.author} ${event.approval ? 'approval-event' : ''}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}<span className={`event-kind ${eventKind(event)}`}>{eventKindLabel(eventKind(event))}</span></span><time>#{event.seq}</time></div>
-	      <div className="message-content">{renderToolContent(event)}{event.toolOutput && (event.toolName === 'Read' || event.content.trimStart().startsWith('[Read ')) ? <details className="tool-details"><summary>查看工具输出</summary><pre>{event.toolOutput}</pre></details> : event.toolOutput ? <pre>{event.toolOutput}</pre> : null}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
+	      <div className="message-content">{event.progress ? renderProgressContent(event) : <>{renderToolContent(event)}{event.toolOutput ? <details className="tool-details"><summary>查看工具输出</summary><pre>{event.toolOutput}</pre></details> : null}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</>}</div>
 			{approvalPending && <div className="approval-actions" aria-label={`${event.approval?.toolName} 工具审批`}>
 				<button className="approval-btn approve" type="button" onClick={() => void handleApproval(event, 'approved')} disabled={decidingApproval !== ''}>批准</button>
 				<button className="approval-btn deny" type="button" onClick={() => void handleApproval(event, 'denied')} disabled={decidingApproval !== ''}>拒绝</button>

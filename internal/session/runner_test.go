@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
@@ -40,6 +41,186 @@ type retryToolConversationAdapter struct {
 
 type approvalToolConversationAdapter struct {
 	result chan orchestrator.ToolResult
+}
+
+type planTodoConversationAdapter struct {
+	called bool
+}
+
+type progressConversationAdapter struct{}
+
+type progressToolAdapter struct{}
+
+func (progressToolAdapter) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
+	return orchestrator.ToolResult{Output: "PRIVATE_TOOL_OUTPUT_DO_NOT_SHOW"}
+}
+
+func (progressConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	if handlers.PlanTodo == nil || handlers.Tool == nil {
+		return orchestrator.ConversationResult{}, errors.New("progress handlers are missing")
+	}
+	if err := handlers.PlanTodo(nil, &codeagentpb.TodoUpdate{
+		Todos:    []*codeagentpb.TodoItem{{Content: "inspect the repository", ActiveForm: "inspecting the repository", Status: "in_progress"}},
+		Revision: 1,
+	}); err != nil {
+		return orchestrator.ConversationResult{}, err
+	}
+	result := handlers.Tool(ctx, orchestrator.ToolCall{
+		ID: "progress-tool", Name: "Read", ParametersJSON: `{"path":"credentials/DO_NOT_DISPLAY.txt"}`,
+	})
+	if result.Error != "" {
+		return orchestrator.ConversationResult{}, errors.New(result.Error)
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "progress complete"}, nil
+}
+
+func (a *planTodoConversationAdapter) RunConversation(_ context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	a.called = true
+	if handlers.PlanTodo == nil {
+		return orchestrator.ConversationResult{}, errors.New("plan/todo handler is missing")
+	}
+	if err := handlers.PlanTodo(nil, &codeagentpb.TodoUpdate{
+		Todos:    []*codeagentpb.TodoItem{{Content: "inspect", ActiveForm: "inspecting", Status: "in_progress"}},
+		Revision: 1,
+	}); err != nil {
+		return orchestrator.ConversationResult{}, err
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "todo persisted"}, nil
+}
+
+func TestSessionRunnerPersistsPlanTodoUpdatesFromConversation(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "todo", "goal")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	conversation := &planTodoConversationAdapter{}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-plan-todo"})
+	defer runner.Close()
+	run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: "req-plan-todo", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(created.EventCount), Content: "implement a multi-step feature across several files",
+		Actor: identity.Default(),
+	})
+	if err != nil {
+		t.Fatalf("submit message: %v", err)
+	}
+	view := waitForRunStatus(t, runner, created.ID, run.RunID, RunCompleted)
+	if view.Status != RunCompleted {
+		t.Fatalf("run status = %s, want completed", view.Status)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var found bool
+	for _, event := range events {
+		if event.Type == "session/plan-todo" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("plan/todo update was not persisted: %v", events)
+	}
+	current, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatalf("project current session: %v", err)
+	}
+	if current.PlanTodo == nil || current.PlanTodo.Revision != 1 || len(current.PlanTodo.Todos) != 1 {
+		t.Fatalf("plan/todo projection = %+v, want revision 1 with one todo", current.PlanTodo)
+	}
+	if got := current.PlanTodo.Todos[0]; got.Content != "inspect" || got.ActiveForm != "inspecting" || got.Status != "in_progress" {
+		t.Fatalf("todo projection = %+v", got)
+	}
+}
+
+func TestSessionRunnerPersistsSafeProgressSummariesForMultiStepRun(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	runner := NewSessionRunner(workbench, progressConversationAdapter{}, progressToolAdapter{}, SessionRunnerOptions{WorkerID: "worker-progress"})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-progress", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+
+	var events []Event
+	deadline := time.Now().Add(time.Second)
+	for {
+		events, err = ledger.Events(ctx, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		completedProgress := false
+		for _, event := range events {
+			if event.Type != progressEventType {
+				continue
+			}
+			var payload progressPayload
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.Title == "任务完成" {
+				completedProgress = true
+				break
+			}
+		}
+		if completedProgress {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completion progress was not appended after terminal fact: %+v", events)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var progress []Event
+	var completedSeq int64 = -1
+	var completionProgressSeq int64 = -1
+	for _, event := range events {
+		if event.Type == "session/progress" {
+			progress = append(progress, event)
+			var payload progressPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Title == "任务完成" {
+				completionProgressSeq = event.Seq
+			}
+		}
+		if event.Type == runCompletedEventType {
+			completedSeq = event.Seq
+		}
+	}
+	if len(progress) < 4 {
+		t.Fatalf("progress events = %d, want at least start, plan/todo, tool, and terminal summaries: %+v", len(progress), events)
+	}
+	for _, event := range progress {
+		payload := string(event.Payload)
+		if strings.Contains(payload, "PRIVATE_TOOL_OUTPUT_DO_NOT_SHOW") || strings.Contains(payload, "credentials/DO_NOT_DISPLAY.txt") {
+			t.Fatalf("progress summary leaked tool content or arguments: %s", payload)
+		}
+	}
+	views, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visible int
+	for _, event := range views {
+		if event.Type == "session/progress" && strings.TrimSpace(event.Content) != "" {
+			visible++
+		}
+	}
+	if visible != len(progress) {
+		t.Fatalf("progress views = %d, want %d visible summaries", visible, len(progress))
+	}
+	if completedSeq < 0 || completionProgressSeq <= completedSeq {
+		t.Fatalf("completion progress seq = %d, run completed seq = %d; progress must follow the authoritative terminal fact", completionProgressSeq, completedSeq)
+	}
 }
 
 type cancelingHeartbeatEventLog struct {
@@ -213,16 +394,25 @@ func TestSessionRunnerContinuationIsIdempotentAndCommitsAssistantTerminal(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Progress receipts are observational ledger facts and may be interleaved
+	// with execution events; the execution ordering assertion below ignores
+	// them while still requiring every durable lifecycle transition.
+	eventsWithoutProgress := make([]Event, 0, len(events))
+	for _, event := range events {
+		if event.Type != progressEventType {
+			eventsWithoutProgress = append(eventsWithoutProgress, event)
+		}
+	}
 	wantTypes := []string{
 		"session/created", "user/message", "checkpoint/create", "session/status-updated",
 		continuationEventType, runLeasedEventType, "assistant/message", runCompletedEventType,
 	}
-	if len(events) != len(wantTypes) {
-		t.Fatalf("events = %d, want %d: %+v", len(events), len(wantTypes), events)
+	if len(eventsWithoutProgress) != len(wantTypes) {
+		t.Fatalf("execution events = %d, want %d: %+v", len(eventsWithoutProgress), len(wantTypes), events)
 	}
 	for index, want := range wantTypes {
-		if events[index].Type != want {
-			t.Fatalf("event[%d] = %q, want %q", index, events[index].Type, want)
+		if eventsWithoutProgress[index].Type != want {
+			t.Fatalf("event[%d] = %q, want %q", index, eventsWithoutProgress[index].Type, want)
 		}
 	}
 	view, err := workbench.Get(ctx, 7, created.ID)
@@ -1188,6 +1378,47 @@ func TestSessionRunnerHeartbeatCancellationDoesNotFailSuccessfulRun(t *testing.T
 	case err := <-failures:
 		t.Fatalf("normal heartbeat cancellation reported as run failure: %v", err)
 	default:
+	}
+}
+
+func TestSessionRunnerEmitsOnlyOneSlowRunNarration(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	blocking := &blockingConversationAdapter{started: make(chan struct{})}
+	runner := NewSessionRunner(workbench, blocking, nil, SessionRunnerOptions{
+		WorkerID: "worker-single-narration", LeaseDuration: 200 * time.Millisecond,
+		HeartbeatInterval: 5 * time.Millisecond, ProgressInterval: 12 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+	if _, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-single-narration", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("conversation did not start")
+	}
+	time.Sleep(70 * time.Millisecond)
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrations := 0
+	for _, event := range events {
+		if event.Type != progressEventType {
+			continue
+		}
+		var payload progressPayload
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.Kind == progressNarration {
+			narrations++
+		}
+	}
+	if narrations != 1 {
+		t.Fatalf("slow-run narrations = %d, want exactly 1", narrations)
 	}
 }
 

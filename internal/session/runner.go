@@ -26,6 +26,8 @@ const (
 	runFailedEventType    = "session/run-failed"
 	toolDispatchedType    = "tool/dispatched"
 	toolUnknownEventType  = "tool/unknown"
+	planTodoEventType     = "session/plan-todo"
+	progressEventType     = "session/progress"
 )
 
 var (
@@ -169,9 +171,12 @@ type SessionRunnerOptions struct {
 	WorkerID          string
 	LeaseDuration     time.Duration
 	HeartbeatInterval time.Duration
-	QueueSize         int
-	Now               func() time.Time
-	Permissions       *permission.Controller
+	// ProgressInterval bounds visible narration for a slow model or tool. It
+	// is separate from the lease heartbeat, which remains transport-only.
+	ProgressInterval time.Duration
+	QueueSize        int
+	Now              func() time.Time
+	Permissions      *permission.Controller
 }
 
 type SessionRunner struct {
@@ -228,6 +233,186 @@ type toolResultPayload struct {
 	Truncated  bool   `json:"truncated,omitempty"`
 }
 
+// planTodoPayload is the canonical, whole-value Plan/Todo projection emitted
+// by the orchestrator. It is a ledger fact (not a mutable side store), so a
+// reopened Session can reconstruct exactly the state sent to the next turn.
+type planTodoPayload struct {
+	RunID    string        `json:"run_id"`
+	Revision uint64        `json:"revision"`
+	Plan     planPayload   `json:"plan"`
+	Todos    []todoPayload `json:"todos"`
+}
+
+type planPayload struct {
+	Steps        []string `json:"steps,omitempty"`
+	CurrentIndex int      `json:"current_index"`
+	Mode         string   `json:"mode,omitempty"`
+}
+
+type todoPayload struct {
+	Content    string `json:"content"`
+	ActiveForm string `json:"active_form,omitempty"`
+	Status     string `json:"status"`
+}
+
+// progressPayload is a short, browser-safe description of a durable run
+// stage. It deliberately has no tool arguments, output, patches, or provider
+// error text: the related ledger facts retain their audit detail separately.
+type progressPayload struct {
+	RunID          string `json:"run_id"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	Summary        string `json:"summary"`
+	PlanRevision   uint64 `json:"plan_revision,omitempty"`
+	TodoRevision   uint64 `json:"todo_revision,omitempty"`
+	SourceEventSeq int64  `json:"source_event_seq"`
+}
+
+const (
+	progressPhase     = "phase"
+	progressMilestone = "milestone"
+	progressNarration = "narration"
+)
+
+func validProgressKind(kind string) bool {
+	switch kind {
+	case progressPhase, progressMilestone, progressNarration:
+		return true
+	default:
+		return false
+	}
+}
+
+func boundedProgressText(value string, maximum int) (string, bool) {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" || len([]rune(value)) > maximum {
+		return "", false
+	}
+	return value, true
+}
+
+func validateProgressPayload(payload progressPayload) (progressPayload, error) {
+	payload.RunID = strings.TrimSpace(payload.RunID)
+	if payload.RunID == "" || !validProgressKind(payload.Kind) || payload.SourceEventSeq < 0 {
+		return progressPayload{}, errors.New("invalid progress payload")
+	}
+	var ok bool
+	if payload.Title, ok = boundedProgressText(payload.Title, 80); !ok {
+		return progressPayload{}, errors.New("invalid progress title")
+	}
+	if payload.Summary, ok = boundedProgressText(payload.Summary, 240); !ok {
+		return progressPayload{}, errors.New("invalid progress summary")
+	}
+	return payload, nil
+}
+
+func progressToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 48 {
+		return "工具"
+	}
+	for _, runeValue := range name {
+		if !((runeValue >= 'a' && runeValue <= 'z') || (runeValue >= 'A' && runeValue <= 'Z') || (runeValue >= '0' && runeValue <= '9') || runeValue == '_' || runeValue == '-') {
+			return "工具"
+		}
+	}
+	return name
+}
+
+func todoProgressSummary(payload planTodoPayload) string {
+	pending, active, completed := 0, 0, 0
+	for _, item := range payload.Todos {
+		switch item.Status {
+		case "completed":
+			completed++
+		case "in_progress":
+			active++
+		default:
+			pending++
+		}
+	}
+	return fmt.Sprintf("任务进度已更新：%d 待处理，%d 进行中，%d 已完成。", pending, active, completed)
+}
+
+func planTodoFromPayload(payload planTodoPayload) *codeagentpb.PlanTodoSnapshot {
+	plan := &codeagentpb.PlanUpdate{
+		Steps:        append([]string(nil), payload.Plan.Steps...),
+		CurrentIndex: int32(payload.Plan.CurrentIndex),
+		Mode:         payload.Plan.Mode,
+		Revision:     payload.Revision,
+	}
+	todos := make([]*codeagentpb.TodoItem, 0, len(payload.Todos))
+	for _, item := range payload.Todos {
+		todos = append(todos, &codeagentpb.TodoItem{Content: item.Content, ActiveForm: item.ActiveForm, Status: item.Status})
+	}
+	return &codeagentpb.PlanTodoSnapshot{SchemaVersion: 1, Revision: payload.Revision, Plan: plan, Todos: todos}
+}
+
+func latestPlanTodo(events []Event) (*codeagentpb.PlanTodoSnapshot, error) {
+	var latest planTodoPayload
+	for _, event := range events {
+		if event.Type != "session/plan-todo" {
+			continue
+		}
+		var payload planTodoPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("%w: invalid plan/todo payload at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		if payload.Revision == 0 || payload.Revision <= latest.Revision {
+			return nil, fmt.Errorf("%w: non-monotonic plan/todo revision at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		latest = payload
+	}
+	if latest.Revision == 0 {
+		return nil, nil
+	}
+	return planTodoFromPayload(latest), nil
+}
+
+func planTodoPayloadFromUpdates(events []Event, runID string, plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) (planTodoPayload, error) {
+	latest, err := latestPlanTodo(events)
+	if err != nil {
+		return planTodoPayload{}, err
+	}
+	payload := planTodoPayload{RunID: strings.TrimSpace(runID), Revision: 0, Plan: planPayload{Mode: "chat"}}
+	if latest != nil {
+		payload.Revision = latest.GetRevision()
+		if latest.GetPlan() != nil {
+			payload.Plan = planPayload{Steps: append([]string(nil), latest.GetPlan().GetSteps()...), CurrentIndex: int(latest.GetPlan().GetCurrentIndex()), Mode: latest.GetPlan().GetMode()}
+		}
+		for _, item := range latest.GetTodos() {
+			payload.Todos = append(payload.Todos, todoPayload{Content: item.GetContent(), ActiveForm: item.GetActiveForm(), Status: item.GetStatus()})
+		}
+	}
+	if plan != nil {
+		payload.Plan = planPayload{Steps: append([]string(nil), plan.GetSteps()...), CurrentIndex: int(plan.GetCurrentIndex()), Mode: plan.GetMode()}
+	}
+	if todo != nil {
+		payload.Todos = payload.Todos[:0]
+		for _, item := range todo.GetTodos() {
+			payload.Todos = append(payload.Todos, todoPayload{Content: item.GetContent(), ActiveForm: item.GetActiveForm(), Status: item.GetStatus()})
+		}
+	}
+	revision := uint64(0)
+	if plan != nil {
+		revision = plan.GetRevision()
+	}
+	if todo != nil {
+		revision = todo.GetRevision()
+	}
+	if revision == 0 {
+		revision = payload.Revision + 1
+	}
+	if revision != payload.Revision+1 {
+		return planTodoPayload{}, fmt.Errorf("%w: plan/todo revision %d follows %d", ErrEventIntegrity, revision, payload.Revision)
+	}
+	payload.Revision = revision
+	if payload.Plan.Mode == "" {
+		payload.Plan.Mode = "chat"
+	}
+	return payload, nil
+}
+
 type runProjection struct {
 	view         RunView
 	leaseID      string
@@ -253,6 +438,9 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	}
 	if options.HeartbeatInterval <= 0 || options.HeartbeatInterval >= options.LeaseDuration {
 		options.HeartbeatInterval = options.LeaseDuration / 3
+	}
+	if options.ProgressInterval <= 0 {
+		options.ProgressInterval = 10 * time.Second
 	}
 	if options.QueueSize <= 0 {
 		options.QueueSize = 256
@@ -765,10 +953,12 @@ func (r *SessionRunner) execute(key runKey) {
 		r.enqueue(key, waitUntil)
 		return
 	}
+	r.recordProgress(r.ctx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
 	if committed, committedErr := r.hasCommittedAssistant(r.ctx, key); committedErr != nil {
 		r.fail(key, lease, committedErr)
 		return
 	} else if committed {
+		r.recordProgress(r.ctx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
 		_ = r.appendTerminal(context.Background(), key, lease, runCompletedEventType, "")
 		return
 	}
@@ -800,7 +990,26 @@ func (r *SessionRunner) execute(key runKey) {
 	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
 	handlers := orchestrator.ConversationHandlers{
 		Compaction: func(update *codeagentpb.CompactionUpdate) error {
-			return r.persistCompaction(runCtx, key, lease, update)
+			if err := r.persistCompaction(runCtx, key, lease, update); err != nil {
+				return err
+			}
+			r.recordProgress(runCtx, key, lease, progressMilestone, "整理上下文", "已整理较早对话，继续处理当前任务。", 0, 0)
+			return nil
+		},
+		PlanTodo: func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error {
+			events, err := r.workbench.ledger.Events(runCtx, key.sessionID)
+			if err != nil {
+				return err
+			}
+			payload, err := planTodoPayloadFromUpdates(events, key.runID, plan, todo)
+			if err != nil {
+				return err
+			}
+			if err := r.appendLeasedFact(runCtx, key, lease.LeaseID, planTodoEventType, payload); err != nil {
+				return err
+			}
+			r.recordProgress(runCtx, key, lease, progressMilestone, "更新任务进度", todoProgressSummary(payload), payload.Revision, payload.Revision)
+			return nil
 		},
 		Tool: func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, call, retryRunIDs...)
@@ -853,7 +1062,11 @@ func (r *SessionRunner) execute(key runKey) {
 		r.fail(key, lease, err)
 		return
 	}
-	_ = r.appendTerminal(context.Background(), key, lease, runCompletedEventType, "")
+	if err := r.appendTerminal(context.Background(), key, lease, runCompletedEventType, ""); err != nil {
+		r.fail(key, lease, err)
+		return
+	}
+	r.recordCompletedProgress(context.Background(), key)
 }
 
 func (r *SessionRunner) requeueAfterLease(key runKey, lease runLeasePayload) error {
@@ -945,6 +1158,8 @@ func (r *SessionRunner) heartbeat(ctx context.Context, key runKey, lease runLeas
 	defer close(done)
 	ticker := time.NewTicker(r.options.HeartbeatInterval)
 	defer ticker.Stop()
+	lastNarration := r.now()
+	narrated := false
 	fail := func(err error) {
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 			return
@@ -979,6 +1194,12 @@ func (r *SessionRunner) heartbeat(ctx context.Context, key runKey, lease runLeas
 			if err := r.appendLeasedFact(ctx, key, lease.LeaseID, runHeartbeatEventType, lease); err != nil {
 				fail(err)
 				return
+			}
+			if !narrated && r.now().Sub(lastNarration) >= r.options.ProgressInterval {
+				// This is deliberately not a heartbeat event: it is a bounded,
+				// user-visible narration for a genuinely slow operation.
+				r.recordProgress(ctx, key, lease, progressNarration, "仍在执行", "任务仍在执行，正在等待模型或工具结果。", 0, 0)
+				narrated = true
 			}
 		}
 	}
@@ -1033,10 +1254,14 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 			}
 		}
 	}
+	planTodo, err := latestPlanTodo(events)
+	if err != nil {
+		return orchestrator.ConversationRequest{}, err
+	}
 	return orchestrator.ConversationRequest{
 		Input: input, SessionID: key.sessionID, RunID: key.runID, Resume: true, NewTurn: newTurn, SurfaceSHA256: projection.surfaceHash,
 		RetryOfRunID: requestRetryOfRunID, RetryOfRunIDs: retryOfRunIDs,
-		Actor: projection.actor, History: history,
+		Actor: projection.actor, History: history, State: planTodo,
 	}, nil
 }
 
@@ -1234,6 +1459,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		if err := r.appendLeasedSurface(ctx, key, lease, "tool/call", callPayload); err != nil {
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
 		}
+		r.recordProgress(ctx, key, lease, progressPhase, "执行工具", fmt.Sprintf("正在执行 %s。", progressToolName(call.Name)), 0, 0)
 	}
 	approval, approvalErr := r.awaitToolApproval(ctx, key, lease, actor, call)
 	if approvalErr != nil {
@@ -1246,6 +1472,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 			result.Error = "tool result persistence failed"
 			return result, true
 		}
+		r.recordProgress(ctx, key, lease, progressMilestone, "工具未获批准", "工具执行未获批准，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
@@ -1254,6 +1481,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if r.tools == nil {
 		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool execution is unavailable", ExitCode: 1}
 		_ = r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID))
+		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", "工具执行不可用，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
 	result := r.tools.Execute(ctx, actor, key.sessionID, call)
@@ -1272,6 +1500,11 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		result.Error = "tool result persistence failed"
 		result.ExitCode = 1
 		return result, true
+	}
+	if result.Error != "" || result.ExitCode != 0 {
+		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", fmt.Sprintf("%s 未完成，正在根据当前结果继续处理。", progressToolName(call.Name)), 0, 0)
+	} else {
+		r.recordProgress(ctx, key, lease, progressMilestone, "工具完成", fmt.Sprintf("%s 已完成，正在继续下一步。", progressToolName(call.Name)), 0, 0)
 	}
 	return result, false
 }
@@ -1327,6 +1560,7 @@ func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease
 				}
 				return "", fmt.Errorf("tool approval persistence failed: %w", err)
 			}
+			r.recordProgress(ctx, key, lease, progressPhase, "等待审批", "正在等待工具审批后继续执行。", 0, 0)
 		default:
 			return "", errors.New("unsupported tool permission decision")
 		}
@@ -1459,6 +1693,63 @@ func (r *SessionRunner) appendLeasedFact(ctx context.Context, key runKey, leaseI
 	return ErrSequenceConflict
 }
 
+// recordProgress writes a bounded observational receipt. A failure to publish
+// that receipt must not change tool, approval, or model execution semantics;
+// those durable facts have their own fail-closed write paths.
+func (r *SessionRunner) recordProgress(ctx context.Context, key runKey, lease runLeasePayload, kind, title, summary string, planRevision, todoRevision uint64) {
+	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+		return
+	}
+	events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+	if err != nil || len(events) == 0 {
+		return
+	}
+	payload, err := validateProgressPayload(progressPayload{
+		RunID: key.runID, Kind: kind, Title: title, Summary: summary,
+		PlanRevision: planRevision, TodoRevision: todoRevision,
+		SourceEventSeq: events[len(events)-1].Seq,
+	})
+	if err != nil {
+		return
+	}
+	_ = r.appendLeasedFact(ctx, key, lease.LeaseID, progressEventType, payload)
+}
+
+// recordCompletedProgress appends an observational receipt only after the
+// authoritative run-completed fact exists. It intentionally bypasses the
+// active-lease writer, which correctly fences all writes after a terminal
+// transition, and revalidates the completed run on every CAS retry.
+func (r *SessionRunner) recordCompletedProgress(ctx context.Context, key runKey) {
+	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+		return
+	}
+	for attempt := 0; attempt < 16; attempt++ {
+		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+		if err != nil || len(events) == 0 {
+			return
+		}
+		run, err := projectRun(events, key.runID)
+		if err != nil || !run.terminal || run.view.Status != RunCompleted {
+			return
+		}
+		payload, err := validateProgressPayload(progressPayload{
+			RunID: key.runID, Kind: progressMilestone, Title: "任务完成",
+			Summary:        "本次任务已完成，已保存回复和执行记录。",
+			SourceEventSeq: events[len(events)-1].Seq,
+		})
+		if err != nil {
+			return
+		}
+		if _, err = r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), progressEventType, payload); err == nil {
+			r.workbench.signal(key.sessionID)
+			return
+		}
+		if !errors.Is(err, ErrSequenceConflict) {
+			return
+		}
+	}
+}
+
 func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
 	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
 	return r.appendLeasedFact(ctx, key, lease.LeaseID, eventType, payload)
@@ -1467,6 +1758,7 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	_ = r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause))
 }
 

@@ -555,6 +555,45 @@ button:disabled {
 .event-kind.tools { color: var(--dsw-static-blue-500); }
 .event-kind.approvals { color: var(--dsw-static-orange-500); }
 .event-kind.code { color: var(--dsw-static-green-500); }
+.event-kind.progress { color: var(--dsw-static-blue-500); }
+
+.latest-progress {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  margin: 0 0 16px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--dsw-static-blue-500) 25%, var(--dsw-alias-border-l1));
+  border-left: 3px solid var(--dsw-static-blue-500);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--dsw-static-blue-500) 6%, var(--dsw-alias-bg-base));
+  color: var(--dsw-alias-text-secondary);
+  font-size: 12px;
+}
+.latest-progress-label { color: var(--dsw-static-blue-500); font-weight: 600; }
+.latest-progress strong { color: var(--dsw-alias-text-primary); font-weight: 600; }
+.latest-progress > span:not(.latest-progress-label) { color: var(--dsw-alias-text-secondary); }
+.latest-progress details { flex-basis: 100%; margin-top: 2px; }
+.latest-progress details summary { color: var(--dsw-alias-text-tertiary); cursor: pointer; user-select: none; }
+.progress-history { display: grid; gap: 5px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--dsw-alias-border-l1); }
+.progress-history > div { display: flex; gap: 8px; color: var(--dsw-alias-text-tertiary); }
+.progress-history b { color: var(--dsw-alias-text-secondary); font-weight: 500; }
+.progress-card {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(100%, 640px);
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-l1);
+}
+.progress-card-title { color: var(--dsw-alias-text-secondary); font-size: 12px; font-weight: 600; }
+.progress-card-summary { color: var(--dsw-alias-text-tertiary); font-size: 12px; line-height: 1.5; }
+.progress-card.phase { border-left: 2px solid var(--dsw-static-blue-500); }
+.progress-card.milestone { border-left: 2px solid var(--dsw-static-green-500); }
+.progress-card.narration { border-left: 2px solid var(--dsw-static-amber-500); }
 
 .message-content pre {
   margin-top: 9px;
@@ -761,6 +800,23 @@ button:disabled {
   gap: 10px;
   padding: 4px;
 }
+
+.plan-todo-panel {
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--dsw-alias-bg-base);
+  font-size: 12px;
+}
+.plan-todo-panel summary { cursor: pointer; color: var(--dsw-alias-text-primary); font-weight: 500; }
+.plan-todo-revision { float: right; color: var(--dsw-alias-text-tertiary); font-family: var(--ds-font-family-code); font-weight: 400; font-size: 10px; }
+.plan-summary { margin-top: 8px; color: var(--dsw-alias-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.todo-items { display: grid; gap: 5px; margin-top: 8px; }
+.todo-item { display: flex; align-items: baseline; gap: 7px; min-width: 0; color: var(--dsw-alias-text-secondary); }
+.todo-item > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todo-state { width: 12px; flex: 0 0 12px; text-align: center; color: var(--dsw-alias-text-tertiary); }
+.todo-state.in_progress { color: var(--dsw-static-blue-500); }
+.todo-state.completed { color: var(--dsw-static-green-500); }
 
 .status-row {
   display: flex;

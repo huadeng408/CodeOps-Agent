@@ -515,3 +515,49 @@ keeps the execution timeline scannable while preserving the canonical ledger
 and an explicit path to inspect details. A real Chromium refresh of the
 interview session showed compact Read rows and no expanded code blocks by
 default. Frontend TypeScript/Vite production build passed after the change.
+
+## Durable Progress Narration Receipt (2026-09-11)
+
+The canonical Session ledger now accepts `session/progress` as a bounded,
+observational event. Its payload contains run identity, progress kind, title,
+summary, optional plan/todo revisions, and the source event sequence. Titles
+and summaries are whitespace-normalized and capped at 80/240 characters. Tool
+arguments, tool output, patches, and provider error text are not copied into
+progress summaries. The same run lease and expected-sequence CAS protect the
+normal writer; progress publication failure does not change model, tool, or
+approval execution semantics.
+
+Fail-closed regressions reject an unknown run, a future source sequence, a
+source event outside the stated run, and a Plan/Todo projection for an unknown
+run. The authoritative `session/run-completed` fact is appended before the
+observational completion summary, preventing a false completed narration when
+the terminal transition fails. A slow run emits at most one timer-based
+`still running` narration; meaningful Plan/Todo, tool, approval, compaction,
+and terminal transitions continue to emit immediate summaries.
+
+Fresh real Chromium verification used a newly registered local account and a
+new session named `进展摘要演示`. Registration auto-login, session creation,
+natural-language submission, WebSocket live delivery, tool approval, refresh,
+and same-session continuation were exercised through visible controls. Before
+refresh the session grew from 8 to 42 events; after refresh the same immutable
+history reloaded and continued to 67, 88, and 93 events. Clicking `继续任务`
+kept the same session and advanced it from 93 to 98 events, then continued to
+118 events. The upstream run later failed closed as `agent continuation
+failed`, left the session paused, and presented another `继续任务` action; this
+is failure/retry evidence, not a successful provider-run claim.
+
+After the UI follow-up, a fresh reload showed the default Messages view with
+only the user message and the still-actionable pending approval, while 21
+historical progress events remained behind the `查看历史进展` disclosure or the
+dedicated Progress filter. The browser console reported zero current errors.
+Read output was visibly collapsed in the earlier browser run. All tool outputs
+now share the same collapsed disclosure path in source, but this run did not
+produce a fresh non-Read result payload after the final reload, so a real
+browser receipt for a long non-Read result remains BLOCKED.
+
+Ignored local screenshots are
+`output/playwright/progress-summary-desktop.png` and
+`output/playwright/progress-summary-mobile.png`. They show the Progress filter
+at 1365x900 and 390x844. This receipt does not close the broader 200-turn,
+workspace/Git restoration, every-button, or production-grade memory goals;
+those remain BLOCKED.

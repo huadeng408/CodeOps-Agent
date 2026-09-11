@@ -71,18 +71,68 @@ type Workbench struct {
 
 // SessionView is the current owner-scoped projection of Session facts.
 type SessionView struct {
-	ID            string    `json:"id"`
-	UserID        uint      `json:"userId"`
-	ProjectName   string    `json:"projectName"`
-	Title         string    `json:"title"`
-	Goal          string    `json:"goal"`
-	Status        string    `json:"status"`
-	EventCount    int       `json:"eventCount"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
-	Run           *RunView  `json:"run,omitempty"`
-	Runs          []RunView `json:"runs,omitempty"`
-	LastUserInput string    `json:"lastUserInput,omitempty"`
+	ID            string        `json:"id"`
+	UserID        uint          `json:"userId"`
+	ProjectName   string        `json:"projectName"`
+	Title         string        `json:"title"`
+	Goal          string        `json:"goal"`
+	Status        string        `json:"status"`
+	EventCount    int           `json:"eventCount"`
+	CreatedAt     time.Time     `json:"createdAt"`
+	UpdatedAt     time.Time     `json:"updatedAt"`
+	Run           *RunView      `json:"run,omitempty"`
+	Runs          []RunView     `json:"runs,omitempty"`
+	LastUserInput string        `json:"lastUserInput,omitempty"`
+	PlanTodo      *PlanTodoView `json:"planTodo,omitempty"`
+}
+
+// PlanTodoView is the browser-safe projection of the latest versioned
+// Plan/Todo ledger fact. It is intentionally whole-value so refresh and
+// reconnect never require replaying mutable UI state.
+type PlanTodoView struct {
+	Revision uint64     `json:"revision"`
+	Plan     PlanView   `json:"plan"`
+	Todos    []TodoView `json:"todos"`
+}
+
+type PlanView struct {
+	Steps        []string `json:"steps,omitempty"`
+	CurrentIndex int      `json:"currentIndex"`
+	Mode         string   `json:"mode,omitempty"`
+}
+
+type TodoView struct {
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm,omitempty"`
+	Status     string `json:"status"`
+}
+
+// ProgressView is the short, observer-facing view of one session/progress
+// fact. Tool arguments and output never cross this projection.
+type ProgressView struct {
+	RunID          string `json:"runId"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	Summary        string `json:"summary"`
+	PlanRevision   uint64 `json:"planRevision,omitempty"`
+	TodoRevision   uint64 `json:"todoRevision,omitempty"`
+	SourceEventSeq int64  `json:"sourceEventSeq"`
+}
+
+func planTodoViewFromPayload(payload planTodoPayload) *PlanTodoView {
+	view := &PlanTodoView{
+		Revision: payload.Revision,
+		Plan: PlanView{
+			Steps:        append([]string(nil), payload.Plan.Steps...),
+			CurrentIndex: payload.Plan.CurrentIndex,
+			Mode:         payload.Plan.Mode,
+		},
+		Todos: make([]TodoView, 0, len(payload.Todos)),
+	}
+	for _, item := range payload.Todos {
+		view.Todos = append(view.Todos, TodoView{Content: item.Content, ActiveForm: item.ActiveForm, Status: item.Status})
+	}
+	return view
 }
 
 // EventView is the browser-safe representation of one canonical ledger fact.
@@ -103,6 +153,7 @@ type EventView struct {
 	Continuation     *ContinuationView     `json:"continuation,omitempty"`
 	Approval         *ToolApprovalView     `json:"approval,omitempty"`
 	CodeModification *CodeModificationView `json:"codeModification,omitempty"`
+	Progress         *ProgressView         `json:"progress,omitempty"`
 }
 
 // ContinuationView is the typed, browser-safe recovery receipt. Callers never
@@ -606,6 +657,26 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	}
 	for _, event := range events[1:] {
 		switch event.Type {
+		case progressEventType:
+			var payload progressPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return SessionView{}, fmt.Errorf("%w: invalid progress payload at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			if _, err := validateProgressPayload(payload); err != nil {
+				return SessionView{}, fmt.Errorf("%w: invalid progress payload at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			if _, exists := runs[payload.RunID]; !exists || payload.SourceEventSeq >= event.Seq || !eventSourceBelongsToRun(events, payload.SourceEventSeq, payload.RunID) {
+				return SessionView{}, fmt.Errorf("%w: invalid progress source at seq %d", ErrEventIntegrity, event.Seq)
+			}
+		case planTodoEventType:
+			var payload planTodoPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Revision == 0 || !runAdmittedBefore(events, event.Seq, payload.RunID) {
+				return SessionView{}, fmt.Errorf("%w: invalid plan/todo projection at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			if view.PlanTodo != nil && payload.Revision <= view.PlanTodo.Revision {
+				return SessionView{}, fmt.Errorf("%w: non-monotonic plan/todo projection at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			view.PlanTodo = planTodoViewFromPayload(payload)
 		case "session/title-updated":
 			var payload struct {
 				Title string `json:"title"`
@@ -667,6 +738,42 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	return view, nil
 }
 
+func eventSourceBelongsToRun(events []Event, sourceSeq int64, runID string) bool {
+	if sourceSeq < 0 || sourceSeq >= int64(len(events)) || events[sourceSeq].Seq != sourceSeq {
+		return false
+	}
+	var payload struct {
+		RunID string `json:"run_id"`
+	}
+	return json.Unmarshal(events[sourceSeq].Payload, &payload) == nil && strings.TrimSpace(payload.RunID) == strings.TrimSpace(runID)
+}
+
+func runAdmittedBefore(events []Event, beforeSeq int64, runID string) bool {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return false
+	}
+	admitted := false
+	for _, event := range events {
+		if event.Seq >= beforeSeq {
+			break
+		}
+		switch event.Type {
+		case continuationEventType:
+			var payload continuationPayload
+			if json.Unmarshal(event.Payload, &payload) == nil && strings.TrimSpace(payload.RunID) == runID {
+				admitted = true
+			}
+		case runCompletedEventType, runFailedEventType:
+			var payload runTerminalPayload
+			if json.Unmarshal(event.Payload, &payload) == nil && strings.TrimSpace(payload.RunID) == runID {
+				return false
+			}
+		}
+	}
+	return admitted
+}
+
 func eventToView(event Event) (EventView, error) {
 	view := EventView{
 		ID: event.EventID, SessionID: event.SessionID, Seq: event.Seq,
@@ -674,6 +781,20 @@ func eventToView(event Event) (EventView, error) {
 		Author: "system", CreatedAt: event.CreatedAt,
 	}
 	switch event.Type {
+	case progressEventType:
+		var payload progressPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return EventView{}, fmt.Errorf("%w: invalid progress payload at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		validated, err := validateProgressPayload(payload)
+		if err != nil {
+			return EventView{}, fmt.Errorf("%w: invalid progress payload at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		view.Content = validated.Summary
+		view.Progress = &ProgressView{
+			RunID: validated.RunID, Kind: validated.Kind, Title: validated.Title, Summary: validated.Summary,
+			PlanRevision: validated.PlanRevision, TodoRevision: validated.TodoRevision, SourceEventSeq: validated.SourceEventSeq,
+		}
 	case compactionEventType:
 		var payload compactionPayload
 		if json.Unmarshal(event.Payload, &payload) != nil {

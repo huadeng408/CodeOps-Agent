@@ -10,6 +10,21 @@ export interface Session {
   updatedAt: string;
   run?: SessionRun;
   lastUserInput?: string;
+  planTodo?: PlanTodo;
+}
+
+export interface PlanTodo {
+  revision: number;
+  plan: {
+    steps?: string[];
+    currentIndex: number;
+    mode?: string;
+  };
+  todos: Array<{
+    content: string;
+    activeForm?: string;
+    status: 'pending' | 'in_progress' | 'completed' | string;
+  }>;
 }
 
 export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -71,6 +86,15 @@ export interface SessionEvent {
 		afterSha256: string;
 		diffSha256: string;
 	};
+  progress?: {
+    runId: string;
+    kind: 'phase' | 'milestone' | 'narration' | string;
+    title: string;
+    summary: string;
+    planRevision?: number;
+    todoRevision?: number;
+    sourceEventSeq: number;
+  };
 }
 
 export interface SessionCheckpoint {

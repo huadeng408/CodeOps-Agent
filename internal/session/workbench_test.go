@@ -68,6 +68,92 @@ func TestWorkbenchEventsAfterRejectsNegativeLimit(t *testing.T) {
 	}
 }
 
+func TestWorkbenchRejectsProgressFromForeignRun(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor := testRunnerActor()
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-progress-foreign", "run-owned", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-owned", RequestID: "request-progress-foreign", LeaseID: "lease-owned", WorkerID: "worker-owned", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	foreign := progressPayload{RunID: "run-foreign", Kind: progressMilestone, Title: "伪造进展", Summary: "不应被接受", SourceEventSeq: 5}
+	if _, err := ledger.Append(ctx, created.ID, 6, progressEventType, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("foreign progress error = %v, want ErrEventIntegrity", err)
+	}
+}
+
+func TestWorkbenchRejectsProgressSourceInTheFuture(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-progress-future", "run-future", testRunnerActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-future", RequestID: "request-progress-future", LeaseID: "lease-future", WorkerID: "worker-future", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	invalid := progressPayload{RunID: "run-future", Kind: progressMilestone, Title: "未来来源", Summary: "不应被接受", SourceEventSeq: 6}
+	if _, err := ledger.Append(ctx, created.ID, 6, progressEventType, invalid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("future progress error = %v, want ErrEventIntegrity", err)
+	}
+}
+
+func TestWorkbenchRejectsProgressSourceOutsideItsRun(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-progress-source", "run-source", testRunnerActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-source", RequestID: "request-progress-source", LeaseID: "lease-source", WorkerID: "worker-source", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	invalid := progressPayload{RunID: "run-source", Kind: progressMilestone, Title: "错误来源", Summary: "不应引用会话创建事件", SourceEventSeq: 0}
+	if _, err := ledger.Append(ctx, created.ID, 6, progressEventType, invalid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("foreign source error = %v, want ErrEventIntegrity", err)
+	}
+}
+
+func TestWorkbenchRejectsPlanTodoFromUnknownRun(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, _ := pausedSessionWithCheckpoint(t, ledger)
+	invalid := planTodoPayload{RunID: "missing-run", Revision: 1, Plan: planPayload{Mode: "chat"}}
+	if _, err := ledger.Append(ctx, created.ID, 4, planTodoEventType, invalid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("unknown plan/todo run error = %v, want ErrEventIntegrity", err)
+	}
+}
+
 func TestWorkbenchForeignOwnerIsIndistinguishableFromMissing(t *testing.T) {
 	ctx := context.Background()
 	workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
