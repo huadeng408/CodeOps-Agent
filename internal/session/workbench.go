@@ -53,6 +53,7 @@ type WorkbenchModule interface {
 	CreateCheckpoint(context.Context, uint, string, int64, string, string) (CheckpointView, error)
 	ListCheckpoints(context.Context, uint, string) ([]CheckpointView, error)
 	RestoreCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
+	RestoreCodeChanges(context.Context, uint, string, string, string, int64, func([]CodeFileTransition) error) (EventView, error)
 	DecideToolApproval(context.Context, uint, string, ToolApprovalDecisionCommand) (EventView, error)
 	// ContinueFromCheckpoint is retained for older transports. New production
 	// callers must inject ContinuationModule so the request enters a durable run.

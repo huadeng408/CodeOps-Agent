@@ -182,6 +182,28 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
     }
   };
 
+  const handleRestoreWorkspace = async (checkpoint: SessionCheckpoint, worktreeName: string) => {
+    if (!window.confirm('将此检查点对应运行的文件恢复到绑定工作区，当前文件必须仍匹配运行后的内容。继续吗？') || busy) return;
+    const run = runHistory.find((item) => item.checkpointHash === checkpoint.hash && item.status === 'completed');
+    if (!run) {
+      setError('找不到该检查点对应的已完成运行记录');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await api.restoreWorkspace(session.id, checkpoint.hash, run.runId, worktreeName, session.eventCount);
+      await onChanged();
+    } catch (cause) {
+      setError(cause instanceof ApiError && cause.status === 409
+        ? '工作区已变化或会话已更新，请刷新后重试'
+        : cause instanceof Error ? cause.message : '工作区恢复失败');
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleContinue = async (checkpoint: SessionCheckpoint, forceNewRequestId = false) => {
     if (busy || continuationInFlightRef.current || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true) return;
     continuationInFlightRef.current = true;
@@ -315,6 +337,15 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
             <div className="workspace-item" key={tree.name}>
               <div className="recovery-summary-meta"><strong>{tree.name}</strong> · {tree.status || 'active'}{tree.active ? ' · 当前' : ''}</div>
               {tree.diffError ? <div className="recovery-summary-meta">{tree.diffError}</div> : <div className="recovery-summary-meta">{tree.diffLines?.join(' · ') || 'working tree clean'}</div>}
+              {checkpoints.some((checkpoint) => runHistory.some((run) => run.checkpointHash === checkpoint.hash && run.status === 'completed')) && (
+                <div className="checkpoint-actions">
+                  {checkpoints.filter((checkpoint) => runHistory.some((run) => run.checkpointHash === checkpoint.hash && run.status === 'completed')).map((checkpoint) => (
+                    <button className="subtle-btn" type="button" key={`${tree.name}:${checkpoint.hash}`} onClick={() => void handleRestoreWorkspace(checkpoint, tree.name)} disabled={busy}>
+                      恢复到“{checkpoint.label}”
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>

@@ -513,6 +513,7 @@ func main() {
 			sessions.GET("/:id/runs/:runId", sessionHandler.RunDetail)
 			sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 			sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
+			sessions.POST("/:id/workspace/restore", sessionHandler.RestoreWorkspace)
 			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 			sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 			sessions.DELETE("/:id", sessionHandler.Delete)

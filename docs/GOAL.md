@@ -5,6 +5,18 @@
 Execution remains ACTIVE; full goal acceptance remains BLOCKED. The entries
 below this section are historical progress notes, not the current gate counts.
 
+- Session-scoped workspace restore is now implemented behind the canonical
+  ledger: `POST /sessions/:id/workspace/restore` accepts only checkpoint/run/
+  worktree identifiers plus the ledger CAS sequence, derives backend-only
+  `Before`/`After` transitions from validated `code/modified` facts, and
+  appends `workspace/restore-intent` plus one completed/failed outcome. The
+  atomic worktree adapter preflights every file and rejects conflicts without
+  partial writes; focused session/handler tests cover success, receipt order,
+  stale CAS 409, and foreign/missing 404 parity. A real browser created a
+  session and submitted natural language successfully, but its disposable
+  session had no managed worktree or completed code-modification run, so the
+  visible file-restore click path remains `BLOCKED`.
+
 - Completed-result recovery now caches the pending response in the existing
   execution checkpoint, validates run/Surface identity, and re-emits its text on
   explicit resume. Canonical conversation history remains owned by the Go ledger.

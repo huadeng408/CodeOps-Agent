@@ -488,3 +488,30 @@ go test -race ... -count=1 exit 0. This is a reusable filesystem primitive,
 not proof of browser-visible Git/patch recovery: it is not yet wired to the
 canonical Session ledger, checkpoint payloads, or a restore endpoint. The
 broader filesystem/Git patch acceptance therefore remains BLOCKED.
+
+The follow-up also keeps backend-only Before/After file contents in each
+code/modified ledger payload, alongside the existing hashes. EventView still
+returns only summary and digests, so the browser does not receive source
+contents. A session-scoped `POST /sessions/:id/workspace/restore` endpoint now
+binds one owner-scoped session, checkpoint, terminal run, and managed worktree;
+it appends `workspace/restore-intent` and exactly one completed/failed outcome
+to the same canonical ledger. The adapter reuses the atomic restore primitive
+and never accepts file contents from the browser.
+
+Focused session and handler regressions pass, including owner isolation,
+foreign/missing 404 parity, stale CAS 409, successful file restoration, and
+receipt ordering. Real Chromium verified registration, session creation,
+natural-language submit, and execution-event growth; the disposable demo
+session had no managed worktree or completed code-modification run, so the
+visible file-restore click path remains `BLOCKED` pending a real agent
+worktree receipt.
+
+## Read Event Presentation Follow-up (2026-09-11)
+
+The browser event stream no longer renders long Read payloads inline. Read
+events show a single path/range summary by default; full request and tool
+output are available only through collapsed native disclosure controls. This
+keeps the execution timeline scannable while preserving the canonical ledger
+and an explicit path to inspect details. A real Chromium refresh of the
+interview session showed compact Read rows and no expanded code blocks by
+default. Frontend TypeScript/Vite production build passed after the change.

@@ -39,6 +39,35 @@ function renderMessageMarkdown(value: string): ReactNode {
   return nodes;
 }
 
+function readEventSummary(content: string): string {
+  const normalized = content.trim();
+  if (!normalized) return '读取文件';
+  if (normalized.startsWith('[Read ')) {
+    const closing = normalized.indexOf(']');
+    if (closing > 0) return normalized.slice(1, closing);
+  }
+  const firstLine = normalized.split(/\r?\n/, 1)[0] || normalized;
+  return firstLine.length > 140 ? firstLine.slice(0, 137) + '…' : firstLine;
+}
+
+function renderToolContent(event: SessionEvent): ReactNode {
+  const isRead = event.toolName === 'Read' || event.content.trimStart().startsWith('[Read ');
+  if (!isRead) return renderMessageMarkdown(event.content || event.type);
+  const summary = readEventSummary(event.content);
+  const full = event.content.trim();
+  return (
+    <>
+      <div className="tool-summary">{summary}</div>
+      {full.length > summary.length && (
+        <details className="tool-details">
+          <summary>查看完整读取结果</summary>
+          <pre>{full}</pre>
+        </details>
+      )}
+    </>
+  );
+}
+
 function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
   const byID = new Map<string, SessionEvent>();
   for (const event of [...existing, ...incoming]) byID.set(event.id, event);
@@ -725,7 +754,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 				&& (activeRun.status === 'queued' || activeRun.status === 'running');
 			return <article key={event.id} className={`message ${event.author} ${event.approval ? 'approval-event' : ''}`}>
       <div className="message-author"><span>{event.author === 'user' ? '你' : event.author}<span className={`event-kind ${eventKind(event)}`}>{eventKindLabel(eventKind(event))}</span></span><time>#{event.seq}</time></div>
-	      <div className="message-content">{renderMessageMarkdown(event.content || event.type)}{event.toolOutput && <pre>{event.toolOutput}</pre>}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
+	      <div className="message-content">{renderToolContent(event)}{event.toolOutput && (event.toolName === 'Read' || event.content.trimStart().startsWith('[Read ')) ? <details className="tool-details"><summary>查看工具输出</summary><pre>{event.toolOutput}</pre></details> : event.toolOutput ? <pre>{event.toolOutput}</pre> : null}{event.approval?.argumentsJson && <pre className="approval-arguments">{event.approval.argumentsJson}</pre>}{event.codeModification && <div className="code-receipt"><span>{event.codeModification.path}</span><code>{event.codeModification.diffSha256.slice(0, 12)}</code></div>}</div>
 			{approvalPending && <div className="approval-actions" aria-label={`${event.approval?.toolName} 工具审批`}>
 				<button className="approval-btn approve" type="button" onClick={() => void handleApproval(event, 'approved')} disabled={decidingApproval !== ''}>批准</button>
 				<button className="approval-btn deny" type="button" onClick={() => void handleApproval(event, 'denied')} disabled={decidingApproval !== ''}>拒绝</button>

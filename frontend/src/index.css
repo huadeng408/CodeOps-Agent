@@ -567,6 +567,32 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.tool-summary {
+  color: var(--dsw-alias-text-tertiary);
+  font-family: var(--ds-font-family-code);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-details {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.tool-details summary {
+  color: var(--dsw-alias-text-tertiary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-details pre {
+  max-height: 260px;
+  overflow: auto;
+  margin-top: 6px;
+}
+
 .message-content p { margin: 0 0 8px; }
 .message-content p:last-child { margin-bottom: 0; }
 .message-content table { border-collapse: collapse; margin: 10px 0; width: min(100%, 720px); font-size: 13px; }

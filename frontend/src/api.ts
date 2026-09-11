@@ -195,6 +195,14 @@ class ApiClient {
     return result.data;
   }
 
+  async restoreWorkspace(sessionId: string, checkpointHash: string, runId: string, worktreeName: string, expectedSeq: number): Promise<SessionEvent> {
+    const result = await this.request<SessionEvent>(
+      'POST', `/sessions/${encodeURIComponent(sessionId)}/workspace/restore`,
+      { body: { checkpointHash, runId, worktreeName, expectedSeq } },
+    );
+    return result.data;
+  }
+
   async continueSession(sessionId: string, expectedSeq: number, checkpointHash = '', requestId = ''): Promise<SessionRun> {
     const result = await this.request<SessionRun>(
       'POST', `/sessions/${encodeURIComponent(sessionId)}/continue`,

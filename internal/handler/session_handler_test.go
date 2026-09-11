@@ -3,6 +3,8 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,6 +153,7 @@ func sessionTestRouter(ownerID uint, workbench *session.Workbench, managers ...*
 	sessions.GET("/:id/runs/:runId", sessionHandler.RunDetail)
 	sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 	sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
+	sessions.POST("/:id/workspace/restore", sessionHandler.RestoreWorkspace)
 	sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 	sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 	sessions.DELETE("/:id", sessionHandler.Delete)
@@ -287,6 +290,77 @@ func TestWorkspaceManifestIncludesBoundWorktreeDiff(t *testing.T) {
 	response := performSessionRequest(sessionTestRouter(7, workbench, manager), http.MethodGet, "/sessions/"+created.ID+"/workspace-manifest", nil)
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"available":true`)) || !bytes.Contains(response.Body.Bytes(), []byte("changed.txt")) {
 		t.Fatalf("workspace diff missing: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRestoreWorkspaceRouteAppliesLedgerTransitionAndReceipts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	worktreePath := filepath.Join(root, ".agent", "worktrees", "resume")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(worktreePath, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("after"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workbench, ledger := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(ctx, 7, "repo", "restore", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "change")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 3, "session/continued", map[string]any{"request_id": "restore-request", "run_id": "restore-run", "checkpoint_hash": checkpoint.Hash, "target_event_id": message.ID, "target_seq": message.Seq, "target_checksum": message.Hash, "resume_count": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, "session/run-leased", map[string]any{"run_id": "restore-run", "request_id": "restore-request", "lease_id": "restore-lease", "worker_id": "handler", "attempt": 1, "lease_until": time.Now().Add(time.Minute).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	transitionHash := func(value string) string { sum := sha256.Sum256([]byte(value)); return hex.EncodeToString(sum[:]) }
+	comboHash := func(before, after string) string {
+		sum := sha256.New()
+		_, _ = sum.Write([]byte(before))
+		_, _ = sum.Write([]byte{0})
+		_, _ = sum.Write([]byte(after))
+		return hex.EncodeToString(sum.Sum(nil))
+	}
+	modification := map[string]any{"run_id": "restore-run", "tool_call_id": "write-1", "tool_name": "Write", "operation": "Write", "summary": "Write modified notes.txt", "path": "notes.txt", "before": "before", "after": "after", "before_sha256": transitionHash("before"), "after_sha256": transitionHash("after"), "diff_sha256": comboHash("before", "after")}
+	if _, err := ledger.Append(ctx, created.ID, 5, "code/modified", modification); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 6, "session/run-completed", map[string]any{"run_id": "restore-run", "request_id": "restore-request", "lease_id": "restore-lease", "attempt": 1}); err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(root, "HEAD")
+	manager.Restore([]worktree.Worktree{{Name: "resume", Path: worktreePath, ParentSessionID: created.ID, Status: worktree.AgentWorktreeActive, Active: true}})
+	router := sessionTestRouter(7, workbench, manager)
+	body := map[string]any{"checkpointHash": checkpoint.Hash, "runId": "restore-run", "worktreeName": "resume", "expectedSeq": int64(7)}
+	response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/workspace/restore", body)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"type":"workspace/restore-completed"`)) {
+		t.Fatalf("restore route status=%d body=%s", response.Code, response.Body.String())
+	}
+	got, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "before" {
+		t.Fatalf("restored file = %q, want before", got)
+	}
+	stale := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/workspace/restore", body)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale restore status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	foreign := performSessionRequest(sessionTestRouter(8, workbench, manager), http.MethodPost, "/sessions/"+created.ID+"/workspace/restore", body)
+	missing := performSessionRequest(sessionTestRouter(8, workbench, manager), http.MethodPost, "/sessions/missing/workspace/restore", body)
+	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("foreign=%d %q missing=%d %q", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
 	}
 }
 

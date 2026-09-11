@@ -1,6 +1,10 @@
 package session
 
-import "testing"
+import (
+	"testing"
+
+	"code-agent/internal/orchestrator"
+)
 
 func TestValidateCodeModificationPayloadRejectsEscapingPaths(t *testing.T) {
 	valid := codeModificationPayload{
@@ -16,5 +20,16 @@ func TestValidateCodeModificationPayloadRejectsEscapingPaths(t *testing.T) {
 	valid.Path = "src/example.txt"
 	if err := validateCodeModificationPayload(valid); err != nil {
 		t.Fatalf("valid relative path rejected: %v", err)
+	}
+}
+
+func TestCodeModificationPayloadRetainsContentForBackendRestore(t *testing.T) {
+	result := orchestrator.ToolResult{ToolName: "Write", ToolCallID: "call", Changes: []orchestrator.CodeChange{{Path: "src/a.txt", Before: "before", After: "after"}}}
+	payloads := codeModificationPayloads(result, "run")
+	if len(payloads) != 1 {
+		t.Fatalf("payload count = %d, want 1", len(payloads))
+	}
+	if payloads[0].Before != "before" || payloads[0].After != "after" {
+		t.Fatalf("payload content = before=%q after=%q", payloads[0].Before, payloads[0].After)
 	}
 }

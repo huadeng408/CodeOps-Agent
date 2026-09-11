@@ -100,6 +100,13 @@ type workspaceWorktree struct {
 	DiffError string   `json:"diffError,omitempty"`
 }
 
+type workspaceRestoreRequest struct {
+	CheckpointHash string `json:"checkpointHash"`
+	RunID          string `json:"runId"`
+	WorktreeName   string `json:"worktreeName"`
+	ExpectedSeq    *int64 `json:"expectedSeq"`
+}
+
 func (h *SessionHandler) Create(c *gin.Context) {
 	owner, err := authenticatedOwner(c)
 	if err != nil {
@@ -281,6 +288,54 @@ func (h *SessionHandler) WorkspaceManifest(c *gin.Context) {
 		manifest.Reason = ""
 	}
 	writeSessionData(c, http.StatusOK, manifest)
+}
+
+// RestoreWorkspace applies only ledger-backed file transitions to the
+// session-bound managed worktree. The browser cannot provide file contents.
+func (h *SessionHandler) RestoreWorkspace(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	var req workspaceRestoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.ExpectedSeq == nil || strings.TrimSpace(req.CheckpointHash) == "" || strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.WorktreeName) == "" {
+		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, errors.New("checkpointHash, runId, worktreeName, and expectedSeq are required")), "checkpointHash, runId, worktreeName, and expectedSeq are required")
+		return
+	}
+	if h.worktree == nil {
+		writeSessionError(c, session.ErrSessionStateConflict, "workspace recovery is unavailable")
+		return
+	}
+	if _, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id")); err != nil {
+		writeSessionError(c, err, "session not found")
+		return
+	}
+	name := strings.TrimSpace(req.WorktreeName)
+	var bound *worktree.Worktree
+	for _, candidate := range h.worktree.List() {
+		if candidate.Name == name && (candidate.ParentSessionID == c.Param("id") || candidate.ChildSessionID == c.Param("id")) {
+			copy := candidate
+			bound = &copy
+			break
+		}
+	}
+	if bound == nil || strings.TrimSpace(bound.Path) == "" {
+		writeSessionError(c, session.ErrSessionStateConflict, "workspace is not bound to this session")
+		return
+	}
+	receipt, err := h.workbench.RestoreCodeChanges(c.Request.Context(), owner, c.Param("id"), req.CheckpointHash, req.RunID, *req.ExpectedSeq, func(changes []session.CodeFileTransition) error {
+		transitions := make([]worktree.FileTransition, 0, len(changes))
+		for _, change := range changes {
+			transitions = append(transitions, worktree.FileTransition{Path: change.Path, Before: change.Before, After: change.After})
+		}
+		return worktree.RestoreFileTransitions(c.Request.Context(), bound.Path, transitions)
+	})
+	if err != nil {
+		writeSessionError(c, err, "failed to restore workspace")
+		return
+	}
+	writeSessionData(c, http.StatusOK, receipt)
 }
 
 func (h *SessionHandler) UpdateTitle(c *gin.Context) {

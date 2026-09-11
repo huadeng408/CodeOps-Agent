@@ -37,6 +37,8 @@ type codeModificationPayload struct {
 	BeforeSHA256 string `json:"before_sha256"`
 	AfterSHA256  string `json:"after_sha256"`
 	DiffSHA256   string `json:"diff_sha256"`
+	Before       string `json:"before,omitempty"`
+	After        string `json:"after,omitempty"`
 }
 
 func codeModificationPayloads(result orchestrator.ToolResult, runID string) []codeModificationPayload {
@@ -54,6 +56,7 @@ func codeModificationPayloads(result orchestrator.ToolResult, runID string) []co
 			Path: path, Operation: result.ToolName, Summary: result.ToolName + " modified " + path,
 			BeforeSHA256: hashCodeState(change.Before), AfterSHA256: hashCodeState(change.After),
 			DiffSHA256: hashCodeTransition(change.Before, change.After),
+			Before: change.Before, After: change.After,
 		})
 	}
 	return out
