@@ -99,6 +99,21 @@ missing interface and then passed after implementation. Full Python regression:
 gap, but does not claim that the broader browser or production acceptance is
 complete.
 
+## Follow-up: Browser Checkpoint Continue After Migration
+
+In the running interview session, the browser clicked the visible checkpoint
+`恢复` control and accepted its confirmation. The event count increased from
+167 to 168 and the session projected from `done` to `paused`; the recovery panel
+showed the existing run lineage and a `继续历史任务` action. After closing the
+details panel, the browser entered a natural-language request and clicked
+`发送`. The provider completed the request, the session returned to `done`, and
+the UI showed 188 persisted events, five messages, 84 tool records, two approval
+records, and one modification. The assistant response explicitly recalled the
+interview persistence constraint. A subsequent real browser reload retained
+the same 188-event projection and response. This receipt verifies checkpoint
+restore followed by ordinary continuation; it does not close the separate
+failure-retry-lineage or managed-worktree restore gates.
+
 The browser WebSocket was also exercised across a real Go server restart. The
 UI changed to `重连中` with `Bad Gateway` while the process was down, then the
 standard helper restarted the configured server and the UI returned to `实时`.

@@ -53,6 +53,15 @@ Python full regression is 2280 passed / 15 skipped; the broader acceptance
 remains BLOCKED for the still-missing browser retry/worktree/transport and
 fresh 200 assistant-turn evidence.
 
+2026-09-12 browser follow-up: on the running interview session, clicking the
+checkpoint `恢复` appended event 168 and projected `done -> paused`. After the
+details panel was closed, a natural-language message was sent through the
+normal input/button path; the provider completed it, the session returned to
+`done`, and the UI showed 188 persisted events with the assistant recalling the
+interview persistence constraint. A browser reload retained the same 188-event
+projection and answer. This is fresh checkpoint/continue persistence evidence;
+failure retry lineage and managed worktree restore remain BLOCKED.
+
 2026-09-11 current follow-up: fixed the real Anthropic two-system-message
 compaction boundary bug with a red-to-green regression. An 8192-token browser
 probe now commits canonical summaries (221 source events, then recompaction)
