@@ -5,6 +5,12 @@
 Execution remains ACTIVE; full goal acceptance remains BLOCKED. The entries
 below this section are historical progress notes, not the current gate counts.
 
+- Operator constraint for the interview demo: persistent context is required.
+  Refresh, process restart, compaction, and continuation must retain the same
+  Session Ledger facts and revised constraints. In-memory chat history is not
+  sufficient for the demo path. This is an acceptance requirement, not a new
+  VERIFIED claim.
+
 - Session-scoped workspace restore is now implemented behind the canonical
   ledger: `POST /sessions/:id/workspace/restore` accepts only checkpoint/run/
   worktree identifiers plus the ledger CAS sequence, derives backend-only
@@ -35,6 +41,17 @@ below this section are historical progress notes, not the current gate counts.
   cannot recover a result that was never stored; they fail closed on replay.
 
 See `docs/interview-verified-2026-09-11.md` for test names and browser evidence.
+
+2026-09-12 follow-up: SQLite long-term memory now has an explicit
+`migrate_legacy_memory()` conversion seam. It preflights every row against the
+known pre-metadata checksum, fails closed before any write on an unknown or
+tampered row, re-signs verified rows with the current canonical format, and
+retains the original checksum in `source_checksum` with `source_type` and
+`source_revision` provenance. Re-running is idempotent (`skipped`), and the
+regression tests cover both successful conversion and no-partial-commit failure.
+Python full regression is 2280 passed / 15 skipped; the broader acceptance
+remains BLOCKED for the still-missing browser retry/worktree/transport and
+fresh 200 assistant-turn evidence.
 
 2026-09-11 current follow-up: fixed the real Anthropic two-system-message
 compaction boundary bug with a red-to-green regression. An 8192-token browser

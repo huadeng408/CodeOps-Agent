@@ -360,6 +360,77 @@ def test_search_memory_rejects_tampered_created_at(tmp_path: Path) -> None:
     store.close()
 
 
+def test_migrate_legacy_memory_is_explicit_idempotent_and_preserves_source(tmp_path: Path) -> None:
+    database = tmp_path / "context.sqlite"
+    store = SQLiteContextStore(database)
+    legacy_id = "legacy-1"
+    session_id = "session-legacy"
+    content = "legacy durable checkpoint"
+    tags = ("workflow", "recovery")
+    created_at = "2026-09-01T00:00:00+00:00"
+    legacy_payload = {"id": legacy_id, "session_id": session_id, "content": content, "tags": tags}
+    legacy_checksum = hashlib.sha256(
+        __import__("json").dumps(legacy_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    store._connection.execute(
+        "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum) VALUES (?, ?, ?, ?, ?, ?)",
+        (legacy_id, session_id, content, __import__("json").dumps(tags), created_at, legacy_checksum),
+    )
+    store._connection.commit()
+
+    report = store.migrate_legacy_memory()
+    assert report.migrated == 1
+    assert report.rejected == 0
+    assert store.search_memory("legacy checkpoint")[0].content == content
+
+    again = store.migrate_legacy_memory()
+    assert again.migrated == 0
+    assert again.skipped == 1
+    source = store._connection.execute(
+        "SELECT checksum, source_checksum FROM long_term_memory WHERE id = ?", (legacy_id,)
+    ).fetchone()
+    assert source["checksum"] != legacy_checksum
+    assert source["source_checksum"] == legacy_checksum
+    store.close()
+
+
+def test_migrate_legacy_memory_fails_closed_without_partial_commit(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    store._connection.execute(
+        "INSERT INTO long_term_memory(id, session_id, content, tags_json, created_at, checksum) VALUES (?, ?, ?, ?, ?, ?)",
+        ("legacy-bad", "session-legacy", "untrusted", "[]", "2026-09-01T00:00:00+00:00", "bad"),
+    )
+    store._connection.commit()
+
+    with pytest.raises(ValueError, match="legacy memory checksum"):
+        store.migrate_legacy_memory()
+    count = store._connection.execute(
+        "SELECT COUNT(*) AS n FROM long_term_memory WHERE id LIKE 'legacy-migrated:%'"
+    ).fetchone()["n"]
+    assert count == 0
+    store.close()
+
+
+def test_search_memory_rejects_tampered_legacy_source_checksum(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    record = store.add_memory(
+        "session-1",
+        "migrated memory provenance",
+        source_type="legacy-memory",
+        source_id="legacy-1",
+        source_revision="legacy-checksum",
+    )
+    store._connection.execute(
+        "UPDATE long_term_memory SET source_checksum = ? WHERE id = ?",
+        ("tampered-source", record.id),
+    )
+    store._connection.commit()
+
+    with pytest.raises(ValueError, match="source checksum mismatch"):
+        store.search_memory("provenance")
+    store.close()
+
+
 def test_search_memory_filters_before_applying_limit(tmp_path: Path) -> None:
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     store.add_memory("session-1", "target durable workflow memory", ["target"])

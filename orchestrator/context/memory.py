@@ -250,6 +250,21 @@ def _canonical_memory(
     )
 
 
+def _legacy_memory_checksum(
+    memory_id: str, session_id: str, content: str, tags: tuple[str, ...]
+) -> str:
+    """Checksum used by the pre-metadata long-term memory format."""
+    payload = {
+        "id": memory_id,
+        "session_id": session_id,
+        "content": content,
+        "tags": tags,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ContextEvent:
     event_id: str
@@ -275,6 +290,14 @@ class LongTermMemory:
     source_revision: str = ""
     revision: int = 1
     expires_at: str = ""
+    source_checksum: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMigrationReport:
+    migrated: int
+    skipped: int
+    rejected: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,11 +373,131 @@ class SQLiteContextStore:
                 ("source_revision", "TEXT NOT NULL DEFAULT ''"),
                 ("revision", "INTEGER NOT NULL DEFAULT 1"),
                 ("expires_at", "TEXT NOT NULL DEFAULT ''"),
+                ("source_checksum", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in memory_columns:
                     self._connection.execute(
                         f"ALTER TABLE long_term_memory ADD COLUMN {name} {definition}"
                     )
+
+    def migrate_legacy_memory(self) -> MemoryMigrationReport:
+        """Explicitly upgrade pre-metadata memory rows without weakening reads.
+
+        Every candidate is verified before the write transaction starts. The
+        original checksum is retained as ``source_checksum`` and the row is
+        re-signed using the current canonical format, making the operation
+        idempotent while preserving one writable memory table.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, session_id, content, tags_json, created_at, checksum, "
+                "source_type, source_id, source_revision, revision, expires_at, source_checksum "
+                "FROM long_term_memory ORDER BY id"
+            ).fetchall()
+
+        plans: list[tuple[str, str, str, str, str, int, str, str]] = []
+        skipped = 0
+        for row in rows:
+            memory_id = str(row["id"])
+            session_id = str(row["session_id"])
+            content = str(row["content"])
+            try:
+                raw_tags = json.loads(str(row["tags_json"]))
+                if not isinstance(raw_tags, list):
+                    raise ValueError("tags must be a list")
+                tags = tuple(str(item) for item in raw_tags)
+                current_source_type = str(row["source_type"] or "")
+                current_source_id = str(row["source_id"] or "")
+                current_source_revision = str(row["source_revision"] or "")
+                current_revision = int(row["revision"] or 1)
+                current_expires_at = str(row["expires_at"] or "")
+                current_checksum = hashlib.sha256(
+                    _canonical_memory(
+                        memory_id,
+                        session_id,
+                        content,
+                        tags,
+                        str(row["created_at"]),
+                        current_source_type,
+                        current_source_id,
+                        current_source_revision,
+                        current_revision,
+                        current_expires_at,
+                    ).encode("utf-8")
+                ).hexdigest()
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(f"legacy memory checksum mismatch for {memory_id}") from exc
+
+            stored_checksum = str(row["checksum"])
+            if stored_checksum == current_checksum:
+                skipped += 1
+                continue
+            legacy_checksum = _legacy_memory_checksum(memory_id, session_id, content, tags)
+            if stored_checksum != legacy_checksum:
+                raise ValueError(f"legacy memory checksum mismatch for {memory_id}")
+            _session_id(session_id)
+            if not content or _redact_text(content) != content:
+                raise ValueError(f"legacy memory checksum mismatch for {memory_id}")
+            source_type = "legacy-memory"
+            source_id = memory_id
+            source_revision = legacy_checksum
+            revision = 1
+            expires_at = ""
+            migrated_checksum = hashlib.sha256(
+                _canonical_memory(
+                    memory_id,
+                    session_id,
+                    content,
+                    tags,
+                    str(row["created_at"]),
+                    source_type,
+                    source_id,
+                    source_revision,
+                    revision,
+                    expires_at,
+                ).encode("utf-8")
+            ).hexdigest()
+            plans.append(
+                (
+                    migrated_checksum,
+                    source_type,
+                    source_id,
+                    source_revision,
+                    legacy_checksum,
+                    revision,
+                    expires_at,
+                    memory_id,
+                )
+            )
+
+        if not plans:
+            return MemoryMigrationReport(0, skipped, 0)
+        with self._lock, self._write_transaction():
+            for (
+                migrated_checksum,
+                source_type,
+                source_id,
+                source_revision,
+                legacy_checksum,
+                revision,
+                expires_at,
+                memory_id,
+            ) in plans:
+                self._connection.execute(
+                    "UPDATE long_term_memory SET checksum = ?, source_type = ?, source_id = ?, "
+                    "source_revision = ?, source_checksum = ?, revision = ?, expires_at = ? WHERE id = ?",
+                    (
+                        migrated_checksum,
+                        source_type,
+                        source_id,
+                        source_revision,
+                        legacy_checksum,
+                        revision,
+                        expires_at,
+                        memory_id,
+                    ),
+                )
+        return MemoryMigrationReport(len(plans), skipped, 0)
 
     def append(self, session_id: str, kind: str, payload: dict[str, Any]) -> ContextEvent:
         session_id = _session_id(session_id)
@@ -597,7 +740,7 @@ class SQLiteContextStore:
         phrase = " ".join(str(query).casefold().split())
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at FROM long_term_memory "
+                "SELECT id, session_id, content, tags_json, created_at, checksum, source_type, source_id, source_revision, revision, expires_at, source_checksum FROM long_term_memory "
                 "ORDER BY created_at DESC, id DESC",
             ).fetchall()
         ranked: list[tuple[int, str, str, LongTermMemory]] = []
@@ -608,6 +751,7 @@ class SQLiteContextStore:
             source_revision = str(row["source_revision"] or "")
             revision = int(row["revision"] or 1)
             expires_at = str(row["expires_at"] or "")
+            source_checksum = str(row["source_checksum"] or "")
             if _expired(expires_at):
                 continue
             expected = hashlib.sha256(
@@ -621,6 +765,8 @@ class SQLiteContextStore:
             ).hexdigest()
             if expected != str(row["checksum"]):
                 raise ValueError(f"memory checksum mismatch for {row['id']}")
+            if source_checksum and source_checksum != source_revision:
+                raise ValueError(f"memory source checksum mismatch for {row['id']}")
             content = str(row["content"])
             haystack = " ".join((content, *tags)).casefold()
             if tokens and not any(token in haystack for token in tokens):
@@ -643,7 +789,7 @@ class SQLiteContextStore:
                 content,
                 tags,
                 str(row["created_at"]),
-                str(row["checksum"]), source_type, source_id, source_revision, revision, expires_at,
+                str(row["checksum"]), source_type, source_id, source_revision, revision, expires_at, source_checksum,
             )
             ranked.append((score, str(row["created_at"]), str(row["id"]), memory))
         ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
@@ -906,4 +1052,11 @@ class LayeredContext:
         return {key: value for key, value in event.payload.items() if key in allowed}
 
 
-__all__ = ["ContextEvent", "ContextSnapshot", "LayeredContext", "LongTermMemory", "SQLiteContextStore"]
+__all__ = [
+    "ContextEvent",
+    "ContextSnapshot",
+    "LayeredContext",
+    "LongTermMemory",
+    "MemoryMigrationReport",
+    "SQLiteContextStore",
+]

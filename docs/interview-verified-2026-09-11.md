@@ -85,6 +85,20 @@ reloaded the page. Both the title and paused status persisted from the backend,
 with no visible alert. This verifies the rename/status persistence path; auth,
 WebSocket and CAS remain separate gates.
 
+## Follow-up: Explicit Legacy Memory Migration
+
+The Python SQLite context store now exposes an explicit `migrate_legacy_memory()`
+conversion seam for the pre-metadata checksum format. The operation verifies
+all candidate rows before opening its write transaction, re-signs verified rows
+with the current canonical checksum, and retains the original checksum in
+`source_checksum` plus `source_type`/`source_revision` provenance. A second run
+reports the already canonical row as `skipped`; an unknown checksum raises before
+any migrated row is written. The two regression tests first failed with the
+missing interface and then passed after implementation. Full Python regression:
+2280 passed, 15 skipped, 31 warnings. This closes the explicit migration code
+gap, but does not claim that the broader browser or production acceptance is
+complete.
+
 The browser WebSocket was also exercised across a real Go server restart. The
 UI changed to `重连中` with `Bad Gateway` while the process was down, then the
 standard helper restarted the configured server and the UI returned to `实时`.
