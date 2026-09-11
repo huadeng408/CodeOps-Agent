@@ -82,6 +82,55 @@ class ResumeRecordingLLM(NoToolLLM):
         return ChatResponse(text="resumed after tool")
 
 
+class ExplodingLLM:
+    model = "fake"
+
+    async def chat(self, request):
+        raise RuntimeError("provider transport exploded with secret-token")
+
+
+def test_provider_runtime_failure_is_converted_to_safe_done_and_receipt(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=ExplodingLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    responses = list(
+        runner.run(
+            "continue the task",
+            iter(()),
+            session_id="provider-failure",
+            run_id="run:provider-failure",
+            surface_sha256="surface:provider-failure",
+        )
+    )
+
+    assert responses[-1].HasField("done")
+    assert responses[-1].done.success is False
+    assert responses[-1].done.message == "agent provider connection failed; retry this task"
+    events = app.context_store.events("provider-failure")
+    failures = [
+        event
+        for event in events
+        if event.kind == "execution_result" and event.payload.get("success") is False
+    ]
+    assert failures
+    assert failures[-1].payload["error_code"] == "provider_transport_error"
+    assert "secret-token" not in repr(events)
+    app.close()
+
+
 @pytest.mark.parametrize("history", [
     [{"role": "user", "content": f"fact-{index}"} for index in range(45)],
     [{"role": "user", "content": "x" * 5000 + " exact-tail-fact"}],

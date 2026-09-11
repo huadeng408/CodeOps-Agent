@@ -86,6 +86,30 @@ MAX_LONG_TERM_MEMORY_CHARS = 4_096
 MAX_CONSECUTIVE_EMPTY_RESPONSES = 3
 
 
+def _provider_failure_details(exc: Exception) -> tuple[str, str, bool]:
+    """Return a stable, credential-free classification for model failures.
+
+    Provider SDKs frequently include request URLs, response bodies, and even
+    authorization headers in exception text.  That text is useful to a local
+    debugger, but must never cross the durable session surface or the gRPC
+    response.  Keep this classifier deliberately small and deterministic so a
+    failed continuation can be retried against the same checkpoint.
+    """
+
+    message = str(exc).lower()
+    if is_context_window_exceeded(exc):
+        return "context_window_exceeded", "context window exceeded; retry this task", True
+    if any(token in message for token in ("401", "403", "unauthorized", "authentication", "api key")):
+        return "provider_authentication_error", "model authentication failed; check provider credentials", False
+    if any(token in message for token in ("timeout", "timed out", "deadline")):
+        return "provider_timeout", "model request timed out; retry this task", True
+    if any(token in message for token in (
+        "connection", "transport", "broken pipe", "reset by peer", "unexpected eof",
+    )):
+        return "provider_transport_error", "agent provider connection failed; retry this task", True
+    return "provider_runtime_error", "agent provider failed; retry this task", True
+
+
 def _sub_agent_request_id(session_id: str, call_id: str) -> str:
     seed = f"{session_id.strip()}:{call_id.strip()}".strip(":") or "anonymous"
     return "spawn-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
@@ -854,7 +878,40 @@ class ConversationRunner:
                 return
             except Exception as exc:
                 if not is_context_window_exceeded(exc) or overflow_retries >= self.max_overflow_retries:
-                    raise
+                    # A provider/runtime exception must terminate as a durable
+                    # failed turn rather than aborting the gRPC stream with no
+                    # terminal Done.  Preserve the historical process
+                    # interruption behaviour: callers use that exception to
+                    # exercise explicit restart/retry recovery.
+                    lowered = str(exc).lower()
+                    if "process interruption" in lowered or "simulated process" in lowered:
+                        raise
+                    error_code, public_message, retryable = _provider_failure_details(exc)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "status": "provider_failed",
+                            "success": False,
+                            "error_code": error_code,
+                            "retryable": retryable,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    yield self._text(public_message)
+                    yield self._session_meta(
+                        turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                    )
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "provider_failed",
+                        turn=turn,
+                        error_code=error_code,
+                        retryable=retryable,
+                        message=public_message,
+                    )
+                    return
                 before = self._message_fingerprint(messages)
                 compacted_messages = self._compact_messages(
                     messages,
@@ -865,7 +922,32 @@ class ConversationRunner:
                 )
                 after = self._message_fingerprint(compacted_messages)
                 if before == after:
-                    raise
+                    error_code, public_message, retryable = _provider_failure_details(exc)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "status": "provider_failed",
+                            "success": False,
+                            "error_code": error_code,
+                            "retryable": retryable,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    yield self._text(public_message)
+                    yield self._session_meta(
+                        turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                    )
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "provider_failed",
+                        turn=turn,
+                        error_code=error_code,
+                        retryable=retryable,
+                        message=public_message,
+                    )
+                    return
                 messages = compacted_messages
                 overflow_retries += 1
                 continue
@@ -1749,7 +1831,35 @@ class ConversationRunner:
                     not is_context_window_exceeded(exc)
                     or final_overflow_retries >= self.max_overflow_retries
                 ):
-                    raise
+                    lowered = str(exc).lower()
+                    if "process interruption" in lowered or "simulated process" in lowered:
+                        raise
+                    error_code, public_message, retryable = _provider_failure_details(exc)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "status": "provider_failed",
+                            "success": False,
+                            "error_code": error_code,
+                            "retryable": retryable,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    yield self._text(public_message)
+                    yield self._session_meta(
+                        final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                    )
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "provider_failed",
+                        turn=final_turn,
+                        error_code=error_code,
+                        retryable=retryable,
+                        message=public_message,
+                    )
+                    return
                 before = self._message_fingerprint(messages)
                 compacted_messages = self._compact_messages(
                     messages,
@@ -1760,7 +1870,32 @@ class ConversationRunner:
                 )
                 after = self._message_fingerprint(compacted_messages)
                 if before == after:
-                    raise
+                    error_code, public_message, retryable = _provider_failure_details(exc)
+                    self._persist_event(
+                        session_id,
+                        "execution_result",
+                        {
+                            "status": "provider_failed",
+                            "success": False,
+                            "error_code": error_code,
+                            "retryable": retryable,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    yield self._text(public_message)
+                    yield self._session_meta(
+                        final_turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                    )
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "provider_failed",
+                        turn=final_turn,
+                        error_code=error_code,
+                        retryable=retryable,
+                        message=public_message,
+                    )
+                    return
                 messages = compacted_messages
                 final_overflow_retries += 1
                 continue
@@ -3268,6 +3403,7 @@ class ConversationRunner:
     ) -> orchestrator_pb2.OrchestratorMessage:
         safe_details = dict(details)
         response = safe_details.pop("response", "")
+        public_message = str(safe_details.pop("message", "") or "")
         if response:
             safe_details["response_sha256"] = self._digest_value(response)
         if self._hook_errors:
@@ -3303,7 +3439,9 @@ class ConversationRunner:
                     message="checkpoint persistence unavailable",
                 )
             )
-        return self._done(success)
+        return orchestrator_pb2.OrchestratorMessage(
+            done=orchestrator_pb2.Done(success=success, message=public_message)
+        )
 
     @staticmethod
     def _digest_value(value: Any) -> str:

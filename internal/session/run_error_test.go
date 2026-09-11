@@ -18,6 +18,8 @@ func TestPublicRunErrorNeverIncludesProviderPayload(t *testing.T) {
 		{errors.New("provider error 401: secret-token"), "model authentication failed; check provider credentials"},
 		{errors.New("provider error 429: secret-token"), "model rate limit reached; retry later"},
 		{context.DeadlineExceeded, "model request timed out; retry this task"},
+		{errors.New("orchestrator conversation failed: agent provider connection failed; retry this task"), "agent provider connection failed; retry this task"},
+		{errors.New("orchestrator conversation failed: agent provider failed; retry this task"), "agent provider failed; retry this task"},
 		{errors.New("secret-token"), "agent continuation failed"},
 		{nil, "agent continuation failed"},
 	} {

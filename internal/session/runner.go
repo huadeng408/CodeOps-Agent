@@ -1771,6 +1771,10 @@ func publicRunError(cause error) string {
 	switch {
 	case errors.Is(cause, orchestrator.ErrCompactionPersistence):
 		return "context compaction could not be persisted; task stopped"
+	case strings.Contains(message, "agent provider connection failed") || strings.Contains(message, "provider_transport_error"):
+		return "agent provider connection failed; retry this task"
+	case strings.Contains(message, "agent provider failed") || strings.Contains(message, "provider_runtime_error"):
+		return "agent provider failed; retry this task"
 	case strings.Contains(message, "401"), strings.Contains(message, "authentication_error"):
 		return "model authentication failed; check provider credentials"
 	case strings.Contains(message, "429"):
