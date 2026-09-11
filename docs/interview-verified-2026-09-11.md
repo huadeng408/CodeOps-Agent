@@ -435,3 +435,37 @@ The two-turn desktop and 390x844 mobile screenshots were inspected:
 Message text and the composer did not overlap in these views. No claim is made
 that every button, browser failure/retry lineage, or Git restoration passed in
 this follow-up. Those broader acceptance items remain open.
+
+## Fresh Browser Checkpoint/CAS Receipt (2026-09-11)
+
+Using a newly registered browser account and the production launcher, Chromium
+verified registration auto-login, session creation, natural-language submit,
+WebSocket ticket/reconnect polling, and page refresh on a fresh disposable
+session. The message produced a durable user/message fact and a queued/running
+session/continued lineage without requiring a manual checkpoint for the
+ordinary turn.
+
+The visible checkpoint form listed only active surface events. Creating a
+browser checkpoint appended one immutable checkpoint/create fact. Restoring a
+missing hash returned one consistent 404. Restoring the same checkpoint with
+stale expectedSeq=0 returned 409 and appended no event. Clicking the visible
+restore control returned 200, appended exactly one session/rewind fact at the
+current sequence, and left all prior event IDs and checksums intact.
+
+The screenshot artifact is output/playwright/live-checkpoint-restore.png.
+This receipt proves the browser checkpoint/CAS conversation-surface path only;
+it does not prove filesystem/Git patch restoration, arbitrary 200-turn memory,
+or every visible control. Those goal items remain BLOCKED pending fresh
+evidence.
+
+Fresh gates for this receipt: go test ./... -count=1 exit 0; python -m
+pytest -q exit 0 (2277 passed, 15 skipped, 31 warnings); npm --prefix frontend
+run build exit 0; go vet ./... exit 0; and git diff --check exit 0. Phoenix was
+unavailable, so telemetry stayed degraded and no tracing success claim is made.
+
+The final full race run, go test -race ./... -count=1, exited 0. Two earlier
+full race attempts exposed a low-frequency failure in
+TestSessionRunnerRecoversPendingApprovalAfterLedgerReopen (pending approval was
+not observed once; the recovered run ended failed once). The isolated race test
+then passed 20 consecutive runs and the final full run passed. This is recorded
+as intermittent evidence rather than silently treated as a deterministic fix.
