@@ -151,6 +151,10 @@ type LogConfig struct {
 // KafkaConfig 存储 Kafka 相关的配置。
 type KafkaConfig struct {
 	Brokers             string            `mapstructure:"brokers"`
+	// ConsumersEnabled controls the optional corpus ingestion consumers. The
+	// interactive Agent Harness does not require Kafka, so this is fail-closed
+	// by default and must be enabled explicitly for ingestion deployments.
+	ConsumersEnabled    bool              `mapstructure:"consumers_enabled"`
 	Topic               string            `mapstructure:"topic"`
 	Topics              KafkaTopicsConfig `mapstructure:"topics"`
 	ConsumerGroupPrefix string            `mapstructure:"consumer_group_prefix"`

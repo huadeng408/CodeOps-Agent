@@ -1,0 +1,9 @@
+# Local override template. Keep credentials in process environment variables;
+# do not commit .env files or provider secrets.
+database:
+  mysql:
+    dsn: "${MYSQL_DSN:}"
+jwt:
+  secret: "${JWT_SECRET:}"
+kafka:
+  consumers_enabled: false

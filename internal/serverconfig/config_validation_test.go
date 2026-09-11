@@ -45,3 +45,13 @@ func TestConfigValidateRejectsWildcardCorsAndPlaceholderSecret(t *testing.T) {
 		t.Fatalf("unsafe configuration was accepted or error was incomplete: %v", err)
 	}
 }
+
+func TestConfigValidateErrorExplainsExternalSecretInjection(t *testing.T) {
+	err := (Config{}).Validate()
+	if err == nil {
+		t.Fatal("empty configuration unexpectedly validated")
+	}
+	if !strings.Contains(err.Error(), "jwt.secret") || !strings.Contains(err.Error(), "database.mysql.dsn") {
+		t.Fatalf("validation error omitted credential fields: %v", err)
+	}
+}

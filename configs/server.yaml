@@ -26,6 +26,9 @@ log:
 
 kafka:
   brokers: "127.0.0.1:9092"
+  # Corpus consumers are optional. Enable explicitly in an ingestion worker;
+  # the interactive Agent Harness remains usable without a Kafka broker.
+  consumers_enabled: false
   topic: "${CODE_AGENT_KAFKA_PARSE_TOPIC:file-parse}"
   consumer_group_prefix: "${CODE_AGENT_KAFKA_CONSUMER_GROUP_PREFIX:paismart-go}"
   max_retries: 3

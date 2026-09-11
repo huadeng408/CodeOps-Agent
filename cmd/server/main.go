@@ -115,7 +115,7 @@ func main() {
 	serverconfig.Init(configPath)
 	cfg := serverconfig.Conf
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "server configuration rejected: %v\n", err)
+		fmt.Fprintf(os.Stderr, "server configuration rejected: %v; provide secrets through the process environment (for example MYSQL_DSN and JWT_SECRET) or run scripts/start-interview.ps1 with a provider config; credentials are never read from tracked files\n", err)
 		return
 	}
 
@@ -422,7 +422,11 @@ func main() {
 		ingestionClient,
 		documentRepo,
 	)
-	go kafka.StartPipelineConsumers(cfg.Kafka, processor, pipelineTaskRepo)
+	if cfg.Kafka.ConsumersEnabled {
+		go kafka.StartPipelineConsumers(cfg.Kafka, processor, pipelineTaskRepo)
+	} else {
+		log.Info("Kafka pipeline consumers disabled; corpus ingestion worker is not started")
+	}
 
 	initCtx, cancelInit := context.WithCancel(context.Background())
 	defer cancelInit()
