@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ContinuationRuntimeStatus, RecoveryManifest, Session, SessionCheckpoint, SessionEvent, SessionRun, WorkspaceManifest } from './types';
 import { api, ApiError } from './api';
 import { createContinuationRequestId } from './continuationRequest';
+import { isSessionSurfaceEvent } from './compactionPresentation';
 
 function readLocalStorage(key: string): string | null {
   try {
@@ -75,7 +76,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
       const targetSeq = marker?.continuation?.targetSeq ?? marker?.rewindTargetSeq;
       setEvents(eventData.filter((event) => {
         const recoveryEvent = event.type === 'session/rewind' || event.type === 'session/continued';
-        const surfaceEvent = ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(event.type);
+        const surfaceEvent = isSessionSurfaceEvent(event);
         return recoveryEvent || (surfaceEvent && (!marker || targetSeq === undefined || event.seq <= targetSeq || event.seq >= marker.seq));
       }));
     } catch (cause) {

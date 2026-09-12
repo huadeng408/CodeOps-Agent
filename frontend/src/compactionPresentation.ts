@@ -9,6 +9,10 @@ interface CompactionEventLike {
   content: string;
 }
 
+export function isSessionSurfaceEvent(event: CompactionEventLike): boolean {
+  return ['user/message', 'assistant/message', 'tool/call', 'tool/result', 'context/compaction'].includes(event.type);
+}
+
 export function isCompactionEvent(event: CompactionEventLike): boolean {
   return event.type === 'context/compaction';
 }

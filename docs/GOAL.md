@@ -4,6 +4,15 @@
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 
+- CheckpointPanel now retains canonical \`context/compaction\` events in its
+  recovery-history surface through the shared \`isSessionSurfaceEvent\`
+  predicate. The regression suite covers this filter contract, and the
+  frontend test/build gates pass. A real browser opened the session details
+  panel and showed ledger #18, 19 events, two completed runs, two continuation
+  records, the latest continuation target, and the workspace recovery summary.
+  The demo Session had no compaction event, so its browser-specific summary
+  rendering remains explicitly unreceipted.
+
 - The frontend now projects canonical \`context/compaction\` events as a visible
   progress card titled \`整理上下文\`, includes them in the progress counter and
   filter, and keeps the bounded summary in the event timeline. Node tests cover
