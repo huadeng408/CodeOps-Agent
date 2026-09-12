@@ -27,6 +27,18 @@ Execution remains ACTIVE; full goal acceptance remains BLOCKED.
   worktree/Git restore click path, or complete tool/approval/code-modification
   receipt; those remain explicitly `BLOCKED`.
 
+- 2026-09-13 browser retry-lineage receipt: in a fresh Chromium session, the
+  Go backend was stopped before sending. The UI showed `Bad Gateway`, entered
+  `重连中`, retained the exact draft, and exposed `重试发送`. After the backend
+  was restored, clicking retry appended the message to the same Session Ledger
+  and created a continuation run. The details surface showed the failed run
+  `run:926ee4d7…`, the successor `run:c7f65552…`, `承接运行 run:926ee4d7…`,
+  `历史失败 1 个`, and `运行历史 2 次`. Tool and approval events remained
+  attached to the successor run, and the UI exposed `继续历史任务` when the
+  successor later failed. This verifies browser failure recovery and preserved
+  run lineage; it does not prove successful provider completion, worktree/Git
+  restore, or a fresh 200-assistant-turn no-forgetting run.
+
 ## Latest Verified Follow-up (2026-09-12)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
