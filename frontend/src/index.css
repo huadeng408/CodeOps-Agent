@@ -985,6 +985,10 @@ button:disabled {
   border-bottom: 1px solid color-mix(in srgb, var(--dsw-static-red-500) 30%, transparent);
 }
 
+.global-error .retry-message-btn {
+  margin-left: 12px;
+}
+
 .inline-error {
   padding: 7px 0;
 }

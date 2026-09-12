@@ -1,12 +1,14 @@
 param(
     [string]$ProviderConfig = (Join-Path $env:USERPROFILE ("Desktop\api$([char]0x5bc6)$([char]0x94a5).txt")),
     [string]$ProviderProfile = '',
-    [switch]$RestartOrchestrator
+    [switch]$RestartOrchestrator,
+    [int]$DockerTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
+. "$PSScriptRoot\rag-agent-e2e-runtime.ps1"
 
 # Configuration is inherited by child processes, never written into launch logs.
 foreach ($file in @('.env', '.env.local')) {
@@ -35,16 +37,7 @@ function Listening([int]$Port) {
     finally { $client.Dispose() }
 }
 
-& docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe' -WindowStyle Hidden
-    $deadline = (Get-Date).AddMinutes(2)
-    do {
-        Start-Sleep -Seconds 2
-        & docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
-    } while ($LASTEXITCODE -ne 0 -and (Get-Date) -lt $deadline)
-    if ($LASTEXITCODE -ne 0) { throw 'Docker did not become ready' }
-}
+Wait-DockerDaemonReady -TimeoutSeconds $DockerTimeoutSeconds
 & docker start codeagent-mysql codeagent-redis codeagent-minio
 if ($LASTEXITCODE -ne 0) { throw 'Required project containers could not start' }
 $deadline = (Get-Date).AddSeconds(60)

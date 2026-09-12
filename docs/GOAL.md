@@ -1,5 +1,35 @@
 # CodeOps-Agent Goal
 
+## Latest Verified Follow-up (2026-09-12)
+
+Execution remains ACTIVE; full goal acceptance remains BLOCKED.
+
+- Message submission now preserves the draft and original request ID when the
+  HTTP request fails. The visible retry action first reloads the canonical
+  Session projection and submits with its latest ledger sequence, preventing a
+  stale CAS cursor from causing repeated 409 failures. Network, 409 and 5xx
+  failures have actionable recovery-oriented messages.
+- The retry module was developed red-to-green with Node native TypeScript tests;
+  the frontend production build passed.
+- Real browser receipt: a dedicated Session began at 1 event. With the expected
+  Go backend process stopped, submission displayed an HTTP 502 recovery message,
+  retained the exact input and exposed the retry button; WebSocket moved to
+  reconnecting. After the normal startup script returned Workbench ready, one
+  retry appended the user message and progress facts, cleared the draft and
+  error, returned the connection to live, and completed at 19 events with
+  status done and the expected assistant reply. This verifies the user-facing
+  send recovery path, not the broader 200-turn or managed-worktree acceptance.
+- The interview startup script now uses the shared bounded Docker readiness
+  module instead of its own unbounded docker info loop. Docker, MySQL, Redis,
+  MinIO, Python 50051, Go 8081 and frontend 3000 were all started through the
+  normal script during this receipt.
+
+The remaining browser retry-lineage, managed-worktree/Git restore, complete
+tool/approval/code-modification receipt and fresh 200 assistant-turn gates
+remain BLOCKED.
+
+## Previous Verified Follow-up (2026-09-11)
+
 ## Latest Verified Follow-up (2026-09-11)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED. The entries

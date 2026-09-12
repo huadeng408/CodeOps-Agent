@@ -56,6 +56,13 @@ def test_e2e_waits_for_docker_desktop_readiness_with_a_shared_helper() -> None:
     assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
 
 
+def test_interview_script_uses_shared_docker_readiness_helper() -> None:
+    source = (ROOT / "scripts" / "start-interview.ps1").read_text(encoding="utf-8")
+    assert "rag-agent-e2e-runtime.ps1" in source
+    assert "Wait-DockerDaemonReady -TimeoutSeconds" in source
+    assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
+
+
 def test_runtime_resolves_and_starts_docker_desktop_before_readiness_poll() -> None:
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     snapshot = (ROOT / "scripts" / "rag_snapshot.ps1").read_text(encoding="utf-8")

@@ -6,6 +6,7 @@ import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
 import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
+import { retryPendingMessage, sendFailureMessage } from './sendRetry';
 
 function renderInlineMarkdown(value: string): ReactNode {
   const parts = value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
@@ -191,6 +192,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pendingRetry, setPendingRetry] = useState<{ sessionId: string; content: string; requestId: string } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -482,12 +484,46 @@ function App() {
     const requestId = messageRequestId(selectedSession.id, content);
     try {
       await api.submitMessage(selectedSession.id, content, selectedSession.eventCount, requestId);
+      setPendingRetry(null);
       setMessage('');
       removeLocalStorage(sessionDraftKey(selectedSession.id));
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
-      setError(errorMessage(cause, '消息发送失败'));
+      setPendingRetry({ sessionId: selectedSession.id, content, requestId });
+      setMessage(content);
+      setError(sendFailureMessage(cause));
+      await refreshSelected().catch(() => undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRetryMessage = async () => {
+    const pending = pendingRetry;
+    if (!pending || busy || !selectedSession || selectedSession.id !== pending.sessionId) return;
+    setBusy(true);
+    setError('');
+    try {
+      await retryPendingMessage(
+        pending,
+        async (sessionId) => {
+          const fresh = await api.getSession(sessionId);
+          setSelectedSession(fresh);
+          setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
+          setRefreshKey((value) => value + 1);
+          return { sessionId: fresh.id, eventCount: fresh.eventCount };
+        },
+        (request) => api.submitMessage(request.sessionId, request.content, request.expectedSeq, request.requestId),
+      );
+      setPendingRetry(null);
+      setMessage('');
+      removeLocalStorage(sessionDraftKey(pending.sessionId));
+      removeLocalStorage(sessionMessageRequestKey(pending.sessionId));
+      await refreshSelected();
+    } catch (cause) {
+      setMessage(pending.content);
+      setError(sendFailureMessage(cause));
       await refreshSelected().catch(() => undefined);
     } finally {
       setBusy(false);
@@ -593,7 +629,7 @@ function App() {
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}
           </div>
         </header>
-        {error && <div className="global-error" role="alert">{error}</div>}
+        {error && <div className="global-error" role="alert">{error}{pendingRetry && selectedSession?.id === pendingRetry.sessionId && <button className="subtle-btn retry-message-btn" type="button" onClick={() => void handleRetryMessage()} disabled={busy}>{busy ? '重试中...' : '重试发送'}</button>}</div>}
         {selectedSession?.run?.status === 'failed' && <div className="global-error" role="alert">{selectedSession.run.error || '任务执行失败'}。可点击“继续任务”重试。</div>}
         {(selectedSession?.run?.status === 'queued' || selectedSession?.run?.status === 'running') && <div className="stream-status" role="status">{selectedSession.run.status === 'queued' ? '任务排队中...' : '正在处理，请稍候...'}</div>}
         <div className="message-list" ref={messageListRef}>
