@@ -4,6 +4,15 @@
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 
+- The frontend now projects canonical \`context/compaction\` events as a visible
+  progress card titled \`整理上下文\`, includes them in the progress counter and
+  filter, and keeps the bounded summary in the event timeline. Node tests cover
+  the presentation contract and the production build passes. A real browser
+  check on the running Workbench selected the \`进展\` filter and displayed five
+  persisted system progress cards, the current-progress card, and historical
+  progress. The demo Session had no compaction event, so browser-specific
+  \`整理上下文\` rendering remains unreceipted rather than overstated.
+
 - Cross-runner restart regression is now covered by
   `TestCompactionSummarySurvivesSessionRunnerRestart`: a canonical
   `context/compaction` event is committed, the first SessionRunner is closed,
