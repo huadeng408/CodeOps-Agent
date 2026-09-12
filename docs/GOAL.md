@@ -1,5 +1,32 @@
 # CodeOps-Agent Goal
 
+## Latest Browser Verification (2026-09-13)
+
+Execution remains ACTIVE; full goal acceptance remains BLOCKED.
+
+- Real Chromium E2E receipt completed against `http://127.0.0.1:3000/`:
+  registered a temporary local demo account, logged in, created and selected a
+  session, submitted natural language, and observed the backend-driven status
+  transition from `running` to `done`. The session grew from 1 to 64 durable
+  events, including 30 tool events and 23 progress events, and rendered an
+  assistant reply.
+- Refresh receipt: after page reload, the same authenticated session reloaded
+  with 64 events, `done` status, the assistant reply, and 23 persisted progress
+  items.
+- Backend restart receipt: verified port `8081` belonged to the project
+  `interview-server.exe`, stopped it, restarted via
+  `scripts/start-interview.ps1`, waited for Workbench ready, then refreshed the
+  same Chromium page. The session, event count, reply, and progress summary
+  remained intact.
+- Authentication receipt: clicked `退出登录`, returned to the login form,
+  logged in again with the same local demo account, and recovered the same
+  session and 64-event history.
+- The receipt proves the interview demo's ordinary conversation, refresh,
+  process-restart persistence, and auth re-entry path. It does not prove a
+  fresh 200-assistant-turn run, failure retry lineage in the browser, managed
+  worktree/Git restore click path, or complete tool/approval/code-modification
+  receipt; those remain explicitly `BLOCKED`.
+
 ## Latest Verified Follow-up (2026-09-12)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
