@@ -39,6 +39,14 @@ Execution remains ACTIVE; full goal acceptance remains BLOCKED.
   run lineage; it does not prove successful provider completion, worktree/Git
   restore, or a fresh 200-assistant-turn no-forgetting run.
 
+- 2026-09-13 browser checkpoint receipt: from the same authenticated Chromium
+  session, opened the Checkpoints panel, created checkpoint "故障恢复前锚点" at
+  event #1, and accepted the append-only restore confirmation. The ledger grew
+  from 215 to 217 events while the original event remained visible; recovery
+  history changed to "恢复 1 次" and "最近恢复到事件 #1". This verifies the
+  user-facing checkpoint create/restore path and append-only semantics. It does
+  not prove managed worktree/Git restoration or 200 assistant-turn memory.
+
 ## Latest Verified Follow-up (2026-09-12)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
