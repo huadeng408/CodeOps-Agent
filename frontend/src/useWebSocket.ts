@@ -1,23 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SessionEvent } from './types';
 import { api } from './api';
+import { persistedCursor } from './ledgerCursor';
 
 interface UseWebSocketOptions {
   sessionId: string | null;
   after?: number;
   onMessage?: (event: SessionEvent) => void;
-}
-
-function persistedCursor(sessionId: string, fallback: number): number {
-  if (fallback >= 0) return fallback;
-  try {
-    const raw = localStorage.getItem("codeops:ledger-cursor:" + sessionId);
-    if (raw === null) return fallback;
-    const cursor = Number.parseInt(raw, 10);
-    return Number.isSafeInteger(cursor) && cursor >= -1 ? cursor : fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 export type WebSocketState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';

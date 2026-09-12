@@ -69,6 +69,14 @@ remain BLOCKED.
   non-blocking. Browser long-dialogue, worktree restore and full receipt gates
   are still not reverified in this stage.
 
+- 2026-09-12 WebSocket continuity follow-up: the reconnect cursor helper now
+  lives in `frontend/src/ledgerCursor.ts` and resumes from the newer of the
+  in-memory cursor and the browser's persisted ledger cursor. This prevents a
+  refresh/reconnect from falling back to an older cursor while keeping browser
+  storage advisory and the Session Ledger canonical. The red regression first
+  exposed the direct-import seam, then passed after extraction (`frontend`: 8
+  tests passed); production TypeScript/Vite build also passed.
+
 ## Previous Verified Follow-up (2026-09-11)
 
 ## Latest Verified Follow-up (2026-09-11)
