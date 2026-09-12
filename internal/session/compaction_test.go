@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	pb "code-agent/gen/codeagentpb"
@@ -75,6 +76,72 @@ func TestRunnerCommitsCompactionAndRecoversCanonicalSurface(t *testing.T) {
 	}
 	if err := ledger.Verify(ctx, created.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompactionSummarySurvivesSessionRunnerRestart(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "restart-summary", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"first durable constraint", "second durable constraint"} {
+		events, readErr := ledger.Events(ctx, created.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, appendErr := workbench.AppendUserMessage(ctx, 7, created.ID, int64(len(events)), text); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	oldSurface, err := ledger.Surface(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := &pb.CompactionUpdate{Summary: "durable restart summary", RemovedMessages: 2, KeepRecentMessages: 1}
+	for _, event := range oldSurface {
+		update.SourceEvents = append(update.SourceEvents, &pb.CanonicalEventReference{EventId: event.EventID, Checksum: event.Checksum})
+	}
+	first := NewSessionRunner(workbench, compactingConversation{update}, nil, SessionRunnerOptions{WorkerID: "worker-summary-first"})
+	firstRun, err := first.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: "request-summary-first", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(len(oldSurface) + 1), Content: "first run", Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, first, created.ID, firstRun.RunID, RunCompleted)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondConversation := &recordingConversationAdapter{reply: "after restart"}
+	second := NewSessionRunner(workbench, secondConversation, nil, SessionRunnerOptions{WorkerID: "worker-summary-second"})
+	t.Cleanup(func() { _ = second.Close() })
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRun, err := second.SubmitMessage(ctx, SubmitMessageCommand{
+		RequestID: "request-summary-second", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(len(events)), Content: "after restart", Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, second, created.ID, secondRun.RunID, RunCompleted)
+	request := secondConversation.lastRequest(t)
+	found := false
+	for _, message := range request.History {
+		if message.Role == "system" && strings.Contains(message.Content, "durable restart summary") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("restarted conversation history lost compaction summary: %#v", request.History)
 	}
 }
 

@@ -4,6 +4,14 @@
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 
+- Cross-runner restart regression is now covered by
+  `TestCompactionSummarySurvivesSessionRunnerRestart`: a canonical
+  `context/compaction` event is committed, the first SessionRunner is closed,
+  and a fresh runner resumes the same Session with the persisted summary still
+  present as a system message in `ConversationRequest.History`. The test first
+  failed on a missing test import and then passed with
+  `go test ./internal/session -run TestCompactionSummarySurvivesSessionRunnerRestart -count=1`.
+
 - Message submission now preserves the draft and original request ID when the
   HTTP request fails. The visible retry action first reloads the canonical
   Session projection and submits with its latest ledger sequence, preventing a
