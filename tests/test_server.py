@@ -51,6 +51,68 @@ def test_history_preserves_tool_call_pairing_for_provider_requests() -> None:
     assert anthropic_messages[1]["content"][0]["tool_use_id"] == "call-1"
 
 
+def test_managed_worktree_request_forces_spawn_agent_tool_choice(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = SpawnFakeLLM()
+    app.llm = llm
+    app.fast_llm = llm
+    runner = _runner_from_app(app, llm)
+
+    responses = list(
+        runner.run(
+            "必须直接调用 SpawnAgent，在 managed worktree 中创建文件并返回 artifact receipt",
+            iter([]),
+        )
+    )
+
+    assert responses[-1].done.success is True
+    assert llm.requests[0].tool_choice == {
+        "type": "function",
+        "function": {"name": "SpawnAgent"},
+    }
+
+
+def test_ordinary_request_keeps_automatic_tool_choice(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = FakeLLM()
+    app.llm = llm
+    app.fast_llm = llm
+    runner = _runner_from_app(app, llm)
+
+    list(runner.run("请检查仓库结构", iter([])))
+
+    assert llm.requests[0].tool_choice is None
+
+
+def test_managed_worktree_rejects_provider_tool_choice_violation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    llm = FakeLLM()
+    app.llm = llm
+    app.fast_llm = llm
+    runner = _runner_from_app(app, llm)
+
+    responses = list(
+        runner.run(
+            "必须直接调用 SpawnAgent，在 managed worktree 中创建文件",
+            iter([]),
+        )
+    )
+
+    assert llm.requests[0].tool_choice == {
+        "type": "function",
+        "function": {"name": "SpawnAgent"},
+    }
+    assert responses[-1].done.success is False
+    assert "did not honor" in responses[-1].done.message
+    assert any(
+        response.HasField("text") and "did not honor" in response.text.text
+        for response in responses
+    )
+
+
 class FakeLLM:
     model = "fake"
 

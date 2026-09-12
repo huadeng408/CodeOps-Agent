@@ -1242,7 +1242,24 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 			return orchestrator.ConversationRequest{}, err
 		}
 	}
-	history, input, err := conversationHistory(surface, events, key.runID, projection.inputEvent)
+	inputEventID := projection.inputEvent
+	if strings.TrimSpace(inputEventID) == "" {
+		// Legacy continuation receipts may omit input_event_id. Recover only an
+		// explicit managed-worktree/SpawnAgent intent; ordinary history-only
+		// checkpoints must keep Input empty so their user message remains in the
+		// canonical history transcript.
+		for index := len(surface) - 1; index >= 0; index-- {
+			if surface[index].Type != userMessageEventType {
+				continue
+			}
+			var payload messagePayload
+			if json.Unmarshal(surface[index].Payload, &payload) == nil && explicitSpawnAgentIntent(payload.Content) {
+				inputEventID = surface[index].EventID
+			}
+			break
+		}
+	}
+	history, input, err := conversationHistory(surface, events, key.runID, inputEventID)
 	if err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
@@ -1267,6 +1284,18 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		RetryOfRunID: requestRetryOfRunID, RetryOfRunIDs: retryOfRunIDs,
 		Actor: projection.actor, History: history, State: planTodo,
 	}, nil
+}
+
+func explicitSpawnAgentIntent(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	return strings.Contains(value, "spawnagent") ||
+		strings.Contains(value, "managed worktree") ||
+		strings.Contains(value, "managed-worktree") ||
+		strings.Contains(value, "isolated worktree") ||
+		strings.Contains(value, "子agent") ||
+		strings.Contains(value, "子 agent") ||
+		strings.Contains(value, "隔离工作树") ||
+		strings.Contains(value, "托管工作树")
 }
 
 func validateContinuationSurface(checkpoint, current []Event, runID string, retryOfRunIDs ...string) error {
@@ -1795,8 +1824,43 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	_ = r.appendLeasedFact(ctx, key, lease.LeaseID, "execution_result", map[string]any{
+		"status":     "run_failed",
+		"error_code": publicRunErrorCode(cause),
+		"error_type": errorTypeName(cause),
+	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	_ = r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause))
+}
+
+func errorTypeName(cause error) string {
+	if cause == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%T", cause)
+}
+
+func publicRunErrorCode(cause error) string {
+	if cause == nil {
+		return "unknown"
+	}
+	message := strings.ToLower(cause.Error())
+	switch {
+	case errors.Is(cause, ErrEventIntegrity):
+		return "event_integrity"
+	case strings.Contains(message, "continuation has no input or history"):
+		return "continuation_input_missing"
+	case strings.Contains(message, "surface has changed"):
+		return "continuation_surface_changed"
+	case strings.Contains(message, "foreign") || strings.Contains(message, "unexpected"):
+		return "continuation_surface_invalid"
+	case errors.Is(cause, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case orchestrator.IsConnectionError(cause):
+		return "orchestrator_connection_error"
+	default:
+		return "continuation_runtime_error"
+	}
 }
 
 // Persist only fixed categories: provider errors can contain credentials or URLs.

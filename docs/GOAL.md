@@ -11,6 +11,32 @@ Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 - Release gates passed in this environment: go test ./... -count=1, go test -race ./..., go vet ./..., python -m pytest -q (2287 passed, 15 skipped), npm --prefix frontend run build, and git diff --check.
 - Still BLOCKED: provider-backed SpawnAgent/managed-worktree/Write/artifact receipt closure, a fresh 200-assistant-turn browser run, the complete browser ticket/live/reconnect matrix, and any final production-grade/no-forgetting claim.
 
+### Fresh provider-backed SpawnAgent retry (2026-09-13)
+
+- After rebuilding the Go backend and restarting the Python orchestrator with the
+  configured provider file, a real Chromium session registered a new account,
+  created `Interview SpawnAgent Fresh`, and sent an explicit managed-worktree
+  instruction through the UI. The page transitioned from `running` to `done`
+  with 15 durable events, 2 messages, and 3 progress milestones.
+- The assistant response included a metadata-only artifact receipt containing
+  `status: completed`, `protocol_version: agent.v1`, a child session id, and a
+  managed-worktree artifact path for `e2e-proof.txt`; the main worktree remained
+  unchanged. This is a real provider-backed SpawnAgent closure, not a mocked
+  API response. The managed worktree is lifecycle-cleaned after completion, so
+  the receipt is the durable proof and the file body is intentionally not
+  retained in the main worktree.
+- The same run exercised the new initial `tool_choice=SpawnAgent` contract.
+  Regression tests cover forced SpawnAgent selection, ordinary automatic tool
+  selection, provider tool-choice violations, and legacy history-only
+  continuation semantics.
+- Release gates freshly passed after this change: `go test ./... -count=1`,
+  `go test -race ./...`, `go vet ./...`, `python -m pytest -q` (2290 passed,
+  15 skipped), `npm --prefix frontend run build`, and `git diff --check`.
+- Still BLOCKED: a fresh 200-assistant-turn browser run with event-count and
+  compaction evidence, the complete ticket/live/reconnect matrix, and durable
+  managed-worktree/Git restore after process restart. Therefore the goal stays
+  ACTIVE/BLOCKED and makes no production-grade or no-forgetting claim.
+
 ## Latest Browser Verification (2026-09-13)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.

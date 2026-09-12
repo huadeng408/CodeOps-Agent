@@ -138,6 +138,29 @@ def _explicit_create_file_intent(text: str) -> bool:
         or re.search(r"创建文件", value)
     )
 
+
+def _required_initial_tool_choice(text: str) -> dict[str, Any] | None:
+    """Force SpawnAgent only for an explicit managed-worktree request.
+
+    Tool selection remains automatic for ordinary conversation and for later
+    tool rounds.  The signal is intentionally narrow so a vague request does
+    not accidentally create a child agent or worktree.
+    """
+    value = str(text or "")
+    strong_signal = bool(
+        re.search(r"spawn\s*agent", value, re.IGNORECASE)
+        or re.search(r"managed[- ]worktree", value, re.IGNORECASE)
+        or re.search(r"(?:isolated|managed)\s+worktree", value, re.IGNORECASE)
+        or re.search(r"子\s*agent", value)
+        or re.search(r"隔离工作树|托管工作树", value)
+    )
+    if not strong_signal:
+        return None
+    return {
+        "type": "function",
+        "function": {"name": "SpawnAgent"},
+    }
+
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 THINKING_BUDGET_TOKENS: int = 10000
 THINKING_COMPLEXITY_TURN_THRESHOLD: int = 3
@@ -879,6 +902,11 @@ class ConversationRunner:
                     request_messages,
                     response_box=response_box,
                     cancel_event=cancel_event,
+                    tool_choice=(
+                        _required_initial_tool_choice(intent_text)
+                        if turn == start_turn
+                        else None
+                    ),
                     **thinking_kwargs,
                 )
             except RequestInterrupted:
@@ -967,6 +995,43 @@ class ConversationRunner:
                 overflow_retries += 1
                 continue
             response = response_box[0]
+            required_tool_choice = (
+                _required_initial_tool_choice(intent_text)
+                if turn == start_turn
+                else None
+            )
+            if required_tool_choice is not None and (
+                not response.tool_calls or response.tool_calls[0].name != "SpawnAgent"
+            ):
+                # Providers may ignore structured tool_choice. Never continue
+                # with an unrelated tool: that would violate the user's
+                # explicit managed-worktree request and make the run
+                # non-auditable. Keep the failure retryable and credential-free.
+                self._persist_event(
+                    session_id,
+                    "execution_result",
+                    {
+                        "status": "tool_choice_not_honored",
+                        "required_tool": "SpawnAgent",
+                        "received_tool": response.tool_calls[0].name if response.tool_calls else "none",
+                        "retryable": True,
+                    },
+                )
+                yield self._text(
+                    "provider did not honor the required SpawnAgent tool choice; retry this task"
+                )
+                yield self._session_meta(
+                    turn, total_tokens_in, total_tokens_out, total_cost, total_cached_tokens
+                )
+                yield self._finish(
+                    session_id,
+                    False,
+                    "tool_choice_not_honored",
+                    turn=turn,
+                    retryable=True,
+                    message="provider did not honor the required SpawnAgent tool choice; retry this task",
+                )
+                return
             self._assign_tool_call_ids(response.tool_calls, session_id=session_id, turn=turn)
             self._emit_loop_event(
                 "model_after",
@@ -2213,6 +2278,7 @@ class ConversationRunner:
         thinking_budget: int = THINKING_BUDGET_TOKENS,
         reasoning_effort: str = "",
         cancel_event: threading.Event | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> ChatResponse:
         tools = self.tool_registry.openai_schemas() if allow_tools else []
         tracer = _try_get_otel_tracer()
@@ -2243,6 +2309,7 @@ class ConversationRunner:
                         reasoning_effort=reasoning_effort,
                         allow_tools=allow_tools,
                         cancel_event=cancel_event,
+                        tool_choice=tool_choice,
                     )
                 )
             )
@@ -2266,6 +2333,7 @@ class ConversationRunner:
         reasoning_effort: str = "",
         cancel_event: threading.Event | None = None,
         response_box: list[ChatResponse] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Streaming variant of :meth:`_chat` (design 22.6).
 
@@ -2314,6 +2382,7 @@ class ConversationRunner:
                 thinking_budget=thinking_budget,
                 reasoning_effort=reasoning_effort,
                 cancel_event=cancel_event,
+                tool_choice=tool_choice,
             )
             if response.text:
                 yield self._text(response.text)
@@ -2347,6 +2416,7 @@ class ConversationRunner:
                 reasoning_effort=reasoning_effort,
                 allow_tools=allow_tools,
                 cancel_event=cancel_event,
+                tool_choice=tool_choice,
             )
 
             text_parts: list[str] = []
