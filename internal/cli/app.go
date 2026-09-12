@@ -631,10 +631,9 @@ func (a *App) handleAgentSpawn(ctx context.Context, spawn *codeagentpb.AgentSpaw
 	return nil
 }
 
-// handleAgentLifecycle validates and records a terminal child state before
-// removing the Harness-owned checkout. Completed children use guarded cleanup;
-// failed/cancelled children use discard semantics so crash recovery cannot be
-// blocked by partial files.
+// handleAgentLifecycle validates and records a terminal child state. Completed
+// children remain readable until their lease expires so the parent run can
+// consume artifacts; failed/cancelled children are cleaned immediately.
 func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
 	if a == nil || a.session == nil || a.worktree == nil || lifecycle == nil {
 		return errors.New("agent lifecycle manager is not configured")
@@ -656,13 +655,22 @@ func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.A
 	if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
 		return errors.New("unsupported agent lifecycle status")
 	}
-	discard := status != worktree.AgentWorktreeReleased && status != "completed"
-	if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
-		return err
-	}
-	persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
-	if len(persisted.Worktrees) != 0 {
-		return errors.New("persist agent worktree cleanup failed")
+	if status == "completed" {
+		completed, err := a.worktree.MarkAgentCompleted(tree.RequestID, lifecycle.GetReason())
+		if err != nil {
+			return err
+		}
+		tree = completed
+		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+	} else {
+		discard := status != worktree.AgentWorktreeReleased
+		if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
+			return err
+		}
+		persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		if len(persisted.Worktrees) != 0 {
+			return errors.New("persist agent worktree cleanup failed")
+		}
 	}
 	a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
 		Name:            tree.Name,

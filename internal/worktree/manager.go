@@ -243,6 +243,32 @@ func (m *Manager) CleanupAgent(ctx context.Context, requestID string, discard bo
 	return nil
 }
 
+// MarkAgentCompleted records a terminal child result without deleting the
+// checkout. The parent conversation may still need to read or modify files
+// in the managed worktree before its own run reaches a terminal state.
+func (m *Manager) MarkAgentCompleted(requestID string, reason string) (Worktree, error) {
+	if m == nil {
+		return Worktree{}, errors.New("worktree manager is nil")
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return Worktree{}, errors.New("agent request id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, tree := range m.trees {
+		if tree.RequestID != requestID {
+			continue
+		}
+		tree.Active = false
+		tree.Status = "completed"
+		m.trees[name] = tree
+		_ = reason
+		return tree, nil
+	}
+	return Worktree{}, errors.New("agent worktree not found")
+}
+
 // ReapExpired removes abandoned leases with discard semantics. It is used by
 // startup recovery and crash cleanup, so dirty child worktrees cannot block
 // the parent session forever.
@@ -267,7 +293,7 @@ func (m *Manager) ReapExpired(ctx context.Context, now time.Time) ([]Worktree, e
 				return reaped, err
 			}
 		}
-		if tree.Status != AgentWorktreeActive || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
+		if (tree.Status != AgentWorktreeActive && tree.Status != "completed") || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
 			continue
 		}
 		if err := m.removeGitWorktree(ctx, tree, true); err != nil {

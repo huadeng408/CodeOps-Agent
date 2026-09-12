@@ -129,6 +129,15 @@ def _sub_agent_worktree_name(request_id: str) -> str:
     request_id = re.sub(r"[^A-Za-z0-9_-]", "-", request_id.strip())
     return ("agent-" + request_id)[:64]
 
+
+def _explicit_create_file_intent(text: str) -> bool:
+    """Return true only for an explicit single-file creation instruction."""
+    value = str(text or "")
+    return bool(
+        re.search(r"\bcreate\s+file\b", value, re.IGNORECASE)
+        or re.search(r"创建文件", value)
+    )
+
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 THINKING_BUDGET_TOKENS: int = 10000
 THINKING_COMPLEXITY_TURN_THRESHOLD: int = 3
@@ -665,6 +674,12 @@ class ConversationRunner:
         cancel_event: threading.Event | None = None,
         plan_todo_snapshot: PlanTodoSnapshot | dict[str, Any] | None = None,
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
+        intent_text = str(user_text or "")
+        if not intent_text and history:
+            for item in reversed(history):
+                if isinstance(item, dict) and str(item.get("role", "")).strip() == "user":
+                    intent_text = str(item.get("content", "") or "")
+                    break
         if self.llm is None:
             yield from self._fallback_conversation(
                 user_text, request_iterator, session_id=session_id
@@ -1577,6 +1592,8 @@ class ConversationRunner:
                             metadata={"tool_name": call.name, "is_error": True},
                         )
                         continue
+                    if _explicit_create_file_intent(intent_text) and not _explicit_create_file_intent(str(spawn["objective"])):
+                        spawn["objective"] = f"{spawn['objective']}；{intent_text}"
                     for worker in workflow.workers:
                         context = dict(worker.context)
                         context.update(

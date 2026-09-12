@@ -19,6 +19,17 @@ foreach ($file in @('.env', '.env.local')) {
         }
     }
 }
+# The Go Harness and Python orchestrator must share one per-launch secret for
+# continuation callbacks (including SpawnAgent/worktree lifecycle events).
+# Generate it only in this process tree when the caller did not provide one;
+# never persist or print the value.
+if ([string]::IsNullOrWhiteSpace($env:ORCHESTRATOR_SHARED_SECRET)) {
+    $env:ORCHESTRATOR_SHARED_SECRET = [guid]::NewGuid().ToString('N')
+}
+# Direct interview launches must opt the Python runner into the Harness
+# SpawnAgent/worktree callback contract (ProcessManager normally injects this
+# for managed launches). Keep it process-scoped and never persist the value.
+$env:CODE_AGENT_REQUIRE_HARNESS_WORKTREE = '1'
 if ($ProviderConfig) {
     $env:CODE_AGENT_PROVIDER_CONFIG = (Resolve-Path -LiteralPath $ProviderConfig).Path
     $env:CODE_AGENT_PROVIDER_PROFILE = $ProviderProfile

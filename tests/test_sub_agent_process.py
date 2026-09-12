@@ -116,6 +116,42 @@ def test_process_agent_executor_returns_declared_artifact_receipt(tmp_path: Path
     assert any("artifact: report.md" in artifact for artifact in result.artifacts)
 
 
+def test_process_agent_executor_applies_explicit_create_file_objective(tmp_path: Path) -> None:
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+
+    result = executor.run(
+        kind="general",
+        title="Create marker",
+        objective="create file .agent-demo/restore-marker.txt with content RESTORE_E2E_MARKER",
+        context={},
+        request_id="request-artifact-create",
+        parent_session_id="session-artifact",
+        child_session_id="session-artifact/subagent/request-artifact-create",
+    )
+
+    marker = tmp_path / ".agent-demo" / "restore-marker.txt"
+    assert marker.read_text(encoding="utf-8") == "RESTORE_E2E_MARKER"
+    assert any("created artifact: .agent-demo/restore-marker.txt" in artifact for artifact in result.artifacts)
+
+
+def test_process_agent_executor_applies_chinese_create_file_objective(tmp_path: Path) -> None:
+    executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
+
+    result = executor.run(
+        kind="general",
+        title="创建 marker",
+        objective="在 managed worktree 中创建文件 .agent-demo/restore-marker.txt，内容只写 RESTORE_E2E_MARKER",
+        context={},
+        request_id="request-artifact-create-zh",
+        parent_session_id="session-artifact",
+        child_session_id="session-artifact/subagent/request-artifact-create-zh",
+    )
+
+    marker = tmp_path / ".agent-demo" / "restore-marker.txt"
+    assert marker.read_text(encoding="utf-8") == "RESTORE_E2E_MARKER"
+    assert any("created artifact: .agent-demo/restore-marker.txt" in artifact for artifact in result.artifacts)
+
+
 def test_process_agent_executor_rejects_canceled_parent_before_spawn(tmp_path: Path) -> None:
     executor = ProcessAgentExecutor(project_root=tmp_path, working_dir=tmp_path)
     canceled = threading.Event()

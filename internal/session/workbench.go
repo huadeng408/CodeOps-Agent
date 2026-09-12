@@ -299,6 +299,21 @@ func (w *Workbench) List(ctx context.Context, ownerID uint) ([]SessionView, erro
 	}
 	views := make([]SessionView, 0, len(ids))
 	for _, id := range ids {
+		// Avoid verifying unrelated tenants before ownership is known. A corrupt
+		// foreign history must not turn an owner's list into a 500; Get remains
+		// fail-closed for sessions that belong to the caller.
+		if ownerReader, ok := w.ledger.(sessionOwnerReader); ok {
+			owner, ownerErr := ownerReader.SessionOwner(ctx, id)
+			if ownerErr != nil {
+				if errors.Is(ownerErr, ErrSessionNotFound) {
+					continue
+				}
+				return nil, ownerErr
+			}
+			if owner != ownerID {
+				continue
+			}
+		}
 		view, getErr := w.Get(ctx, ownerID, id)
 		if getErr != nil {
 			if errors.Is(getErr, ErrSessionNotFound) {

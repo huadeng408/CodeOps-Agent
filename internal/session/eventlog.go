@@ -97,6 +97,13 @@ type EventLog interface {
 	Close() error
 }
 
+// sessionOwnerReader is an optional read-only seam used by owner-scoped list
+// operations. Keeping it outside EventLog preserves compatibility with test
+// adapters while allowing SQLite to filter foreign histories before replay.
+type sessionOwnerReader interface {
+	SessionOwner(context.Context, string) (uint, error)
+}
+
 // SQLiteEventLog stores events in one append-only SQLite table. The database
 // remains independent from the legacy sessions snapshot table so migration can
 // be performed without dual-writing mutable state.
@@ -662,6 +669,31 @@ FROM session_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
 		return nil, fmt.Errorf("iterate session events: %w", err)
 	}
 	return events, nil
+}
+
+// SessionOwner reads only the immutable session/created payload. It does not
+// verify or replay the rest of the chain, so unrelated corrupt histories
+// cannot poison an owner's list operation.
+func (l *SQLiteEventLog) SessionOwner(ctx context.Context, sessionID string) (uint, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return 0, ErrSessionNotFound
+	}
+	if err := l.ensure(ctx); err != nil {
+		return 0, err
+	}
+	var payload string
+	err := l.db.QueryRowContext(ctx, `SELECT payload FROM session_events WHERE session_id = ? AND seq = 0 AND type = ?`, sessionID, sessionCreatedEventType).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrSessionNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read session owner: %w", err)
+	}
+	var created sessionCreatedPayload
+	if err := json.Unmarshal([]byte(payload), &created); err != nil || created.OwnerID == 0 {
+		return 0, fmt.Errorf("%w: invalid session owner payload", ErrEventIntegrity)
+	}
+	return created.OwnerID, nil
 }
 
 // EventsAfter returns the verified suffix after an inclusive sequence cursor.

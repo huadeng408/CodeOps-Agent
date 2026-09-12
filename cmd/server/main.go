@@ -378,12 +378,20 @@ func main() {
 			if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
 				return fmt.Errorf("unsupported agent lifecycle status")
 			}
-			discard := status != worktree.AgentWorktreeReleased && status != "completed"
-			if cleanupErr := workspaceManager.CleanupAgent(lifecycleCtx, tree.RequestID, discard, lifecycle.GetReason()); cleanupErr != nil {
-				return cleanupErr
+			if status == "completed" {
+				completed, markErr := workspaceManager.MarkAgentCompleted(tree.RequestID, lifecycle.GetReason())
+				if markErr != nil {
+					return markErr
+				}
+				tree = completed
+			} else {
+				discard := status != worktree.AgentWorktreeReleased
+				if cleanupErr := workspaceManager.CleanupAgent(lifecycleCtx, tree.RequestID, discard, lifecycle.GetReason()); cleanupErr != nil {
+					return cleanupErr
+				}
+				tree.Active = false
+				tree.Status = status
 			}
-			tree.Active = false
-			tree.Status = status
 			if persistErr := appendPersistedWorktreeEvent(lifecycleCtx, ledger, tree.ParentSessionID, persistedWorktreeTerminalEvent, tree, lifecycle.GetReason()); persistErr != nil {
 				return fmt.Errorf("persist agent worktree lifecycle: %w", persistErr)
 			}
@@ -391,6 +399,7 @@ func main() {
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
 			WorkerID: workerID, Permissions: continuationPermissions,
+			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
 		})
 		return &managedContinuation{runner: runner, client: client}, nil
 	}

@@ -372,6 +372,33 @@ func TestWorktreeManagerSpawnsIsolatedAgentWithIdempotentLease(t *testing.T) {
 	}
 }
 
+func TestWorktreeManagerKeepsCompletedAgentCheckoutUntilLeaseReap(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo)
+	manager := worktree.NewManager(repo, "HEAD")
+	request := worktree.AgentSpawnRequest{RequestID: "request-complete", ParentSessionID: "parent", ChildSessionID: "child", WorktreeName: "child-complete"}
+	spawned, err := manager.SpawnAgent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := manager.MarkAgentCompleted(request.RequestID, "child completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || completed.Active {
+		t.Fatalf("completed worktree metadata = %#v", completed)
+	}
+	if _, err := os.Stat(spawned.Path); err != nil {
+		t.Fatalf("completed child checkout must remain readable: %v", err)
+	}
+	if _, err := manager.ReapExpired(context.Background(), spawned.LeaseExpiresAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(spawned.Path); !os.IsNotExist(err) {
+		t.Fatalf("expired completed checkout should be reaped, stat err: %v", err)
+	}
+}
+
 func TestWorktreeManagerSpawnFailsClosedForNonGitAndUnsafeInputs(t *testing.T) {
 	manager := worktree.NewManager(t.TempDir(), "HEAD")
 	_, err := manager.SpawnAgent(context.Background(), worktree.AgentSpawnRequest{

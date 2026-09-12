@@ -39,6 +39,22 @@ type retryToolConversationAdapter struct {
 	toolResults []orchestrator.ToolResult
 }
 
+type readonlyRetryConversationAdapter struct {
+	mu          sync.Mutex
+	toolResults []orchestrator.ToolResult
+}
+
+func (a *readonlyRetryConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	if handlers.Tool == nil {
+		return orchestrator.ConversationResult{}, errors.New("tool handler is missing")
+	}
+	result := handlers.Tool(ctx, orchestrator.ToolCall{ID: "retry-readonly", Name: "Grep", ParametersJSON: "{\"glob\":\"internal/session/*.go\",\"head_limit\":5,\"pattern\":\"func\"}"})
+	a.mu.Lock()
+	a.toolResults = append(a.toolResults, result)
+	a.mu.Unlock()
+	return orchestrator.ConversationResult{Success: true, Message: "re-executed readonly result"}, nil
+}
+
 type approvalToolConversationAdapter struct {
 	result chan orchestrator.ToolResult
 }
@@ -1791,6 +1807,56 @@ func pausedSessionWithCheckpoint(t *testing.T, ledger EventLog) (*Workbench, Ses
 
 func testRunnerActor() identity.Actor {
 	return identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "alice", TenantID: "org:one", Roles: []string{"USER"}}
+}
+
+func TestSessionRunnerRetryReadOnlyUnknownInvocationReexecutes(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor := testRunnerActor()
+	oldPayload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-readonly-failed", "run-readonly-failed", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Append(ctx, created.ID, 4, continuationEventType, oldPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{RunID: "run-readonly-failed", RequestID: "request-readonly-failed", LeaseID: "lease-readonly-failed", WorkerID: "worker-readonly-failed", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: "run-readonly-failed", ToolCallID: "retry-readonly", ToolName: "Grep", ArgumentsJSON: "{\"glob\":\"internal/session/*.go\",\"head_limit\":5,\"pattern\":\"func\"}"}
+	if _, err = ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Append(ctx, created.ID, 7, toolDispatchedType, call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Append(ctx, created.ID, 8, runFailedEventType, runTerminalPayload{RunID: "run-readonly-failed", RequestID: "request-readonly-failed", LeaseID: "lease-readonly-failed", Attempt: 1, Error: "agent continuation failed"}); err != nil {
+		t.Fatal(err)
+	}
+	conversation := &readonlyRetryConversationAdapter{}
+	external := &countingToolAdapter{}
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{WorkerID: "worker-readonly-retry", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{RequestID: "request-readonly-retry", SessionID: created.ID, OwnerID: 7, CheckpointHash: checkpoint.Hash, ExpectedSeq: 9, Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if terminal.Error != "" {
+		t.Fatalf("readonly retry failed: %+v", terminal)
+	}
+	external.mu.Lock()
+	executions := external.calls
+	external.mu.Unlock()
+	if executions != 1 {
+		t.Fatalf("readonly retry executions = %d, want 1", executions)
+	}
+	conversation.mu.Lock()
+	defer conversation.mu.Unlock()
+	if len(conversation.toolResults) != 1 || conversation.toolResults[0].Error != "" || conversation.toolResults[0].Output != "unexpected external execution" {
+		t.Fatalf("readonly retry result = %#v", conversation.toolResults)
+	}
 }
 
 func continuationRequestPayloadForTest(ctx context.Context, workbench *Workbench, sessionID, checkpointHash, requestID, runID string, actor identity.Actor) (continuationPayload, error) {

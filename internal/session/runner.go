@@ -177,6 +177,8 @@ type SessionRunnerOptions struct {
 	QueueSize        int
 	Now              func() time.Time
 	Permissions      *permission.Controller
+	AgentSpawn       orchestrator.AgentSpawnHandler
+	AgentLifecycle   orchestrator.AgentLifecycleHandler
 }
 
 type SessionRunner struct {
@@ -989,6 +991,8 @@ func (r *SessionRunner) execute(key runKey) {
 	var blocked atomic.Bool
 	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
 	handlers := orchestrator.ConversationHandlers{
+		AgentSpawn:     r.options.AgentSpawn,
+		AgentLifecycle: r.options.AgentLifecycle,
 		Compaction: func(update *codeagentpb.CompactionUpdate) error {
 			if err := r.persistCompaction(runCtx, key, lease, update); err != nil {
 				return err
@@ -1445,12 +1449,12 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 				unknownPrior = true
 			}
 		}
-		if unknownPrior {
+		if unknownPrior && !isReadOnlyTool(call.Name) {
 			_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON})
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
 		}
 	}
-	if state.dispatched != nil {
+	if state.dispatched != nil && !isReadOnlyTool(call.Name) {
 		_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON})
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
 	}
@@ -1507,6 +1511,15 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具完成", fmt.Sprintf("%s 已完成，正在继续下一步。", progressToolName(call.Name)), 0, 0)
 	}
 	return result, false
+}
+
+func isReadOnlyTool(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "Read", "Glob", "Grep":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall) (ApprovalDecision, error) {
@@ -1704,10 +1717,14 @@ func (r *SessionRunner) recordProgress(ctx context.Context, key runKey, lease ru
 	if err != nil || len(events) == 0 {
 		return
 	}
+	sourceSeq := latestRunSourceSeq(events, key.runID)
+	if sourceSeq < 0 {
+		return
+	}
 	payload, err := validateProgressPayload(progressPayload{
 		RunID: key.runID, Kind: kind, Title: title, Summary: summary,
 		PlanRevision: planRevision, TodoRevision: todoRevision,
-		SourceEventSeq: events[len(events)-1].Seq,
+		SourceEventSeq: sourceSeq,
 	})
 	if err != nil {
 		return
@@ -1732,10 +1749,14 @@ func (r *SessionRunner) recordCompletedProgress(ctx context.Context, key runKey)
 		if err != nil || !run.terminal || run.view.Status != RunCompleted {
 			return
 		}
+		sourceSeq := latestRunSourceSeq(events, key.runID)
+		if sourceSeq < 0 {
+			return
+		}
 		payload, err := validateProgressPayload(progressPayload{
 			RunID: key.runID, Kind: progressMilestone, Title: "任务完成",
 			Summary:        "本次任务已完成，已保存回复和执行记录。",
-			SourceEventSeq: events[len(events)-1].Seq,
+			SourceEventSeq: sourceSeq,
 		})
 		if err != nil {
 			return
@@ -1748,6 +1769,22 @@ func (r *SessionRunner) recordCompletedProgress(ctx context.Context, key runKey)
 			return
 		}
 	}
+}
+
+// latestRunSourceSeq returns the newest event whose payload carries the
+// current run id. Progress receipts must never point at transport-only facts
+// such as agent/worktree-terminal, which intentionally have no run_id.
+func latestRunSourceSeq(events []Event, runID string) int64 {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return -1
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		if eventSourceBelongsToRun(events, events[index].Seq, runID) {
+			return events[index].Seq
+		}
+	}
+	return -1
 }
 
 func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {

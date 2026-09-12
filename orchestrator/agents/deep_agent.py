@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ class DeepAgent:
 
     def _findings(self, task: AgentTask, project_root: str, working_dir: str) -> list[str]:
         findings: list[str] = []
+        created = _apply_explicit_create_file(task.objective, working_dir)
+        if created:
+            findings.append(created)
         files = _context_files(task.context)
         if files:
             # Relative context paths are resolved in the Harness-assigned
@@ -72,6 +76,49 @@ class DeepAgent:
         if not findings:
             findings.append("no additional context supplied")
         return findings
+
+
+_CREATE_FILE_PATTERNS = (
+    re.compile(
+        r"\bcreate\s+file\s+(?P<path>[^\s,，。]+)\s+with\s+content\s+(?P<content>.+?)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:创建文件)\s+(?P<path>[^\s,，。]+)\s*[，,]\s*(?:内容只写|内容仅写)\s+(?P<content>.+?)\s*$",
+    ),
+)
+
+
+def _apply_explicit_create_file(objective: str, working_dir: str) -> str | None:
+    """Apply only an explicit, single-file creation objective in the child checkout.
+
+    The objective is intentionally narrow: arbitrary shell/code execution is not part
+    of the process-agent contract. Paths are resolved beneath the Harness-assigned
+    working directory and the receipt contains metadata only.
+    """
+    objective_text = str(objective or "")
+    match = next(
+        (candidate for pattern in _CREATE_FILE_PATTERNS if (candidate := pattern.search(objective_text)) is not None),
+        None,
+    )
+    if match is None:
+        return None
+    raw_path = match.group("path").strip().strip('\"\'')
+    content = match.group("content").strip()
+    if not raw_path or not content:
+        return None
+    candidate = (Path(working_dir).resolve() / Path(raw_path)).resolve()
+    root = Path(working_dir).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("create-file objective path is outside workspace") from exc
+    if candidate == root or relative.as_posix().startswith(".git/") or relative.parts[:1] == (".git",):
+        raise ValueError("create-file objective cannot target git metadata")
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(content, encoding="utf-8")
+    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return f"created artifact: {relative.as_posix()} (bytes={candidate.stat().st_size}, sha256={digest})"
 
 
 def _agent_kind(value: str) -> AgentKind:

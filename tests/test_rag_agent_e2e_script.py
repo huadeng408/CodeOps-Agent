@@ -63,6 +63,19 @@ def test_interview_script_uses_shared_docker_readiness_helper() -> None:
     assert "docker info --format '{{.ServerVersion}}' | Out-Null" not in source
 
 
+def test_interview_script_bootstraps_ephemeral_orchestrator_secret() -> None:
+    source = (ROOT / "scripts" / "start-interview.ps1").read_text(encoding="utf-8")
+    assert "ORCHESTRATOR_SHARED_SECRET" in source
+    assert "[guid]::NewGuid().ToString('N')" in source
+    assert "CODE_AGENT_PROVIDER_CONFIG" in source
+
+
+def test_interview_script_enables_harness_worktree_callbacks() -> None:
+    source = (ROOT / "scripts" / "start-interview.ps1").read_text(encoding="utf-8")
+    assert "CODE_AGENT_REQUIRE_HARNESS_WORKTREE" in source
+    assert "$env:CODE_AGENT_REQUIRE_HARNESS_WORKTREE = '1'" in source
+
+
 def test_runtime_resolves_and_starts_docker_desktop_before_readiness_poll() -> None:
     runtime = (ROOT / "scripts" / "rag-agent-e2e-runtime.ps1").read_text(encoding="utf-8")
     snapshot = (ROOT / "scripts" / "rag_snapshot.ps1").read_text(encoding="utf-8")

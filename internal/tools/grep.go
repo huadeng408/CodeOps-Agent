@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-func (e *Executor) executeGrep(_ context.Context, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeGrep(ctx context.Context, args map[string]any) (ToolResult, error) {
 	pattern, ok := stringArg(args, "pattern", "query")
 	if !ok || pattern == "" {
 		return ToolResult{Name: "Grep", Error: "pattern is required"}, fmt.Errorf("pattern is required")
@@ -42,10 +42,19 @@ func (e *Executor) executeGrep(_ context.Context, args map[string]any) (ToolResu
 	fileCounts := map[string]int{}
 	files := map[string]struct{}{}
 	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == ".venv" || name == ".runtime" || name == "__pycache__" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(e.Root, p)
@@ -63,7 +72,7 @@ func (e *Executor) executeGrep(_ context.Context, args map[string]any) (ToolResu
 			}
 		}
 
-		fileMatches, err := grepFile(p, rel, expr, options)
+		fileMatches, err := grepFile(ctx, p, rel, expr, options)
 		if err != nil {
 			return nil
 		}
@@ -165,7 +174,7 @@ func grepOptionsFromArgs(args map[string]any) (grepOptions, error) {
 	}, nil
 }
 
-func grepFile(path, rel string, expr *regexp.Regexp, options grepOptions) ([]grepMatch, error) {
+func grepFile(ctx context.Context, path, rel string, expr *regexp.Regexp, options grepOptions) ([]grepMatch, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -176,6 +185,11 @@ func grepFile(path, rel string, expr *regexp.Regexp, options grepOptions) ([]gre
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {

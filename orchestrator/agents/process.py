@@ -86,6 +86,8 @@ class ProcessAgentExecutor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="strict",
         )
         try:
             process.stdin.write(request_json + "\n")
