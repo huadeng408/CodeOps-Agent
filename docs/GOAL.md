@@ -4,6 +4,17 @@
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 
+- 2026-09-13 provider-backed restart/retry receipt: using the configured local
+  provider file (validated without exposing values), a real Chromium session
+  registered, logged in, created a session, and completed a natural-language
+  request with `REAL_E2E_OK`. After a controlled restart of the project Go
+  backend through `scripts/start-interview.ps1`, the same browser session sent
+  a second request and completed with `RESTART_E2E_OK`; the assistant explicitly
+  recalled the earlier marker and the canonical ledger grew from 9 to 17 events.
+  This proves a successful provider response after backend restart and durable
+  context recall in the same session. It does not close the separate 200
+  assistant-turn, managed worktree/Git restore, or compaction acceptance gates.
+
 - Real Chromium E2E receipt completed against `http://127.0.0.1:3000/`:
   registered a temporary local demo account, logged in, created and selected a
   session, submitted natural language, and observed the backend-driven status
