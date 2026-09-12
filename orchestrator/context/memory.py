@@ -821,7 +821,9 @@ class LayeredContext:
 
     def load(self, session_id: str, raw_paths: Iterable[str] = ()) -> ContextSnapshot:
         files = self._files()
-        events = self.store.events(session_id, limit=self.max_events)
+        loaded_events = self.store.events(session_id, limit=self.max_events + 1)
+        history_truncated_by_count = len(loaded_events) > self.max_events
+        events = loaded_events[-self.max_events:]
         p0_lines = ["P0 directory summary"]
         for path in files:
             relative = path.relative_to(self.project_root).as_posix()
@@ -894,8 +896,13 @@ class LayeredContext:
             )
         ]
         events_text = "\n".join(event_lines)
+        if history_truncated_by_count:
+            events_text = (
+                "[older event content truncated; canonical Session Ledger retains earlier events]\n"
+                + events_text
+            )
         if len(events_text) > self.max_event_chars:
-            events_text = "[older event content truncated]\n" + events_text[-self.max_event_chars :]
+            events_text = "[older event content truncated; canonical Session Ledger retains earlier events]\n" + events_text[-self.max_event_chars :]
         baseline_bytes = sum(self._safe_size(path) for path in files) + len(events_text.encode("utf-8"))
         rendered = "\n".join((p0, p1, events_text, *p3.values()))
         return ContextSnapshot(

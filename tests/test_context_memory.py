@@ -594,6 +594,19 @@ def test_layered_context_bounds_events_and_redacts_credential_shapes(tmp_path: P
     store.close()
 
 
+def test_layered_context_marks_bounded_history_without_claiming_events_were_deleted(tmp_path: Path) -> None:
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    for index in range(4):
+        store.append("session-1", "execution_result", {"status": "ok", "output": f"event-{index}"})
+    context = LayeredContext(store, tmp_path, max_events=2, max_event_chars=1000)
+
+    summary = context.load("session-1")
+
+    assert "older event content truncated" in summary.events_text
+    assert "canonical Session Ledger retains earlier events" in summary.events_text
+    store.close()
+
+
 def test_layered_context_reads_only_bounded_raw_bytes_and_skips_symlink(tmp_path: Path) -> None:
     source = tmp_path / "source.txt"
     source.write_text("0123456789" * 1000, encoding="utf-8")

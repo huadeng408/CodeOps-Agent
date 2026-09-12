@@ -54,6 +54,21 @@ The remaining browser retry-lineage, managed-worktree/Git restore, complete
 tool/approval/code-modification receipt and fresh 200 assistant-turn gates
 remain BLOCKED.
 
+- 2026-09-12 context visibility follow-up: `LayeredContext.load` now reads one
+  sentinel event beyond its bounded window and explicitly prefixes the rendered
+  history with `[older event content truncated; canonical Session Ledger retains
+  earlier events]` when count or character limits hide older entries. This is a
+  visibility safeguard only; it does not delete ledger facts or prove
+  200-turn no-forgetting behavior. The regression was red before the change and
+  green after it (`tests/test_context_memory.py`: 34 passed, 1 skipped).
+- Fresh repository gates after this change: `python -m pytest -q` -> 2283
+  passed, 15 skipped, 3 warnings; `go test ./... -count=1` -> exit 0;
+  `go test -race ./...` -> exit 0; `go vet ./...` -> exit 0;
+  `npm --prefix frontend test` -> 7 passed; frontend production build -> exit
+  0; `git diff --check` -> exit 0. Existing deprecation warnings remain
+  non-blocking. Browser long-dialogue, worktree restore and full receipt gates
+  are still not reverified in this stage.
+
 ## Previous Verified Follow-up (2026-09-11)
 
 ## Latest Verified Follow-up (2026-09-11)
