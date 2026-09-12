@@ -47,6 +47,16 @@ Execution remains ACTIVE; full goal acceptance remains BLOCKED.
   user-facing checkpoint create/restore path and append-only semantics. It does
   not prove managed worktree/Git restoration or 200 assistant-turn memory.
 
+
+- 2026-09-13 browser CAS/ownership receipt: from the authenticated Chromium
+  session, a stale title update with `expectedSeq: 0` returned HTTP `409` and
+  reported the canonical actual sequence (`217`). A missing Session returned
+  HTTP `404`. A second real Chromium context was registered under a separate
+  local account and queried the first account's Session, events, runs, and
+  checkpoints; each returned HTTP `404`, matching the fail-closed ownership
+  contract. A same-user cross-session request was intentionally not counted as
+  foreign.
+
 ## Latest Verified Follow-up (2026-09-12)
 
 Execution remains ACTIVE; full goal acceptance remains BLOCKED.
