@@ -752,6 +752,9 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				if reason == "" {
 					reason = "unspecified failure"
 				}
+				if code := strings.TrimSpace(payload.Done.GetErrorCode()); code != "" {
+					reason = code + ": " + reason
+				}
 				return "", fmt.Errorf("%w: %s", ErrConversationFailed, reason)
 			}
 			if payload.Done.Message != "" {

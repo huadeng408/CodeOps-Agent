@@ -3491,6 +3491,8 @@ class ConversationRunner:
         safe_details = dict(details)
         response = safe_details.pop("response", "")
         public_message = str(safe_details.pop("message", "") or "")
+        error_code = str(safe_details.get("error_code", "") or "")
+        retryable = bool(safe_details.get("retryable", False))
         if response:
             safe_details["response_sha256"] = self._digest_value(response)
         if self._hook_errors:
@@ -3517,6 +3519,8 @@ class ConversationRunner:
                 done=orchestrator_pb2.Done(
                     success=False,
                     message="context persistence unavailable",
+                    error_code="context_persistence_unavailable",
+                    retryable=True,
                 )
             )
         if self._checkpoint_persistence_error:
@@ -3524,10 +3528,14 @@ class ConversationRunner:
                 done=orchestrator_pb2.Done(
                     success=False,
                     message="checkpoint persistence unavailable",
+                    error_code="checkpoint_persistence_unavailable",
+                    retryable=True,
                 )
             )
         return orchestrator_pb2.OrchestratorMessage(
-            done=orchestrator_pb2.Done(success=success, message=public_message)
+            done=orchestrator_pb2.Done(
+                success=success, message=public_message, error_code=error_code, retryable=retryable
+            )
         )
 
     @staticmethod

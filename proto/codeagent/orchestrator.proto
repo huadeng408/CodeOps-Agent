@@ -198,6 +198,10 @@ message SessionMeta {
 message Done {
   bool success = 1;
   string message = 2;
+  // Stable, credential-free machine-readable failure classification.
+  string error_code = 3;
+  // Whether retrying the same task/checkpoint is expected to be safe.
+  bool retryable = 4;
 }
 
 message CompactionUpdate {

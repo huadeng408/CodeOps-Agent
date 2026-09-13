@@ -778,6 +778,41 @@ func TestOrchestratorClientReturnsErrorForUnsuccessfulDone(t *testing.T) {
 	}
 }
 
+type errorCodeOrchestratorServer struct {
+	codeagentpb.UnimplementedOrchestratorServer
+}
+
+func (s *errorCodeOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
+	if _, err := stream.Recv(); err != nil && err != io.EOF {
+		return err
+	}
+	return stream.Send(&codeagentpb.OrchestratorMessage{
+		Payload: &codeagentpb.OrchestratorMessage_Done{
+			Done: &codeagentpb.Done{Success: false, Message: "agent provider failed; retry this task", ErrorCode: "provider_runtime_error", Retryable: true},
+		},
+	})
+}
+
+func TestOrchestratorClientPreservesDoneErrorCode(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	codeagentpb.RegisterOrchestratorServer(server, &errorCodeOrchestratorServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err = client.RunConversation(context.Background(), orchestrator.ConversationRequest{Input: "resume", SessionID: "error-code-session", Actor: orchestrator.ActorIdentity{ActorID: "actor-error-code", Subject: "user-error-code", TenantID: "tenant-error-code", Roles: []string{"USER"}}}, orchestrator.ConversationHandlers{})
+	if !strings.Contains(err.Error(), "provider_runtime_error") {
+		t.Fatalf("error = %v, want stable provider_runtime_error code", err)
+	}
+}
+
 func TestOrchestratorClientRejectsEOFWithoutTerminalDone(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

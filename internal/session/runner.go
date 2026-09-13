@@ -1848,6 +1848,16 @@ func publicRunErrorCode(cause error) string {
 	switch {
 	case errors.Is(cause, ErrEventIntegrity):
 		return "event_integrity"
+	case strings.Contains(message, "provider_authentication_error"):
+		return "provider_authentication_error"
+	case strings.Contains(message, "provider_transport_error"):
+		return "provider_transport_error"
+	case strings.Contains(message, "provider_timeout"):
+		return "provider_timeout"
+	case strings.Contains(message, "context_window_exceeded"):
+		return "context_window_exceeded"
+	case strings.Contains(message, "provider_runtime_error"):
+		return "provider_runtime_error"
 	case strings.Contains(message, "continuation has no input or history"):
 		return "continuation_input_missing"
 	case strings.Contains(message, "surface has changed"):
