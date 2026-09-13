@@ -8,7 +8,7 @@ Execution remains ACTIVE; full goal acceptance remains BLOCKED.
 - A real Chromium session was registered and logged in, created a clean Session, sent natural-language instructions, survived a controlled Go backend restart, and resumed the same Session Ledger through the browser.
 - A fresh failure/retry sequence was exercised in the browser. After retrying the same session, Read/Grep/Glob calls completed instead of being stopped by the previous tool/unknown reconciliation path; the successor run remained on the same Session and lineage. The run still did not reach the required SpawnAgent -> managed worktree -> Write -> artifact receipt completion.
 - The safe-retry change is intentionally limited to read-only Read, Glob, and Grep; Write/Edit/NotebookEdit/Bash/Git and other side-effecting tools remain fail-closed when an earlier dispatch has no durable result.
-- Release gates passed in this environment: go test ./... -count=1, go test -race ./..., go vet ./..., python -m pytest -q (2287 passed, 15 skipped), npm --prefix frontend run build, and git diff --check.
+- Release gates passed in this environment: go test ./... -count=1, go test -race ./..., go vet ./..., python -m pytest -q (2290 passed, 15 skipped), npm --prefix frontend run build, and git diff --check.
 - Still BLOCKED: provider-backed SpawnAgent/managed-worktree/Write/artifact receipt closure, a fresh 200-assistant-turn browser run, the complete browser ticket/live/reconnect matrix, and any final production-grade/no-forgetting claim.
 
 ### Fresh provider-backed SpawnAgent retry (2026-09-13)
