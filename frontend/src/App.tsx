@@ -8,6 +8,7 @@ import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
 import { retryPendingMessage, sendFailureMessage } from './sendRetry';
 import { compactionPresentation, isCompactionEvent } from './compactionPresentation';
+import { mergeSessionEvents } from './eventMerge';
 
 function renderInlineMarkdown(value: string): ReactNode {
   const parts = value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
@@ -68,12 +69,6 @@ function renderToolContent(event: SessionEvent): ReactNode {
       )}
     </>
   );
-}
-
-function mergeEvents(existing: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
-  const byID = new Map<string, SessionEvent>();
-  for (const event of [...existing, ...incoming]) byID.set(event.id, event);
-  return [...byID.values()].sort((a, b) => a.seq - b.seq);
 }
 
 function hasSequenceGap(after: number, incoming: SessionEvent[]): boolean {
@@ -718,7 +713,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
       // last observed ledger sequence.
       const data = await api.listEvents(sessionId, after >= 0 ? { after } : {});
     setEvents((previous) => {
-        const merged = mergeEvents(previous, data);
+        const merged = mergeSessionEvents(previous, data);
         cursorRef.current = merged.reduce((max, event) => Math.max(max, event.seq), -1);
         persistedSessionCursor(sessionId, cursorRef.current);
         return merged;
@@ -773,7 +768,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 			);
 			if (decided) {
 				setEvents((previous) => {
-					const merged = mergeEvents(previous, [decided]);
+					const merged = mergeSessionEvents(previous, [decided]);
 					cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
 					persistedSessionCursor(sessionId, cursorRef.current);
 					return merged;
@@ -796,7 +791,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
       return;
     }
       setEvents((previous) => {
-      const merged = mergeEvents(previous, [event]);
+      const merged = mergeSessionEvents(previous, [event]);
       cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
       persistedSessionCursor(sessionId, cursorRef.current);
       return merged;
