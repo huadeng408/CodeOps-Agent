@@ -757,6 +757,19 @@ func eventSourceBelongsToRun(events []Event, sourceSeq int64, runID string) bool
 	if sourceSeq < 0 || sourceSeq >= int64(len(events)) || events[sourceSeq].Seq != sourceSeq {
 		return false
 	}
+	// Only canonical run facts may anchor a visible progress receipt.
+	// Transport lifecycle events (agent/*) are intentionally excluded even
+	// when a corrupt/legacy writer included a matching run_id.
+	switch events[sourceSeq].Type {
+	case continuationEventType, runLeasedEventType, runHeartbeatEventType,
+		runCompletedEventType, runFailedEventType, "execution_result",
+		"user/message", "assistant/message", "tool/call", "tool/result",
+		toolDispatchedType, toolUnknownEventType, planTodoEventType,
+		compactionEventType, codeModifiedEventType, progressEventType:
+		// allowed canonical run facts
+	default:
+		return false
+	}
 	var payload struct {
 		RunID string `json:"run_id"`
 	}

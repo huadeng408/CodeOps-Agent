@@ -67,6 +67,19 @@ type progressConversationAdapter struct{}
 
 type progressToolAdapter struct{}
 
+func TestLatestRunSourceSeqSkipsTransportOnlyTail(t *testing.T) {
+	runID := "run:source"
+	events := []Event{
+		{Seq: 0, Type: sessionCreatedEventType, Payload: json.RawMessage(`{"id":"session"}`)},
+		{Seq: 1, Type: continuationEventType, Payload: json.RawMessage(`{"run_id":"run:source"}`)},
+		{Seq: 2, Type: "execution_result", Payload: json.RawMessage(`{"run_id":"run:source","status":"turn_started"}`)},
+		{Seq: 3, Type: "agent/worktree-terminal", Payload: json.RawMessage(`{"worktree":"agent-slot","status":"cleaned"}`)},
+	}
+	if got := latestRunSourceSeq(events, runID); got != 2 {
+		t.Fatalf("latestRunSourceSeq = %d, want authoritative run event seq 2", got)
+	}
+}
+
 func (progressToolAdapter) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
 	return orchestrator.ToolResult{Output: "PRIVATE_TOOL_OUTPUT_DO_NOT_SHOW"}
 }
@@ -875,6 +888,61 @@ func TestSessionRunnerConcurrentRecoverSingleLeaseClaim(t *testing.T) {
 	secondConversation.mu.Unlock()
 	if firstCalls+secondCalls != 1 {
 		t.Fatalf("conversation calls = %d, want 1", firstCalls+secondCalls)
+	}
+}
+
+func TestSessionRunnerClaimUnexpiredLeaseIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-unexpired-lease", "run-unexpired-lease", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Now().Add(time.Minute).UTC()
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-unexpired-lease", RequestID: "request-unexpired-lease", LeaseID: "lease-unexpired",
+		WorkerID: "worker-existing", Attempt: 1, LeaseUntil: leaseUntil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "unused"}, nil, SessionRunnerOptions{WorkerID: "worker-retry", LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+	key := runKey{sessionID: created.ID, runID: "run-unexpired-lease"}
+	first, wait, err := runner.claim(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != (runLeasePayload{}) {
+		t.Fatalf("claim returned a new lease for an unexpired run: %+v", first)
+	}
+	if wait.IsZero() || wait.Before(leaseUntil.Add(-time.Second)) {
+		t.Fatalf("waitUntil = %v, want near existing lease expiry %v", wait, leaseUntil)
+	}
+	eventsBefore, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, waitAgain, err := runner.claim(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waitAgain.IsZero() {
+		t.Fatal("second claim returned zero wait for unexpired lease")
+	}
+	eventsAfter, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("unexpired claim appended events: before=%d after=%d", len(eventsBefore), len(eventsAfter))
 	}
 }
 

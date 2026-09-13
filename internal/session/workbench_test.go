@@ -141,6 +141,35 @@ func TestWorkbenchRejectsProgressSourceOutsideItsRun(t *testing.T) {
 	}
 }
 
+func TestWorkbenchRejectsTransportProgressSourceWithMatchingRunID(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-progress-transport", "run-transport", testRunnerActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-transport", RequestID: "request-progress-transport", LeaseID: "lease-transport", WorkerID: "worker-transport", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	// A transport-only event must never be accepted as the progress source,
+	// even if an old/corrupt writer included a matching run_id.
+	if _, err := ledger.Append(ctx, created.ID, 6, "agent/worktree-terminal", map[string]any{"run_id": "run-transport", "status": "cleaned"}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := progressPayload{RunID: "run-transport", Kind: progressMilestone, Title: "伪造来源", Summary: "不应引用 transport 事件", SourceEventSeq: 6}
+	if _, err := ledger.Append(ctx, created.ID, 7, progressEventType, invalid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("transport source error = %v, want ErrEventIntegrity", err)
+	}
+}
+
 func TestWorkbenchRejectsPlanTodoFromUnknownRun(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
