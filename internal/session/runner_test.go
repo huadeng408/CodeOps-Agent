@@ -29,6 +29,34 @@ type blockingConversationAdapter struct {
 	finished chan struct{}
 }
 
+type crossSessionBlockingConversationAdapter struct {
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	mu           sync.Mutex
+	calls        int
+	releaseOnce  sync.Once
+}
+
+func (a *crossSessionBlockingConversationAdapter) release() {
+	a.releaseOnce.Do(func() { close(a.releaseFirst) })
+}
+
+func (a *crossSessionBlockingConversationAdapter) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, _ orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	a.mu.Lock()
+	a.calls++
+	call := a.calls
+	a.mu.Unlock()
+	if call == 1 {
+		close(a.firstStarted)
+		select {
+		case <-a.releaseFirst:
+		case <-ctx.Done():
+			return orchestrator.ConversationResult{}, ctx.Err()
+		}
+	}
+	return orchestrator.ConversationResult{Success: true, Message: request.Input + " done"}, nil
+}
+
 type recoverableConversationAdapter struct {
 	mu    sync.Mutex
 	calls int
@@ -557,6 +585,41 @@ func TestSessionRunnerSubmitMessageRejectsSecondTurnWhileRunIsActive(t *testing.
 	if messageCount != 1 {
 		t.Fatalf("active run accepted %d user messages, want 1", messageCount)
 	}
+}
+
+func TestSessionRunnerRunsDifferentSessionsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	first, err := workbench.Create(ctx, 7, "repo", "first", "slow provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := workbench.Create(ctx, 7, "repo", "second", "should not wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := &crossSessionBlockingConversationAdapter{firstStarted: make(chan struct{}), releaseFirst: make(chan struct{})}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-cross-session"})
+	t.Cleanup(func() { conversation.release(); _ = runner.Close() })
+	firstRun, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "cross-first", SessionID: first.ID, OwnerID: 7, ExpectedSeq: 1, Content: "slow", Actor: testRunnerActor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first conversation did not start")
+	}
+	secondRun, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "cross-second", SessionID: second.ID, OwnerID: 7, ExpectedSeq: 1, Content: "fast", Actor: testRunnerActor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal := waitForRunStatus(t, runner, second.ID, secondRun.RunID, RunCompleted); terminal.Status != RunCompleted {
+		t.Fatalf("second session remained blocked by first: %+v", terminal)
+	}
+	conversation.release()
+	_ = waitForRunStatus(t, runner, first.ID, firstRun.RunID, RunCompleted)
 }
 
 func TestSessionRunnerFailureWritesOneTerminalAndReturnsSessionToPaused(t *testing.T) {

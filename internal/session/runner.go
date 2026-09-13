@@ -175,10 +175,13 @@ type SessionRunnerOptions struct {
 	// is separate from the lease heartbeat, which remains transport-only.
 	ProgressInterval time.Duration
 	QueueSize        int
-	Now              func() time.Time
-	Permissions      *permission.Controller
-	AgentSpawn       orchestrator.AgentSpawnHandler
-	AgentLifecycle   orchestrator.AgentLifecycleHandler
+	// WorkerCount controls bounded cross-session execution concurrency.
+	// Runs from the same session remain serialized by the durable run CAS.
+	WorkerCount    int
+	Now            func() time.Time
+	Permissions    *permission.Controller
+	AgentSpawn     orchestrator.AgentSpawnHandler
+	AgentLifecycle orchestrator.AgentLifecycleHandler
 }
 
 type SessionRunner struct {
@@ -447,6 +450,9 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	if options.QueueSize <= 0 {
 		options.QueueSize = 256
 	}
+	if options.WorkerCount <= 0 {
+		options.WorkerCount = 4
+	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
@@ -455,8 +461,10 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 		workbench: workbench, conversation: conversation, tools: tools, options: options,
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}),
 	}
-	runner.wg.Add(1)
-	go runner.workerLoop()
+	runner.wg.Add(options.WorkerCount)
+	for i := 0; i < options.WorkerCount; i++ {
+		go runner.workerLoop()
+	}
 	return runner
 }
 
