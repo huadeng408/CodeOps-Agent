@@ -9,8 +9,8 @@
 
 ## 归档与事实源
 
-- 过时设计、地图、计划和规格统一放在 `docs/archive/superseded/`，归档时保留原文件内容与来源路径。
-- 当前生产实现、验收契约和最新执行计划不得移入 superseded。
+- 过时设计、地图、计划、规格、日更日志和评测 JSON 统一放在 `docs/archive/`，索引是 `docs/archive/INDEX.md`。归档时保留原文件内容。
+- 当前生产实现、验收契约和最新执行计划不得移入 archive。新对话默认不读 archive。
 - Session ledger 是唯一可写事实源；不得新增与其竞争的持久化事实源。
 
 ## 安全边界

@@ -136,6 +136,42 @@ do not expose this prompt in the manifest
 	}
 }
 
+func TestWriteManifestPreservesRoutingAndInvocationMetadataWithoutPrompt(t *testing.T) {
+	dir := t.TempDir()
+	contents := strings.Join([]string{
+		"---",
+		"name: model-only",
+		"description: Model-only routing skill.",
+		"whenToUse: Use when the model needs repository context.",
+		"disable-model-invocation: false",
+		"user-invocable: false",
+		"---",
+		"private instructions",
+	}, "\n")
+	writeTestSkill(t, dir, "model-only", contents)
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: dir}); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	manifest := filepath.Join(t.TempDir(), "skills.json")
+	if err := manager.WriteManifest(manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"model-only", "Use when the model needs repository context.", "modelInvocable", "userInvocable"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("manifest missing %s: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "private instructions") || strings.Contains(text, "prompt") {
+		t.Fatalf("manifest must not expose prompt body: %s", text)
+	}
+}
+
 func TestDiscoverRejectsInvalidNamesAndToolMetadata(t *testing.T) {
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "aaa-valid", `---
@@ -169,6 +205,94 @@ body
 	}
 }
 
+func TestDiscoverSupportsFlatFilesAndDeepSeekMetadata(t *testing.T) {
+	root := t.TempDir()
+	flat := filepath.Join(root, "flat.md")
+	contents := `---
+name: flat
+description: Flat skill
+whenToUse: Use for flat-file checks.
+disable-model-invocation: true
+user-invocable: false
+---
+flat body
+`
+	if err := os.WriteFile(flat, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{Directories: []string{root}}); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	skill, ok := manager.Get("flat")
+	if !ok {
+		t.Fatal("expected flat skill")
+	}
+	if skill.WhenToUse != "Use for flat-file checks." || skill.Source == "" || skill.Provider == "" || skill.Path != flat {
+		t.Fatalf("missing deepseek metadata: %+v", skill)
+	}
+	if skill.Invocation.ModelInvocable || skill.Invocation.UserInvocable {
+		t.Fatalf("invocation policy not applied: %+v", skill.Invocation)
+	}
+}
+
+func TestReadResourceConfinesAccessToSkillDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "resource-skill", "---\nname: resource-skill\ndescription: Resource skill\n---\nbody\n")
+	if err := os.MkdirAll(filepath.Join(root, "resource-skill", "resources"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "resource-skill", "resources", "guide.txt"), []byte("guide"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := manager.ReadResource("resource-skill", "resources/guide.txt")
+	if err != nil || string(data) != "guide" {
+		t.Fatalf("read resource: %q %v", data, err)
+	}
+	if _, err := manager.ReadResource("resource-skill", "../SKILL.md"); err == nil {
+		t.Fatal("resource traversal must fail")
+	}
+}
+
+func TestDiscoverPriorityUsesProjectDSHBeforeAgentsAndCustom(t *testing.T) {
+	project := t.TempDir()
+	dsh := filepath.Join(project, ".dsh", "skills")
+	agents := filepath.Join(project, ".agents", "skills")
+	custom := t.TempDir()
+	for _, item := range []struct{ root, body string }{{dsh, "dsh"}, {agents, "agents"}, {custom, "custom"}} {
+		writeTestSkill(t, item.root, "same", "---\nname: same\ndescription: "+item.body+"\n---\n"+item.body)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDSHDir: dsh, ProjectAgentsDir: agents, Directories: []string{custom}}); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	skill, ok := manager.Get("same")
+	if !ok {
+		t.Fatal("expected same")
+	}
+	if skill.Description != "dsh" {
+		t.Fatalf("expected project dsh winner, got %+v", skill)
+	}
+}
+
+func TestSnapshotMarksIncompleteAndRetainsLastGoodCatalog(t *testing.T) {
+	manager := NewManager()
+	manager.SetDiscoveryStatus(true)
+	first := manager.Snapshot()
+	if !first.Complete || first.Revision == 0 {
+		t.Fatalf("expected initial complete revision, got %+v", first)
+	}
+	manager.SetDiscoveryStatus(false)
+	second := manager.Snapshot()
+	if second.Complete || second.Count != first.Count || second.Revision != first.Revision {
+		t.Fatalf("last-good catalog lost: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestRegisterRejectsInvalidRegisteredMetadata(t *testing.T) {
 	manager := NewManager()
 	manager.Register(Skill{Name: "Bad_Name", Description: "invalid", Prompt: "body"})
@@ -181,6 +305,23 @@ func TestRegisterRejectsInvalidRegisteredMetadata(t *testing.T) {
 	}
 	if err := manager.WriteManifest(filepath.Join(t.TempDir(), "skills.json")); err != nil {
 		t.Fatalf("built-in manifest should remain writable: %v", err)
+	}
+}
+
+func TestRegisterPreservesExplicitlyDisabledInvocationPolicy(t *testing.T) {
+	manager := NewManager()
+	manager.Register(Skill{
+		Name:        "internal-only",
+		Description: "An internal-only runtime skill.",
+		Prompt:      "private runtime instructions",
+		Invocation:  InvocationPolicy{ModelInvocable: false, UserInvocable: false, Configured: true},
+	})
+	skill, ok := manager.Get("internal-only")
+	if !ok {
+		t.Fatal("expected runtime Skill to be registered")
+	}
+	if skill.Invocation.ModelInvocable || skill.Invocation.UserInvocable {
+		t.Fatalf("explicitly disabled policy was overwritten: %+v", skill.Invocation)
 	}
 }
 

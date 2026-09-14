@@ -224,13 +224,32 @@ internal/cli/.agent/
 /docs/RESEARCH-2026-08-14-MULTIMODAL-RAG-MODALITIES.md
 
 # Historical plans, progress logs and design maps are local context, not the
-# active goal or public source of truth.
+# active goal or public source of truth. The live Goal stays at docs/GOAL.md.
+# Archive INDEX plus promoted receipts may be tracked; dumps stay local.
 /docs/DESIGN-MAP*.md
 /docs/HANDOFF-*.md
 /docs/PROGRESS-*.md
+/docs/interview-verified-*.md
+/docs/interview-readiness-*.md
+/docs/architecture/
+/docs/research/
 /docs/RAG-FOUNDATION-PLAN1-IMPLEMENTATION-2026-07-30.md
 /docs/agent-eval-trace-plan.md
-/docs/archive/
+/docs/history/
+/docs/archive/progress/
+/docs/archive/plans/
+/docs/archive/design-map/
+/docs/archive/superseded/
+/docs/archive/run-artifacts/
+/docs/archive/receipts/HANDOFF-*.md
+/docs/archive/receipts/GOAL-log-*.md
+/docs/archive/research/interview-stories-2026.md
+/docs/archive/research/interview-research-sources.md
+/docs/archive/research/RESEARCH-*.md
+!/docs/archive/INDEX.md
+!/docs/archive/receipts/interview-*.md
+!/docs/archive/research/codex-claude-official-comparison.md
+!/docs/archive/research/production-agent-harness-assessment.md
 /docs/design/
 /docs/qrels/BUILD-*.md
 /docs/qrels/RUN-*.md

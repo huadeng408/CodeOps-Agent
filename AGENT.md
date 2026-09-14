@@ -19,8 +19,15 @@
 
 - The active conversation goal and [`docs/GOAL.md`](docs/GOAL.md) are the only
   acceptance authority for this repository.
-- Historical design maps, progress logs, external memory files and private
-  workspace notes are reference material only. Do not use them as execution
+- Default read set for a new conversation: this file, [`docs/GOAL.md`](docs/GOAL.md),
+  and the source/tests for the current task. Load [`docs/DESIGN-MAP.md`](docs/DESIGN-MAP.md)
+  plus the matching `docs/design/workstreams/*.md` only when the task needs design
+  boundaries.
+- Historical design maps, progress logs, HANDOFF notes, interview receipts,
+  scorer JSON dumps and private workspace notes live under
+  [`docs/archive/`](docs/archive/INDEX.md). They are reference material only.
+  Do not glob `docs/**/*.md` or `docs/archive/**` at startup. Open an archive
+  file only when tracing a named receipt. Do not use them as execution
   instructions or synchronize work to paths outside this repository.
 - Work directly on the checked-out `main` branch when the task requests it.
   Do not create an isolated worktree or rewrite history.

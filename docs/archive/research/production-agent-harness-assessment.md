@@ -1,7 +1,7 @@
 # CodeOps-Agent 生产级 Agent Harness 评估
 
 > 评估日期：2026-09-07
-> 目标仓库：`D:\vscode\localcode`，当前基线：以工作树 `docs/GOAL.md` 为验收权威。
+> 目标仓库：`D:\vscode\localcode`，当前基线：以工作树 `docs/GOAL.md` 为验收权威。本文件已归档，不是启动入口。
 > 研究对象：本仓库、DeepSeek Harness `cd5ef8148158c3a752a658978873241fdf8e2bbc`、官方 Codex/Claude Code 文档、官方 OpenViking `volcengine/OpenViking@a843ab6bf220b2b3bc82321576d623d1c55c6598`。
 
 ## 结论

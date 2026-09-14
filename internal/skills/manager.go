@@ -17,38 +17,81 @@ import (
 )
 
 type Skill struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Tools       []string `json:"tools,omitempty"`
+	Name         string           `json:"name"`
+	Description  string           `json:"description"`
+	Prompt       string           `json:"prompt"`
+	Tools        []string         `json:"tools,omitempty"`
+	WhenToUse    string           `json:"whenToUse,omitempty"`
+	Source       string           `json:"source,omitempty"`
+	Provider     string           `json:"provider,omitempty"`
+	Path         string           `json:"path,omitempty"`
+	ResourceBase string           `json:"resourceBase,omitempty"`
+	Invocation   InvocationPolicy `json:"invocation,omitempty"`
 }
 
 type Snapshot struct {
-	Count int
+	Count    int
+	Complete bool
+	Revision uint64
+}
+
+// InvocationPolicy mirrors the model/user invocation controls used by
+// DeepSeek-style SKILL.md frontmatter. Both are enabled by default for
+// built-in and legacy skills.
+type InvocationPolicy struct {
+	ModelInvocable bool `json:"modelInvocable"`
+	UserInvocable  bool `json:"userInvocable"`
+	Configured     bool `json:"-"`
 }
 
 // DiscoveryOptions describes the three Skill precedence levels. Later levels
 // override earlier ones, so a project can replace a global default safely.
 type DiscoveryOptions struct {
-	GlobalDir   string
-	Directories []string
-	ProjectDir  string
+	GlobalDir        string
+	Directories      []string
+	ProjectDir       string
+	ProjectDSHDir    string
+	ProjectAgentsDir string
+	UserDSHDir       string
+	UserAgentsDir    string
+	BundledDir       string
 }
 
 type skillEntry struct {
 	skill Skill
 	path  string
+	rank  int
+}
+
+type discoveredSkill struct {
+	skill Skill
+	path  string
+	rank  int
+	order int
+}
+
+type discoveryRoot struct {
+	path   string
+	source string
+	rank   int
 }
 
 type skillFrontmatter struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Tools       []string `yaml:"tools"`
+	Name                   string   `yaml:"name"`
+	Description            string   `yaml:"description"`
+	Tools                  []string `yaml:"tools"`
+	WhenToUse              string   `yaml:"whenToUse"`
+	DisableModelInvocation *bool    `yaml:"disable-model-invocation"`
+	UserInvocable          *bool    `yaml:"user-invocable"`
 }
 
 type Manager struct {
-	mu    sync.Mutex
-	items map[string]skillEntry
+	mu              sync.Mutex
+	items           map[string]skillEntry
+	builtins        map[string]skillEntry
+	discoveredNames map[string]struct{}
+	complete        bool
+	revision        uint64
 }
 
 var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -70,11 +113,29 @@ func validSkillMetadata(skill Skill) bool {
 }
 
 func NewManager() *Manager {
-	manager := &Manager{items: make(map[string]skillEntry)}
+	manager := &Manager{
+		items:           make(map[string]skillEntry),
+		builtins:        make(map[string]skillEntry),
+		discoveredNames: make(map[string]struct{}),
+		complete:        true,
+		revision:        1,
+	}
 	for _, skill := range goalSkills() {
-		manager.Register(skill)
+		manager.registerBuiltin(skill)
 	}
 	return manager
+}
+
+func (m *Manager) registerBuiltin(skill Skill) {
+	if !validSkillMetadata(skill) {
+		return
+	}
+	if !skill.Invocation.Configured && !skill.Invocation.ModelInvocable && !skill.Invocation.UserInvocable {
+		skill.Invocation = InvocationPolicy{ModelInvocable: true, UserInvocable: true}
+	}
+	entry := skillEntry{skill: skill}
+	m.items[skill.Name] = entry
+	m.builtins[skill.Name] = entry
 }
 
 func (m *Manager) Register(skill Skill) {
@@ -84,6 +145,9 @@ func (m *Manager) Register(skill Skill) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if !skill.Invocation.Configured && !skill.Invocation.ModelInvocable && !skill.Invocation.UserInvocable {
+		skill.Invocation = InvocationPolicy{ModelInvocable: true, UserInvocable: true}
+	}
 	m.items[skill.Name] = skillEntry{skill: skill}
 }
 
@@ -91,71 +155,130 @@ func (m *Manager) Register(skill Skill) {
 // Missing directories are normal because global and project Skill directories
 // are both optional.
 func (m *Manager) Discover(options DiscoveryOptions) error {
-	for _, root := range append([]string{options.GlobalDir}, options.Directories...) {
-		if err := m.discoverDirectory(root); err != nil {
+	// DeepSeek Harness uses lower numeric ranks for higher-precedence roots.
+	// Collect every candidate before mutating the catalog so one malformed root
+	// cannot partially replace the last-good observation.
+	roots := []discoveryRoot{
+		{path: options.ProjectDSHDir, source: "project-dsh", rank: 100},
+		{path: options.ProjectAgentsDir, source: "project-agents", rank: 200},
+		{path: options.ProjectDir, source: "project", rank: 250},
+	}
+	for _, path := range options.Directories {
+		roots = append(roots, discoveryRoot{path: path, source: "custom", rank: 300})
+	}
+	roots = append(roots,
+		discoveryRoot{path: options.UserDSHDir, source: "user-dsh", rank: 400},
+		discoveryRoot{path: options.UserAgentsDir, source: "user-agents", rank: 500},
+		discoveryRoot{path: options.GlobalDir, source: "global", rank: 550},
+		discoveryRoot{path: options.BundledDir, source: "bundled", rank: 600},
+	)
+	winners := make(map[string]discoveredSkill)
+	order := 0
+	for _, root := range roots {
+		items, err := m.discoverDirectory(root)
+		if err != nil {
+			m.SetDiscoveryStatus(false)
 			return err
 		}
+		for _, item := range items {
+			item.order = order
+			order++
+			current, exists := winners[item.skill.Name]
+			if !exists || item.rank < current.rank || (item.rank == current.rank && item.order < current.order) {
+				winners[item.skill.Name] = item
+			}
+		}
 	}
-	return m.discoverDirectory(options.ProjectDir)
+
+	m.mu.Lock()
+	for name := range m.discoveredNames {
+		if builtin, ok := m.builtins[name]; ok {
+			m.items[name] = builtin
+		} else {
+			delete(m.items, name)
+		}
+	}
+	m.discoveredNames = make(map[string]struct{}, len(winners))
+	for name, item := range winners {
+		m.items[name] = skillEntry{skill: item.skill, path: item.path, rank: item.rank}
+		m.discoveredNames[name] = struct{}{}
+	}
+	m.complete = true
+	m.revision++
+	m.mu.Unlock()
+	return nil
 }
 
-func (m *Manager) discoverDirectory(root string) error {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return nil
+func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, error) {
+	root.path = strings.TrimSpace(root.path)
+	if root.path == "" {
+		return nil, nil
 	}
 
-	entries, err := os.ReadDir(root)
+	entries, err := os.ReadDir(root.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read skills directory %s: %w", root, err)
-	}
-	type discoveredSkill struct {
-		skill Skill
-		path  string
+		return nil, fmt.Errorf("read skills directory %s: %w", root.path, err)
 	}
 	discovered := make([]discoveredSkill, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if root.source == "user-dsh" && entry.IsDir() && entry.Name() == ".system" {
 			continue
 		}
-		path := filepath.Join(root, entry.Name(), "SKILL.md")
+		path := ""
+		if entry.IsDir() {
+			path = filepath.Join(root.path, entry.Name(), "SKILL.md")
+		} else if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+			// DeepSeek also accepts a flat skill file directly under a catalog.
+			path = filepath.Join(root.path, entry.Name())
+		} else {
+			continue
+		}
 		metadata, err := readFrontmatter(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("discover skill %s: %w", path, err)
+			return nil, fmt.Errorf("discover skill %s: %w", path, err)
 		}
 		name := strings.TrimSpace(metadata.Name)
 		if name == "" {
-			name = entry.Name()
+			name = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 		}
 		if !validSkillName(name) {
-			return fmt.Errorf("discover skill %s: invalid name %q", path, name)
+			return nil, fmt.Errorf("discover skill %s: invalid name %q", path, name)
 		}
 		description := strings.TrimSpace(metadata.Description)
 		if description == "" {
-			return fmt.Errorf("discover skill %s: description is required", path)
+			return nil, fmt.Errorf("discover skill %s: description is required", path)
 		}
 		candidate := Skill{
-			Name:        name,
-			Description: description,
-			Tools:       normalizeTools(metadata.Tools),
+			Name:         name,
+			Description:  description,
+			Tools:        normalizeTools(metadata.Tools),
+			WhenToUse:    strings.TrimSpace(metadata.WhenToUse),
+			Source:       root.source,
+			Provider:     "filesystem",
+			Path:         path,
+			ResourceBase: filepath.Dir(path),
+			Invocation:   InvocationPolicy{ModelInvocable: true, UserInvocable: true},
+		}
+		if metadata.DisableModelInvocation != nil {
+			candidate.Invocation.ModelInvocable = !*metadata.DisableModelInvocation
+			candidate.Invocation.Configured = true
+		}
+		if metadata.UserInvocable != nil {
+			candidate.Invocation.UserInvocable = *metadata.UserInvocable
+			candidate.Invocation.Configured = true
 		}
 		if !validSkillMetadata(candidate) || len(candidate.Tools) != len(metadata.Tools) {
-			return fmt.Errorf("discover skill %s: invalid tool metadata", path)
+			return nil, fmt.Errorf("discover skill %s: invalid tool metadata", path)
 		}
-		discovered = append(discovered, discoveredSkill{skill: candidate, path: path})
+		discovered = append(discovered, discoveredSkill{skill: candidate, path: path, rank: root.rank})
 	}
-	// Commit only after every entry in this root has passed validation. A
-	// malformed sibling must not leave a partially refreshed catalog behind.
-	for _, item := range discovered {
-		m.registerLazy(item.skill, item.path)
-	}
-	return nil
+	return discovered, nil
 }
 
 func (m *Manager) registerLazy(skill Skill, path string) {
@@ -197,6 +320,46 @@ func (m *Manager) Load(name string) (Skill, bool, error) {
 	return current.skill, true, nil
 }
 
+// ReadResource reads a file shipped beside a filesystem Skill. Resource paths
+// are confined to the Skill directory, preventing traversal into the host.
+func (m *Manager) ReadResource(name, resource string) ([]byte, error) {
+	skill, ok, err := m.Load(name)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("skill %q not found", name)
+	}
+	base := strings.TrimSpace(skill.ResourceBase)
+	if base == "" {
+		return nil, fmt.Errorf("skill %q has no resource directory", name)
+	}
+	basePath, err := filepath.Abs(base)
+	if err != nil {
+		return nil, fmt.Errorf("resolve skill resource directory: %w", err)
+	}
+	clean := filepath.Clean(resource)
+	if clean == "." || filepath.IsAbs(resource) {
+		return nil, errors.New("invalid skill resource path")
+	}
+	target, err := filepath.Abs(filepath.Join(basePath, clean))
+	if err != nil {
+		return nil, fmt.Errorf("resolve skill resource: %w", err)
+	}
+	rel, err := filepath.Rel(basePath, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, errors.New("skill resource path escapes skill directory")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errors.New("skill resource is a directory")
+	}
+	return os.ReadFile(target)
+}
+
 // Get preserves the original lookup API for callers that cannot surface a
 // loading error. New command and tool paths should use Load instead.
 func (m *Manager) Get(name string) (Skill, bool) {
@@ -221,7 +384,20 @@ func (m *Manager) List() []Skill {
 func (m *Manager) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Snapshot{Count: len(m.items)}
+	return Snapshot{Count: len(m.items), Complete: m.complete, Revision: m.revision}
+}
+
+// SetDiscoveryStatus lets filesystem watchers report an incomplete refresh
+// while retaining the last good catalog and revision.
+func (m *Manager) SetDiscoveryStatus(complete bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.complete != complete {
+		m.complete = complete
+		if complete {
+			m.revision++
+		}
+	}
 }
 
 // WriteManifest writes model-facing Skill metadata without leaking prompt
@@ -231,9 +407,15 @@ func (m *Manager) WriteManifest(path string) error {
 		return nil
 	}
 	type manifestSkill struct {
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Tools       []string `json:"tools,omitempty"`
+		Name         string           `json:"name"`
+		Description  string           `json:"description"`
+		Tools        []string         `json:"tools,omitempty"`
+		WhenToUse    string           `json:"whenToUse,omitempty"`
+		Invocation   InvocationPolicy `json:"invocation"`
+		Source       string           `json:"source,omitempty"`
+		Provider     string           `json:"provider,omitempty"`
+		Path         string           `json:"path,omitempty"`
+		ResourceBase string           `json:"resourceBase,omitempty"`
 	}
 	items := m.List()
 	payload := struct {
@@ -244,9 +426,15 @@ func (m *Manager) WriteManifest(path string) error {
 			return errors.New("invalid Skill metadata")
 		}
 		payload.Skills = append(payload.Skills, manifestSkill{
-			Name:        skill.Name,
-			Description: skill.Description,
-			Tools:       append([]string(nil), skill.Tools...),
+			Name:         skill.Name,
+			Description:  skill.Description,
+			Tools:        append([]string(nil), skill.Tools...),
+			WhenToUse:    skill.WhenToUse,
+			Invocation:   skill.Invocation,
+			Source:       skill.Source,
+			Provider:     skill.Provider,
+			Path:         skill.Path,
+			ResourceBase: skill.ResourceBase,
 		})
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
