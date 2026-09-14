@@ -1,5 +1,23 @@
 """Memory system."""
 
-from .manager import Memory, MemoryManager, MemoryStats
+from .manager import (
+    Memory,
+    MemoryEvent,
+    MemoryManager,
+    MemoryStats,
+    RecallEntry,
+    RecallOptions,
+    RecallResult,
+    RecallStats,
+)
 
-__all__ = ["Memory", "MemoryManager", "MemoryStats"]
+__all__ = [
+    "Memory",
+    "MemoryEvent",
+    "MemoryManager",
+    "MemoryStats",
+    "RecallEntry",
+    "RecallOptions",
+    "RecallResult",
+    "RecallStats",
+]

@@ -36,6 +36,22 @@ Durable, attributable knowledge that can be retrieved across agent steps or
 Sessions. A transcript is evidence for Memory, not Memory by itself.
 _Avoid_: chat history, cache
 
+**Memory Namespace**:
+The isolation scope in which a Memory can be discovered and recalled. It does
+not grant access by itself; authorization remains a Harness responsibility.
+_Avoid_: folder, tenant permission
+
+**Memory Detail**:
+The declared level of detail of one Memory: abstract, overview, or full. It is
+a retrieval contract, not a claim that one record was generated from another.
+_Avoid_: priority, confidence
+
+**Memory Provenance**:
+The source URI, source checksum, and optional Session association that make a
+Memory attributable to evidence in the Session Ledger or another approved
+source.
+_Avoid_: copied transcript, unverified citation
+
 **Checkpoint**:
 A durable recovery anchor for a known Session state. Restoring a Checkpoint
 changes the active Surface without deleting later Session Ledger facts.

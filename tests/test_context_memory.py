@@ -3,15 +3,321 @@ from __future__ import annotations
 import ast
 import hashlib
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 import orchestrator.context.memory as memory_module
+import orchestrator.memory.manager as file_memory_module
 from orchestrator.context.memory import LayeredContext, SQLiteContextStore
-from orchestrator.memory.manager import Memory, MemoryManager
+from orchestrator.memory.manager import Memory, MemoryManager, RecallOptions
 
 _CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
+
+
+def test_memory_manager_legacy_defaults_do_not_rewrite_source(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    path = memory_dir / "legacy-note.md"
+    legacy = (
+        "---\n"
+        "id: legacy-1\n"
+        "name: legacy-note\n"
+        "tags: project\n"
+        "created_at: 2026-09-05T00:00:00+00:00\n"
+        "updated_at: 2026-09-05T00:00:00+00:00\n"
+        "---\n"
+        "legacy body\n"
+    )
+    path.write_text(legacy, encoding="utf-8")
+
+    manager = MemoryManager(str(memory_dir))
+    loaded = manager.get("legacy-note")
+
+    assert loaded is not None
+    assert (loaded.namespace, loaded.kind, loaded.detail) == ("user", "default", "full")
+    assert path.read_text(encoding="utf-8") == legacy
+
+
+def test_memory_manager_metadata_round_trips_with_provenance(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    manager = MemoryManager(str(memory_dir))
+    source_checksum = hashlib.sha256(b"source evidence").hexdigest()
+
+    saved = manager.save(
+        Memory(
+            id="memory-1",
+            name="workflow-recovery",
+            content="Workers resume from verified checkpoints.",
+            tags=["workflow"],
+            namespace="project",
+            kind="experiences",
+            detail="overview",
+            source_uri="session://session-1/events/42",
+            source_checksum=source_checksum,
+            session_id="session-1",
+        )
+    )
+    assert saved.checksum
+
+    loaded = MemoryManager(str(memory_dir)).get(saved.id)
+
+    assert loaded is not None
+    assert (loaded.namespace, loaded.kind, loaded.detail) == (
+        "project",
+        "experiences",
+        "overview",
+    )
+    assert loaded.source_uri == "session://session-1/events/42"
+    assert loaded.source_checksum == source_checksum
+    assert loaded.session_id == "session-1"
+    assert loaded.checksum == saved.checksum
+
+
+def test_memory_positional_constructor_preserves_legacy_timestamp_slots(tmp_path: Path) -> None:
+    created_at = datetime(2026, 9, 5, tzinfo=UTC)
+    updated_at = datetime(2026, 9, 6, tzinfo=UTC)
+    item = Memory("legacy-1", "legacy-note", "legacy body", ["project"], created_at, updated_at)
+
+    assert item.created_at == created_at
+    assert item.updated_at == updated_at
+    saved = MemoryManager(str(tmp_path / "memory")).save(item)
+    assert saved.namespace == "user"
+    assert saved.kind == "default"
+    assert saved.detail == "full"
+
+
+def test_memory_manager_defaults_blank_metadata_to_legacy_values(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+
+    saved = manager.save(
+        Memory(
+            id="memory-blank-defaults",
+            name="blank-defaults",
+            content="ordinary note",
+            namespace=" ",
+            kind="\t",
+            detail="  ",
+        )
+    )
+
+    assert (saved.namespace, saved.kind, saved.detail) == ("user", "default", "full")
+
+
+def test_memory_manager_sorts_equal_timestamps_by_name_ascending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixed = datetime(2026, 9, 5, tzinfo=UTC)
+    monkeypatch.setattr(file_memory_module, "_now", lambda: fixed)
+    manager = MemoryManager(str(tmp_path / "memory"))
+
+    manager.save(Memory("memory-beta", "beta", "same timestamp"))
+    manager.save(Memory("memory-alpha", "alpha", "same timestamp"))
+
+    assert [item.name for item in manager.list()] == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("namespace", "Project!", "namespace"),
+        ("kind", "experiences!", "kind"),
+        ("detail", "summary", "detail"),
+        ("source_uri", "session://session-1/events/42", "source URI"),
+        ("source_checksum", "bad", "source checksum"),
+        ("checksum", "bad", "memory checksum"),
+    ),
+)
+def test_memory_manager_rejects_invalid_metadata_without_writing(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    values = {field: value}
+    if field == "source_uri":
+        values["source_checksum"] = ""
+    memory = Memory(
+        id="invalid-metadata",
+        name="invalid-metadata",
+        content="ordinary note",
+        **values,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        manager.save(memory)
+
+    assert manager.list() == []
+    assert list((tmp_path / "memory").glob("*.md")) == [
+        tmp_path / "memory" / "MEMORY.md"
+    ]
+
+
+def test_memory_manager_recomputes_prefilled_checksum(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    supplied_checksum = "0" * 64
+
+    saved = manager.save(
+        Memory(
+            id="memory-resigned",
+            name="resigned",
+            content="ordinary note",
+            checksum=supplied_checksum,
+        )
+    )
+
+    assert saved.checksum != supplied_checksum
+    assert MemoryManager(str(tmp_path / "memory")).get(saved.id).checksum == saved.checksum
+
+
+def test_memory_manager_uses_utc_z_timestamps_for_cross_runtime_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixed = datetime(2026, 9, 5, tzinfo=UTC)
+    monkeypatch.setattr(file_memory_module, "_now", lambda: fixed)
+    memory_dir = tmp_path / "memory"
+    saved = MemoryManager(str(memory_dir)).save(
+        Memory("memory-cross-runtime", "cross-runtime", "ordinary note", [], fixed, fixed)
+    )
+
+    text = (memory_dir / f"{saved.name}.md").read_text(encoding="utf-8")
+    assert "created_at: 2026-09-05T00:00:00Z" in text
+    assert "updated_at: 2026-09-05T00:00:00Z" in text
+
+
+def test_memory_audit_sink_is_not_emitted_when_file_prepare_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = []
+    manager = MemoryManager(str(tmp_path / "memory"), audit_sink=events.append)
+
+    def fail_write(_path: Path, _item: Memory) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(file_memory_module, "_write_memory_file", fail_write)
+    with pytest.raises(OSError, match="disk full"):
+        manager.add("ordinary note")
+
+    assert events == []
+    assert manager.list() == []
+    assert list((tmp_path / "memory").glob("*.md")) == [
+        tmp_path / "memory" / "MEMORY.md"
+    ]
+
+
+def test_memory_manager_rolls_back_file_and_items_when_index_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_dir = tmp_path / "memory"
+    manager = MemoryManager(str(memory_dir))
+    before_index = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+    def fail_index() -> None:
+        (memory_dir / "MEMORY.md").write_text("partial index\n", encoding="utf-8")
+        raise OSError("index unavailable")
+
+    monkeypatch.setattr(manager, "_write_index", fail_index)
+    with pytest.raises(OSError, match="index unavailable"):
+        manager.save(Memory("memory-index-failure", "index-failure", "ordinary note"))
+
+    assert manager.list() == []
+    assert not (memory_dir / "index-failure.md").exists()
+    assert (memory_dir / "MEMORY.md").read_text(encoding="utf-8") == before_index
+
+
+def test_memory_recall_filters_ranks_and_limits_deterministically(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    for item in (
+        Memory(
+            id="",
+            name="secondary",
+            content="Workflow recovery remains available.",
+            namespace="project",
+            kind="experiences",
+            detail="overview",
+        ),
+        Memory(
+            id="",
+            name="workflow-recovery",
+            content="Resume workers from checkpoints.",
+            tags=["workflow", "recovery"],
+            namespace="project",
+            kind="experiences",
+            detail="overview",
+        ),
+        Memory(
+            id="",
+            name="user-workflow",
+            content="Workflow recovery for another scope.",
+            namespace="user",
+            kind="experiences",
+            detail="overview",
+        ),
+    ):
+        manager.save(item)
+
+    result = manager.recall(
+        "workflow recovery",
+        RecallOptions(
+            namespace="project",
+            kind="experiences",
+            detail="overview",
+            limit=1,
+        ),
+    )
+
+    assert [entry.memory.name for entry in result.entries] == ["workflow-recovery"]
+    assert (result.stats.candidates, result.stats.returned, result.stats.dropped) == (2, 1, 1)
+
+
+def test_memory_recall_honors_whole_entry_token_budget(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    manager.save(Memory(id="", name="workflow", content="workflow", tags=["workflow"]))
+    manager.save(
+        Memory(id="", name="large", content="workflow " + "large evidence " * 80)
+    )
+
+    result = manager.recall("workflow", RecallOptions(max_tokens=20))
+
+    assert [entry.memory.name for entry in result.entries] == ["workflow"]
+    assert result.stats.used_tokens <= 20
+    assert result.stats.dropped == 1
+
+
+def test_memory_recall_rejects_negative_bounds(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    with pytest.raises(ValueError, match="limit"):
+        manager.recall("query", RecallOptions(limit=-1))
+    with pytest.raises(ValueError, match="token"):
+        manager.recall("query", RecallOptions(max_tokens=-1))
+
+
+def test_memory_audit_sink_receives_sanitized_lifecycle_events(tmp_path: Path) -> None:
+    events = []
+    manager = MemoryManager(str(tmp_path / "memory"), audit_sink=events.append)
+
+    saved = manager.add("derived workflow evidence", ["workflow-private"])
+    manager.delete(saved.id)
+
+    assert [event.action for event in events] == ["save", "delete"]
+    assert events[0].memory_id == saved.id
+    assert events[0].memory_checksum == saved.checksum
+    serialized = repr(events)
+    assert "derived workflow evidence" not in serialized
+    assert "workflow-private" not in serialized
+
+
+def test_memory_audit_sink_failure_prevents_write(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+
+    def fail_audit(_event) -> None:
+        raise RuntimeError("ledger unavailable")
+
+    manager = MemoryManager(str(memory_dir), audit_sink=fail_audit)
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        manager.add("safe derived knowledge")
+
+    assert manager.list() == []
+    assert list(memory_dir.glob("*.md")) == [memory_dir / "MEMORY.md"]
 
 
 def test_context_module_parses_with_python_311_grammar() -> None:
@@ -531,6 +837,42 @@ def test_initial_messages_bound_long_term_memory_injection(tmp_path: Path) -> No
     assert len(section) <= 4_096
     assert "older memories omitted" in section
     store.close()
+
+
+def test_conversation_memory_recall_budget_bounds_file_memories(tmp_path: Path) -> None:
+    from orchestrator.graph.main_graph import build_graph
+    from orchestrator.runtime.conversation import ConversationRunner
+    from orchestrator.runtime.tools import ToolRegistry
+    from orchestrator.skills.manager import SkillManager
+    from orchestrator.todo.manager import TodoManager
+
+    memory_manager = MemoryManager(str(tmp_path / "memory"))
+    for index in range(5):
+        memory_manager.save(
+            Memory(
+                id="",
+                name=f"budget-memory-{index}",
+                content=f"budget-marker-{index} " + ("x" * 1_800),
+                tags=["budget-marker"],
+            )
+        )
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=None,
+        tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(),
+        memory_manager=memory_manager,
+        skills=SkillManager(),
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+    )
+
+    rendered = "\n".join(
+        str(message.content)
+        for message in runner._initial_messages("budget-marker", 1, session_id="session-1")
+    )
+
+    assert rendered.count("budget-memory-") == 2
 
 
 def test_invalid_memory_does_not_discard_verified_event_context(tmp_path: Path) -> None:

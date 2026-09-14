@@ -43,7 +43,7 @@ from orchestrator.llm.client import (
 )
 from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.llm.router import PreparedRoute, ProviderRouter
-from orchestrator.memory.manager import Memory, MemoryManager
+from orchestrator.memory.manager import Memory, MemoryManager, RecallOptions
 from orchestrator.prompts import (
     build_system_prompt,
     build_with_cache_breaks,
@@ -2164,7 +2164,11 @@ class ConversationRunner:
         state_context: str = "",
     ) -> list[ChatMessage]:
         history = history or []
-        memories = self.memory_manager.load_relevant(user_text)
+        recalled = self.memory_manager.recall(
+            user_text,
+            RecallOptions(limit=5, max_tokens=1_200),
+        )
+        memories = [entry.memory for entry in recalled.entries]
         layered = ""
         if self.layered_context is not None and session_id.strip():
             try:
