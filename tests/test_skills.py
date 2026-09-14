@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from orchestrator.skills.manager import SkillManager
+from orchestrator.skills.manager import InvocationPolicy, Skill, SkillManager
 
 
 def test_default_skill_manager_exposes_goal_catalog_without_project_manifest() -> None:
@@ -257,6 +257,23 @@ def test_skill_manager_filters_model_and_user_invocation_views(tmp_path) -> None
     assert "internal-only" not in {item.name for item in manager.list(for_model=True)}
     assert "user-only" not in {item.name for item in manager.list(for_model=True)}
     assert {item.name for item in manager.list(for_user=True)} >= {"user-only"}
+    assert "internal-only" not in {item.name for item in manager.list(for_user=True)}
+
+
+def test_skill_manager_default_list_is_explicitly_unfiltered() -> None:
+    manager = SkillManager()
+    manager.register(
+        Skill(
+            name="internal-only",
+            description="runtime",
+            prompt="internal body",
+            tools=["Read"],
+            invocation=InvocationPolicy(model_invocable=False, user_invocable=False),
+        )
+    )
+
+    assert "internal-only" in {item.name for item in manager.list()}
+    assert "internal-only" not in {item.name for item in manager.list(for_model=True)}
     assert "internal-only" not in {item.name for item in manager.list(for_user=True)}
 
 

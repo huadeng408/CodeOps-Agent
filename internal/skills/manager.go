@@ -368,11 +368,29 @@ func (m *Manager) Get(name string) (Skill, bool) {
 }
 
 func (m *Manager) List() []Skill {
+	return m.listFiltered(nil)
+}
+
+// ListForModel returns only Skills that may be surfaced to model prompts.
+// Discovery remains metadata-only; callers must use Load when they need a body.
+func (m *Manager) ListForModel() []Skill {
+	return m.listFiltered(func(policy InvocationPolicy) bool { return policy.ModelInvocable })
+}
+
+// ListForUser returns only Skills that may be selected from user-facing entry points.
+func (m *Manager) ListForUser() []Skill {
+	return m.listFiltered(func(policy InvocationPolicy) bool { return policy.UserInvocable })
+}
+
+func (m *Manager) listFiltered(include func(InvocationPolicy) bool) []Skill {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	out := make([]Skill, 0, len(m.items))
 	for _, entry := range m.items {
+		if include != nil && !include(entry.skill.Invocation) {
+			continue
+		}
 		out = append(out, entry.skill)
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -325,6 +325,36 @@ func TestRegisterPreservesExplicitlyDisabledInvocationPolicy(t *testing.T) {
 	}
 }
 
+func TestListFiltersInvocationPolicyViews(t *testing.T) {
+	manager := NewManager()
+	manager.Register(Skill{
+		Name:        "internal-only",
+		Description: "runtime-only skill",
+		Prompt:      "internal body",
+		Tools:       []string{"Read"},
+		Invocation:  InvocationPolicy{ModelInvocable: false, UserInvocable: false, Configured: true},
+	})
+
+	if !containsSkill(manager.List(), "internal-only") {
+		t.Fatal("default List should retain the complete catalog")
+	}
+	if containsSkill(manager.ListForModel(), "internal-only") {
+		t.Fatal("model view must exclude non-model-invocable skills")
+	}
+	if containsSkill(manager.ListForUser(), "internal-only") {
+		t.Fatal("user view must exclude non-user-invocable skills")
+	}
+}
+
+func containsSkill(items []Skill, name string) bool {
+	for _, item := range items {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func writeTestSkill(t *testing.T, root, name, contents string) {
 	t.Helper()
 	dir := filepath.Join(root, name)

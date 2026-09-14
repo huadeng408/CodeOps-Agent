@@ -875,6 +875,39 @@ def test_conversation_memory_recall_budget_bounds_file_memories(tmp_path: Path) 
     assert rendered.count("budget-memory-") == 2
 
 
+def test_conversation_capabilities_expose_only_model_invocable_skills(tmp_path: Path) -> None:
+    from orchestrator.graph.main_graph import build_graph
+    from orchestrator.runtime.conversation import ConversationRunner
+    from orchestrator.runtime.tools import ToolRegistry
+    from orchestrator.skills.manager import InvocationPolicy, Skill, SkillManager
+    from orchestrator.todo.manager import TodoManager
+
+    skills = SkillManager()
+    skills.register(
+        Skill(
+            name="internal-only",
+            description="runtime-only skill",
+            prompt="internal body",
+            tools=["Read"],
+            invocation=InvocationPolicy(model_invocable=False, user_invocable=False),
+        )
+    )
+    runner = ConversationRunner(
+        graph=build_graph(),
+        llm=None,
+        tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=skills,
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+    )
+
+    capabilities = runner._capabilities_context()
+
+    assert "internal-only" not in capabilities
+
+
 def test_invalid_memory_does_not_discard_verified_event_context(tmp_path: Path) -> None:
     from orchestrator.graph.main_graph import build_graph
     from orchestrator.memory.manager import MemoryManager
