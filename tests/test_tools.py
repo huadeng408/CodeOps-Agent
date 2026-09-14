@@ -71,6 +71,36 @@ def test_tool_registry_refreshes_skill_catalog_into_model_visible_description(tm
     assert "release: Prepare a release." not in refreshed.description
 
 
+def test_tool_registry_hides_non_model_invocable_skills(tmp_path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    (agent_dir / "skills.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "internal-only",
+                        "description": "Private runtime skill.",
+                        "invocation": {"modelInvocable": False, "userInvocable": False},
+                    },
+                    {
+                        "name": "model-only",
+                        "description": "Safe model skill.",
+                        "invocation": {"modelInvocable": True, "userInvocable": False},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry(str(tmp_path))
+    spec = registry.get("Skill")
+    assert spec is not None
+    assert "model-only: Safe model skill." in spec.description
+    assert "internal-only: Private runtime skill." not in spec.description
+
+
 def test_extension_manifest_refresh_never_removes_builtin_tools(tmp_path) -> None:
     agent_dir = tmp_path / ".agent"
     agent_dir.mkdir()

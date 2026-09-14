@@ -164,6 +164,12 @@ class ToolRegistry:
             name = str(raw.get("name", "")).strip()
             if not name:
                 continue
+            invocation = raw.get("invocation", {})
+            if not isinstance(invocation, dict):
+                continue
+            model_invocable = invocation.get("modelInvocable", True)
+            if not isinstance(model_invocable, bool) or not model_invocable:
+                continue
             summary = str(raw.get("description", "")).strip() or "No description."
             catalog.append(f"{name}: {summary}")
         if catalog:

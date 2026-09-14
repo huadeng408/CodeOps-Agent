@@ -293,11 +293,26 @@ func (m *Manager) registerLazy(skill Skill, path string) {
 // Load resolves a Skill's instruction body on first use. Metadata remains
 // inexpensive to list, while prompts are cached after a successful load.
 func (m *Manager) Load(name string) (Skill, bool, error) {
+	return m.loadFiltered(name, nil, "")
+}
+
+func (m *Manager) LoadForModel(name string) (Skill, bool, error) {
+	return m.loadFiltered(name, func(policy InvocationPolicy) bool { return policy.ModelInvocable }, "model")
+}
+
+func (m *Manager) LoadForUser(name string) (Skill, bool, error) {
+	return m.loadFiltered(name, func(policy InvocationPolicy) bool { return policy.UserInvocable }, "user")
+}
+
+func (m *Manager) loadFiltered(name string, include func(InvocationPolicy) bool, audience string) (Skill, bool, error) {
 	m.mu.Lock()
 	entry, ok := m.items[name]
 	m.mu.Unlock()
 	if !ok {
 		return Skill{}, false, nil
+	}
+	if include != nil && !include(entry.skill.Invocation) {
+		return Skill{}, false, fmt.Errorf("skill %q is not %s-invocable", name, audience)
 	}
 	if entry.path == "" {
 		return entry.skill, true, nil

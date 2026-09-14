@@ -1316,7 +1316,7 @@ func (a *App) runSkillCommand(ctx context.Context, command, name, args string) {
 		a.renderer.PrintLine("skills are not available")
 		return
 	}
-	skill, ok, err := a.skills.Load(name)
+	skill, ok, err := a.skills.LoadForUser(name)
 	if err != nil {
 		a.renderer.PrintLine(err.Error())
 		return
@@ -1512,7 +1512,7 @@ func (a *App) skillLines() []string {
 	if a.skills == nil {
 		return []string{"skills are not available"}
 	}
-	registered := a.skills.List()
+	registered := a.skills.ListForUser()
 	if len(registered) == 0 {
 		return []string{"no skills registered"}
 	}

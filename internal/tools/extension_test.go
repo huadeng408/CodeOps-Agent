@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"code-agent/internal/extensions"
+	"code-agent/internal/skills"
 )
 
 type extensionTestAdapter struct {
@@ -75,5 +76,21 @@ func TestExecutorDoesNotLeakExtensionAdapterErrors(t *testing.T) {
 	})
 	if err == nil || result.ExitCode != 1 || strings.Contains(result.Error, "private marker") || strings.Contains(result.Error, "credential-shaped-value") {
 		t.Fatalf("result = %#v, err = %v", result, err)
+	}
+}
+
+func TestExecutorSkillToolRejectsNonModelInvocableSkill(t *testing.T) {
+	manager := skills.NewManager()
+	manager.Register(skills.Skill{
+		Name: "user-only", Description: "user skill", Prompt: "private",
+		Invocation: skills.InvocationPolicy{ModelInvocable: false, UserInvocable: true, Configured: true},
+	})
+	executor := NewExecutor(t.TempDir())
+	executor.SetSkillsManager(manager)
+	result, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Skill", Arguments: map[string]any{"name": "user-only"},
+	})
+	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Error, "not model-invocable") {
+		t.Fatalf("result=%+v err=%v, want model policy denial", result, err)
 	}
 }

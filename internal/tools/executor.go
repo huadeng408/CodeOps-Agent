@@ -324,7 +324,7 @@ func (e *Executor) executeSkill(_ context.Context, args map[string]any) (ToolRes
 		return ToolResult{Name: "Skill", Error: "skill name is required", ExitCode: 1}, nil
 	}
 	name = strings.TrimSpace(name)
-	skill, ok, err := manager.Load(name)
+	skill, ok, err := manager.LoadForModel(name)
 	if err != nil {
 		return ToolResult{Name: "Skill", Error: err.Error(), ExitCode: 1}, nil
 	}

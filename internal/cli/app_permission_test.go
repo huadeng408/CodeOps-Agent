@@ -379,6 +379,29 @@ func TestHandleSlashCommandRunsNamedSkill(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCommandHidesAndRejectsNonUserInvocableSkill(t *testing.T) {
+	root := t.TempDir()
+	app, out := newPermissionTestApp(root, "")
+	app.skills = skills.NewManager()
+	app.skills.Register(skills.Skill{
+		Name: "internal-only", Description: "runtime only", Prompt: "private",
+		Invocation: skills.InvocationPolicy{ModelInvocable: true, UserInvocable: false, Configured: true},
+	})
+	if !app.handleSlashCommand(context.Background(), "/skills") {
+		t.Fatal("/skills should be handled")
+	}
+	if strings.Contains(out.String(), "internal-only") {
+		t.Fatalf("user skill listing exposed restricted skill: %q", out.String())
+	}
+	out.Reset()
+	if !app.handleSlashCommand(context.Background(), "/skill internal-only") {
+		t.Fatal("/skill should be handled")
+	}
+	if !strings.Contains(out.String(), "not user-invocable") {
+		t.Fatalf("expected policy denial, got %q", out.String())
+	}
+}
+
 func TestBuildSkillInputIncludesPromptToolsAndFocus(t *testing.T) {
 	input := buildSkillInput(skills.Skill{
 		Name:   "review",

@@ -346,6 +346,32 @@ func TestListFiltersInvocationPolicyViews(t *testing.T) {
 	}
 }
 
+func TestLoadViewsRejectDisallowedSkillsBeforeReadingPrompt(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal-only", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: internal-only\ndescription: private\nuser-invocable: false\ndisable-model-invocation: true\n---\nprivate body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	// Remove the body after metadata discovery. Policy checks must happen before
+	// any attempt to read the now-missing prompt.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.LoadForUser("internal-only"); err == nil || ok || !strings.Contains(err.Error(), "not user-invocable") {
+		t.Fatalf("LoadForUser = ok=%v err=%v, want policy denial", ok, err)
+	}
+	if _, ok, err := manager.LoadForModel("internal-only"); err == nil || ok || !strings.Contains(err.Error(), "not model-invocable") {
+		t.Fatalf("LoadForModel = ok=%v err=%v, want policy denial", ok, err)
+	}
+}
+
 func containsSkill(items []Skill, name string) bool {
 	for _, item := range items {
 		if item.Name == name {
