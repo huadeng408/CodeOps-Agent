@@ -798,6 +798,10 @@ class ToolRegistry:
                             "type": "string",
                             "description": "Optional arguments or focus to pass to the skill.",
                         },
+                        "resource": {
+                            "type": "string",
+                            "description": "Read a UTF-8 reference, script, or template relative to this skill directory instead of loading its prompt. Does not execute scripts.",
+                        },
                     },
                     "required": ["name"],
                 },

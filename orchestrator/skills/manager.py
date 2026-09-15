@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +50,7 @@ class SkillManager:
         self._builtin_names: set[str] = set()
         self._catalog_names: set[str] = set()
         self._catalog_defaults: dict[str, Skill] = {}
+        self._builtin_defaults: dict[str, Skill] = {}
         self._manifest_names: set[str] = set()
         self._discovered_names: set[str] = set()
         self._lazy_paths: dict[str, Path] = {}
@@ -91,6 +94,7 @@ class SkillManager:
             self._catalog_names.add(name)
             self._catalog_defaults[name] = skill
 
+        self._builtin_defaults = dict(self._skills)
         if project_root:
             root = Path(project_root).resolve()
             self.discover(
@@ -122,7 +126,7 @@ class SkillManager:
 
     def read_resource(self, name: str, resource: str) -> bytes:
         """Read a Skill resource while keeping access inside its directory."""
-        skill = self.load(name)
+        skill = self.get(name)
         if skill is None:
             raise ValueError(f"skill {name!r} not found")
         if not skill.resource_base:
@@ -136,9 +140,7 @@ class SkillManager:
             target.relative_to(base)
         except ValueError as exc:
             raise ValueError("skill resource path escapes skill directory") from exc
-        if target.is_dir():
-            raise ValueError("skill resource is a directory")
-        return target.read_bytes()
+        return _read_bounded_file(target)
 
     def list(self, *, for_model: bool = False, for_user: bool = False) -> list[Skill]:
         if for_model and for_user:
@@ -203,8 +205,9 @@ class SkillManager:
             return
 
         for name in self._discovered_names:
+            self._lazy_paths.pop(name, None)
             if name in self._builtin_names:
-                self._skills[name] = self._catalog_defaults.get(name, self._skills[name])
+                self._skills[name] = self._builtin_defaults[name]
             else:
                 self._skills.pop(name, None)
                 self._lazy_paths.pop(name, None)
@@ -283,6 +286,8 @@ class SkillManager:
 
 
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_MAX_FRONTMATTER_BYTES = 64 << 10
+_MAX_RESOURCE_BYTES = 256 << 10
 
 
 def _as_path(value: str | Path | None) -> Path | None:
@@ -321,18 +326,26 @@ def _discover_root(root: _DiscoveryRoot) -> list[tuple[Skill, Path]]:
 
 def _read_skill_metadata(path: Path) -> dict[str, object]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        with path.open("rb") as stream:
+            first = stream.readline(_MAX_FRONTMATTER_BYTES + 1)
+            if first.decode("utf-8-sig").strip() != "---":
+                raise ValueError(f"Skill file missing frontmatter: {path}")
+            lines: list[str] = []
+            consumed = len(first)
+            while True:
+                line = stream.readline(_MAX_FRONTMATTER_BYTES + 1)
+                consumed += len(line)
+                if consumed > _MAX_FRONTMATTER_BYTES:
+                    raise ValueError(f"Skill frontmatter is too large: {path}")
+                if not line:
+                    raise ValueError(f"Skill file missing closing frontmatter: {path}")
+                text = line.decode("utf-8")
+                if text.strip() == "---":
+                    break
+                lines.append(text)
+        raw = yaml.safe_load("".join(lines))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise ValueError(f"read {path}: {exc}") from exc
-    if not text.startswith("---"):
-        raise ValueError(f"Skill file missing frontmatter: {path}")
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        raise ValueError(f"Skill file missing frontmatter: {path}")
-    closing = next((index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
-    if closing is None:
-        raise ValueError(f"Skill file missing closing frontmatter: {path}")
-    raw = yaml.safe_load("\n".join(lines[1:closing]))
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
@@ -341,7 +354,7 @@ def _read_skill_metadata(path: Path) -> dict[str, object]:
 
 
 def _read_skill_body(path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
+    text = _read_bounded_file(path).decode("utf-8-sig")
     lines = text.splitlines()
     closing = next((index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
     if closing is None or not lines or lines[0].strip() != "---":
@@ -356,7 +369,7 @@ def _skill_from_metadata(metadata: dict[str, object], path: Path, root: _Discove
         raise ValueError(f"Skill {path} requires string name and description")
     raw_tools = metadata.get("tools", metadata.get("allowed-tools", []))
     if isinstance(raw_tools, str):
-        tools = [item for item in re.split(r"[,\\s]+", raw_tools) if item]
+        tools = [item for item in re.split(r"[,\s]+", raw_tools) if item]
     elif isinstance(raw_tools, list):
         if not all(isinstance(item, str) for item in raw_tools):
             raise ValueError(f"Skill {path} contains invalid tools metadata")
@@ -387,6 +400,16 @@ def _skill_from_metadata(metadata: dict[str, object], path: Path, root: _Discove
             user_invocable=user_invocable,
         ),
     )
+
+
+def _read_bounded_file(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("skill resource must be a regular file")
+        data = stream.read(_MAX_RESOURCE_BYTES + 1)
+    if len(data) > _MAX_RESOURCE_BYTES:
+        raise ValueError("skill resource is too large")
+    return data
 
 
 def _validate_skill_metadata(name: str, description: str, tools: list[str]) -> None:

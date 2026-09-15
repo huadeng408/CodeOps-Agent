@@ -6,6 +6,13 @@ from codeagent import orchestrator_pb2
 from orchestrator.runtime.tools import ToolRegistry
 
 
+def test_skill_tool_exposes_confined_resource_read() -> None:
+    spec = ToolRegistry().get("Skill")
+    assert spec is not None
+    assert spec.parameters["properties"]["resource"]["type"] == "string"
+    assert spec.parameters["required"] == ["name"]
+
+
 def test_tool_registry_loads_mcp_manifest(tmp_path) -> None:
     agent_dir = tmp_path / ".agent"
     agent_dir.mkdir()

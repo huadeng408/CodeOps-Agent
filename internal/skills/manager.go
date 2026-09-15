@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -77,13 +78,19 @@ type discoveryRoot struct {
 }
 
 type skillFrontmatter struct {
-	Name                   string   `yaml:"name"`
-	Description            string   `yaml:"description"`
-	Tools                  []string `yaml:"tools"`
-	WhenToUse              string   `yaml:"whenToUse"`
-	DisableModelInvocation *bool    `yaml:"disable-model-invocation"`
-	UserInvocable          *bool    `yaml:"user-invocable"`
+	Name                   string    `yaml:"name"`
+	Description            string    `yaml:"description"`
+	Tools                  yaml.Node `yaml:"tools"`
+	AllowedTools           yaml.Node `yaml:"allowed-tools"`
+	WhenToUse              string    `yaml:"whenToUse"`
+	DisableModelInvocation *bool     `yaml:"disable-model-invocation"`
+	UserInvocable          *bool     `yaml:"user-invocable"`
 }
+
+const (
+	maxSkillFrontmatterBytes = 64 << 10
+	MaxResourceBytes         = 256 << 10
+)
 
 type Manager struct {
 	mu              sync.Mutex
@@ -254,10 +261,18 @@ func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, erro
 		if description == "" {
 			return nil, fmt.Errorf("discover skill %s: description is required", path)
 		}
+		toolsNode := metadata.Tools
+		if toolsNode.Kind == 0 {
+			toolsNode = metadata.AllowedTools
+		}
+		tools, err := parseTools(toolsNode)
+		if err != nil {
+			return nil, fmt.Errorf("discover skill %s: %w", path, err)
+		}
 		candidate := Skill{
 			Name:         name,
 			Description:  description,
-			Tools:        normalizeTools(metadata.Tools),
+			Tools:        tools,
 			WhenToUse:    strings.TrimSpace(metadata.WhenToUse),
 			Source:       root.source,
 			Provider:     "filesystem",
@@ -273,7 +288,7 @@ func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, erro
 			candidate.Invocation.UserInvocable = *metadata.UserInvocable
 			candidate.Invocation.Configured = true
 		}
-		if !validSkillMetadata(candidate) || len(candidate.Tools) != len(metadata.Tools) {
+		if !validSkillMetadata(candidate) {
 			return nil, fmt.Errorf("discover skill %s: invalid tool metadata", path)
 		}
 		discovered = append(discovered, discoveredSkill{skill: candidate, path: path, rank: root.rank})
@@ -338,41 +353,33 @@ func (m *Manager) loadFiltered(name string, include func(InvocationPolicy) bool,
 // ReadResource reads a file shipped beside a filesystem Skill. Resource paths
 // are confined to the Skill directory, preventing traversal into the host.
 func (m *Manager) ReadResource(name, resource string) ([]byte, error) {
-	skill, ok, err := m.Load(name)
-	if err != nil {
-		return nil, err
-	}
+	return m.readResource(name, resource, false)
+}
+
+func (m *Manager) ReadResourceForModel(name, resource string) ([]byte, error) {
+	return m.readResource(name, resource, true)
+}
+
+func (m *Manager) readResource(name, resource string, forModel bool) ([]byte, error) {
+	m.mu.Lock()
+	entry, ok := m.items[name]
+	m.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("skill %q not found", name)
 	}
-	base := strings.TrimSpace(skill.ResourceBase)
+	if forModel && !entry.skill.Invocation.ModelInvocable {
+		return nil, fmt.Errorf("skill %q is not model-invocable", name)
+	}
+	base := strings.TrimSpace(entry.skill.ResourceBase)
 	if base == "" {
 		return nil, fmt.Errorf("skill %q has no resource directory", name)
 	}
-	basePath, err := filepath.Abs(base)
-	if err != nil {
-		return nil, fmt.Errorf("resolve skill resource directory: %w", err)
-	}
-	clean := filepath.Clean(resource)
-	if clean == "." || filepath.IsAbs(resource) {
-		return nil, errors.New("invalid skill resource path")
-	}
-	target, err := filepath.Abs(filepath.Join(basePath, clean))
-	if err != nil {
-		return nil, fmt.Errorf("resolve skill resource: %w", err)
-	}
-	rel, err := filepath.Rel(basePath, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, errors.New("skill resource path escapes skill directory")
-	}
-	info, err := os.Stat(target)
+	file, err := openSkillFile(base, resource)
 	if err != nil {
 		return nil, err
 	}
-	if info.IsDir() {
-		return nil, errors.New("skill resource is a directory")
-	}
-	return os.ReadFile(target)
+	defer file.Close()
+	return readBoundedSkillFile(file)
 }
 
 // Get preserves the original lookup API for callers that cannot surface a
@@ -483,22 +490,34 @@ func (m *Manager) WriteManifest(path string) error {
 	return nil
 }
 
-func normalizeTools(tools []string) []string {
-	out := make([]string, len(tools))
-	for i, tool := range tools {
-		out[i] = strings.TrimSpace(tool)
+func parseTools(node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
 	}
-	return out
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		return strings.FieldsFunc(node.Value, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }), nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, errors.New("invalid tool metadata")
+	}
+	out := make([]string, 0, len(node.Content))
+	for _, child := range node.Content {
+		if child.Kind != yaml.ScalarNode || child.Tag != "!!str" {
+			return nil, errors.New("invalid tool metadata")
+		}
+		out = append(out, strings.TrimSpace(child.Value))
+	}
+	return out, nil
 }
 
 func readFrontmatter(path string) (skillFrontmatter, error) {
-	file, err := os.Open(path)
+	file, err := openSkillFile(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		return skillFrontmatter{}, err
 	}
 	defer file.Close()
 
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReader(io.LimitReader(file, maxSkillFrontmatterBytes+1))
 	first, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return skillFrontmatter{}, fmt.Errorf("read frontmatter: %w", err)
@@ -508,8 +527,13 @@ func readFrontmatter(path string) (skillFrontmatter, error) {
 	}
 
 	var lines []string
+	bytesRead := len(first)
 	for {
 		line, readErr := reader.ReadString('\n')
+		bytesRead += len(line)
+		if bytesRead > maxSkillFrontmatterBytes {
+			return skillFrontmatter{}, errors.New("skill frontmatter is too large")
+		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return skillFrontmatter{}, fmt.Errorf("read frontmatter: %w", readErr)
 		}
@@ -530,18 +554,57 @@ func readFrontmatter(path string) (skillFrontmatter, error) {
 }
 
 func readPrompt(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	file, err := openSkillFile(filepath.Dir(path), filepath.Base(path))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	data, err := readBoundedSkillFile(file)
 	if err != nil {
 		return "", err
 	}
 	text := strings.TrimPrefix(string(data), "\ufeff")
-	if !strings.HasPrefix(text, "---") {
+	lines := strings.SplitAfter(text, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return "", errors.New("missing YAML frontmatter")
 	}
-	parts := strings.SplitN(text, "\n---", 2)
-	if len(parts) != 2 {
-		return "", errors.New("missing closing YAML frontmatter")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return strings.TrimSpace(strings.Join(lines[i+1:], "")), nil
+		}
 	}
-	body := strings.TrimPrefix(parts[1], "\n")
-	return strings.TrimSpace(body), nil
+	return "", errors.New("missing closing YAML frontmatter")
+}
+
+// os.Root keeps containment enforced during the open, including symlink races.
+func openSkillFile(base, resource string) (*os.File, error) {
+	if strings.TrimSpace(resource) == "" || !filepath.IsLocal(resource) {
+		return nil, errors.New("invalid skill resource path")
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(resource)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return nil, errors.New("skill resource must be a regular file")
+	}
+	return file, nil
+}
+
+func readBoundedSkillFile(file *os.File) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(file, MaxResourceBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxResourceBytes {
+		return nil, errors.New("skill resource is too large")
+	}
+	return data, nil
 }

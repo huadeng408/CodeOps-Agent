@@ -78,6 +78,28 @@ func TestNewAppDiscoversConfiguredSkillsAndWritesMetadataManifest(t *testing.T) 
 	}
 }
 
+func TestNewAppUsesLayeredProjectSkills(t *testing.T) {
+	root := t.TempDir()
+	for _, prefix := range []string{".agent", ".agents", ".dsh"} {
+		base := filepath.Join(root, prefix, "skills", "layered")
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "SKILL.md"), []byte("---\nname: layered\ndescription: "+prefix+" workflow\n---\n"+prefix+" body"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default(root)
+	cfg.OrchestratorAddr = "127.0.0.1:1"
+	cfg.OrchestratorAutoStart = false
+	app := NewApp(cfg, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	t.Cleanup(func() { cleanupIntegrationApp(t, app) })
+	skill, ok, err := app.skills.LoadForModel("layered")
+	if err != nil || !ok || skill.Source != "project-dsh" || skill.Prompt != ".dsh body" {
+		t.Fatalf("CLI layered skill = %+v, %v, %v", skill, ok, err)
+	}
+}
+
 func TestRealNewAppRAGIngestThenSearchKnowledge(t *testing.T) {
 	if os.Getenv("CODE_AGENT_RUN_RAG_E2E") != "1" {
 		t.Skip("set CODE_AGENT_RUN_RAG_E2E=1 to run the real RAG integration")

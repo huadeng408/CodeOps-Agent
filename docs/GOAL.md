@@ -151,6 +151,29 @@ Session 存储采用一次性并行迁移，而不是双写：新会话只写 ap
 
 ## 当前边界
 
+### Skills 接线阶段（2026-09-15）
+
+状态：`IMPLEMENTED`。已补齐生产 CLI 的 `.dsh/skills`、`.agents/skills`
+及用户目录接线；发现只读 frontmatter，支持 BOM/CRLF 与 `allowed-tools`；
+`Skill(name, resource)` 经 Go Harness 读取附带文本资源，不执行脚本。
+资源上限 256 KiB，Go 使用 `os.Root` 拒绝路径、符号链接及 Windows junction 逃逸；
+资源读取仍受模型调用策略限制，保留来源 SHA-256。Python 恢复失败目录刷新时
+保持 last-good，并在覆盖删除后恢复专用 builtin。
+
+本轮命令：`go test ./... -count=1`、`go vet ./...`、`git diff --check`
+均退出 0；`python -m pytest -q` 退出 0（2327 passed, 17 skipped）。
+定向 `go test ./internal/skills ./internal/tools -count=1` 退出 0；
+`python -m pytest -q tests/test_skills.py tests/test_tools.py` 退出 0
+（25 passed, 1 skipped）。普通 symlink 测试因 Windows 创建权限跳过，
+Windows junction 拒绝测试实际通过。
+
+`CODE_AGENT_RUN_SKILLS_E2E=1 go test ./tests/e2e -run
+TestProductionSkillManifestIsMetadataOnly -count=1` 退出 0，实际启动生产 Go CLI；
+本地 receipt 位于 `.runtime/e2e/skills-manifest-process.json`，逐运行 manifest
+和 receipt 位于其 `manifest_artifact` 所指目录。该检查只证明临时目录输入下的
+发现/优先级/metadata-only 行为；receipt 明确记录 dirty source，不能代替
+40 个 provider-backed Skill 可运行证据或 1000 案例选型指标。
+
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成
 前不进入版本控制；外部 page-Qrels trust root 由运行环境配置，缺失时发布路径

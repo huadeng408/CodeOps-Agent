@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from orchestrator.skills.manager import InvocationPolicy, Skill, SkillManager
 
@@ -289,3 +290,71 @@ def test_skill_manager_reads_resources_without_path_traversal(tmp_path) -> None:
     import pytest
     with pytest.raises(ValueError, match="escapes"):
         manager.read_resource("resource-skill", "../SKILL.md")
+
+
+def test_skill_discovery_reads_only_frontmatter_with_bom_and_invalid_body(tmp_path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    path = root / "portable.md"
+    path.write_bytes(
+        b"\xef\xbb\xbf---\r\nname: portable\r\ndescription: Portable workflow\r\n"
+        b"allowed-tools: Read, Grep Bash\r\n---\r\n\xff"
+    )
+    manager = SkillManager()
+    manager.discover(directories=[root])
+    skill = manager.get("portable")
+    assert skill is not None
+    assert skill.tools == ["Read", "Grep", "Bash"]
+    assert skill.prompt == ""
+    path.write_text(
+        "\ufeff---\nname: portable\ndescription: Portable workflow\n---\nbody\n---not-a-delimiter\n",
+        encoding="utf-8",
+    )
+    assert manager.load("portable").prompt == "body\n---not-a-delimiter"
+
+
+def test_skill_discovery_rejects_invalid_yaml_and_restores_specialized_builtin(tmp_path) -> None:
+    root = tmp_path / "skills"
+    manager = SkillManager()
+    builtin = manager.load("review").prompt
+    _write_fs_skill(root, "review", "override", body="custom review")
+    manager.discover(directories=[root])
+    assert manager.load("review").prompt == "custom review"
+    root.joinpath("review", "SKILL.md").write_text("---\nname: [\n---\n", encoding="utf-8")
+    manager.discover(directories=[root])
+    assert manager.snapshot().complete is False
+    assert manager.get("review").prompt == "custom review"
+    root.joinpath("review", "SKILL.md").unlink()
+    manager.discover(directories=[root])
+    assert manager.load("review").prompt == builtin
+
+
+def test_skill_resource_read_does_not_load_body_and_is_bounded(tmp_path) -> None:
+    root = tmp_path / "skills"
+    _write_fs_skill(root, "resource-skill", "resources")
+    base = root / "resource-skill"
+    manager = SkillManager()
+    manager.discover(directories=[root])
+    base.joinpath("SKILL.md").unlink()
+    base.joinpath("guide.txt").write_bytes(b"guide")
+    assert manager.read_resource("resource-skill", "guide.txt") == b"guide"
+    assert manager.get("resource-skill").prompt == ""
+    base.joinpath("large.txt").write_bytes(b"x" * (256 * 1024 + 1))
+    with pytest.raises(ValueError, match="large"):
+        manager.read_resource("resource-skill", "large.txt")
+
+
+def test_skill_resource_rejects_symlink_escape(tmp_path) -> None:
+    root = tmp_path / "skills"
+    _write_fs_skill(root, "resource-skill", "resources")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside")
+    link = root / "resource-skill" / "escape.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    manager = SkillManager()
+    manager.discover(directories=[root])
+    with pytest.raises(ValueError, match="escapes"):
+        manager.read_resource("resource-skill", "escape.txt")

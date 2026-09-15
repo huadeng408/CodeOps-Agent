@@ -2,7 +2,9 @@ package skills
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -255,6 +257,76 @@ func TestReadResourceConfinesAccessToSkillDirectory(t *testing.T) {
 	}
 	if _, err := manager.ReadResource("resource-skill", "../SKILL.md"); err == nil {
 		t.Fatal("resource traversal must fail")
+	}
+}
+
+func TestSkillWindowsFrontmatterAndAllowedTools(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "portable", "\ufeff---\r\nname: portable\r\ndescription: Portable workflow\r\nallowed-tools: Read, Grep Bash\r\n---\r\nRun the workflow.\r\n---not-a-delimiter\r\n")
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	metadata := skillByName(t, manager.List(), "portable")
+	if metadata.Prompt != "" || strings.Join(metadata.Tools, ",") != "Read,Grep,Bash" {
+		t.Fatalf("unexpected lazy metadata: %+v", metadata)
+	}
+	skill, ok, err := manager.LoadForModel("portable")
+	if err != nil || !ok || skill.Prompt != "Run the workflow.\r\n---not-a-delimiter" {
+		t.Fatalf("LoadForModel = %+v, %v, %v", skill, ok, err)
+	}
+}
+
+func TestReadResourceRejectsSymlinkEscapeAndOversizedFile(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "confined", "---\nname: confined\ndescription: Confined resources\n---\nbody\n")
+	base := filepath.Join(root, "confined")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("symlink", func(t *testing.T) {
+		if err := os.Symlink(outside, filepath.Join(base, "escape.txt")); err != nil {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		if _, err := manager.ReadResource("confined", "escape.txt"); err == nil {
+			t.Fatal("symlink escape must fail")
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(base, "large.txt"), []byte(strings.Repeat("x", 256*1024+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.ReadResource("confined", "large.txt"); err == nil {
+			t.Fatal("oversized resource must fail")
+		}
+	})
+}
+
+func TestReadResourceRejectsWindowsJunctionEscape(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows junction test")
+	}
+	root := t.TempDir()
+	writeTestSkill(t, root, "confined", "---\nname: confined\ndescription: Confined resources\n---\nbody\n")
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "guide.txt"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(root, "confined", "escape")
+	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", junction, outside).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v, %s", err, output)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ReadResource("confined", "escape/guide.txt"); err == nil {
+		t.Fatal("junction escape must fail")
 	}
 }
 

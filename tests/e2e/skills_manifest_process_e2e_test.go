@@ -25,6 +25,15 @@ func TestProductionSkillManifestIsMetadataOnly(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0o644); err != nil {
 		t.Fatalf("write project Skill: %v", err)
 	}
+	for _, prefix := range []string{".agents", ".dsh"} {
+		base := filepath.Join(projectRoot, prefix, "skills", "release")
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "SKILL.md"), []byte("\ufeff---\r\nname: release\r\ndescription: "+prefix+" release workflow.\r\nallowed-tools: Git, Bash\r\n---\r\nPROJECT_SKILL_BODY_MUST_NOT_BE_IN_MANIFEST\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	settings, err := json.Marshal(map[string]any{
 		"session_db_path":         filepath.Join(projectRoot, ".agent", "sessions", "sessions.sqlite"),
 		"memory_dir":              filepath.Join(projectRoot, ".agent", "memory"),
@@ -76,15 +85,36 @@ func TestProductionSkillManifestIsMetadataOnly(t *testing.T) {
 			release.Tools = skill.Tools
 		}
 	}
-	if release.Name != "release" || release.Description != "Project release workflow." || strings.Join(release.Tools, ",") != "Git,Bash" {
+	if release.Name != "release" || release.Description != ".dsh release workflow." || strings.Join(release.Tools, ",") != "Git,Bash" {
 		t.Fatalf("project Skill metadata was not exported: %+v", release)
 	}
 	if strings.Contains(string(manifest), "PROJECT_SKILL_BODY_MUST_NOT_BE_IN_MANIFEST") || strings.Contains(string(manifest), `"prompt"`) {
 		t.Fatalf("Skill manifest leaked instruction body: %q", string(manifest))
 	}
 	digest := sha256.Sum256(manifest)
+	runID := fmt.Sprintf("skills-manifest-%d", agent.ProcessState.Pid())
+	artifactDir := filepath.Join(repositoryRoot, ".runtime", "e2e", runID)
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirtyCheck := exec.Command("git", "diff", "--quiet", "HEAD", "--", "internal/skills", "internal/cli/app.go", "internal/tools/executor.go")
+	dirtyCheck.Dir = repositoryRoot
+	sourceDirty := dirtyCheck.Run() != nil
+	status := "VERIFIED"
+	if sourceDirty {
+		status = "IMPLEMENTED"
+	}
 	receipt := map[string]any{
-		"status":                  "VERIFIED",
+		"status":                  status,
+		"source_dirty":            sourceDirty,
+		"scope":                   "production CLI metadata discovery on temporary filesystem inputs; not provider-backed Skill selection",
+		"run_id":                  runID,
+		"checks_total":            4,
+		"checks_passed":           4,
+		"manifest_artifact":       filepath.ToSlash(filepath.Join(".runtime", "e2e", runID, "manifest.json")),
 		"exit_code":               0,
 		"kind":                    "production-skill-manifest",
 		"git_sha":                 productionGitSHA(t, repositoryRoot),
@@ -106,5 +136,8 @@ func TestProductionSkillManifestIsMetadataOnly(t *testing.T) {
 	}
 	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
 		t.Fatalf("write Skill receipt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "receipt.json"), append(receiptJSON, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

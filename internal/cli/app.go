@@ -166,13 +166,21 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	executor.SetRAGSearcher(ragClient)
 	skillsManager := skills.NewManager()
 	globalSkillsDir := ""
+	userDSHSkillsDir := ""
+	userAgentsSkillsDir := ""
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		globalSkillsDir = filepath.Join(home, ".agent", "skills")
+		userDSHSkillsDir = filepath.Join(home, ".dsh", "skills")
+		userAgentsSkillsDir = filepath.Join(home, ".agents", "skills")
 	}
 	if err := skillsManager.Discover(skills.DiscoveryOptions{
-		GlobalDir:   globalSkillsDir,
-		Directories: cfg.SkillDirectories,
-		ProjectDir:  filepath.Join(cfg.ProjectRoot, ".agent", "skills"),
+		GlobalDir:        globalSkillsDir,
+		Directories:      cfg.SkillDirectories,
+		ProjectDir:       filepath.Join(cfg.ProjectRoot, ".agent", "skills"),
+		ProjectDSHDir:    filepath.Join(cfg.ProjectRoot, ".dsh", "skills"),
+		ProjectAgentsDir: filepath.Join(cfg.ProjectRoot, ".agents", "skills"),
+		UserDSHDir:       userDSHSkillsDir,
+		UserAgentsDir:    userAgentsSkillsDir,
 	}); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "skills discovery failed: %v\n", err)
 	}
