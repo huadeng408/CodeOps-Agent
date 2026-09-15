@@ -54,7 +54,10 @@ type App struct {
 	status         *StatusLine
 	metrics        *metrics.Collector
 	session        *session.Manager
-	memory         *memory.Manager
+	memory         memory.CLIStore
+	ledgerMemory   *memory.LedgerMemory
+	agentRunner    *session.SessionRunner
+	agentTools     *cliAgentTools
 	todos          *todo.Manager
 	permissions    *permission.Controller
 	actor          identity.Actor
@@ -207,6 +210,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		}
 	}
 	executor.SetTracer(telemetry)
+	sessionStore := session.NewSQLiteEventStore(cfg.SessionDBPath)
+	sessionManager := session.NewManager(sessionStore)
 
 	app := &App{
 		cfg:            cfg,
@@ -214,8 +219,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		renderer:       NewStreamRenderer(stdout),
 		status:         NewStatusLine(),
 		metrics:        metrics.NewCollector(),
-		session:        session.NewManager(session.NewSQLiteEventStore(cfg.SessionDBPath)),
-		memory:         memory.NewManager(cfg.MemoryDir),
+		session:        sessionManager,
 		todos:          todo.NewManager(),
 		permissions:    permission.NewControllerWithRules(levels, allowlist, denylist),
 		actor:          actor,
@@ -235,6 +239,32 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		instructions:   instructions,
 		telemetry:      telemetry,
 	}
+	app.memory = memory.NewLazyLedgerCLI(func() (*memory.LedgerMemory, error) {
+		ledger, err := sessionStore.Ledger()
+		if err != nil {
+			return nil, err
+		}
+		app.ledgerMemory = memory.NewLedgerMemory(ledger, func(ctx context.Context, request *codeagentpb.MemoryReflectionRequest) (*codeagentpb.MemoryReflectionResponse, error) {
+			return app.orchestrator.ReflectMemory(ctx, request)
+		})
+		if app.orchestrator != nil {
+			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor)}
+			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
+				Permissions: app.permissions, Memory: app.ledgerMemory, AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
+					tree, err := app.worktree.SpawnAgent(ctx, worktree.AgentSpawnRequest{RequestID: request.TaskID, ParentSessionID: request.ParentSessionID, ChildSessionID: request.ChildSessionID, WorktreeName: request.TaskID, Retain: true})
+					if err != nil {
+						return "", err
+					}
+					app.session.SetWorktrees(sessionWorktrees(app.worktree.List()))
+					return tree.Path, nil
+				},
+			})
+			if err := app.agentRunner.Recover(context.Background()); err != nil {
+				return nil, err
+			}
+		}
+		return app.ledgerMemory, nil
+	}, sessionManager.Current)
 	app.input.SetInterruptHandler(func() bool {
 		return app.handleInterrupt(time.Now(), func() {})
 	})
@@ -249,6 +279,14 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 }
 
 func (a *App) Run(ctx context.Context) error {
+	defer func() {
+		if a.agentRunner != nil {
+			_ = a.agentRunner.Close()
+		}
+		if a.agentTools != nil {
+			_ = a.agentTools.Close()
+		}
+	}()
 	defer func() { _ = a.session.Close() }()
 	defer func() {
 		if a.executor != nil {
@@ -517,12 +555,33 @@ func (a *App) converse(ctx context.Context, input string) (string, error) {
 		return "", err
 	}
 	current = a.session.Current()
-	return a.orchestrator.ConverseWithHistoryAndState(
-		ctx, input, current.ID,
-		orchestratorHistory(current.Messages, input),
-		planTodoSnapshot(current),
-		a.handleOrchestratorEvent, a.handleAskUserRequest, a.handleToolCall,
-	)
+	if a.memory != nil {
+		if err := a.memory.Err(); err != nil {
+			return "", errors.New("memory ledger unavailable")
+		}
+	}
+	memoryContext := ""
+	if a.ledgerMemory != nil {
+		if owner, err := memory.OwnerForActor(current.Actor); err == nil && a.permissions.CheckFor(current.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
+			memoryContext, _ = a.ledgerMemory.Recall(ctx, owner, input, 1200)
+		}
+	}
+	result, err := a.orchestrator.RunConversation(ctx, orchestrator.ConversationRequest{
+		Input: input, SessionID: current.ID, WorkingDir: current.WorkingDir, Actor: current.Actor,
+		History: orchestratorHistory(current.Messages, input), State: planTodoSnapshot(current),
+		HarnessManaged: true, MemoryContextJSON: memoryContext,
+	}, orchestrator.ConversationHandlers{
+		Tool: a.handleToolCall, Event: a.handleOrchestratorEvent, AskUser: a.handleAskUserRequest,
+		TextDelta: a.orchestrator.OnTextDelta, Compaction: a.handleCompactionUpdate, PlanTodo: a.handlePlanTodoUpdate,
+	})
+	if err == nil && result.Success && a.ledgerMemory != nil {
+		memoryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		if commitErr := a.ledgerMemory.CommitCLIOutcome(memoryCtx, current.ID, result.Message); commitErr != nil {
+			a.renderer.PrintLine("memory reflection unavailable; task reply preserved")
+		}
+		cancel()
+	}
+	return result.Message, err
 }
 
 func planTodoSnapshot(current session.Session) *codeagentpb.PlanTodoSnapshot {
@@ -813,6 +872,33 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	var result tools.ToolResult
 	if call.Name == "SessionFork" || call.Name == "SessionRewind" {
 		result = a.executeSessionControl(ctx, call.Name, params)
+	} else if (call.Name == "SpawnAgent" || call.Name == "AgentTask" || call.Name == "PublishArtifact") && a.agentRunner != nil {
+		response := a.agentRunner.ExecuteAgentTool(ctx, current.Actor, current.ID, call)
+		result = tools.ToolResult{Name: call.Name, Output: response.Output, Error: response.Error, ExitCode: int(response.ExitCode)}
+	} else if (call.Name == "RecallMemory" || call.Name == "ManageMemory") && a.ledgerMemory != nil {
+		result.Name = call.Name
+		if call.Name == "RecallMemory" {
+			var query session.MemoryQuery
+			decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
+			decoder.DisallowUnknownFields()
+			if err = decoder.Decode(&query); err == nil {
+				var owner uint
+				if owner, err = memory.OwnerForActor(current.Actor); err == nil {
+					result.Output, err = a.ledgerMemory.RecallWithOptions(ctx, owner, query)
+				}
+			}
+		} else {
+			var command session.MemoryCommand
+			decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
+			decoder.DisallowUnknownFields()
+			if err = decoder.Decode(&command); err == nil {
+				result.Output, err = a.ledgerMemory.Manage(ctx, current.ID, command)
+			}
+		}
+		if err != nil {
+			result.Error = "memory request rejected"
+			result.ExitCode = 1
+		}
 	} else {
 		result, err = a.executor.Execute(ctx, tools.ToolRequest{
 			Name:           call.Name,
@@ -1052,9 +1138,10 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/clear reset the current conversation",
 			"/config show loaded configuration",
 			"/budget show token and cost budget usage",
-			"/memory manage persistent memories (add/list/find/show/delete)",
+			"/memory manage persistent memories (add/list/find/show/delete/import)",
 			"/sessions list recent saved sessions",
 			"/tasks show task status",
+			"/agents list or approve/deny a child agent's pending tool",
 			"/undo revert the last recorded change set",
 			"/diff show the current session diff summary",
 			"/worktree manage worktree state (list/create/switch/cleanup)",
@@ -1138,6 +1225,8 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		a.handleSessionsCommand(ctx, fields)
 	case "/tasks":
 		a.renderer.PrintBlock("tasks", a.todos.Lines())
+	case "/agents":
+		a.handleAgentsCommand(ctx, fields)
 	case "/undo":
 		entry, ok := a.undo.Latest()
 		if !ok {
@@ -2091,10 +2180,22 @@ func (a *App) handleMemoryCommand(raw string, fields []string) {
 			return
 		}
 		a.renderer.PrintLine("deleted memory: " + args)
+	case "import":
+		adapter, ok := a.memory.(*memory.CLIAdapter)
+		if !ok {
+			a.renderer.PrintLine("ledger memory import unavailable")
+			return
+		}
+		count, err := adapter.ImportLegacy(a.cfg.MemoryDir)
+		if err != nil {
+			a.renderer.PrintLine("legacy memory import rejected")
+			return
+		}
+		a.renderer.PrintLine(fmt.Sprintf("imported memories: %d", count))
 	default:
 		a.renderer.PrintBlock("memory", []string{
 			a.memorySummary(),
-			"commands: add, list, find, show, delete",
+			"commands: add, list, find, show, delete, import",
 		})
 	}
 }
@@ -2238,6 +2339,7 @@ func sessionWorktrees(trees []worktree.Worktree) []session.WorktreeState {
 			LeaseID:         tree.LeaseID,
 			LeaseExpiresAt:  tree.LeaseExpiresAt,
 			Status:          tree.Status,
+			Retained:        tree.Retained,
 		})
 	}
 	return out
@@ -2257,6 +2359,7 @@ func worktrees(trees []session.WorktreeState) []worktree.Worktree {
 			LeaseID:         tree.LeaseID,
 			LeaseExpiresAt:  tree.LeaseExpiresAt,
 			Status:          tree.Status,
+			Retained:        tree.Retained,
 		})
 	}
 	return out

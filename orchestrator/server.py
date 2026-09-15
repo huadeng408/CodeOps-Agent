@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
+import logging
 import os
 import threading
+from collections import OrderedDict
 from concurrent import futures
 from dataclasses import dataclass
 from pathlib import Path
 
 import grpc
+from google.protobuf.json_format import MessageToDict
 
 from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 
@@ -25,6 +30,7 @@ from .llm.providers import (
     build_provider_router,
 )
 from .memory.manager import MemoryManager
+from .memory.reflection import reflect_memory
 from .runtime import (
     AgentLoopPluginRegistry,
     CommandRegistry,
@@ -87,6 +93,8 @@ class OrchestratorServer:
         )
         self.layered_context = LayeredContext(self.context_store, self.project_root)
         self.skills = SkillManager(self.project_root)
+        self._skill_catalogs: OrderedDict[str, SkillManager] = OrderedDict()
+        self._skill_catalog_lock = threading.Lock()
         self.extensions = ExtensionRegistry.from_manifest(
             Path(self.project_root) / ".agent" / "extensions.json"
         )
@@ -107,6 +115,38 @@ class OrchestratorServer:
             self.graph.close()
             self.context_store.close()
             self._otel_shutdown()
+
+    def session_skills(self, root: str) -> SkillManager:
+        key = str(Path(root).resolve())
+        with self._skill_catalog_lock:
+            skills = self._skill_catalogs.pop(key, None) or SkillManager(key)
+            user_root = Path.home()
+            skills.discover(
+                project_dsh_dir=Path(key) / ".dsh" / "skills",
+                project_agents_dir=Path(key) / ".agents" / "skills",
+                project_dir=Path(key) / ".agent" / "skills",
+                user_dsh_dir=user_root / ".dsh" / "skills",
+                user_agents_dir=user_root / ".agents" / "skills",
+                global_dir=user_root / ".agent" / "skills",
+            )
+            self._skill_catalogs[key] = skills
+            if len(self._skill_catalogs) > 128:
+                self._skill_catalogs.popitem(last=False)
+            # Bodies loaded by a runner must not mutate another session's view.
+            return copy.deepcopy(skills)
+
+    def session_extensions(self, root: str) -> ExtensionRegistry:
+        """Resolve extension metadata within the request's project boundary.
+
+        The process-level registry is valid for the configured project root.
+        A managed child worktree gets a fresh metadata-only registry so a
+        parent extension manifest cannot widen the child's model surface.
+        """
+
+        key = str(Path(root).resolve())
+        if key == self.project_root:
+            return self.extensions
+        return ExtensionRegistry.from_manifest(Path(key) / ".agent" / "extensions.json")
 
     def serve(self) -> None:
         server = create_grpc_server(self)
@@ -135,6 +175,15 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             status="ok",
             version="0.1.0",
         )
+
+    def ReflectMemory(self, request, context):
+        self._authorize_actor(
+            request.actor if request.HasField("actor") else None,
+            request.session_id, context,
+        )
+        cancel = threading.Event()
+        context.add_callback(cancel.set)
+        return reflect_memory(self.app.llm, request, cancel)
 
     def _authorize_actor(self, actor_wire, session_id: str, context) -> ActorIdentity | None:
         # Keep the pre-Actor API usable for ephemeral, session-less callers.
@@ -212,7 +261,12 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "continuation retry run id requires resume")
         return run_id, resume, surface_sha256, retry_of_run_id, tuple(retry_of_run_ids)
 
-    def _new_runner(self) -> ConversationRunner:
+    def _new_runner(
+        self,
+        working_dir: str | None = None,
+        *,
+        project_root: str | None = None,
+    ) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
         # executable tools. This keeps compaction on the same model boundary
         # as normal turns while making the path explicit in production.
@@ -223,15 +277,21 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 provider="default",
                 model=str(getattr(self.app.llm, "model", "")),
             )
+        runner_root = str(Path(project_root or self.app.project_root).resolve())
+        runner_working_dir = (
+            str(Path(working_dir).resolve()) if working_dir else self.app.working_dir
+        )
+        skill_root = working_dir or runner_root
+        skills = self.app.session_skills(skill_root)
         return ConversationRunner(
             graph=self.app.graph,
             llm=self.app.llm,
-            tool_registry=self.app.tools,
+            tool_registry=ToolRegistry(runner_root, skills=skills),
             todo_manager=self.app.todos,
             memory_manager=self.app.memory,
-            skills=self.app.skills,
-            project_root=self.app.project_root,
-            working_dir=self.app.working_dir,
+            skills=skills,
+            project_root=runner_root,
+            working_dir=runner_working_dir,
             token_budget=self.app.token_budget,
             fast_llm=self.app.fast_llm,
             main_llm=self.app.llm,
@@ -242,7 +302,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             provider_router=self._provider_router_for_request(),
             hooks=self.app.hooks,
             commands=self.app.commands,
-            extensions=self.app.extensions,
+            extensions=self.app.session_extensions(runner_root),
             compaction_summarizer=compaction_summarizer,
             require_harness_worktree=os.getenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "").strip().lower()
             in {"1", "true", "yes", "on"},
@@ -303,12 +363,26 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         actor = None
         history: list[dict[str, str]] = []
         plan_todo_snapshot = None
+        working_dir = ""
+        harness_managed = False
+        memory_context = ""
+        agent_task = None
+        allowed_tools = ()
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "user_input":
                 user_input = message.user_input
                 user_text = user_input.text
                 session_id = user_input.session_id
+                working_dir = self._validate_working_dir(user_input.working_dir, session_id, context)
+                harness_managed = user_input.harness_managed
+                memory_context = user_input.memory_context_json
+                agent_task = user_input.agent_task if user_input.HasField("agent_task") else None
+                allowed_tools = tuple(user_input.allowed_tools)
+                if len(memory_context) > 64000:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT,"memory context is too large")
+                if agent_task is not None and (not harness_managed or agent_task.child_session_id != session_id or agent_task.schema_version != "agent.v2"):
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT,"invalid independent agent task")
                 actor = self._authorize_actor(
                     user_input.actor if user_input.HasField("actor") else None,
                     session_id,
@@ -373,7 +447,46 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             pass
 
         try:
-            runner = self._new_runner()
+            if agent_task is not None:
+                # An independent child receives a separate project boundary.
+                # Its working tree is the only root from which model-facing
+                # manifests and instructions may be discovered.
+                child_root = working_dir or self.app.project_root
+                runner = self._new_runner(
+                    working_dir=working_dir or None,
+                    project_root=child_root,
+                )
+            elif working_dir:
+                runner = self._new_runner(working_dir=working_dir)
+            else:
+                runner = self._new_runner()
+            if harness_managed:
+                runner.harness_managed = True
+                runner.harness_memory_context = memory_context
+                runner.layered_context = None
+                runner.todo_manager = TodoManager()
+                runner.token_budget = TokenBudget(max_tokens=self.app.config.max_tokens,max_cost=self.app.config.max_cost)
+                if agent_task is not None:
+                    task_identity = orchestrator_pb2.AgentTask()
+                    task_identity.CopyFrom(agent_task)
+                    task_identity.ClearField("messages")
+                    task_identity.ClearField("artifacts")
+                    task_identity.ClearField("pending_approvals")
+                    runner.agent_task_context = (
+                        "You are an independent child agent. Work only on the assigned task and explicit materials. "
+                        "Your history, plan and budget are separate from the parent. "
+                        "Use PublishArtifact to deliver files/data; AskUser requests input from the parent.\n"+
+                        json.dumps(MessageToDict(task_identity,preserving_proto_field_name=True),ensure_ascii=False)
+                    )
+                if agent_task is not None or allowed_tools:
+                    # Always apply the Harness-provided allow-list to a child;
+                    # an empty list must fail closed instead of restoring the
+                    # parent's complete default catalog.
+                    runner.tool_registry = ToolRegistry(
+                        runner.project_root,
+                        allowed_tools=allowed_tools,
+                        skills=runner.skills,
+                    )
             runner_actor = actor
             new_turn_options = {}
             if dict(context.invocation_metadata() or ()).get("x-code-agent-new-turn", "").lower() == "true":
@@ -393,6 +506,36 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 retry_of_run_ids=retry_of_run_ids,
                 **new_turn_options,
             )
+        except Exception as exc:  # noqa: BLE001 - never terminate a gRPC stream without Done
+            # Keep the stream contract explicit so the Go harness can persist a
+            # retryable terminal state instead of misclassifying an abrupt EOF.
+            # Do not expose provider URLs, request bodies, or credential-bearing
+            # exception text across the RPC boundary.
+            error_name = type(exc).__name__
+            lowered = str(exc).lower()
+            if "timeout" in lowered or "timed out" in lowered:
+                error_code = "provider_timeout"
+                message = "agent provider timed out; retry this task"
+            elif "auth" in lowered or "401" in lowered or "403" in lowered:
+                error_code = "provider_authentication_error"
+                message = "model authentication failed; check provider credentials"
+            else:
+                error_code = "provider_runtime_error"
+                message = "agent provider failed; retry this task"
+            try:
+                logging.getLogger(__name__).error(
+                    "conversation runner failed: type=%s code=%s", error_name, error_code
+                )
+            except Exception:
+                pass
+            yield orchestrator_pb2.OrchestratorMessage(
+                done=orchestrator_pb2.Done(
+                    success=False,
+                    message=message,
+                    error_code=error_code,
+                    retryable=True,
+                )
+            )
         finally:
             lease.release()
             # Detach the TraceContext parent so following calls on this
@@ -403,6 +546,25 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     _otel_context.detach(otel_token)
                 except Exception:
                     pass
+
+    def _validate_working_dir(self, value: str, session_id: str, context) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "working directory must be absolute")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "working directory must exist")
+        if not resolved.is_dir():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "working directory must be a directory")
+        try:
+            resolved.relative_to(Path(self.app.project_root).resolve())
+        except ValueError:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "working directory must be inside project root")
+        return str(resolved)
 
     def _provider_clients_for_request(self):
         clients = dict(self.app.provider_clients)

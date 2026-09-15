@@ -1067,6 +1067,30 @@ def test_normal_conversation_rejects_checkpoint_from_different_history(tmp_path:
     app.close()
 
 
+def test_completed_legacy_checkpoint_allows_a_new_history_turn(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("orchestrator.server.load_dotenv", lambda: None)
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path)))
+    try:
+        app.graph.write_checkpoint(
+            GraphState(metadata={"session_id": "legacy-completed", "phase": "model_after", "turn": 1,
+                                 "history_sha256": ConversationRunner._digest_value([])},
+                       response="completed reply", done=True, next_node="done"),
+            thread_id="legacy-completed",
+        )
+        runner = ConversationRunner(
+            graph=app.graph, llm=NoToolLLM(), tool_registry=app.tools,
+            todo_manager=app.todos, memory_manager=app.memory, skills=app.skills,
+            project_root=app.project_root, working_dir=app.working_dir,
+        )
+        assert runner.load_checkpoint(
+            "legacy-completed", history_digest=ConversationRunner._digest_value(
+                [{"role": "user", "content": "new turn after completed reply"}]
+            ),
+        ) is None
+    finally:
+        app.close()
+
+
 def test_normal_conversation_fails_closed_when_checkpoint_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))

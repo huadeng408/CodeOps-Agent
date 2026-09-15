@@ -8,6 +8,7 @@ service Orchestrator {
   rpc Converse(stream HarnessMessage) returns (stream OrchestratorMessage);
   rpc Compact(CompactRequest) returns (CompactionUpdate);
   rpc Health(Empty) returns (HealthResponse);
+  rpc ReflectMemory(MemoryReflectionRequest) returns (MemoryReflectionResponse);
 }
 
 message Empty {}
@@ -65,6 +66,108 @@ message UserInput {
   repeated ConversationMessage history = 3;
   PlanTodoSnapshot plan_todo_state = 4;
   ActorContext actor = 5;
+  string working_dir = 6;
+  bool harness_managed = 7;
+  string memory_context_json = 8;
+  AgentTask agent_task = 9;
+  repeated string allowed_tools = 10;
+}
+
+// Local agent.v2 contracts. The Harness authenticates the caller and owns
+// task facts; these do not advertise remote A2A or OAuth interoperability.
+message AgentCard {
+  string schema_version = 1;
+  string id = 2;
+  string name = 3;
+  string description = 4;
+  repeated string capabilities = 5;
+  string address = 6;
+  repeated string transports = 7;
+  repeated string authentication = 8;
+}
+
+message AgentFile {
+  string path = 1;
+  string media_type = 2;
+  string sha256 = 3;
+  int64 size_bytes = 4;
+}
+
+message AgentPart {
+  oneof payload {
+    string text = 1;
+    AgentFile file = 2;
+    string data_json = 3;
+  }
+}
+
+message AgentMessage {
+  string id = 1;
+  string role = 2;
+  repeated AgentPart parts = 3;
+}
+
+message AgentArtifact {
+  string id = 1;
+  string name = 2;
+  repeated AgentPart parts = 3;
+  string checksum = 4;
+}
+
+message AgentTask {
+  string schema_version = 1;
+  string id = 2;
+  string parent_session_id = 3;
+  string child_session_id = 4;
+  string status = 5;
+  AgentCard card = 6;
+  repeated AgentMessage messages = 7;
+  repeated AgentArtifact artifacts = 8;
+  uint64 revision = 9;
+  string error_code = 10;
+  repeated AgentToolApproval pending_approvals = 11;
+  string working_dir = 12;
+}
+
+// Read-only task projection. Decisions use the Harness's human approval
+// interface, never a model-supplied AgentTask action.
+message AgentToolApproval {
+  string child_session_id = 1;
+  string run_id = 2;
+  string tool_call_id = 3;
+  string tool_name = 4;
+  string arguments_json = 5;
+  string pending_event_id = 6;
+  int64 pending_seq = 7;
+}
+
+message MemorySource {
+  string event_id = 1;
+  string checksum = 2;
+  string text = 3;
+}
+
+message MemoryCandidate {
+  string kind = 1;
+  string key = 2;
+  string abstract = 3;
+  string overview = 4;
+  string content = 5;
+  repeated string source_event_ids = 6;
+}
+
+message MemoryReflectionRequest {
+  string session_id = 1;
+  ActorContext actor = 2;
+  string source_checksum = 3;
+  repeated MemorySource sources = 4;
+}
+
+message MemoryReflectionResponse {
+  repeated MemoryCandidate candidates = 1;
+  string source_checksum = 2;
+  string model = 3;
+  string error_code = 4;
 }
 
 // ActorContext is the authenticated, non-secret identity issued by the Go

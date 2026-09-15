@@ -42,7 +42,7 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 	if !ok || path == "" {
 		return ToolResult{Name: "NotebookEdit", Error: "path is required"}, fmt.Errorf("path is required")
 	}
-	abs, err := secureFilePath(e.Root, path)
+	abs, err := e.workingFilePath(path)
 	if err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}

@@ -181,6 +181,57 @@ class CapturingCompactionRunner:
         return orchestrator_pb2.CompactionUpdate(summary="compacted", trigger="manual")
 
 
+class RaisingConversationRunner:
+    def run(self, *args, **kwargs):
+        raise RuntimeError("provider stream ended unexpectedly")
+        yield  # keep this a generator function
+
+
+def test_converse_emits_retryable_terminal_done_on_runner_exception(monkeypatch, tmp_path, caplog) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    service = OrchestratorService(app)
+    runner = RaisingConversationRunner()
+
+    def fail_with_sensitive_exception(*args, **kwargs):
+        raise RuntimeError("PRIVATE_EXCEPTION_BODY_MUST_NOT_BE_LOGGED")
+        yield
+
+    runner.run = fail_with_sensitive_exception
+    service._new_runner = lambda *args, **kwargs: runner
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-runner-exception"
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(
+                                    text="continue", session_id=session_id, actor=_session_actor(session_id)
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        assert responses
+        terminal = responses[-1].done
+        assert terminal.success is False
+        assert terminal.retryable is True
+        assert terminal.error_code == "provider_runtime_error"
+        assert "retry" in terminal.message
+        assert "provider_runtime_error" in caplog.text
+        assert "PRIVATE_EXCEPTION_BODY_MUST_NOT_BE_LOGGED" not in caplog.text
+    finally:
+        server.stop(grace=0)
+
+
 def _session_actor(session_id: str) -> orchestrator_pb2.ActorContext:
     return orchestrator_pb2.ActorContext(
         schema_version=1,
@@ -248,6 +299,127 @@ def test_converse_propagates_and_validates_continuation_metadata(
                 )
             assert caught.value.code() == grpc.StatusCode.INVALID_ARGUMENT
             assert "surface sha256 is required" in caught.value.details()
+    finally:
+        server.stop(grace=0)
+        app.close()
+
+
+def test_converse_passes_valid_working_dir_to_runner(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    project_root = tmp_path / "project"
+    working_dir = project_root / "nested"
+    working_dir.mkdir(parents=True)
+    app = OrchestratorServer(
+        ServerConfig(project_root=str(project_root), memory_dir=str(tmp_path / "memory"))
+    )
+    service = OrchestratorService(app)
+    captured = {}
+
+    class Runner:
+        def run(self, *args, **kwargs):
+            yield orchestrator_pb2.OrchestratorMessage(
+                done=orchestrator_pb2.Done(success=True, message="done")
+            )
+
+    service._new_runner = lambda **kwargs: (captured.update(kwargs) or Runner())
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-working-dir"
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            list(
+                stub.Converse(
+                    iter([
+                        orchestrator_pb2.HarnessMessage(
+                            user_input=orchestrator_pb2.UserInput(
+                                text="inspect",
+                                session_id=session_id,
+                                working_dir=str(working_dir),
+                                actor=_session_actor(session_id),
+                            )
+                        )
+                    ])
+                )
+            )
+        assert captured["working_dir"] == str(working_dir.resolve())
+    finally:
+        server.stop(grace=0)
+        app.close()
+
+
+@pytest.mark.parametrize("working_dir, expected", [("relative", "absolute")])
+def test_converse_rejects_invalid_working_dir(monkeypatch, tmp_path, working_dir, expected):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    app = OrchestratorServer(
+        ServerConfig(project_root=str(project_root), memory_dir=str(tmp_path / "memory"))
+    )
+    service = OrchestratorService(app)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-invalid-working-dir"
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            with pytest.raises(grpc.RpcError) as caught:
+                list(
+                    stub.Converse(
+                        iter([
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(
+                                    text="inspect",
+                                    session_id=session_id,
+                                    working_dir=working_dir,
+                                    actor=_session_actor(session_id),
+                                )
+                            )
+                        ])
+                    )
+                )
+            assert caught.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+            assert expected in caught.value.details()
+    finally:
+        server.stop(grace=0)
+        app.close()
+
+
+def test_converse_rejects_missing_or_outside_working_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    app = OrchestratorServer(
+        ServerConfig(project_root=str(project_root), memory_dir=str(tmp_path / "memory"))
+    )
+    service = OrchestratorService(app)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            for value, expected in [
+                (str(project_root / "missing"), "exist"),
+                (str(tmp_path), "inside project root"),
+            ]:
+                session_id = "session-invalid-working-dir"
+                with pytest.raises(grpc.RpcError) as caught:
+                    list(stub.Converse(iter([
+                        orchestrator_pb2.HarnessMessage(
+                            user_input=orchestrator_pb2.UserInput(
+                                text="inspect", session_id=session_id,
+                                working_dir=value, actor=_session_actor(session_id),
+                            )
+                        )
+                    ])))
+                assert caught.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+                assert expected in caught.value.details()
     finally:
         server.stop(grace=0)
         app.close()

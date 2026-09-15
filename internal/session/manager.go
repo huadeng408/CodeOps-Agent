@@ -129,6 +129,7 @@ type WorktreeState struct {
 	LeaseID         string    `json:"lease_id,omitempty"`
 	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
 	Status          string    `json:"status,omitempty"`
+	Retained        bool      `json:"retained,omitempty"`
 }
 
 // WorktreeLifecycle is an append-only audit record for an agent checkout.

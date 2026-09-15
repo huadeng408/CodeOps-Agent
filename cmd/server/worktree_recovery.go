@@ -30,6 +30,7 @@ type persistedWorktreeEvent struct {
 	LeaseExpiresAt  string `json:"lease_expires_at"`
 	Status          string `json:"status"`
 	Reason          string `json:"reason,omitempty"`
+	Retained        bool   `json:"retained,omitempty"`
 }
 
 func appendPersistedWorktreeEvent(ctx context.Context, ledger session.EventLog, sessionID, eventType string, tree worktree.Worktree, reason string) error {
@@ -45,6 +46,7 @@ func appendPersistedWorktreeEvent(ctx context.Context, ledger session.EventLog, 
 		RequestID: tree.RequestID, ParentSessionID: tree.ParentSessionID, ChildSessionID: tree.ChildSessionID,
 		LeaseID: tree.LeaseID, LeaseExpiresAt: tree.LeaseExpiresAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		Status: tree.Status, Reason: strings.TrimSpace(reason),
+		Retained: tree.Retained,
 	}
 	if eventType == persistedWorktreeTerminalEvent {
 		payload.Active = false
@@ -128,6 +130,7 @@ func restorePersistedWorktrees(ctx context.Context, ledger session.EventLog, man
 				Name: payload.Name, Path: payload.Path, BaseRef: payload.BaseRef, Active: payload.Active,
 				RequestID: payload.RequestID, ParentSessionID: payload.ParentSessionID, ChildSessionID: payload.ChildSessionID,
 				LeaseID: payload.LeaseID, LeaseExpiresAt: leaseExpiresAt, Status: payload.Status,
+				Retained: payload.Retained,
 			}
 		}
 	}

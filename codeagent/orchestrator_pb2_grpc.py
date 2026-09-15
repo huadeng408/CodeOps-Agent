@@ -49,6 +49,11 @@ class OrchestratorStub(object):
                 request_serializer=codeagent_dot_orchestrator__pb2.Empty.SerializeToString,
                 response_deserializer=codeagent_dot_orchestrator__pb2.HealthResponse.FromString,
                 _registered_method=True)
+        self.ReflectMemory = channel.unary_unary(
+                '/codeagent.v1.Orchestrator/ReflectMemory',
+                request_serializer=codeagent_dot_orchestrator__pb2.MemoryReflectionRequest.SerializeToString,
+                response_deserializer=codeagent_dot_orchestrator__pb2.MemoryReflectionResponse.FromString,
+                _registered_method=True)
 
 
 class OrchestratorServicer(object):
@@ -72,6 +77,12 @@ class OrchestratorServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReflectMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_OrchestratorServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +100,11 @@ def add_OrchestratorServicer_to_server(servicer, server):
                     servicer.Health,
                     request_deserializer=codeagent_dot_orchestrator__pb2.Empty.FromString,
                     response_serializer=codeagent_dot_orchestrator__pb2.HealthResponse.SerializeToString,
+            ),
+            'ReflectMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReflectMemory,
+                    request_deserializer=codeagent_dot_orchestrator__pb2.MemoryReflectionRequest.FromString,
+                    response_serializer=codeagent_dot_orchestrator__pb2.MemoryReflectionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +188,33 @@ class Orchestrator(object):
             '/codeagent.v1.Orchestrator/Health',
             codeagent_dot_orchestrator__pb2.Empty.SerializeToString,
             codeagent_dot_orchestrator__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReflectMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/codeagent.v1.Orchestrator/ReflectMemory',
+            codeagent_dot_orchestrator__pb2.MemoryReflectionRequest.SerializeToString,
+            codeagent_dot_orchestrator__pb2.MemoryReflectionResponse.FromString,
             options,
             channel_credentials,
             insecure,

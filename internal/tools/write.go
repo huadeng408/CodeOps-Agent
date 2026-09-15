@@ -14,7 +14,7 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	}
 	content, _ := stringArg(args, "content", "text", "body")
 
-	abs, err := secureFilePath(e.Root, path)
+	abs, err := e.workingFilePath(path)
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
@@ -24,7 +24,7 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	}
 	// Validate again after parent creation to close the common symlink-swap
 	// window before the temporary file is opened.
-	abs, err = secureFilePath(e.Root, path)
+	abs, err = e.workingFilePath(path)
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}

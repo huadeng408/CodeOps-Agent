@@ -17,8 +17,20 @@ def test_memory_tool_exposes_budget_but_not_owner() -> None:
     spec = ToolRegistry().get("RecallMemory")
     assert spec is not None
     assert spec.permission == orchestrator_pb2.ASK_SESSION
-    assert set(spec.parameters["properties"]) == {"query", "max_tokens"}
+    assert set(spec.parameters["properties"]) == {"query", "max_tokens", "kind", "detail"}
     assert spec.parameters["additionalProperties"] is False
+
+
+def test_spawn_agent_owns_message_and_tool_allowlist_schema() -> None:
+    registry = ToolRegistry()
+    spawn = registry.get("SpawnAgent")
+    workflow = registry.get("RunWorkflow")
+    assert spawn is not None and workflow is not None
+    properties = spawn.parameters["properties"]
+    assert properties["message"]["properties"]["parts"]["items"]["properties"]["file"]["type"] == "object"
+    assert properties["allowed_tools"]["items"]["type"] == "string"
+    assert "message" not in workflow.parameters["properties"]
+    assert "allowed_tools" not in workflow.parameters["properties"]
 
 
 def test_tool_registry_loads_mcp_manifest(tmp_path) -> None:

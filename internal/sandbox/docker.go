@@ -179,17 +179,9 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 			return "", nil, err
 		}
 	}
-	workingDir := request.WorkingDir
-	if strings.TrimSpace(workingDir) == "" {
-		workingDir = workspace
-	}
-	workingDir, err = absolutePath(workingDir)
+	containerDir, err := ContainerWorkingDir(workspace, request.WorkingDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve sandbox working directory: %w", err)
-	}
-	rel, err := filepath.Rel(workspace, workingDir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", nil, fmt.Errorf("sandbox working directory is outside workspace: %s", workingDir)
+		return "", nil, err
 	}
 	command := strings.TrimSpace(request.Command)
 	program := strings.TrimSpace(request.Program)
@@ -197,10 +189,6 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 		return "", nil, errors.New("sandbox request must contain exactly one of command or program")
 	}
 
-	containerDir := "/workspace"
-	if rel != "." && rel != "" {
-		containerDir += "/" + filepath.ToSlash(rel)
-	}
 	args, err := buildDockerRunArgs(config, workspace, containerDir, request)
 	if err != nil {
 		return "", nil, err
@@ -211,6 +199,33 @@ func BuildDockerCommand(platform string, config Config, request Request) (string
 		binary = "docker.exe"
 	}
 	return binary, args, nil
+}
+
+// ContainerWorkingDir maps a host workspace-relative directory to the stable
+// path exposed by Docker/WSL sandboxes. Callers that execute structured tools
+// inside the container must use this value for flags such as Git's -C; the
+// container's --workdir alone does not override an explicit -C argument.
+func ContainerWorkingDir(workspace, workingDir string) (string, error) {
+	workspace, err := absolutePath(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox workspace: %w", err)
+	}
+	if strings.TrimSpace(workingDir) == "" {
+		workingDir = workspace
+	}
+	workingDir, err = absolutePath(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox working directory: %w", err)
+	}
+	rel, err := filepath.Rel(workspace, workingDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox working directory is outside workspace: %s", workingDir)
+	}
+	containerDir := "/workspace"
+	if rel != "." && rel != "" {
+		containerDir += "/" + filepath.ToSlash(rel)
+	}
+	return containerDir, nil
 }
 
 func buildDockerRunArgs(config Config, workspaceSource, containerDir string, request Request) ([]string, error) {

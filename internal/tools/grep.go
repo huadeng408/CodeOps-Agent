@@ -21,6 +21,13 @@ func (e *Executor) executeGrep(ctx context.Context, args map[string]any) (ToolRe
 	if searchRoot == "" {
 		searchRoot = "."
 	}
+	base, baseErr := e.currentWorkingDir()
+	if baseErr != nil {
+		return ToolResult{Name: "Grep", Error: baseErr.Error()}, baseErr
+	}
+	if !filepath.IsAbs(searchRoot) {
+		searchRoot = filepath.Join(base, searchRoot)
+	}
 	absRoot, err := workspacePath(e.Root, searchRoot)
 	if err != nil {
 		return ToolResult{Name: "Grep", Error: err.Error()}, err
@@ -57,7 +64,7 @@ func (e *Executor) executeGrep(ctx context.Context, args map[string]any) (ToolRe
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(e.Root, p)
+		rel, err := filepath.Rel(base, p)
 		if err != nil {
 			return err
 		}

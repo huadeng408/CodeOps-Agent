@@ -170,6 +170,38 @@ func TestWorkbenchRejectsTransportProgressSourceWithMatchingRunID(t *testing.T) 
 	}
 }
 
+func TestWorkbenchAcceptsApprovalProgressSource(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-progress-approval", "run-progress-approval", testRunnerActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-progress-approval", RequestID: "request-progress-approval", LeaseID: "lease-progress-approval", WorkerID: "worker-progress-approval", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: lease.RunID, ToolCallID: "call-progress-approval", ToolName: "Write", ArgumentsJSON: `{"path":"README.md","content":"x"}`}
+	if _, err := ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	approval := toolApprovalPayload{RunID: lease.RunID, ToolCallID: call.ToolCallID, ToolName: call.ToolName, ArgumentsJSON: call.ArgumentsJSON, Decision: ApprovalPending}
+	if _, err := ledger.Append(ctx, created.ID, 7, approvalPendingEventType, approval); err != nil {
+		t.Fatal(err)
+	}
+	progress := progressPayload{RunID: lease.RunID, Kind: progressMilestone, Title: "等待审批", Summary: "等待工具审批", SourceEventSeq: 7}
+	if _, err := ledger.Append(ctx, created.ID, 8, progressEventType, progress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workbench.Get(ctx, 7, created.ID); err != nil {
+		t.Fatalf("approval progress source rejected: %v", err)
+	}
+}
+
 func TestWorkbenchRejectsPlanTodoFromUnknownRun(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

@@ -16,7 +16,7 @@ func (e *Executor) executeRead(ctx context.Context, args map[string]any) (ToolRe
 		return ToolResult{Name: "Read", Error: "path is required"}, fmt.Errorf("path is required")
 	}
 
-	abs, err := secureFilePath(e.Root, path)
+	abs, err := e.workingFilePath(path)
 	if err != nil {
 		return ToolResult{Name: "Read", Error: err.Error()}, err
 	}

@@ -8,9 +8,10 @@ import (
 	"testing"
 
 	"code-agent/internal/config"
+	"code-agent/internal/memory"
 )
 
-func TestAppRunFailsClosedWhenMemoryInitializationFails(t *testing.T) {
+func TestAppDoesNotRewriteLegacyMemoryAndExplicitImportFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	memoryDir := filepath.Join(root, "memory")
 	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
@@ -27,7 +28,15 @@ func TestAppRunFailsClosedWhenMemoryInitializationFails(t *testing.T) {
 
 	app := NewApp(cfg, strings.NewReader(""), &strings.Builder{}, &strings.Builder{})
 	err := app.Run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "memory initialization failed") {
-		t.Fatalf("Run error = %v, want fail-closed memory initialization error", err)
+	if err != nil {
+		t.Fatalf("Ledger CLI was blocked by unused legacy memory: %v", err)
+	}
+	adapter := app.memory.(*memory.CLIAdapter)
+	if _, err := adapter.ImportLegacy(memoryDir); err == nil {
+		t.Fatal("corrupt legacy memory imported")
+	}
+	data, err := os.ReadFile(filepath.Join(memoryDir, "broken.md"))
+	if err != nil || string(data) != "not frontmatter\n" {
+		t.Fatal("legacy file changed")
 	}
 }

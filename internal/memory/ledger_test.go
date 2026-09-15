@@ -206,7 +206,7 @@ func TestLedgerMemoryDeniedToolNeverReadsHistoricalMemory(t *testing.T) {
 	}
 }
 
-func TestLedgerMemoryRewindAndPendingTurnInvalidateOldCommit(t *testing.T) {
+func TestLedgerMemoryRewindDeletesButPendingTurnRetainsCompletedCommit(t *testing.T) {
 	for _, mutation := range []string{"rewind", "pending", "delete"} {
 		t.Run(mutation, func(t *testing.T) {
 			ledger := openMemoryLedger(t)
@@ -228,7 +228,11 @@ func TestLedgerMemoryRewindAndPendingTurnInvalidateOldCommit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if result := decodeMemoryRecall(t, module, 7, "obsolete", 1200); len(result.Entries) != 0 {
+			expected := 0
+			if mutation == "pending" {
+				expected = 1
+			}
+			if result := decodeMemoryRecall(t, module, 7, "obsolete", 1200); len(result.Entries) != expected {
 				t.Fatalf("stale commit resurfaced: %+v", result)
 			}
 			if err := module.Commit(ctx, sessionID); err == nil {
@@ -248,6 +252,22 @@ func TestLedgerMemoryMalformedOwnedCommitFailsClosed(t *testing.T) {
 	}
 	if text, err := module.Recall(context.Background(), 7, "source", 1200); !errors.Is(err, ErrTrajectoryIntegrity) || text != "" {
 		t.Fatalf("invalid commit accepted: %q, %v", text, err)
+	}
+}
+
+func TestMalformedTrajectorySourceSequenceFailsClosed(t *testing.T) {
+	events := []session.Event{{Seq: 0, EventID: "event-0", Checksum: "checksum-0", Type: "user/message"}}
+	_, err := resolveTrajectorySource(events, TrajectorySource{
+		Seq: 99, EventID: "event-99", Checksum: "checksum-99", Type: "user/message",
+	})
+	if !errors.Is(err, ErrTrajectoryIntegrity) {
+		t.Fatalf("out-of-range source was not rejected: %v", err)
+	}
+	_, err = resolveTrajectorySource(events, TrajectorySource{
+		Seq: 0, EventID: "different-event", Checksum: "checksum-0", Type: "user/message",
+	})
+	if !errors.Is(err, ErrTrajectoryIntegrity) {
+		t.Fatalf("mismatched source identity was not rejected: %v", err)
 	}
 }
 

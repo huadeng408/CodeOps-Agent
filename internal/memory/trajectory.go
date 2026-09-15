@@ -57,6 +57,20 @@ type SessionTrajectory struct {
 	SourceChecksum string             `json:"source_checksum"`
 }
 
+// resolveTrajectorySource binds a derived source reference back to the
+// verified immutable event. Never index the ledger from an untrusted sequence
+// without checking both its range and its identity fields first.
+func resolveTrajectorySource(events []session.Event, source TrajectorySource) (session.Event, error) {
+	if source.Seq < 0 || source.Seq >= int64(len(events)) {
+		return session.Event{}, fmt.Errorf("%w: source sequence %d is out of range", ErrTrajectoryIntegrity, source.Seq)
+	}
+	event := events[int(source.Seq)]
+	if event.Seq != source.Seq || event.EventID != source.EventID || event.Checksum != source.Checksum || event.Type != source.Type {
+		return session.Event{}, fmt.Errorf("%w: source sequence %d identity mismatch", ErrTrajectoryIntegrity, source.Seq)
+	}
+	return event, nil
+}
+
 // BuildSessionTrajectory verifies and deterministically projects a session's
 // immutable event stream. It never writes to the ledger or to the Memory
 // store.
@@ -76,6 +90,9 @@ func BuildSessionTrajectory(ctx context.Context, ledger session.EventLog, sessio
 }
 
 func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, options TrajectoryOptions) (SessionTrajectory, error) {
+	if len(snapshot.Events) > 0 && (snapshot.Events[0].Type == "session/state" || snapshot.Events[0].Type == "legacy/import") {
+		return buildLegacyTrajectory(snapshot, sessionID)
+	}
 	maxOverview := options.MaxOverviewChars
 	if maxOverview == 0 {
 		maxOverview = defaultTrajectoryOverviewChars

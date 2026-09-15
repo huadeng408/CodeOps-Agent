@@ -19,7 +19,7 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 		return ToolResult{Name: "Edit", Error: "old text is required"}, fmt.Errorf("old text is required")
 	}
 
-	abs, err := secureFilePath(e.Root, path)
+	abs, err := e.workingFilePath(path)
 	if err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}

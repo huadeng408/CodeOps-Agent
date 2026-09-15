@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-15）。
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-16）。
 
 历史进展、面试收据和根目录评测 JSON 已归档到 [`docs/archive/`](archive/INDEX.md)。新对话默认只读本文和 [`AGENT.md`](../AGENT.md)，不要把归档当执行指令。完整日更日志见 [`docs/archive/receipts/GOAL-log-2026-09.md`](archive/receipts/GOAL-log-2026-09.md)。
 
@@ -199,8 +199,8 @@ surface projection 使用同一次读取，并拒绝重复 event ID。
 'LedgerMemory|LedgerSnapshot|Trajectory|MemoryCommit' -count=1`，以及
 `go test -race ./internal/memory ./internal/session -run
 'LedgerMemory|LedgerSnapshot|MemoryCommit' -count=1` 均退出 0。
-`go test ./... -count=1`、`go vet ./...`、`git diff --check` 退出 0；
-`python -m pytest -q` 退出 0（2329 passed, 16 skipped, 31 warnings）。
+`go test ./... -count=1`、`go vet ./...` 退出 0；
+`python -m pytest -q` 退出 0（2336 passed, 16 skipped, 31 warnings）。
 这些结果来自包含既有未提交改动的工作树，不升级为 source-clean runtime 证据。
 
 `CODE_AGENT_RUN_MEMORY_INTEGRATION=1 go test ./internal/memory -run
@@ -212,10 +212,104 @@ TestLedgerMemoryAcrossProcessRestart -count=1` 退出 0：两个独立 Go 测试
 收据明确标记 fixture-backed、source-dirty、`IMPLEMENTED`；它没有启动生产
 server/provider，不是真实模型 E2E，也不是故障恢复率指标。
 
-剩余缺口：模型反思与类型化经验提取、跨提交演化/去重、检索后端与保留策略、
-CLI 旧 Session Adapter 的 Memory 调用方迁移、真实 provider-backed Skills /
-Memory E2E，以及既定规模/准确率/Token 指标。当前进程未提供批准的 provider
-凭据，不读取本地 secret 文件来补齐；上述门禁仍为 `BLOCKED`。
+`ReflectMemory` RPC 与 Python `reflect_memory` 已实现：输入来源、证据引用、字段
+边界和敏感内容均在 Harness/编排层校验，反思请求显式禁用 tools；Go 侧只把通过
+来源校验的候选以 CAS 追加到 Session Ledger 的类型化 `Experience`，并支持修订、
+去重 key、tombstone 和来源演化。定向测试覆盖 provider 缺失时不捏造候选，以及
+并发提案只采用一个 durable proposal。它证明的是接口和 fail-closed 行为，不是
+语义质量或生产模型可用性。
+
+剩余缺口：provider-backed 语义质量与长期检索指标、跨提交演化/去重的生产数据、
+向量检索后端（当前为词法召回）、真实 provider-backed Skills/Memory E2E，
+以及既定规模/准确率/Token 指标。TTL、forget tombstone 与 CLI 单向 Adapter
+已在后续阶段实现，不再属于接口缺口。当前进程未
+提供批准的 provider 凭据，不读取本地 secret 文件来补齐；上述门禁仍为 `BLOCKED`。
+
+### 独立子 Agent 阶段（2026-09-16）
+
+状态：`IMPLEMENTED`。主 Agent 通过 Harness-owned `SpawnAgent` 创建真正独立的
+子 Session；子 Agent 使用独立的 Session Ledger、checkpoint、运行队列、actor
+绑定和（需要写入时）managed working directory。父 Agent 的历史、Memory、工具
+审批和 provider transcript 不会隐式继承，子 Agent 只接收显式委派内容。
+
+协议层新增版本化 `AgentCard`、`AgentMessage`、`AgentTask`、`AgentArtifact`、
+`AgentFile`、`AgentPart` 与 `AgentToolApproval`：Card 描述能力、地址、通信方式和
+鉴权要求；Message 支持文本、受限 JSON 和经过路径/大小/SHA-256 校验的文件；Task
+支持 submitted/working/input_required/completed/failed/canceled 状态、父子会话
+关联、补充消息、等待、取消和人工工具审批；Artifact 支持文本/结构化结果/固定文件
+以及 checksum。所有事实仍追加到对应 Session Ledger，重启时从 ledger/checkpoint
+恢复，父 Session 删除会联动取消子任务。
+
+Agent 工具调用的内部 mutation ID 按普通 run 隔离，retry 则固定到最早 retry
+ancestor；因此 SpawnAgent、AgentTask 消息、AskUser 输入请求和 PublishArtifact
+在传输重试后不会创建第二个 task 或 artifact。新增回归覆盖失败前驱已有子任务的
+重试路径；Go/Python 生成物与 protobuf schema 同步。
+
+本轮定向命令
+`go test ./internal/session ./internal/memory ./internal/orchestrator ./tests/go
+-run 'Agent|LedgerMemory|Trajectory|MemoryCommit|OrchestratorClient|Retry' -count=1`
+退出 0；全量 Go/Python 结果见上文。跨进程收据命令
+`CODE_AGENT_RUN_INDEPENDENT_AGENTS_E2E=1 go test ./tests/e2e -run
+TestProductionIndependentAgentsAndMemoryProcess -count=1` 退出 0，收据位于
+`.runtime/e2e/independent-agents-process.json`，包含两个 Go 进程、两个 Python
+进程和 `passed=13,total=13`：独立 child session/context、输入补充、文件 Artifact
+固定、重启后同一 task/child history、Skills lazy loading、反思禁用 tools、typed
+Memory 恢复和 ledger hash chain 均为 true。该收据的 `evidence_type` 是
+`fixture-backed-production-cli-grpc`，`provider_backed=false`、`source_dirty=true`、
+`status=IMPLEMENTED`；它不是 provider 生产 E2E、并发故障率或官方 scorer 证据。
+
+### 本轮接口收尾（2026-09-16）
+
+状态：`IMPLEMENTED`。Skills、Ledger Memory 和独立子 Agent 的本地接口完成接线，
+契约与用法见 [`skills-memory-agents.md`](skills-memory-agents.md)。Skills 发现、
+lazy body 和资源目录解析现在均校验 catalog root，拒绝目录 junction/symlink
+移出信任根，也拒绝发现之后替换目录造成的越界。Python 刷新失败保持 last-good，
+不读取越界 frontmatter；生产读取边界由 Go `os.Root` 强制。
+
+Memory 支持六类 Experience、分层详情、来源校验、revision/CAS、TTL、forget
+tombstone 与显式恢复；CLI `/memory` 新事实只写同一 Ledger，旧 Markdown 只有
+显式 `/memory import` 才单向导入。子任务拥有独立的 History、Plan、checkpoint、
+budget、actor 和执行队列；Card 覆盖 deep/explore/plan/review/security 的只读
+profile 与 general/background 的隔离写入 profile。`SpawnAgent` 的 Message 和
+`allowed_tools` schema 已正确接线，模型可传文件与受限工具子集。
+
+Artifact 上限为每 task 16 个（含自动报告）；满额后相同 ID、相同内容的重放返回
+原成果，不增加事件，并发容量检查在 Ledger CAS 内完成。失败的 Shell/Git/MCP
+等副作用收据只作为失败上下文重放，不自动重执行；仅只读或 Ledger 幂等操作允许
+原 ID 重试。provider 异常日志不输出异常正文。旧 `RunWorkflow` 的未定义 spawn
+变量分支已修复；保留其单向兼容路径，不宣称旧调度器删除门槛已满足。
+
+新回归曾以退出 1 复现 schema 归属、发现/延迟读取 junction 越界及满额幂等缺口。
+首次 `-race` 退出 1 暴露测试未等待自动报告的计数时序；固定准备步骤后，Artifact
+并发/满额重放的 `-race -count=10` 退出 0。最终 `go test ./... -count=1`、
+`go vet ./...`、定向 `go test -race ./internal/session ./internal/memory
+./internal/worktree ./internal/tools ./cmd/server -count=1`、protobuf 重新生成和
+`git diff --check` 均退出 0；`python -m pytest -q` 退出 0
+（2341 passed, 16 skipped, 31 warnings）。普通 symlink 创建权限仍有跳过，Windows
+junction 测试实际执行。前端不属于本轮提交或验证范围。
+
+暂存区收尾保留已有 `LastUserInput` 字段、surface 投影及其测试，只提交新增
+WorkingDir/Agent 接线；两个用户工作树文件的 SHA-256 在操作前后完全一致。
+对这两个暂存 blob 生成本地 Go overlay，`go test -overlay=<index-overlay>
+./internal/handler ./internal/session ./internal/memory ./internal/skills
+./internal/tools ./cmd/server -count=1`、同 overlay 的 `go test ./... -count=1`、
+`go vet ./...` 和上述定向 `-race` 均退出 0。首次未加引号的 PowerShell overlay
+参数被拆成 package，命令退出 1；修正参数传递后验证准确的暂存版本退出 0。
+暂存路径扫描实际覆盖 60 个文件，未发现候选密钥或禁止的运行产物路径，匹配值
+不输出；`git diff --cached --check` 退出 0。本地检查脚本、overlay 和导出的
+blob 只保存在忽略的 `.runtime/staging/`，不进入提交。
+
+独立 Agent/Memory 跨进程命令再次退出 0，13/13 检查均通过。提交前收据绑定
+`4e1a301243bb2e43b6dbedd1bd3870b065d503bf`，run ID `run-1064136823`，
+`.runtime/e2e/independent-agents-process.json` SHA-256 为
+`1990ea7074ad2d17b0e85aa2e837aacaba0ac6b28cbfcc870ac7fcc65addeeda`。
+该检查仍为 `fixture-backed-production-cli-grpc`、`provider_backed=false`、
+`source_dirty=true`、`IMPLEMENTED`，没有把 fixture 结果升级为生产证据。
+同轮 Skills 生产 CLI manifest 检查与 Memory 独立进程重启检查均退出 0；
+各次 receipt、完整分母、进程观测和产物 checksum 保留在 `.runtime/e2e/`，
+不纳入提交。当前进程未配置批准的 provider 凭据，不读取本地 secret 文件补齐；
+provider-backed 语义质量、40 Skills 的真实可运行矩阵、948/1000、Token 降幅、
+规模故障恢复与官方 scorer 门禁仍为 `BLOCKED`。
 
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成

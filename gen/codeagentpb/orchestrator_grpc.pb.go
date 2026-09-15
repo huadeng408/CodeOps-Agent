@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Orchestrator_Converse_FullMethodName = "/codeagent.v1.Orchestrator/Converse"
-	Orchestrator_Compact_FullMethodName  = "/codeagent.v1.Orchestrator/Compact"
-	Orchestrator_Health_FullMethodName   = "/codeagent.v1.Orchestrator/Health"
+	Orchestrator_Converse_FullMethodName      = "/codeagent.v1.Orchestrator/Converse"
+	Orchestrator_Compact_FullMethodName       = "/codeagent.v1.Orchestrator/Compact"
+	Orchestrator_Health_FullMethodName        = "/codeagent.v1.Orchestrator/Health"
+	Orchestrator_ReflectMemory_FullMethodName = "/codeagent.v1.Orchestrator/ReflectMemory"
 )
 
 // OrchestratorClient is the client API for Orchestrator service.
@@ -31,6 +32,7 @@ type OrchestratorClient interface {
 	Converse(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HarnessMessage, OrchestratorMessage], error)
 	Compact(ctx context.Context, in *CompactRequest, opts ...grpc.CallOption) (*CompactionUpdate, error)
 	Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthResponse, error)
+	ReflectMemory(ctx context.Context, in *MemoryReflectionRequest, opts ...grpc.CallOption) (*MemoryReflectionResponse, error)
 }
 
 type orchestratorClient struct {
@@ -74,6 +76,16 @@ func (c *orchestratorClient) Health(ctx context.Context, in *Empty, opts ...grpc
 	return out, nil
 }
 
+func (c *orchestratorClient) ReflectMemory(ctx context.Context, in *MemoryReflectionRequest, opts ...grpc.CallOption) (*MemoryReflectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryReflectionResponse)
+	err := c.cc.Invoke(ctx, Orchestrator_ReflectMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OrchestratorServer is the server API for Orchestrator service.
 // All implementations must embed UnimplementedOrchestratorServer
 // for forward compatibility.
@@ -81,6 +93,7 @@ type OrchestratorServer interface {
 	Converse(grpc.BidiStreamingServer[HarnessMessage, OrchestratorMessage]) error
 	Compact(context.Context, *CompactRequest) (*CompactionUpdate, error)
 	Health(context.Context, *Empty) (*HealthResponse, error)
+	ReflectMemory(context.Context, *MemoryReflectionRequest) (*MemoryReflectionResponse, error)
 	mustEmbedUnimplementedOrchestratorServer()
 }
 
@@ -99,6 +112,9 @@ func (UnimplementedOrchestratorServer) Compact(context.Context, *CompactRequest)
 }
 func (UnimplementedOrchestratorServer) Health(context.Context, *Empty) (*HealthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedOrchestratorServer) ReflectMemory(context.Context, *MemoryReflectionRequest) (*MemoryReflectionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReflectMemory not implemented")
 }
 func (UnimplementedOrchestratorServer) mustEmbedUnimplementedOrchestratorServer() {}
 func (UnimplementedOrchestratorServer) testEmbeddedByValue()                      {}
@@ -164,6 +180,24 @@ func _Orchestrator_Health_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Orchestrator_ReflectMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MemoryReflectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestratorServer).ReflectMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Orchestrator_ReflectMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestratorServer).ReflectMemory(ctx, req.(*MemoryReflectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Orchestrator_ServiceDesc is the grpc.ServiceDesc for Orchestrator service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -178,6 +212,10 @@ var Orchestrator_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _Orchestrator_Health_Handler,
+		},
+		{
+			MethodName: "ReflectMemory",
+			Handler:    _Orchestrator_ReflectMemory_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

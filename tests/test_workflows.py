@@ -434,3 +434,36 @@ def test_conversation_workflow_decoder_preserves_attempt_budget(tmp_path: Path) 
     )
 
     assert workflow.workers[0].max_attempts == 3
+
+
+def test_conversation_runs_workflow_without_a_prior_spawn(tmp_path: Path) -> None:
+    class WorkflowProvider:
+        model = "fixture-workflow"
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def chat(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ChatResponse(tool_calls=[ToolCall(
+                    id="workflow", name="RunWorkflow", arguments={
+                        "id": "without-spawn",
+                        "workers": [{"id": "inspect", "title": "Inspect", "objective": "Inspect sources"}],
+                    },
+                    arguments_json='{"id":"without-spawn","workers":[{"id":"inspect","title":"Inspect","objective":"Inspect sources"}]}',
+                )])
+            return ChatResponse(text="workflow completed")
+
+    provider = WorkflowProvider()
+    runner = ConversationRunner(
+        graph=build_graph(), llm=provider, tool_registry=ToolRegistry(str(tmp_path)),
+        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
+        token_budget=TokenBudget(), provider_clients={"default": provider},
+    )
+    events = list(runner.run("Create a file called report.txt", iter(()), session_id="workflow-only"))
+    assert events[-1].done.success is True
+    assert any(event.HasField("agent_spawn") for event in events), [str(event) for event in events]
+    results = [message for request in provider.requests for message in request.messages if message.name == "RunWorkflow"]
+    assert results and json.loads(results[-1].content)["state"] == "completed"

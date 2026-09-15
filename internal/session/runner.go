@@ -24,6 +24,7 @@ const (
 	runHeartbeatEventType = "session/run-heartbeat"
 	runCompletedEventType = "session/run-completed"
 	runFailedEventType    = "session/run-failed"
+	runCanceledEventType  = "session/run-canceled"
 	toolDispatchedType    = "tool/dispatched"
 	toolUnknownEventType  = "tool/unknown"
 	planTodoEventType     = "session/plan-todo"
@@ -101,6 +102,7 @@ const (
 	RunRunning   RunStatus = "running"
 	RunCompleted RunStatus = "completed"
 	RunFailed    RunStatus = "failed"
+	RunCanceled  RunStatus = "canceled"
 )
 
 // ContinueCommand is the complete caller intent accepted by the SessionRunner
@@ -159,6 +161,14 @@ type ToolExecutionAdapter interface {
 	Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult
 }
 
+// WorkingDirToolExecutionAdapter is an optional seam for executors whose
+// mutable cwd must be isolated per durable Session. Legacy adapters continue
+// to use Execute; production continuation wiring implements this method.
+type WorkingDirToolExecutionAdapter interface {
+	ToolExecutionAdapter
+	ExecuteInWorkingDir(context.Context, identity.Actor, string, string, orchestrator.ToolCall) orchestrator.ToolResult
+}
+
 // ToolExecutionFunc adapts the Harness-owned tool executor without exposing
 // executor internals to the continuation module.
 type ToolExecutionFunc func(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult
@@ -177,27 +187,33 @@ type SessionRunnerOptions struct {
 	QueueSize        int
 	// WorkerCount controls bounded cross-session execution concurrency.
 	// Runs from the same session remain serialized by the durable run CAS.
-	WorkerCount    int
-	Now            func() time.Time
-	Permissions    *permission.Controller
-	AgentSpawn     orchestrator.AgentSpawnHandler
-	AgentLifecycle orchestrator.AgentLifecycleHandler
-	Memory         SessionMemory
+	WorkerCount      int
+	Now              func() time.Time
+	Permissions      *permission.Controller
+	AgentSpawn       orchestrator.AgentSpawnHandler
+	AgentLifecycle   orchestrator.AgentLifecycleHandler
+	Memory           SessionMemory
+	AgentWorkspace   func(context.Context, AgentWorkspaceRequest) (string, error)
+	AgentApproval    func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
+	AgentWorkerCount int
 }
 
 type SessionRunner struct {
-	workbench    *Workbench
-	conversation ConversationAdapter
-	tools        ToolExecutionAdapter
-	options      SessionRunnerOptions
-	ctx          context.Context
-	cancel       context.CancelFunc
-	queue        chan runKey
-	queuedMu     sync.Mutex
-	queued       map[runKey]struct{}
-	lifecycleMu  sync.RWMutex
-	closed       bool
-	wg           sync.WaitGroup
+	workbench       *Workbench
+	conversation    ConversationAdapter
+	tools           ToolExecutionAdapter
+	options         SessionRunnerOptions
+	ctx             context.Context
+	cancel          context.CancelFunc
+	queue           chan runKey
+	agentQueue      chan runKey
+	agentMu         sync.Mutex
+	activeAgentRuns map[runKey]context.CancelFunc
+	queuedMu        sync.Mutex
+	queued          map[runKey]struct{}
+	lifecycleMu     sync.RWMutex
+	closed          bool
+	wg              sync.WaitGroup
 }
 
 type runKey struct {
@@ -454,6 +470,12 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	if options.WorkerCount <= 0 {
 		options.WorkerCount = 4
 	}
+	if options.WorkerCount > 6 {
+		options.WorkerCount = 6
+	}
+	if options.AgentWorkerCount <= 0 || options.AgentWorkerCount > 4 {
+		options.AgentWorkerCount = 4
+	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
@@ -461,10 +483,14 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	runner := &SessionRunner{
 		workbench: workbench, conversation: conversation, tools: tools, options: options,
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}),
+		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]context.CancelFunc),
 	}
-	runner.wg.Add(options.WorkerCount)
+	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount)
 	for i := 0; i < options.WorkerCount; i++ {
-		go runner.workerLoop()
+		go runner.workerLoop(runner.queue)
+	}
+	for i := 0; i < options.AgentWorkerCount; i++ {
+		go runner.workerLoop(runner.agentQueue)
 	}
 	return runner
 }
@@ -800,10 +826,11 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		return errors.New("session runner requires a workbench")
 	}
 	r.lifecycleMu.RLock()
-	defer r.lifecycleMu.RUnlock()
 	if r.closed {
+		r.lifecycleMu.RUnlock()
 		return ErrSessionRunnerClosed
 	}
+	r.lifecycleMu.RUnlock()
 	ids, err := r.workbench.ledger.SessionIDs(ctx)
 	if err != nil {
 		return err
@@ -828,7 +855,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		// different projection and lifecycle. Its streams are not runner work;
 		// unknown non-Workbench streams still fail below instead of being hidden.
 		switch events[0].Type {
-		case sessionStateEventType, "legacy/import", "session/fork/import":
+		case sessionStateEventType, "legacy/import", "session/fork/import", "memory/catalog-created":
 			continue
 		}
 		// A deleted session remains in the append-only ledger for auditability,
@@ -843,6 +870,15 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		if view.Status == "deleted" {
 			continue
 		}
+		if err := r.recoverAgentTask(ctx, view.UserID, events); err != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, err))
+			continue
+		}
+		events, readErr = r.workbench.ledger.Events(ctx, sessionID)
+		if readErr != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s updated events: %w", sessionID, readErr))
+			continue
+		}
 		runs, projectErr := projectRuns(events)
 		if projectErr != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s runs: %w", sessionID, projectErr))
@@ -854,6 +890,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			}
 			if run.terminal {
 				if view.Run != nil && view.Run.RunID == runID {
+					r.completeAgentTurn(ctx, runKey{sessionID: sessionID, runID: runID})
 					r.commitSessionMemory(ctx, runKey{sessionID: sessionID, runID: runID})
 				}
 				continue
@@ -862,7 +899,13 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 			if run.view.LeaseUntil != nil && run.view.LeaseUntil.After(r.now()) {
 				wakeAt = *run.view.LeaseUntil
 			}
+			r.lifecycleMu.RLock()
+			if r.closed {
+				r.lifecycleMu.RUnlock()
+				return ErrSessionRunnerClosed
+			}
 			r.enqueue(runKey{sessionID: sessionID, runID: runID}, wakeAt)
+			r.lifecycleMu.RUnlock()
 		}
 	}
 	if err := errors.Join(recoverErrs...); err != nil {
@@ -930,7 +973,7 @@ func (r *SessionRunner) enqueue(key runKey, wakeAt time.Time) {
 			}
 		}
 		select {
-		case r.queue <- key:
+		case r.targetQueue(key) <- key:
 		case <-r.ctx.Done():
 			r.releaseQueued(key)
 		}
@@ -943,13 +986,20 @@ func (r *SessionRunner) releaseQueued(key runKey) {
 	r.queuedMu.Unlock()
 }
 
-func (r *SessionRunner) workerLoop() {
+func (r *SessionRunner) targetQueue(key runKey) chan runKey {
+	if strings.HasPrefix(key.sessionID, "agent-") {
+		return r.agentQueue
+	}
+	return r.queue
+}
+
+func (r *SessionRunner) workerLoop(queue chan runKey) {
 	defer r.wg.Done()
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
-		case key := <-r.queue:
+		case key := <-queue:
 			r.releaseQueued(key)
 			r.execute(key)
 		}
@@ -957,6 +1007,7 @@ func (r *SessionRunner) workerLoop() {
 }
 
 func (r *SessionRunner) execute(key runKey) {
+	defer r.completeAgentTurn(context.Background(), key)
 	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
 	defer stopWatching()
 	lease, waitUntil, err := r.claim(r.ctx, key)
@@ -980,6 +1031,12 @@ func (r *SessionRunner) execute(key runKey) {
 	}
 	runCtx, cancel := context.WithCancel(r.ctx)
 	defer cancel()
+	if strings.HasPrefix(key.sessionID, "agent-") {
+		r.agentMu.Lock()
+		r.activeAgentRuns[key] = cancel
+		r.agentMu.Unlock()
+		defer func() { r.agentMu.Lock(); delete(r.activeAgentRuns, key); r.agentMu.Unlock() }()
+	}
 	heartbeatDone := make(chan struct{})
 	heartbeatErr := make(chan error, 1)
 	go r.heartbeat(runCtx, key, lease, deletions, heartbeatDone, cancel, heartbeatErr)
@@ -1001,6 +1058,22 @@ func (r *SessionRunner) execute(key runKey) {
 		<-heartbeatDone
 		r.fail(key, lease, errors.New("continuation has no input or history"))
 		return
+	}
+	if request.AgentTask != nil {
+		parentDeleted, stopWatchingParent := r.workbench.watchDeletion(request.AgentTask.ParentSessionId)
+		parentWatcherDone := make(chan struct{})
+		defer func() { cancel(); <-parentWatcherDone; stopWatchingParent() }()
+		go func() {
+			defer close(parentWatcherDone)
+			select {
+			case <-runCtx.Done():
+			case <-parentDeleted:
+				fenceCtx, fenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = r.cancelAgentTask(fenceCtx, request.AgentTask, "parent-deleted")
+				fenceCancel()
+				cancel()
+			}
+		}()
 	}
 	var blocked atomic.Bool
 	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
@@ -1030,7 +1103,7 @@ func (r *SessionRunner) execute(key runKey) {
 			return nil
 		},
 		Tool: func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
-			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, call, retryRunIDs...)
+			result, unsafe := r.executeTool(ctx, key, lease, request.Actor, request.WorkingDir, call, retryRunIDs...)
 			if unsafe {
 				blocked.Store(true)
 			}
@@ -1085,6 +1158,7 @@ func (r *SessionRunner) execute(key runKey) {
 		return
 	}
 	r.recordCompletedProgress(context.Background(), key)
+	r.completeAgentTurn(context.Background(), key)
 	r.commitSessionMemory(context.Background(), key)
 }
 
@@ -1240,6 +1314,14 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
+	workingDir := ""
+	if len(events) > 0 && events[0].Type == sessionCreatedEventType {
+		var created sessionCreatedPayload
+		if err := json.Unmarshal(events[0].Payload, &created); err != nil {
+			return orchestrator.ConversationRequest{}, fmt.Errorf("%w: invalid session working directory", ErrEventIntegrity)
+		}
+		workingDir = strings.TrimSpace(created.WorkingDir)
+	}
 	requestRetryOfRunID := ""
 	retryOfRunIDs := []string(nil)
 	if projection.surfaceHash != "" {
@@ -1294,11 +1376,19 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
-	return orchestrator.ConversationRequest{
-		Input: input, SessionID: key.sessionID, RunID: key.runID, Resume: true, NewTurn: newTurn, SurfaceSHA256: projection.surfaceHash,
+	request := orchestrator.ConversationRequest{
+		Input: input, SessionID: key.sessionID, WorkingDir: workingDir, RunID: key.runID, Resume: true, NewTurn: newTurn, SurfaceSHA256: projection.surfaceHash,
 		RetryOfRunID: requestRetryOfRunID, RetryOfRunIDs: retryOfRunIDs,
 		Actor: projection.actor, History: history, State: planTodo,
-	}, nil
+		HarnessManaged: true,
+	}
+	if err := r.agentRequest(events, &request); err != nil {
+		return orchestrator.ConversationRequest{}, err
+	}
+	if request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
+		request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
+	}
+	return request, nil
 }
 
 func explicitSpawnAgentIntent(content string) bool {
@@ -1437,7 +1527,7 @@ func invocationHistoryKey(runID, callID string) string {
 	return strings.TrimSpace(runID) + "\x00" + strings.TrimSpace(callID)
 }
 
-func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall, retryOfRunIDs ...string) (orchestrator.ToolResult, bool) {
+func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, workingDir string, call orchestrator.ToolCall, retryOfRunIDs ...string) (orchestrator.ToolResult, bool) {
 	call.ID = strings.TrimSpace(call.ID)
 	call.Name = strings.TrimSpace(call.Name)
 	if call.ID == "" || call.Name == "" {
@@ -1452,6 +1542,14 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool ledger unavailable", ExitCode: 1}, true
 	}
+	policyAllowed := agentAllowed(events, call.Name)
+	if task, _, taskErr := projectAgentTask(events); taskErr != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
+	} else if task != nil {
+		if _, _, err := r.readAgentTask(ctx, projectionOwner(events), task.Id, key.sessionID); err != nil {
+			policyAllowed = false
+		}
+	}
 	state := invocationProjection(events, key.runID, call.ID)
 	if (state.prepared != nil && !toolCallMatches(*state.prepared, call)) ||
 		(state.dispatched != nil && !toolCallMatches(*state.dispatched, call)) ||
@@ -1459,11 +1557,18 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation identity conflict", ExitCode: 1}, true
 	}
 	if state.result != nil {
-		return toolResultFromPayload(*state.result), false
+		if toolResultSucceeded(*state.result) || len(retryOfRunIDs) == 0 || !canRetryFailedTool(call.Name) {
+			return toolResultFromPayload(*state.result), false
+		}
+		// Retry only read-only or Ledger-idempotent operations. A failed
+		// external effect may still have changed state and must not be repeated.
 	}
-	// A retry may replay a tool request whose result was durably committed by
-	// the failed predecessor. Reuse that receipt and materialize a current-run
-	// call/result pair for auditability; never invoke the external tool again.
+	// A retry may replay a tool request whose successful result was durably
+	// committed by a failed predecessor. Reuse only that successful receipt and
+	// materialize a current-run call/result pair for auditability; never invoke
+	// the external tool again. A failed receipt is context for the provider, not
+	// an idempotency receipt for read-only operations. Failed external effects
+	// retain their result; a nonzero exit code does not prove no effect occurred.
 	retryOfRunIDs = normalizedRetryRunIDs("", retryOfRunIDs)
 	if len(retryOfRunIDs) > 0 {
 		unknownPrior := false
@@ -1473,7 +1578,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 				(prior.dispatched != nil && !toolCallMatches(*prior.dispatched, call)) {
 				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation identity conflict", ExitCode: 1}, true
 			}
-			if prior.result != nil {
+			if prior.result != nil && (toolResultSucceeded(*prior.result) || !canRetryFailedTool(call.Name)) {
 				if prior.prepared == nil {
 					return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool result has no prepared invocation", ExitCode: 1}, true
 				}
@@ -1488,6 +1593,10 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 					return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool result persistence failed", ExitCode: 1}, true
 				}
 				return reused, false
+			}
+			if prior.result != nil {
+				// Only a safe failed operation reaches this retry path.
+				continue
 			}
 			if prior.dispatched != nil {
 				unknownPrior = true
@@ -1509,7 +1618,11 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		}
 		r.recordProgress(ctx, key, lease, progressPhase, "执行工具", fmt.Sprintf("正在执行 %s。", progressToolName(call.Name)), 0, 0)
 	}
-	approval, approvalErr := r.awaitToolApproval(ctx, key, lease, actor, call)
+	approval := ApprovalDenied
+	var approvalErr error
+	if policyAllowed {
+		approval, approvalErr = r.awaitToolApproval(ctx, key, lease, actor, call)
+	}
 	if approvalErr != nil {
 		unsafe := ctx.Err() == nil
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: approvalErr.Error(), ExitCode: 1}, unsafe
@@ -1526,7 +1639,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed", ExitCode: 1}, true
 	}
-	if r.tools == nil && call.Name != "RecallMemory" {
+	if r.tools == nil && call.Name != "RecallMemory" && call.Name != "ManageMemory" && !agentTool(call.Name) && call.Name != "AskUser" {
 		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool execution is unavailable", ExitCode: 1}
 		_ = r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID))
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", "工具执行不可用，正在根据当前结果继续处理。", 0, 0)
@@ -1535,6 +1648,18 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	result := orchestrator.ToolResult{}
 	if call.Name == "RecallMemory" {
 		result = r.recallSessionMemory(ctx, events, call)
+	} else if call.Name == "ManageMemory" {
+		result = r.manageSessionMemory(ctx, key.sessionID, call)
+	} else if agentTool(call.Name) {
+		agentCall := call
+		agentCall.ID = agentInvocationID(key.runID, retryOfRunIDs, call.ID)
+		result = r.ExecuteAgentTool(ctx, actor, key.sessionID, agentCall)
+	} else if call.Name == "AskUser" {
+		agentCall := call
+		agentCall.ID = agentInvocationID(key.runID, retryOfRunIDs, call.ID)
+		result = r.askAgentInput(ctx, actor, key.sessionID, agentCall)
+	} else if scoped, ok := r.tools.(WorkingDirToolExecutionAdapter); ok {
+		result = scoped.ExecuteInWorkingDir(ctx, actor, key.sessionID, workingDir, call)
 	} else {
 		result = r.tools.Execute(ctx, actor, key.sessionID, call)
 	}
@@ -1571,6 +1696,10 @@ func isReadOnlyTool(name string) bool {
 	}
 }
 
+func canRetryFailedTool(name string) bool {
+	return isReadOnlyTool(name) || name == "Skill" || name == "SearchKnowledge" || agentTool(name) || name == "AskUser"
+}
+
 func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease runLeasePayload, actor identity.Actor, call orchestrator.ToolCall) (ApprovalDecision, error) {
 	for {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
@@ -1589,6 +1718,25 @@ func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease
 			}
 			if approval.decision != nil {
 				return approval.decision.Decision, nil
+			}
+			task, _, taskErr := projectAgentTask(events)
+			if taskErr != nil {
+				return "", taskErr
+			}
+			if task != nil && r.options.AgentApproval != nil {
+				pending := agentApprovalView(key.sessionID, *approval.pendingEvent, *approval.pending)
+				decision, err := r.options.AgentApproval(ctx, pending)
+				if err != nil {
+					return "", errors.New("agent approval unavailable")
+				}
+				_, err = r.workbench.DecideToolApproval(ctx, projectionOwner(events), key.sessionID, ToolApprovalDecisionCommand{
+					RunID: pending.RunId, ToolCallID: pending.ToolCallId, PendingEventID: pending.PendingEventId,
+					PendingSeq: pending.PendingSeq, Decision: decision,
+				})
+				if err != nil {
+					return "", err
+				}
+				continue
 			}
 			select {
 			case <-ctx.Done():
@@ -1689,6 +1837,10 @@ func toolResultPayloadFrom(result orchestrator.ToolResult, runID string) toolRes
 
 func toolResultFromPayload(payload toolResultPayload) orchestrator.ToolResult {
 	return orchestrator.ToolResult{ToolCallID: payload.ToolCallID, ToolName: payload.ToolName, Output: payload.Output, Error: payload.Error, ExitCode: payload.ExitCode, Truncated: payload.Truncated}
+}
+
+func toolResultSucceeded(payload toolResultPayload) bool {
+	return strings.TrimSpace(payload.Error) == "" && payload.ExitCode == 0
 }
 
 func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lease runLeasePayload, eventType string, payload any) error {
@@ -1971,6 +2123,19 @@ func normalizedRetryRunIDs(primary string, candidates []string) []string {
 	return ids
 }
 
+// agentInvocationID is the durable idempotency key for mutations owned by an
+// Agent tool (task creation, task messages, input requests, and artifacts).
+// Ordinary turns are isolated by their current run. A continuation retry must
+// keep the oldest retry ancestor as its namespace, otherwise the same logical
+// provider call would create a second child task or artifact after a crash.
+func agentInvocationID(runID string, retryOfRunIDs []string, callID string) string {
+	namespace := strings.TrimSpace(runID)
+	if roots := normalizedRetryRunIDs("", retryOfRunIDs); len(roots) > 0 {
+		namespace = roots[0]
+	}
+	return namespace + ":" + strings.TrimSpace(callID)
+}
+
 func projectRun(events []Event, runID string) (runProjection, error) {
 	runs, err := projectRuns(events)
 	if err != nil {
@@ -2027,7 +2192,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			run.leaseID = payload.LeaseID
 			run.order = event.Seq
 			runs[payload.RunID] = run
-		case runCompletedEventType, runFailedEventType:
+		case runCompletedEventType, runFailedEventType, runCanceledEventType:
 			var payload runTerminalPayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return nil, fmt.Errorf("%w: invalid run terminal at seq %d", ErrEventIntegrity, event.Seq)
@@ -2040,6 +2205,8 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			run.view.CompletedAt, run.view.LeaseUntil, run.terminal = &completed, nil, true
 			if event.Type == runCompletedEventType {
 				run.view.Status = RunCompleted
+			} else if event.Type == runCanceledEventType {
+				run.view.Status = RunCanceled
 			} else {
 				run.view.Status, run.view.Error = RunFailed, payload.Error
 			}

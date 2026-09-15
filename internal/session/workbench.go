@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -60,6 +62,13 @@ type WorkbenchModule interface {
 	ContinueFromCheckpoint(context.Context, uint, string, string, int64) (EventView, error)
 }
 
+// WorkingDirCreator is an optional capability exposed by the canonical
+// Workbench. Keeping it separate preserves lightweight test doubles and
+// legacy transports while allowing HTTP callers to persist a session cwd.
+type WorkingDirCreator interface {
+	CreateWithWorkingDir(context.Context, uint, string, string, string, string) (SessionView, error)
+}
+
 // Workbench is the deep module used by browser transports. It keeps Session
 // authorization and projections local to the canonical append-only ledger.
 type Workbench struct {
@@ -76,6 +85,7 @@ type SessionView struct {
 	ProjectName   string        `json:"projectName"`
 	Title         string        `json:"title"`
 	Goal          string        `json:"goal"`
+	WorkingDir    string        `json:"workingDir"`
 	Status        string        `json:"status"`
 	EventCount    int           `json:"eventCount"`
 	CreatedAt     time.Time     `json:"createdAt"`
@@ -186,6 +196,7 @@ type sessionCreatedPayload struct {
 	ProjectName string `json:"project_name"`
 	Title       string `json:"title"`
 	Goal        string `json:"goal,omitempty"`
+	WorkingDir  string `json:"working_dir"`
 	Status      string `json:"status"`
 }
 
@@ -227,6 +238,16 @@ func NewWorkbench(ledger EventLog, notify EventNotifier) *Workbench {
 
 // Create starts a new Session with one immutable owner-bearing fact.
 func (w *Workbench) Create(ctx context.Context, ownerID uint, projectName, title, goal string) (SessionView, error) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		workingDir = "."
+	}
+	return w.CreateWithWorkingDir(ctx, ownerID, projectName, title, goal, workingDir)
+}
+
+// CreateWithWorkingDir records an existing repository directory in the
+// canonical creation fact. No mutable workspace registry is introduced.
+func (w *Workbench) CreateWithWorkingDir(ctx context.Context, ownerID uint, projectName, title, goal, workingDir string) (SessionView, error) {
 	if w == nil || w.ledger == nil {
 		return SessionView{}, errors.New("session ledger is required")
 	}
@@ -238,13 +259,21 @@ func (w *Workbench) Create(ctx context.Context, ownerID uint, projectName, title
 	if projectName == "" || title == "" {
 		return SessionView{}, fmt.Errorf("%w: session project and title are required", ErrInvalidSessionInput)
 	}
+	workingDir, err := filepath.Abs(strings.TrimSpace(workingDir))
+	if err != nil {
+		return SessionView{}, fmt.Errorf("%w: invalid working directory", ErrInvalidSessionInput)
+	}
+	info, statErr := os.Stat(workingDir)
+	if statErr != nil || !info.IsDir() {
+		return SessionView{}, fmt.Errorf("%w: working directory must be an existing directory", ErrInvalidSessionInput)
+	}
 	sessionID, err := newEventID()
 	if err != nil {
 		return SessionView{}, err
 	}
 	event, err := w.ledger.Append(ctx, sessionID, 0, sessionCreatedEventType, sessionCreatedPayload{
 		OwnerID: ownerID, ProjectName: projectName, Title: title,
-		Goal: strings.TrimSpace(goal), Status: "running",
+		Goal: strings.TrimSpace(goal), WorkingDir: workingDir, Status: "running",
 	})
 	if err != nil {
 		return SessionView{}, fmt.Errorf("create session: %w", err)
@@ -252,7 +281,7 @@ func (w *Workbench) Create(ctx context.Context, ownerID uint, projectName, title
 	w.signal(sessionID)
 	return SessionView{
 		ID: sessionID, UserID: ownerID, ProjectName: projectName, Title: title,
-		Goal: strings.TrimSpace(goal), Status: "running", EventCount: 1,
+		Goal: strings.TrimSpace(goal), WorkingDir: workingDir, Status: "running", EventCount: 1,
 		CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
 	}, nil
 }
@@ -649,7 +678,7 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	}
 	view := SessionView{
 		ID: events[0].SessionID, UserID: created.OwnerID,
-		ProjectName: created.ProjectName, Title: created.Title, Goal: created.Goal,
+		ProjectName: created.ProjectName, Title: created.Title, Goal: created.Goal, WorkingDir: created.WorkingDir,
 		Status: created.Status, EventCount: len(events),
 		CreatedAt: events[0].CreatedAt, UpdatedAt: events[len(events)-1].CreatedAt,
 	}
@@ -728,6 +757,8 @@ func reduceSessionView(events []Event) (SessionView, error) {
 			view.Status = "done"
 		case runFailedEventType:
 			view.Status = "paused"
+		case runCanceledEventType:
+			view.Status = "paused"
 		case "session/rewind":
 			// Restoring a checkpoint is an explicit user intervention. The
 			// immutable rewind marker changes the active surface, and the
@@ -765,7 +796,8 @@ func eventSourceBelongsToRun(events []Event, sourceSeq int64, runID string) bool
 		runCompletedEventType, runFailedEventType, "execution_result",
 		"user/message", "assistant/message", "tool/call", "tool/result",
 		toolDispatchedType, toolUnknownEventType, planTodoEventType,
-		compactionEventType, codeModifiedEventType, progressEventType:
+		compactionEventType, codeModifiedEventType, progressEventType,
+		approvalPendingEventType, approvalApprovedEventType, approvalDeniedEventType:
 		// allowed canonical run facts
 	default:
 		return false

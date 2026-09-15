@@ -441,6 +441,38 @@ func TestSessionViewDerivesLastUserInputFromActiveSurface(t *testing.T) {
 	}
 }
 
+func TestCreateSessionPersistsWorkingDir(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	workingDir := t.TempDir()
+	router := sessionTestRouter(7, workbench)
+	response := performSessionRequest(router, http.MethodPost, "/sessions", map[string]any{
+		"projectName": "repo", "title": "workspace", "goal": "goal", "workingDir": workingDir,
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data session.SessionView `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.Abs(workingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.WorkingDir != resolved {
+		t.Fatalf("working dir=%q want %q", envelope.Data.WorkingDir, resolved)
+	}
+	view, err := workbench.Get(context.Background(), 7, envelope.Data.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.WorkingDir != resolved {
+		t.Fatalf("persisted working dir=%q want %q", view.WorkingDir, resolved)
+	}
+}
+
 func TestRecoveryManifestIncludesCurrentRunLineage(t *testing.T) {
 	workbench, ledger := openHandlerTestWorkbench(t)
 	created, err := workbench.Create(context.Background(), 7, "repo", "lineage", "goal")

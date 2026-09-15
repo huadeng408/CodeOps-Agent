@@ -394,6 +394,19 @@ func (e *Executor) currentWorkingDir() (string, error) {
 	return workspacePath(e.Root, current)
 }
 
+// workingFilePath resolves a file-tool target relative to the session's
+// working directory while retaining the workspace-root containment checks.
+func (e *Executor) workingFilePath(target string) (string, error) {
+	base, err := e.currentWorkingDir()
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	return secureFilePath(e.Root, target)
+}
+
 func stringArg(args map[string]any, keys ...string) (string, bool) {
 	for _, key := range keys {
 		value, ok := args[key]

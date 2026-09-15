@@ -36,6 +36,7 @@ type Worktree struct {
 	LeaseID         string    `json:"lease_id,omitempty"`
 	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
 	Status          string    `json:"status,omitempty"`
+	Retained        bool      `json:"retained,omitempty"`
 }
 
 // AgentSpawnRequest is the authenticated boundary between SpawnAgent and the
@@ -47,6 +48,7 @@ type AgentSpawnRequest struct {
 	ChildSessionID  string
 	WorktreeName    string
 	BaseRef         string
+	Retain          bool
 }
 
 type Manager struct {
@@ -159,6 +161,7 @@ func (m *Manager) SpawnAgent(ctx context.Context, request AgentSpawnRequest) (Wo
 		LeaseID:         leaseID,
 		LeaseExpiresAt:  time.Now().Add(m.leaseTTL),
 		Status:          AgentWorktreeActive,
+		Retained:        request.Retain,
 	}
 	m.trees[name] = tree
 	return tree, nil
@@ -293,7 +296,7 @@ func (m *Manager) ReapExpired(ctx context.Context, now time.Time) ([]Worktree, e
 				return reaped, err
 			}
 		}
-		if (tree.Status != AgentWorktreeActive && tree.Status != "completed") || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
+		if tree.Retained || (tree.Status != AgentWorktreeActive && tree.Status != "completed") || tree.LeaseExpiresAt.IsZero() || tree.LeaseExpiresAt.After(now) {
 			continue
 		}
 		if err := m.removeGitWorktree(ctx, tree, true); err != nil {

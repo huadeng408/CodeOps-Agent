@@ -29,6 +29,10 @@ func NewSQLiteEventStore(path string) *SQLiteEventStore {
 	return &SQLiteEventStore{Path: path}
 }
 
+// Ledger exposes the same fact store to one-way adapters; callers must not
+// open or double-write a second snapshot or memory database.
+func (s *SQLiteEventStore) Ledger() (EventLog, error) { return s.eventLog() }
+
 func (s *SQLiteEventStore) Save(ctx context.Context, current Session) error {
 	if strings.TrimSpace(current.ID) == "" {
 		return errors.New("session id is required")
@@ -116,6 +120,13 @@ func (s *SQLiteEventStore) List(ctx context.Context) ([]Session, error) {
 	}
 	sessions := make([]Session, 0, len(ids))
 	for _, id := range ids {
+		events, readErr := log.Events(ctx, id)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(events) > 0 && (events[0].Type == sessionCreatedEventType || events[0].Type == "memory/catalog-created") {
+			continue
+		}
 		loaded, loadErr := s.Load(ctx, id)
 		if loadErr != nil {
 			return nil, loadErr

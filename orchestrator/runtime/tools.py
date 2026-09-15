@@ -31,6 +31,7 @@ class ToolRegistry:
         self,
         project_root: str | None = None,
         allowed_tools: Collection[str] | None = None,
+        skills: Any = None,
     ) -> None:
         self._project_root = Path(project_root).resolve() if project_root else None
         self._mcp_manifest_path = (
@@ -45,6 +46,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tool_names: set[str] = set()
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
+        self._skills = skills
         for spec in self._default_tools():
             self.register(spec, builtin=True)
 
@@ -143,7 +145,7 @@ class ToolRegistry:
         self._mcp_tool_names = next_names
 
     def _refresh_skills_catalog(self) -> None:
-        if self._skills_manifest_path is None:
+        if self._skills_manifest_path is None and self._skills is None:
             return
         skill_tool = self._tools.get("Skill")
         if skill_tool is None:
@@ -152,10 +154,16 @@ class ToolRegistry:
             "Invoke a registered skill by name. Returns the skill prompt "
             "and instructions to be injected into the conversation."
         )
-        try:
-            payload = json.loads(self._skills_manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+        if self._skills is not None:
+            payload = {"skills": [
+                {"name": item.name, "description": item.description}
+                for item in self._skills.list(for_model=True)
+            ]}
+        else:
+            try:
+                payload = json.loads(self._skills_manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
         raw_skills = payload.get("skills", []) if isinstance(payload, dict) else []
         catalog: list[str] = []
         for raw in raw_skills:
@@ -621,14 +629,15 @@ class ToolRegistry:
             ),
             ToolSpec(
                 name="SpawnAgent",
-                description="Spawn a sub-agent for an independent task.",
-                permission=orchestrator_pb2.AUTO_ALLOW,
+                description="Assign an independent model agent a task. Only objective and explicit Message/context materials are passed; parent history and approvals are not inherited. Returns agent.v2 Task with Card, state and Artifacts. parallel=true returns without waiting; use AgentTask to follow up.",
+                permission=orchestrator_pb2.ASK_SESSION,
                 parameters={
                     "type": "object",
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Sub-agent type such as explore, general, plan, or background.",
+                            "enum": ["deep", "explore", "general", "plan", "background", "review", "security"],
+                            "description": "Independent agent capability. Only general and background receive write tools and an isolated worktree.",
                         },
                         "title": {
                             "type": "string",
@@ -650,6 +659,8 @@ class ToolRegistry:
                             "type": "string",
                             "description": "Serialized structured context for the sub-agent.",
                         },
+                        "message": {"type": "object", "properties": {"parts": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "file": {"type": "object", "properties": {"path": {"type": "string"}, "sha256": {"type": "string"}, "media_type": {"type": "string"}}}, "data_json": {"type": "string"}}}}}},
+                        "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of this agent's tools; cannot expand its permissions."},
                     },
                     "required": ["kind", "title", "objective"],
                 },
@@ -680,6 +691,22 @@ class ToolRegistry:
                     },
                     "required": ["id", "workers"],
                 },
+            ),
+            ToolSpec(
+                name="AgentTask", permission=orchestrator_pb2.AUTO_ALLOW,
+                description="Discover Agent Cards or inspect/wait/message/cancel assigned tasks. Messages start separate child turns. Only children can request input_required. Pending tool approvals require the human Harness interface; models cannot approve them. Results are Ledger projections.",
+                parameters={"type":"object","additionalProperties":False,"properties":{
+                    "action":{"type":"string","enum":["cards","list","get","wait","message","cancel","input_required"]},
+                    "task_id":{"type":"string"},
+                    "message":{"type":"object","properties":{"parts":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"file":{"type":"object","properties":{"path":{"type":"string"},"sha256":{"type":"string"},"media_type":{"type":"string"}}},"data_json":{"type":"string"}}}}}},
+                },"required":["action"]},
+            ),
+            ToolSpec(
+                name="PublishArtifact", permission=orchestrator_pb2.AUTO_ALLOW,
+                description="Deliver an artifact from this child session: report text, file/patch reference or structured data_json. File content is pinned and confined by the Harness; patches are not automatically applied to the parent.",
+                parameters={"type":"object","additionalProperties":False,"properties":{
+                    "artifact":{"type":"object","properties":{"name":{"type":"string"},"parts":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"file":{"type":"object","properties":{"path":{"type":"string"},"sha256":{"type":"string"},"media_type":{"type":"string"}}},"data_json":{"type":"string"}}}}},"required":["name","parts"]},
+                },"required":["artifact"]},
             ),
             ToolSpec(
                 name="AskUser",
@@ -819,9 +846,26 @@ class ToolRegistry:
                     "properties": {
                         "query": {"type": "string", "description": "Task or repository facts to recall."},
                         "max_tokens": {"type": "integer", "minimum": 1, "maximum": 8000, "description": "Estimated memory token budget; defaults to 1200."},
+                        "kind": {"type": "string", "enum": ["trajectories", "profile", "preferences", "entities", "events", "cases", "patterns"]},
+                        "detail": {"type": "string", "enum": ["abstract", "overview", "full"]},
                     },
                     "required": ["query"],
                     "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="ManageMemory",
+                description="Read, remember, forget or set retention for source-verified memory. Writes require explicit Harness approval and expected_revision CAS; forgotten keys are not recreated by automatic reflection.",
+                permission=orchestrator_pb2.ALWAYS_ASK,
+                parameters={
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "read", "remember", "forget", "retain"]},
+                        "id": {"type": "string"}, "kind": {"type": "string"},
+                        "key": {"type": "string"}, "content": {"type": "string", "maxLength": 4000},
+                        "expected_revision": {"type": "integer", "minimum": 0},
+                        "ttl_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
+                    }, "required": ["action"],
                 },
             ),
         ]

@@ -15,6 +15,9 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
+	"code-agent/internal/skills"
+	"code-agent/internal/tools"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type recordingConversationAdapter struct {
@@ -70,6 +73,62 @@ type retryToolConversationAdapter struct {
 type readonlyRetryConversationAdapter struct {
 	mu          sync.Mutex
 	toolResults []orchestrator.ToolResult
+}
+
+// skillConversationAdapter models the provider turn that exposed the server
+// wiring regression: a repository-oriented turn invokes Skill before it can
+// produce an answer. A missing Skills manager must fail the run durably, while
+// a later retry with the manager configured must be able to execute a fresh
+// invocation and keep the failed run in its retry lineage.
+type skillConversationAdapter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *skillConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	if handlers.Tool == nil {
+		return orchestrator.ConversationResult{}, errors.New("tool handler is missing")
+	}
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	result := handlers.Tool(ctx, orchestrator.ToolCall{
+		// Providers may reuse the same logical tool call while retrying a
+		// failed turn; the runner must not replay a failed receipt forever.
+		ID: "skill-call", Name: "Skill", ParametersJSON: `{"name":"commit"}`,
+	})
+	if result.Error != "" {
+		return orchestrator.ConversationResult{}, errors.New(result.Error)
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "repository exploration continued"}, nil
+}
+
+type executorToolAdapter struct {
+	executor *tools.Executor
+}
+
+func (a executorToolAdapter) Execute(ctx context.Context, _ identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	var arguments map[string]any
+	if strings.TrimSpace(call.ParametersJSON) != "" {
+		if err := json.Unmarshal([]byte(call.ParametersJSON), &arguments); err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid tool parameters", ExitCode: 1}
+		}
+	}
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
+	result, err := a.executor.Execute(ctx, tools.ToolRequest{Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID})
+	out := orchestrator.ToolResult{
+		ToolCallID: call.ID, ToolName: call.Name, Output: result.Output,
+		Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated,
+	}
+	if err != nil && out.Error == "" {
+		out.Error = err.Error()
+	}
+	if err != nil && out.ExitCode == 0 {
+		out.ExitCode = 1
+	}
+	return out
 }
 
 func (a *readonlyRetryConversationAdapter) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
@@ -488,6 +547,42 @@ func TestSessionRunnerContinuationIsIdempotentAndCommitsAssistantTerminal(t *tes
 	}
 }
 
+func TestSessionRunnerContinuationCarriesCanonicalWorkingDir(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	workingDir := t.TempDir()
+	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "title", "goal", workingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	conversation := &recordingConversationAdapter{reply: "ok"}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-working-dir"})
+	t.Cleanup(func() { _ = runner.Close() })
+	accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-working-dir", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	if got := conversation.lastRequest(t).WorkingDir; got != workingDir {
+		t.Fatalf("conversation working dir = %q, want %q", got, workingDir)
+	}
+}
+
 func TestSessionRunnerSubmitMessageStartsNaturalLanguageTurnAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
@@ -646,6 +741,100 @@ func TestSessionRunnerFailureWritesOneTerminalAndReturnsSessionToPaused(t *testi
 	}
 	if view.Status != "paused" || view.Run == nil || view.Run.Status != RunFailed {
 		t.Fatalf("failed session = %+v", view)
+	}
+}
+
+func TestSessionRunnerSkillFailureContinuesWithSameRetryLineage(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+
+	// The first attempt mirrors the pre-fix server wiring: the executor exists,
+	// but no Skills manager has been installed yet.
+	executor := tools.NewExecutor(t.TempDir())
+	t.Cleanup(func() { _ = executor.Close() })
+	conversation := &skillConversationAdapter{}
+	runner := NewSessionRunner(workbench, conversation, executorToolAdapter{executor: executor}, SessionRunnerOptions{
+		WorkerID: "worker-skill-retry", LeaseDuration: time.Second,
+	})
+	t.Cleanup(func() { _ = runner.Close() })
+
+	first, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-skill-first", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatalf("request initial Skill continuation: %v", err)
+	}
+	failed := waitForRunStatus(t, runner, created.ID, first.RunID, RunFailed)
+	if failed.Error != "agent continuation failed" {
+		t.Fatalf("initial Skill failure = %+v, want public continuation failure", failed)
+	}
+
+	// Verify the durable failure retained its categorized runtime error and the
+	// failed Skill result, rather than silently dropping the tool invocation.
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRuntimeFailure, sawMissingManager bool
+	for _, event := range events {
+		switch event.Type {
+		case "execution_result":
+			var payload struct {
+				ErrorCode string `json:"error_code"`
+			}
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.ErrorCode == "continuation_runtime_error" {
+				sawRuntimeFailure = true
+			}
+		case "tool/result":
+			var payload toolResultPayload
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.Error == "skills manager not available" {
+				sawMissingManager = true
+			}
+		}
+	}
+	if !sawRuntimeFailure || !sawMissingManager {
+		t.Fatalf("missing Skill manager failure was not durably categorized: runtime=%v missing_manager=%v events=%+v", sawRuntimeFailure, sawMissingManager, events)
+	}
+
+	// Install the same built-in catalog used by the server's continuation
+	// wiring, then let the user continue the paused task. The provider retries
+	// the same invocation id, so the runner must execute it again after the
+	// capability is fixed instead of reusing the failed receipt.
+	executor.SetSkillsManager(skills.NewManager())
+	latest, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := runner.RequestContinuation(ctx, ContinueCommand{
+		RequestID: "request-skill-retry", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: int64(len(latest)), Actor: testRunnerActor(),
+	})
+	if err != nil {
+		t.Fatalf("request Skill retry: %v", err)
+	}
+	completed := waitForRunStatus(t, runner, created.ID, second.RunID, RunCompleted)
+	if completed.Status != RunCompleted || completed.RetryOfRunID != first.RunID || len(completed.RetryOfRunIDs) != 1 || completed.RetryOfRunIDs[0] != first.RunID {
+		t.Fatalf("Skill retry lineage = %+v, want completed retry of %q", completed, first.RunID)
+	}
+
+	events, err = ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var successfulSkillResults int
+	for _, event := range events {
+		if event.Type != "tool/result" {
+			continue
+		}
+		var payload toolResultPayload
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.RunID == second.RunID && payload.Error == "" && payload.Output != "" {
+			successfulSkillResults++
+		}
+	}
+	if successfulSkillResults != 1 {
+		t.Fatalf("successful Skill retry results = %d, want exactly one; events=%+v", successfulSkillResults, events)
 	}
 }
 
@@ -1646,6 +1835,188 @@ func TestSessionRunnerRetrySearchesAllFailedPredecessorsForToolReceipt(t *testin
 		t.Fatalf("latest retry executed external tool %d times, want 0", external.calls)
 	}
 	external.mu.Unlock()
+}
+
+func TestAgentInvocationIDUsesStableRetryRoot(t *testing.T) {
+	if got := agentInvocationID("run-current", []string{"run-root", "run-middle", "run-root"}, "spawn"); got != "run-root:spawn" {
+		t.Fatalf("retry agent invocation id = %q, want run-root:spawn", got)
+	}
+	if got := agentInvocationID("run-current", nil, "spawn"); got != "run-current:spawn" {
+		t.Fatalf("ordinary agent invocation id = %q, want run-current:spawn", got)
+	}
+}
+
+func TestSessionRunnerRetryRetainsFailedSideEffectReceipt(t *testing.T) {
+	for _, name := range []string{"Write", "Bash", "Git", "external_mcp"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			ledger := openWorkbenchTestLedger(t)
+			workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+			actor, err := testRunnerActor().BindSession(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendRun := func(requestID, runID string, seq int64) runLeasePayload {
+				t.Helper()
+				payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, requestID, runID, actor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ledger.Append(ctx, created.ID, seq, continuationEventType, payload); err != nil {
+					t.Fatal(err)
+				}
+				lease := runLeasePayload{RunID: runID, RequestID: requestID, LeaseID: "lease-" + runID, WorkerID: "worker", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+				if _, err := ledger.Append(ctx, created.ID, seq+1, runLeasedEventType, lease); err != nil {
+					t.Fatal(err)
+				}
+				return lease
+			}
+			old := appendRun("request-old", "run-old", 4)
+			call := toolCallPayload{RunID: old.RunID, ToolCallID: "effect", ToolName: name, ArgumentsJSON: `{"path":"result.txt"}`}
+			if _, err := ledger.AppendSurface(ctx, created.ID, 6, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledger.Append(ctx, created.ID, 7, toolDispatchedType, call); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledger.AppendSurface(ctx, created.ID, 8, "tool/result", toolResultPayload{RunID: old.RunID, ToolCallID: call.ToolCallID, ToolName: name, Error: "effect failed after partial changes", ExitCode: 1}, SurfaceOperation{Op: "append"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledger.Append(ctx, created.ID, 9, runFailedEventType, runTerminalPayload{RunID: old.RunID, RequestID: old.RequestID, LeaseID: old.LeaseID, Attempt: 1, Error: "failed"}); err != nil {
+				t.Fatal(err)
+			}
+			lease := appendRun("request-retry", "run-retry", 10)
+			external := &countingToolAdapter{}
+			runner := NewSessionRunner(workbench, &recordingConversationAdapter{}, external, SessionRunnerOptions{WorkerID: "worker"})
+			t.Cleanup(func() { _ = runner.Close() })
+			result, unsafe := runner.executeTool(ctx, runKey{sessionID: created.ID, runID: lease.RunID}, lease, actor, created.WorkingDir, orchestrator.ToolCall{ID: call.ToolCallID, Name: name, ParametersJSON: call.ArgumentsJSON}, old.RunID)
+			if unsafe || result.Error != "effect failed after partial changes" || result.ExitCode != 1 || external.calls != 0 {
+				t.Fatalf("failed effect retried: result=%+v unsafe=%v calls=%d", result, unsafe, external.calls)
+			}
+		})
+	}
+}
+
+func TestSessionRunnerRetryKeepsAgentMutationInvocationId(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "agent retry", "keep child mutations idempotent", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 1, "spawn a child agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "agent retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &independentAgentFixture{mode: "blocked", started: make(chan struct{})}
+	runner := NewSessionRunner(workbench, fixture, nil, SessionRunnerOptions{WorkerID: "worker-agent-retry", AgentWorkerCount: 1, LeaseDuration: time.Second})
+	t.Cleanup(func() { _ = runner.Close() })
+
+	oldPayload, err := workbench.continuationRequestPayload(ctx, created.ID, checkpoint.Hash, "request-root", "run-root", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, oldPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{
+		RunID: "run-root", RequestID: "request-root", LeaseID: "lease-root", WorkerID: "worker-root", Attempt: 1,
+		LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parameters := `{"kind":"explore","title":"retry child","objective":"inspect explicit sources","parallel":true}`
+	first := runner.ExecuteAgentTool(ctx, actor, created.ID, orchestrator.ToolCall{
+		ID: agentInvocationID("run-root", nil, "spawn"), Name: "SpawnAgent", ParametersJSON: parameters,
+	})
+	if first.Error != "" {
+		t.Fatalf("initial child mutation failed: %+v", first)
+	}
+	firstTask := &codeagentpb.AgentTask{}
+	if err := protojson.Unmarshal([]byte(first.Output), firstTask); err != nil {
+		t.Fatal(err)
+	}
+	if firstTask.Id == "" {
+		t.Fatal("initial child mutation returned no task id")
+	}
+	select {
+	case <-fixture.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial child did not start")
+	}
+
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSeq := int64(len(events))
+	call := toolCallPayload{RunID: "run-root", ToolCallID: "spawn", ToolName: "SpawnAgent", ArgumentsJSON: parameters}
+	if _, err := ledger.AppendSurface(ctx, created.ID, baseSeq, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, baseSeq+1, toolDispatchedType, call); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.AppendSurface(ctx, created.ID, baseSeq+2, "tool/result", toolResultPayload{
+		RunID: "run-root", ToolCallID: "spawn", ToolName: "SpawnAgent", Error: "child attempt interrupted", ExitCode: 1,
+	}, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, baseSeq+3, runFailedEventType, runTerminalPayload{
+		RunID: "run-root", RequestID: "request-root", LeaseID: "lease-root", Attempt: 1, Error: "child attempt interrupted",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retryPayload, err := workbench.continuationRequestPayload(ctx, created.ID, checkpoint.Hash, "request-retry", "run-retry", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Append(ctx, created.ID, baseSeq+4, continuationEventType, retryPayload); err != nil {
+		t.Fatal(err)
+	}
+	lease := runLeasePayload{RunID: "run-retry", RequestID: "request-retry", LeaseID: "lease-retry", WorkerID: "worker-retry", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()}
+	if _, err := ledger.Append(ctx, created.ID, baseSeq+5, runLeasedEventType, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	result, unsafe := runner.executeTool(ctx, runKey{sessionID: created.ID, runID: "run-retry"}, lease, actor, created.WorkingDir, orchestrator.ToolCall{
+		ID: "spawn", Name: "SpawnAgent", ParametersJSON: parameters,
+	}, "run-root")
+	if unsafe || result.Error != "" {
+		t.Fatalf("retry child mutation = %+v unsafe=%v", result, unsafe)
+	}
+	retriedTask := &codeagentpb.AgentTask{}
+	if err := protojson.Unmarshal([]byte(result.Output), retriedTask); err != nil {
+		t.Fatal(err)
+	}
+	if retriedTask.Id != firstTask.Id {
+		t.Fatalf("retry created a second child task: first=%s retry=%s", firstTask.Id, retriedTask.Id)
+	}
+	events, err = ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := 0
+	for _, event := range events {
+		if event.Type == "agent/task-linked" {
+			links++
+		}
+	}
+	if links != 1 {
+		t.Fatalf("retry appended %d child links, want one", links)
+	}
 }
 
 func TestWorkbenchRunHistoryKeepsCreationOrderAfterLaterHeartbeat(t *testing.T) {

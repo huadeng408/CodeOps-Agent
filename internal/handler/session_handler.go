@@ -41,6 +41,7 @@ type createSessionRequest struct {
 	ProjectName string `json:"projectName"`
 	Title       string `json:"title"`
 	Goal        string `json:"goal"`
+	WorkingDir  string `json:"workingDir"`
 }
 
 type expectedSeqRequest struct {
@@ -118,7 +119,12 @@ func (h *SessionHandler) Create(c *gin.Context) {
 		writeSessionError(c, errors.Join(session.ErrInvalidSessionInput, err), "invalid session request")
 		return
 	}
-	view, err := h.workbench.Create(c.Request.Context(), owner, req.ProjectName, req.Title, req.Goal)
+	var view session.SessionView
+	if creator, ok := h.workbench.(session.WorkingDirCreator); ok && strings.TrimSpace(req.WorkingDir) != "" {
+		view, err = creator.CreateWithWorkingDir(c.Request.Context(), owner, req.ProjectName, req.Title, req.Goal, req.WorkingDir)
+	} else {
+		view, err = h.workbench.Create(c.Request.Context(), owner, req.ProjectName, req.Title, req.Goal)
+	}
 	if err != nil {
 		writeSessionError(c, err, "failed to create session")
 		return

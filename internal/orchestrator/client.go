@@ -131,7 +131,10 @@ type AgentLifecycleHandler func(context.Context, *codeagentpb.AgentLifecycle) er
 type ConversationRequest struct {
 	Input     string
 	SessionID string
-	RunID     string
+	// WorkingDir is the request-scoped directory selected by the canonical
+	// session creation fact. Empty preserves legacy process-default behavior.
+	WorkingDir string
+	RunID      string
 	// RetryOfRunID is the stable root predecessor for a fresh continuation
 	// attempt. It remains as a compatibility field for callers that only know
 	// one predecessor.
@@ -145,10 +148,14 @@ type ConversationRequest struct {
 	NewTurn bool
 	// SurfaceSHA256 binds a resumed run to the immutable checkpoint Surface.
 	// Legal tool/result suffixes may grow while this identity remains stable.
-	SurfaceSHA256 string
-	Actor         ActorIdentity
-	History       []ConversationMessage
-	State         *codeagentpb.PlanTodoSnapshot
+	SurfaceSHA256     string
+	Actor             ActorIdentity
+	History           []ConversationMessage
+	State             *codeagentpb.PlanTodoSnapshot
+	HarnessManaged    bool
+	MemoryContextJSON string
+	AgentTask         *codeagentpb.AgentTask
+	AllowedTools      []string
 }
 
 type ConversationResult struct {
@@ -398,6 +405,13 @@ func (c *Client) Health(ctx context.Context) (*codeagentpb.HealthResponse, error
 	return c.client.Health(ctx, &codeagentpb.Empty{})
 }
 
+func (c *Client) ReflectMemory(ctx context.Context, request *codeagentpb.MemoryReflectionRequest) (*codeagentpb.MemoryReflectionResponse, error) {
+	if c == nil || c.client == nil || request == nil {
+		return nil, errors.New("reflection orchestrator unavailable")
+	}
+	return c.client.ReflectMemory(c.injectTraceMetadata(ctx), request)
+}
+
 // ErrCompactionPersistence distinguishes ledger failures from RPC transport failures.
 var ErrCompactionPersistence = errors.New("compaction persistence failed")
 
@@ -608,11 +622,16 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_UserInput{
 			UserInput: &codeagentpb.UserInput{
-				Text:          request.Input,
-				SessionId:     sessionID,
-				History:       historyPayload,
-				PlanTodoState: request.State,
-				Actor:         actorProto(actor),
+				Text:              request.Input,
+				SessionId:         sessionID,
+				WorkingDir:        request.WorkingDir,
+				History:           historyPayload,
+				PlanTodoState:     request.State,
+				Actor:             actorProto(actor),
+				HarnessManaged:    request.HarnessManaged,
+				MemoryContextJson: request.MemoryContextJSON,
+				AgentTask:         request.AgentTask,
+				AllowedTools:      request.AllowedTools,
 			},
 		},
 	}); err != nil {

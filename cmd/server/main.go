@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -19,7 +18,6 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/handler"
-	"code-agent/internal/identity"
 	"code-agent/internal/memory"
 	"code-agent/internal/middleware"
 	"code-agent/internal/model"
@@ -31,7 +29,6 @@ import (
 	"code-agent/internal/service"
 	"code-agent/internal/session"
 	"code-agent/internal/telemetry/genai"
-	"code-agent/internal/tools"
 	"code-agent/internal/worktree"
 	"code-agent/pkg/database"
 	"code-agent/pkg/documentparser"
@@ -271,7 +268,6 @@ func main() {
 	}
 	defer ledger.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
-	sessionMemory := memory.NewLedgerMemory(ledger)
 	workspaceRoot, rootErr := os.Getwd()
 	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
 		workspaceRoot = "."
@@ -305,36 +301,9 @@ func main() {
 		continuationTarget = "127.0.0.1:50051"
 	}
 	continuationRoot := workspaceRoot
-	continuationExecutor := tools.NewExecutor(continuationRoot)
-	if err := continuationExecutor.SetWorkingDir(continuationRoot); err != nil {
-		log.Warnf("session continuation working directory unavailable: %v", err)
-	}
+	continuationExecutors := newContinuationToolExecutors(continuationRoot)
 	continuationPermissions := continuationPermissionController()
-	continuationTools := session.ToolExecutionFunc(func(ctx context.Context, actor identity.Actor, sessionID string, call harnessorch.ToolCall) harnessorch.ToolResult {
-		var arguments map[string]any
-		if strings.TrimSpace(call.ParametersJSON) != "" {
-			if err := json.Unmarshal([]byte(call.ParametersJSON), &arguments); err != nil {
-				return harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid tool parameters", ExitCode: 1}
-			}
-		}
-		if arguments == nil {
-			arguments = map[string]any{}
-		}
-		result, err := continuationExecutor.Execute(ctx, tools.ToolRequest{
-			Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
-		})
-		out := harnessorch.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
-		for _, change := range result.Changes {
-			out.Changes = append(out.Changes, harnessorch.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
-		}
-		if err != nil && out.Error == "" {
-			out.Error = err.Error()
-		}
-		if err != nil && out.ExitCode == 0 {
-			out.ExitCode = 1
-		}
-		return out
-	})
+	continuationTools := continuationExecutors
 	continuationSlot := session.NewContinuationSlot()
 	workerID := "server:" + strings.TrimSpace(cfg.Server.Port)
 	connectContinuation := func(ctx context.Context) (session.ContinuationModule, error) {
@@ -342,6 +311,7 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
+		sessionMemory := memory.NewLedgerMemory(ledger, client.ReflectMemory)
 		client.OnAgentSpawn = func(spawnCtx context.Context, spawn *codeagentpb.AgentSpawn) error {
 			if spawn == nil {
 				return fmt.Errorf("agent spawn payload is required")
@@ -403,13 +373,23 @@ func main() {
 			WorkerID: workerID, Permissions: continuationPermissions,
 			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
 			Memory: sessionMemory,
+			AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
+				tree, err := workspaceManager.SpawnAgent(ctx, worktree.AgentSpawnRequest{RequestID: request.TaskID, ParentSessionID: request.ParentSessionID, ChildSessionID: request.ChildSessionID, WorktreeName: request.TaskID, Retain: true})
+				if err != nil {
+					return "", err
+				}
+				if err := appendPersistedWorktreeEvent(ctx, ledger, tree.ParentSessionID, persistedWorktreeActiveEvent, tree, "independent agent task"); err != nil {
+					return "", err
+				}
+				return tree.Path, nil
+			},
 		})
 		return &managedContinuation{runner: runner, client: client}, nil
 	}
 	continuationSupervisor := session.NewContinuationSupervisor(continuationSlot, 5*time.Second, connectContinuation)
 	continuationSupervisor.Start(context.Background())
 	defer continuationSupervisor.Close()
-	defer continuationExecutor.Close()
+	defer continuationExecutors.Close()
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
 
 	// Telemetry: create tracer and wire into handlers and services.

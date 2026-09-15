@@ -127,6 +127,64 @@ func TestFileToolsWriteAndEditProduceCompleteFileAndChanges(t *testing.T) {
 	}
 }
 
+func TestFileToolsResolveRelativePathsFromWorkingDir(t *testing.T) {
+	root := t.TempDir()
+	workingDir := filepath.Join(root, "nested", "repo")
+	if err := os.MkdirAll(workingDir, 0o755); err != nil {
+		t.Fatalf("create working directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workingDir, "README.md"), []byte("nested repository"), 0o644); err != nil {
+		t.Fatalf("write nested fixture: %v", err)
+	}
+	executor := NewExecutor(root)
+	defer executor.Close()
+	if err := executor.SetWorkingDir(workingDir); err != nil {
+		t.Fatalf("set working directory: %v", err)
+	}
+
+	read, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Read", Arguments: map[string]any{"path": "README.md"},
+	})
+	if err != nil {
+		t.Fatalf("Read from working directory: %v", err)
+	}
+	if !strings.Contains(read.Output, "nested repository") {
+		t.Fatalf("Read output = %q, want nested fixture", read.Output)
+	}
+
+	if _, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Write", Arguments: map[string]any{"path": "generated.txt", "content": "created in nested repo"},
+	}); err != nil {
+		t.Fatalf("Write from working directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workingDir, "generated.txt")); err != nil {
+		t.Fatalf("nested write missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "generated.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write escaped working directory: %v", err)
+	}
+
+	glob, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Glob", Arguments: map[string]any{"pattern": "*.md"},
+	})
+	if err != nil {
+		t.Fatalf("Glob from working directory: %v", err)
+	}
+	if strings.TrimSpace(glob.Output) != "README.md" {
+		t.Fatalf("Glob output = %q, want README.md from session directory", glob.Output)
+	}
+
+	grep, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "nested repository", "path": ".", "output_mode": "content"},
+	})
+	if err != nil {
+		t.Fatalf("Grep from working directory: %v", err)
+	}
+	if !strings.Contains(grep.Output, "README.md:1:nested repository") {
+		t.Fatalf("Grep output = %q, want nested repository match", grep.Output)
+	}
+}
+
 func TestFileToolsRejectSymlinkAliasInsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	realPath := filepath.Join(root, "real.txt")

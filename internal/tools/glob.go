@@ -16,15 +16,19 @@ func (e *Executor) executeGlob(_ context.Context, args map[string]any) (ToolResu
 		return ToolResult{Name: "Glob", Error: "pattern is required"}, fmt.Errorf("pattern is required")
 	}
 
+	base, err := e.currentWorkingDir()
+	if err != nil {
+		return ToolResult{Name: "Glob", Error: err.Error()}, err
+	}
 	matches := []string{}
-	err := filepath.WalkDir(e.Root, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(e.Root, p)
+		rel, err := filepath.Rel(base, p)
 		if err != nil {
 			return err
 		}
