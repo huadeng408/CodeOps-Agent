@@ -311,6 +311,20 @@ blob 只保存在忽略的 `.runtime/staging/`，不进入提交。
 provider-backed 语义质量、40 Skills 的真实可运行矩阵、948/1000、Token 降幅、
 规模故障恢复与官方 scorer 门禁仍为 `BLOCKED`。
 
+提交 `8eb6db7e7f3c73a52956f0510c8b35775638d78a` 推送并核对远端 SHA 后，
+同一跨进程命令在 `GOFLAGS=-overlay=<index-overlay>` 下再次退出 0；该 overlay
+只用上述两个已提交 blob 替代用户工作树的不同版本，不修改用户文件。
+新 run ID 为 `run-4186329138`，13/13 检查通过，两个 Go CLI 进程均退出 0。
+`.runtime/e2e/independent-agents-process.json` 的新 SHA-256 为
+`7a7ac8e74311e610d1dd6e711d4822f384d96f9906beb4e3919dc93781da9657`；
+每次运行的原始收据与产物保留在其 run 目录。新收据仍明确记录
+`fixture-backed-production-cli-grpc`、`provider_backed=false`、`source_dirty=true`
+和 `IMPLEMENTED`，不因提交或重跑升级为生产验证。
+提交前再次运行 `python -m pytest -q`：2341 passed、16 skipped、31 warnings，
+退出 0；`scripts/generate-proto.ps1` 再次退出 0，生成物与已暂存内容一致。
+准确的 60 个提交路径通过不输出值的秘密/运行产物扫描及 cached diff check。
+本段为只追加证据的文档更新；前端、AGENTS.md 与用户原有运行树均未纳入提交。
+
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成
 前不进入版本控制；外部 page-Qrels trust root 由运行环境配置，缺失时发布路径
