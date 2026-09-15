@@ -54,6 +54,7 @@ class SkillManager:
         self._manifest_names: set[str] = set()
         self._discovered_names: set[str] = set()
         self._lazy_paths: dict[str, Path] = {}
+        self._filesystem_roots: dict[str, Path] = {}
         self._discovery_complete = True
         self._manifest_path = (
             Path(project_root).resolve() / ".agent" / "skills.json"
@@ -118,6 +119,7 @@ class SkillManager:
         if skill is None or path is None:
             return skill
         try:
+            path = _confined_skill_path(path, self._filesystem_roots[name])
             skill.prompt = _read_skill_body(path)
         except OSError as exc:
             raise ValueError(f"load skill {name!r}: {exc}") from exc
@@ -134,7 +136,11 @@ class SkillManager:
         requested = Path(resource)
         if not resource.strip() or requested.is_absolute():
             raise ValueError("invalid skill resource path")
-        base = Path(skill.resource_base).resolve()
+        base = Path(skill.resource_base)
+        if name in self._filesystem_roots:
+            base = _confined_skill_path(base, self._filesystem_roots[name])
+        else:
+            base = base.resolve()
         target = (base / requested).resolve()
         try:
             target.relative_to(base)
@@ -187,13 +193,13 @@ class SkillManager:
                 _DiscoveryRoot(_as_path(bundled_dir), "bundled", 600),
             ]
         )
-        winners: dict[str, tuple[Skill, Path, int, int]] = {}
+        winners: dict[str, tuple[Skill, Path, int, int, Path]] = {}
         order = 0
         try:
             for root in roots:
                 for skill, path in _discover_root(root):
                     current = winners.get(skill.name)
-                    candidate = (skill, path, root.rank, order)
+                    candidate = (skill, path, root.rank, order, root.path.resolve())
                     if current is None or (root.rank, order) < (current[2], current[3]):
                         winners[skill.name] = candidate
                     order += 1
@@ -206,14 +212,16 @@ class SkillManager:
 
         for name in self._discovered_names:
             self._lazy_paths.pop(name, None)
+            self._filesystem_roots.pop(name, None)
             if name in self._builtin_names:
                 self._skills[name] = self._builtin_defaults[name]
             else:
                 self._skills.pop(name, None)
                 self._lazy_paths.pop(name, None)
-        for name, (skill, path, _rank, _order) in winners.items():
+        for name, (skill, path, _rank, _order, catalog_root) in winners.items():
             self._skills[name] = skill
             self._lazy_paths[name] = path
+            self._filesystem_roots[name] = catalog_root
         self._discovered_names = set(winners)
         self._discovery_complete = True
         self._complete = True
@@ -306,6 +314,7 @@ def _discover_root(root: _DiscoveryRoot) -> list[tuple[Skill, Path]]:
         return []
     if not root.path.is_dir():
         raise ValueError(f"Skill discovery root is not a directory: {root.path}")
+    catalog_root = root.path.resolve()
 
     candidates: list[Path] = []
     for child in sorted(root.path.iterdir(), key=lambda item: item.name.casefold()):
@@ -318,10 +327,20 @@ def _discover_root(root: _DiscoveryRoot) -> list[tuple[Skill, Path]]:
 
     discovered: list[tuple[Skill, Path]] = []
     for path in candidates:
+        path = _confined_skill_path(path, catalog_root)
         metadata = _read_skill_metadata(path)
         skill = _skill_from_metadata(metadata, path, root)
         discovered.append((skill, path))
     return discovered
+
+
+def _confined_skill_path(path: Path, catalog_root: Path) -> Path:
+    target = path.resolve()
+    try:
+        target.relative_to(catalog_root)
+    except ValueError as exc:
+        raise ValueError("skill path escapes discovery root") from exc
+    return target
 
 
 def _read_skill_metadata(path: Path) -> dict[str, object]:

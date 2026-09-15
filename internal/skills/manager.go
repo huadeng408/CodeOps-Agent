@@ -59,16 +59,18 @@ type DiscoveryOptions struct {
 }
 
 type skillEntry struct {
-	skill Skill
-	path  string
-	rank  int
+	skill       Skill
+	path        string
+	catalogRoot string
+	rank        int
 }
 
 type discoveredSkill struct {
-	skill Skill
-	path  string
-	rank  int
-	order int
+	skill       Skill
+	path        string
+	catalogRoot string
+	rank        int
+	order       int
 }
 
 type discoveryRoot struct {
@@ -207,7 +209,7 @@ func (m *Manager) Discover(options DiscoveryOptions) error {
 	}
 	m.discoveredNames = make(map[string]struct{}, len(winners))
 	for name, item := range winners {
-		m.items[name] = skillEntry{skill: item.skill, path: item.path, rank: item.rank}
+		m.items[name] = skillEntry{skill: item.skill, path: item.path, catalogRoot: item.catalogRoot, rank: item.rank}
 		m.discoveredNames[name] = struct{}{}
 	}
 	m.complete = true
@@ -221,6 +223,11 @@ func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, erro
 	if root.path == "" {
 		return nil, nil
 	}
+	absolute, err := filepath.Abs(root.path)
+	if err != nil {
+		return nil, err
+	}
+	root.path = absolute
 
 	entries, err := os.ReadDir(root.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -229,21 +236,35 @@ func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, erro
 	if err != nil {
 		return nil, fmt.Errorf("read skills directory %s: %w", root.path, err)
 	}
+	catalog, err := os.OpenRoot(root.path)
+	if err != nil {
+		return nil, err
+	}
+	defer catalog.Close()
 	discovered := make([]discoveredSkill, 0, len(entries))
 	for _, entry := range entries {
 		if root.source == "user-dsh" && entry.IsDir() && entry.Name() == ".system" {
 			continue
 		}
-		path := ""
-		if entry.IsDir() {
-			path = filepath.Join(root.path, entry.Name(), "SKILL.md")
+		isDir := entry.IsDir()
+		if entry.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			info, err := catalog.Stat(entry.Name())
+			if err != nil {
+				return nil, err
+			}
+			isDir = info.IsDir()
+		}
+		relative := ""
+		if isDir {
+			relative = filepath.Join(entry.Name(), "SKILL.md")
 		} else if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
 			// DeepSeek also accepts a flat skill file directly under a catalog.
-			path = filepath.Join(root.path, entry.Name())
+			relative = entry.Name()
 		} else {
 			continue
 		}
-		metadata, err := readFrontmatter(path)
+		path := filepath.Join(root.path, relative)
+		metadata, err := readFrontmatter(catalog, relative)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -291,7 +312,7 @@ func (m *Manager) discoverDirectory(root discoveryRoot) ([]discoveredSkill, erro
 		if !validSkillMetadata(candidate) {
 			return nil, fmt.Errorf("discover skill %s: invalid tool metadata", path)
 		}
-		discovered = append(discovered, discoveredSkill{skill: candidate, path: path, rank: root.rank})
+		discovered = append(discovered, discoveredSkill{skill: candidate, path: path, catalogRoot: root.path, rank: root.rank})
 	}
 	return discovered, nil
 }
@@ -333,7 +354,16 @@ func (m *Manager) loadFiltered(name string, include func(InvocationPolicy) bool,
 		return entry.skill, true, nil
 	}
 
-	prompt, err := readPrompt(entry.path)
+	base, relative := filepath.Dir(entry.path), filepath.Base(entry.path)
+	if entry.catalogRoot != "" {
+		base = entry.catalogRoot
+		var err error
+		relative, err = filepath.Rel(base, entry.path)
+		if err != nil {
+			return Skill{}, true, err
+		}
+	}
+	prompt, err := readPrompt(base, relative)
 	if err != nil {
 		return Skill{}, true, fmt.Errorf("load skill %q: %w", name, err)
 	}
@@ -374,7 +404,28 @@ func (m *Manager) readResource(name, resource string, forModel bool) ([]byte, er
 	if base == "" {
 		return nil, fmt.Errorf("skill %q has no resource directory", name)
 	}
-	file, err := openSkillFile(base, resource)
+	var file *os.File
+	var err error
+	if entry.catalogRoot == "" {
+		file, err = openSkillFile(base, resource)
+	} else {
+		// Resolve the resource directory from the catalog, not from a replaced
+		// candidate parent that could itself now be a junction outside the root.
+		var catalog, directory *os.Root
+		catalog, err = os.OpenRoot(entry.catalogRoot)
+		if err == nil {
+			defer catalog.Close()
+			var relative string
+			relative, err = filepath.Rel(entry.catalogRoot, base)
+			if err == nil {
+				directory, err = catalog.OpenRoot(relative)
+			}
+			if err == nil {
+				defer directory.Close()
+				file, err = openRegularSkillFile(directory, resource)
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -510,8 +561,8 @@ func parseTools(node yaml.Node) ([]string, error) {
 	return out, nil
 }
 
-func readFrontmatter(path string) (skillFrontmatter, error) {
-	file, err := openSkillFile(filepath.Dir(path), filepath.Base(path))
+func readFrontmatter(root *os.Root, relative string) (skillFrontmatter, error) {
+	file, err := openRegularSkillFile(root, relative)
 	if err != nil {
 		return skillFrontmatter{}, err
 	}
@@ -553,8 +604,8 @@ func readFrontmatter(path string) (skillFrontmatter, error) {
 	return metadata, nil
 }
 
-func readPrompt(path string) (string, error) {
-	file, err := openSkillFile(filepath.Dir(path), filepath.Base(path))
+func readPrompt(base, resource string) (string, error) {
+	file, err := openSkillFile(base, resource)
 	if err != nil {
 		return "", err
 	}
@@ -578,14 +629,18 @@ func readPrompt(path string) (string, error) {
 
 // os.Root keeps containment enforced during the open, including symlink races.
 func openSkillFile(base, resource string) (*os.File, error) {
-	if strings.TrimSpace(resource) == "" || !filepath.IsLocal(resource) {
-		return nil, errors.New("invalid skill resource path")
-	}
 	root, err := os.OpenRoot(base)
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
+	return openRegularSkillFile(root, resource)
+}
+
+func openRegularSkillFile(root *os.Root, resource string) (*os.File, error) {
+	if strings.TrimSpace(resource) == "" || !filepath.IsLocal(resource) {
+		return nil, errors.New("invalid skill resource path")
+	}
 	file, err := root.Open(resource)
 	if err != nil {
 		return nil, err

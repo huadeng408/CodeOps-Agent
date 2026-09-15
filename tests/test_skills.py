@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import pytest
 
 from orchestrator.skills.manager import InvocationPolicy, Skill, SkillManager
@@ -358,3 +360,58 @@ def test_skill_resource_rejects_symlink_escape(tmp_path) -> None:
     manager.discover(directories=[root])
     with pytest.raises(ValueError, match="escapes"):
         manager.read_resource("resource-skill", "escape.txt")
+
+
+def _link_skill_directory(link, target) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+            check=True, capture_output=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def test_skill_discovery_rejects_directory_escape_without_reading_metadata(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "skills"
+    outside = tmp_path / "outside"
+    _write_fs_skill(root, "durable", "last good")
+    _write_fs_skill(outside, "escape", "outside catalog")
+    manager = SkillManager()
+    manager.discover(directories=[root])
+    first = manager.snapshot()
+    _link_skill_directory(root / "escape", outside / "escape")
+
+    opened = []
+    original_open = type(root).open
+
+    def record_open(path, *args, **kwargs):
+        opened.append(path.resolve())
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(root), "open", record_open)
+    manager.discover(directories=[root])
+
+    assert manager.get("escape") is None
+    assert manager.get("durable") is not None
+    second = manager.snapshot()
+    assert second.complete is False
+    assert second.count == first.count and second.revision == first.revision
+    assert outside / "escape" / "SKILL.md" not in opened
+
+
+def test_skill_lazy_reads_reject_directory_replacement_escape(tmp_path) -> None:
+    root = tmp_path / "skills"
+    outside = tmp_path / "outside"
+    _write_fs_skill(root, "confined", "original")
+    _write_fs_skill(outside, "confined", "outside", body="outside body")
+    outside.joinpath("confined", "guide.txt").write_bytes(b"outside")
+    manager = SkillManager()
+    manager.discover(directories=[root])
+    root.joinpath("confined").rename(tmp_path / "saved-skill")
+    _link_skill_directory(root / "confined", outside / "confined")
+
+    with pytest.raises(ValueError, match="escapes"):
+        manager.load("confined")
+    with pytest.raises(ValueError, match="escapes"):
+        manager.read_resource("confined", "guide.txt")

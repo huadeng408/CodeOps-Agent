@@ -330,6 +330,62 @@ func TestReadResourceRejectsWindowsJunctionEscape(t *testing.T) {
 	}
 }
 
+func linkSkillDirectory(t *testing.T, link, target string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("create junction: %v, %s", err, output)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillDiscoveryRejectsDirectoryEscapeAndRetainsLastGood(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	writeTestSkill(t, root, "durable", "---\nname: durable\ndescription: last good\n---\nbody\n")
+	writeTestSkill(t, outside, "escape", "---\nname: escape\ndescription: outside catalog\n---\nbody\n")
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	first := manager.Snapshot()
+	linkSkillDirectory(t, filepath.Join(root, "escape"), filepath.Join(outside, "escape"))
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err == nil {
+		t.Fatal("directory escape must fail closed")
+	}
+	if containsSkill(manager.List(), "escape") || !containsSkill(manager.List(), "durable") {
+		t.Fatal("failed discovery must retain only the last-good catalog")
+	}
+	second := manager.Snapshot()
+	if second.Complete || second.Count != first.Count || second.Revision != first.Revision {
+		t.Fatalf("last-good snapshot changed: %+v -> %+v", first, second)
+	}
+}
+
+func TestSkillLazyReadsRejectDirectoryReplacementEscape(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	writeTestSkill(t, root, "confined", "---\nname: confined\ndescription: original\n---\nbody\n")
+	writeTestSkill(t, outside, "confined", "---\nname: confined\ndescription: outside\n---\noutside body\n")
+	if err := os.WriteFile(filepath.Join(outside, "confined", "guide.txt"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	if err := manager.Discover(DiscoveryOptions{ProjectDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "confined"), filepath.Join(t.TempDir(), "saved-skill")); err != nil {
+		t.Fatal(err)
+	}
+	linkSkillDirectory(t, filepath.Join(root, "confined"), filepath.Join(outside, "confined"))
+	if _, _, err := manager.Load("confined"); err == nil {
+		t.Fatal("lazy body must not trust a replaced directory")
+	}
+	if _, err := manager.ReadResource("confined", "guide.txt"); err == nil {
+		t.Fatal("resource read must not trust a replaced directory")
+	}
+}
+
 func TestDiscoverPriorityUsesProjectDSHBeforeAgentsAndCustom(t *testing.T) {
 	project := t.TempDir()
 	dsh := filepath.Join(project, ".dsh", "skills")
