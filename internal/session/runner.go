@@ -182,6 +182,7 @@ type SessionRunnerOptions struct {
 	Permissions    *permission.Controller
 	AgentSpawn     orchestrator.AgentSpawnHandler
 	AgentLifecycle orchestrator.AgentLifecycleHandler
+	Memory         SessionMemory
 }
 
 type SessionRunner struct {
@@ -852,6 +853,9 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				return err
 			}
 			if run.terminal {
+				if view.Run != nil && view.Run.RunID == runID {
+					r.commitSessionMemory(ctx, runKey{sessionID: sessionID, runID: runID})
+				}
 				continue
 			}
 			wakeAt := time.Time{}
@@ -969,7 +973,9 @@ func (r *SessionRunner) execute(key runKey) {
 		return
 	} else if committed {
 		r.recordProgress(r.ctx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
-		_ = r.appendTerminal(context.Background(), key, lease, runCompletedEventType, "")
+		if r.appendTerminal(context.Background(), key, lease, runCompletedEventType, "") == nil {
+			r.commitSessionMemory(context.Background(), key)
+		}
 		return
 	}
 	runCtx, cancel := context.WithCancel(r.ctx)
@@ -1079,6 +1085,7 @@ func (r *SessionRunner) execute(key runKey) {
 		return
 	}
 	r.recordCompletedProgress(context.Background(), key)
+	r.commitSessionMemory(context.Background(), key)
 }
 
 func (r *SessionRunner) requeueAfterLease(key runKey, lease runLeasePayload) error {
@@ -1519,13 +1526,18 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed", ExitCode: 1}, true
 	}
-	if r.tools == nil {
+	if r.tools == nil && call.Name != "RecallMemory" {
 		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool execution is unavailable", ExitCode: 1}
 		_ = r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID))
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", "工具执行不可用，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
-	result := r.tools.Execute(ctx, actor, key.sessionID, call)
+	result := orchestrator.ToolResult{}
+	if call.Name == "RecallMemory" {
+		result = r.recallSessionMemory(ctx, events, call)
+	} else {
+		result = r.tools.Execute(ctx, actor, key.sessionID, call)
+	}
 	result.ToolCallID = call.ID
 	result.ToolName = call.Name
 	for _, modification := range codeModificationPayloads(result, key.runID) {
@@ -1552,7 +1564,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 
 func isReadOnlyTool(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "Read", "Glob", "Grep":
+	case "Read", "Glob", "Grep", "RecallMemory":
 		return true
 	default:
 		return false
@@ -1838,7 +1850,9 @@ func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 		"error_type": errorTypeName(cause),
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
-	_ = r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause))
+	if r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause)) == nil {
+		r.commitSessionMemory(ctx, key)
+	}
 }
 
 func errorTypeName(cause error) string {

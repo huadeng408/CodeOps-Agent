@@ -55,6 +55,7 @@ var DefaultPermissions = map[string]Level{
 	"Glob":            AutoAllow,
 	"Grep":            AutoAllow,
 	"SearchKnowledge": AutoAllow,
+	"RecallMemory":    AskSession,
 	"Edit":            AskSession,
 	"Write":           AskSession,
 	"Bash":            AlwaysAsk,

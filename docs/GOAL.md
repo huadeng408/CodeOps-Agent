@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-14）。
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-15）。
 
 历史进展、面试收据和根目录评测 JSON 已归档到 [`docs/archive/`](archive/INDEX.md)。新对话默认只读本文和 [`AGENT.md`](../AGENT.md)，不要把归档当执行指令。完整日更日志见 [`docs/archive/receipts/GOAL-log-2026-09.md`](archive/receipts/GOAL-log-2026-09.md)。
 
@@ -173,6 +173,49 @@ TestProductionSkillManifestIsMetadataOnly -count=1` 退出 0，实际启动生�
 和 receipt 位于其 `manifest_artifact` 所指目录。该检查只证明临时目录输入下的
 发现/优先级/metadata-only 行为；receipt 明确记录 dirty source，不能代替
 40 个 provider-backed Skill 可运行证据或 1000 案例选型指标。
+
+### Memory Ledger 接线阶段（2026-09-15）
+
+状态：`IMPLEMENTED`。参考 OpenViking 的轨迹提交、来源校验与分层记忆思路，
+独立实现 Go `LedgerMemory`，不复制两个 AGPL-3.0 参考仓库的源码。生产 server
+在任务终态和完成进展后追加 `memory/trajectory-committed`；重启补齐遗漏提交，
+不重新调用模型。新事实只写 Session Ledger，召回投影在读取时重建；现有文件
+Memory Adapter 不与此路径双写。该阶段生成确定性概览，不是模型语义反思。
+
+`RecallMemory` 经既有审批及 tool-call/result 审计，默认 `AskSession`；用户身份
+只来自 Session Ledger，不接受模型指定 owner。召回最多 5 条，默认估算预算
+1200 tokens、上限 8000；保留 source URI、event checksum 和来源 SHA-256。
+新 turn、rewind 或 compaction 改变轨迹时旧提交不会进入召回，已删除 Session
+不再返回。工具名称不匹配、孤立修改收据、未闭合调用、unknown 结果、损坏的自有提交均
+fail-closed；外租户损坏的记忆提交不影响自有召回。Ledger snapshot 验证和
+surface projection 使用同一次读取，并拒绝重复 event ID。
+
+记忆写入失败独立追加脱敏的 `memory/commit-blocked`，不覆盖成功的任务终态；
+提交被取消后，失败审计使用单独的有界上下文。概览不复制工具输出、原始 diff
+或终态错误正文，消息中的常见凭据形式脱敏。新增测试曾以退出 1 复现 JSON
+带引号字段的脱敏缺口及孤立修改收据误判完整的缺口；修复后目标测试退出 0。
+
+本轮目标 `go test ./internal/memory ./internal/session ./tests/go -run
+'LedgerMemory|LedgerSnapshot|Trajectory|MemoryCommit' -count=1`，以及
+`go test -race ./internal/memory ./internal/session -run
+'LedgerMemory|LedgerSnapshot|MemoryCommit' -count=1` 均退出 0。
+`go test ./... -count=1`、`go vet ./...`、`git diff --check` 退出 0；
+`python -m pytest -q` 退出 0（2329 passed, 16 skipped, 31 warnings）。
+这些结果来自包含既有未提交改动的工作树，不升级为 source-clean runtime 证据。
+
+`CODE_AGENT_RUN_MEMORY_INTEGRATION=1 go test ./internal/memory -run
+TestLedgerMemoryAcrossProcessRestart -count=1` 退出 0：两个独立 Go 测试进程使用
+真实 SQLite Ledger，完成遗漏终态提交恢复、身份隔离、预算、hash chain、来源
+一致性及重复恢复幂等的 10/10 检查。收据位于
+`.runtime/e2e/memory-ledger-process.json`；每次运行的 receipt、两个进程观测、
+日志及 SQLite 产物保留在其 `artifacts` 目录，带 SHA-256 和完整检查分母。
+收据明确标记 fixture-backed、source-dirty、`IMPLEMENTED`；它没有启动生产
+server/provider，不是真实模型 E2E，也不是故障恢复率指标。
+
+剩余缺口：模型反思与类型化经验提取、跨提交演化/去重、检索后端与保留策略、
+CLI 旧 Session Adapter 的 Memory 调用方迁移、真实 provider-backed Skills /
+Memory E2E，以及既定规模/准确率/Token 指标。当前进程未提供批准的 provider
+凭据，不读取本地 secret 文件来补齐；上述门禁仍为 `BLOCKED`。
 
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成

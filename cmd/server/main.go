@@ -20,6 +20,7 @@ import (
 	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/handler"
 	"code-agent/internal/identity"
+	"code-agent/internal/memory"
 	"code-agent/internal/middleware"
 	"code-agent/internal/model"
 	harnessorch "code-agent/internal/orchestrator"
@@ -270,6 +271,7 @@ func main() {
 	}
 	defer ledger.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
+	sessionMemory := memory.NewLedgerMemory(ledger)
 	workspaceRoot, rootErr := os.Getwd()
 	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
 		workspaceRoot = "."
@@ -400,6 +402,7 @@ func main() {
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
 			WorkerID: workerID, Permissions: continuationPermissions,
 			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
+			Memory: sessionMemory,
 		})
 		return &managedContinuation{runner: runner, client: client}, nil
 	}

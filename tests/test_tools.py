@@ -13,6 +13,14 @@ def test_skill_tool_exposes_confined_resource_read() -> None:
     assert spec.parameters["required"] == ["name"]
 
 
+def test_memory_tool_exposes_budget_but_not_owner() -> None:
+    spec = ToolRegistry().get("RecallMemory")
+    assert spec is not None
+    assert spec.permission == orchestrator_pb2.ASK_SESSION
+    assert set(spec.parameters["properties"]) == {"query", "max_tokens"}
+    assert spec.parameters["additionalProperties"] is False
+
+
 def test_tool_registry_loads_mcp_manifest(tmp_path) -> None:
     agent_dir = tmp_path / ".agent"
     agent_dir.mkdir()

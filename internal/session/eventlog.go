@@ -771,7 +771,12 @@ func (l *SQLiteEventLog) Verify(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
+	return verifyLedgerEvents(events, sessionID)
+}
+
+func verifyLedgerEvents(events []Event, sessionID string) error {
 	var previous string
+	identities := make(map[string]struct{}, len(events))
 	for index, event := range events {
 		if event.Seq != int64(index) || event.SessionID != sessionID || event.Version != eventSchemaVersion {
 			return fmt.Errorf("%w: invalid sequence or version at seq %d", ErrEventIntegrity, event.Seq)
@@ -779,6 +784,10 @@ func (l *SQLiteEventLog) Verify(ctx context.Context, sessionID string) error {
 		if strings.TrimSpace(event.EventID) == "" || strings.TrimSpace(event.Type) == "" {
 			return fmt.Errorf("%w: missing event identity at seq %d", ErrEventIntegrity, event.Seq)
 		}
+		if _, exists := identities[event.EventID]; exists {
+			return fmt.Errorf("%w: duplicate event identity at seq %d", ErrEventIntegrity, event.Seq)
+		}
+		identities[event.EventID] = struct{}{}
 		if !json.Valid(event.Payload) {
 			return fmt.Errorf("%w: invalid payload at seq %d", ErrEventIntegrity, event.Seq)
 		}
