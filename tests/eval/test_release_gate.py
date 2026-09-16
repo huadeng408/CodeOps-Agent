@@ -106,7 +106,7 @@ def _passing_receipts(repo: Path, sha: str) -> None:
     skills.update(
         {
             "dataset_pin": {"case_count": 1000},
-            "catalog_pin": {"skill_count": 40},
+            "catalog_pin": {"skill_count": 40, "sha256": "5" * 64},
             "provider": {"model_revision_status": "MODEL_IDENTITY_VERIFIED"},
             "scoring": {"correct": 950, "denominator": 1000, "accuracy": 0.95},
             "execution_matrix": {
@@ -116,7 +116,18 @@ def _passing_receipts(repo: Path, sha: str) -> None:
                 "production_loader": True,
                 "metadata_only_discovery": True,
                 "lazy_body_loads": 40,
+                "manifest_sha256": "5" * 64,
+                "catalog_sha256": "6" * 64,
+                "artifact_sha256": "7" * 64,
+                "source_pin": skills["source_pin"],
             },
+            "artifacts": {"execution_matrix": "skill-execution-matrix.json"},
+        }
+    )
+    skills["raw_evidence"].update(
+        {
+            "execution_matrix_sha256": "7" * 64,
+            "execution_matrix_catalog_sha256": "6" * 64,
         }
     )
     agent = _evidence(sha, "agent")
@@ -286,6 +297,100 @@ def test_release_gate_rejects_smoke_swebench_and_bad_skill_fingerprint(tmp_path:
     assert report.status is GateStatus.BLOCKED
     assert any(check.name == "evidence.skills" and check.status == "BLOCKED" for check in report.checks)
     assert any(check.name == "evidence.swebench" and check.status == "BLOCKED" for check in report.checks)
+
+
+def test_release_gate_rejects_unpinned_skill_execution_matrix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, sha = _git_repo(tmp_path)
+    _passing_receipts(repo, sha)
+    monkeypatch.setattr("eval.release_gate._git_head", lambda _: sha)
+    skills = next((repo / "data" / "eval" / "skills" / "receipts").glob("*.json"))
+    payload = json.loads(skills.read_text(encoding="utf-8"))
+    payload["execution_matrix"].pop("artifact_sha256")
+    skills.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert any(
+        check.name == "evidence.skills" and check.status == "BLOCKED"
+        for check in report.checks
+    )
+
+
+def test_release_gate_rejects_bogus_skill_identity_and_manifest_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for mutation in ("identity", "manifest"):
+        root = tmp_path / mutation
+        root.mkdir()
+        repo, sha = _git_repo(root)
+        _passing_receipts(repo, sha)
+        monkeypatch.setattr("eval.release_gate._git_head", lambda _, value=sha: value)
+        skills = next(
+            (repo / "data" / "eval" / "skills" / "receipts").glob("*.json")
+        )
+        payload = json.loads(skills.read_text(encoding="utf-8"))
+        if mutation == "identity":
+            payload["provider"]["model_revision_status"] = "bogus-but-accepted"
+        else:
+            payload["catalog_pin"]["sha256"] = "not-a-hash"
+            payload["execution_matrix"]["manifest_sha256"] = "not-a-hash"
+        skills.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+        report = evaluate_release(repo, run_tests=False)
+
+        assert report.status is GateStatus.BLOCKED
+        assert any(
+            check.name == "evidence.skills" and check.status == "BLOCKED"
+            for check in report.checks
+        )
+
+
+def test_release_gate_rejects_non_integral_or_impossible_skill_scores(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for index, invalid_correct in enumerate((float("nan"), float("inf"), 1001, 948.5)):
+        root = tmp_path / f"score-{index}"
+        root.mkdir()
+        repo, sha = _git_repo(root)
+        _passing_receipts(repo, sha)
+        monkeypatch.setattr("eval.release_gate._git_head", lambda _, value=sha: value)
+        skills = next(
+            (repo / "data" / "eval" / "skills" / "receipts").glob("*.json")
+        )
+        payload = json.loads(skills.read_text(encoding="utf-8"))
+        payload["scoring"]["correct"] = invalid_correct
+        skills.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+        report = evaluate_release(repo, run_tests=False)
+
+        assert report.status is GateStatus.BLOCKED
+        assert any(
+            check.name == "evidence.skills" and check.status == "BLOCKED"
+            for check in report.checks
+        )
+
+
+def test_release_gate_rejects_skill_matrix_from_different_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, sha = _git_repo(tmp_path)
+    _passing_receipts(repo, sha)
+    monkeypatch.setattr("eval.release_gate._git_head", lambda _: sha)
+    skills = next((repo / "data" / "eval" / "skills" / "receipts").glob("*.json"))
+    payload = json.loads(skills.read_text(encoding="utf-8"))
+    payload["execution_matrix"]["source_pin"]["dirty_hash"] = "8" * 64
+    skills.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert any(
+        check.name == "evidence.skills" and check.status == "BLOCKED"
+        for check in report.checks
+    )
 
 
 def test_release_gate_rejects_short_workflow_and_fixture_backed_agent(

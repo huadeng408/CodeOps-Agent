@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -101,6 +102,88 @@ def _write_inputs(
     return manifest_path, dataset_path
 
 
+def _write_formal_inputs(root: Path) -> tuple[Path, Path]:
+    agent_dir = root / ".agent"
+    agent_dir.mkdir(parents=True)
+    manifest_path = agent_dir / "skills.json"
+    skills = [
+        {
+            "name": f"skill-{index:02d}",
+            "description": f"route requests for capability {index:02d}",
+            "tools": ["Read"],
+            "invocation": {"modelInvocable": True, "userInvocable": True},
+        }
+        for index in range(40)
+    ]
+    manifest_path.write_text(json.dumps({"skills": skills}), encoding="utf-8")
+    dataset_path = root / "skill-selection-formal.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dataset_id": "skill-selection-formal-test-v1",
+                "license": "CC0-1.0",
+                "provenance": "repository-authored formal contract fixture",
+                "expected_case_count": 1_000,
+                "prompt_templates": ["{request}"],
+                "skills": [
+                    {
+                        "name": skill["name"],
+                        "requests": [
+                            f"Use capability {index:02d} for case {case:02d}."
+                            for case in range(25)
+                        ],
+                    }
+                    for index, skill in enumerate(skills)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _pin_dataset(dataset_path)
+    return manifest_path, dataset_path
+
+
+def _write_execution_matrix(
+    path: Path,
+    manifest_path: Path,
+    source: dict[str, object],
+) -> dict[str, object]:
+    manifest_raw = manifest_path.read_bytes()
+    manifest = json.loads(manifest_raw.decode("utf-8"))
+    entries: list[dict[str, object]] = []
+    for metadata in sorted(manifest["skills"], key=lambda item: item["name"]):
+        invocation = metadata.get("invocation", {})
+        entry: dict[str, object] = {"name": metadata["name"]}
+        if metadata.get("tools"):
+            entry["tools"] = metadata["tools"]
+        entry["model_invocable"] = invocation.get("modelInvocable", True)
+        entry["user_invocable"] = invocation.get("userInvocable", True)
+        entry["body_sha256"] = hashlib.sha256(
+            f"body:{metadata['name']}".encode("utf-8")
+        ).hexdigest()
+        entries.append(entry)
+    matrix: dict[str, object] = {
+        "schema_version": 1,
+        "status": "VERIFIED",
+        "run_id": "skills-matrix-test",
+        "source_pin": source,
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "catalog_sha256": skill_selection_module._matrix_catalog_sha256(entries),
+        "execution_matrix": {
+            "denominator": len(entries),
+            "passed": len(entries),
+            "failures": [],
+            "production_loader": True,
+            "metadata_only_discovery": True,
+            "lazy_body_loads": len(entries),
+        },
+        "skills": entries,
+    }
+    path.write_text(json.dumps(matrix, indent=2), encoding="utf-8")
+    return matrix
+
+
 class _ProviderState:
     def __init__(self, *, always_skill: str = "", delay_s: float = 0.0) -> None:
         self.always_skill = always_skill
@@ -129,6 +212,14 @@ class _StaticRemoteClient(OpenAIClient):
                 "system_fingerprint": f"fp-{selected}",
             },
         )
+
+
+class _NeverCalledRemoteClient(OpenAIClient):
+    calls = 0
+
+    async def chat(self, request) -> ChatResponse:
+        type(self).calls += 1
+        raise AssertionError("provider must not be called before matrix validation")
 
 
 class _StaticAnthropicClient(AnthropicClient):
@@ -288,6 +379,121 @@ def test_skill_selection_prompt_exposes_catalog_as_structured_metadata(
     assert "- debug: diagnose a reproducible failure" in prompt
     assert "- inspect: inspect repository structure and relevant files" in prompt
     assert "expected_skill" not in prompt
+
+
+def test_execution_matrix_accepts_source_bound_40_skill_catalog(tmp_path: Path) -> None:
+    manifest_path, _ = _write_formal_inputs(tmp_path)
+    repository_root = Path(__file__).resolve().parents[2]
+    expected_source = skill_selection_module.source_pin(repository_root)
+    matrix_path = tmp_path / "skills-matrix.json"
+    _write_execution_matrix(matrix_path, manifest_path, expected_source)
+
+    summary, payload = skill_selection_module._load_execution_matrix(
+        matrix_path,
+        _load_catalog(manifest_path),
+        expected_source,
+    )
+
+    assert summary["denominator"] == 40
+    assert summary["passed"] == 40
+    assert summary["lazy_body_loads"] == 40
+    assert payload["status"] == "VERIFIED"
+
+
+def test_go_execution_matrix_is_accepted_by_python_verifier(tmp_path: Path) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_path = tmp_path / ".agent" / "skills.json"
+    matrix_path = tmp_path / "skills-matrix.json"
+
+    result = subprocess.run(
+        [
+            "go",
+            "run",
+            "./cmd/skills-manifest",
+            "--output",
+            str(manifest_path),
+            "--matrix-output",
+            str(matrix_path),
+            "--repo-root",
+            str(repository_root),
+            "--run-id",
+            "skills-matrix-cross-language",
+        ],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    expected_source = skill_selection_module.source_pin(repository_root)
+
+    summary, _ = skill_selection_module._load_execution_matrix(
+        matrix_path,
+        _load_catalog(manifest_path),
+        expected_source,
+    )
+
+    assert summary["denominator"] >= 40
+    assert summary["catalog_sha256"]
+
+
+def test_execution_matrix_rejects_tampered_pins_and_entries(tmp_path: Path) -> None:
+    manifest_path, _ = _write_formal_inputs(tmp_path)
+    repository_root = Path(__file__).resolve().parents[2]
+    expected_source = skill_selection_module.source_pin(repository_root)
+    matrix_path = tmp_path / "skills-matrix.json"
+    original = _write_execution_matrix(matrix_path, manifest_path, expected_source)
+    catalog = _load_catalog(manifest_path)
+
+    for mutation in ("source", "manifest", "name", "body"):
+        payload = copy.deepcopy(original)
+        if mutation == "source":
+            payload["source_pin"]["dirty_hash"] = "0" * 64
+        elif mutation == "manifest":
+            payload["manifest_sha256"] = "0" * 64
+        elif mutation == "name":
+            payload["skills"][0]["name"] = "different-skill"
+        else:
+            payload["skills"][0]["body_sha256"] = "0" * 64
+        matrix_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            skill_selection_module._load_execution_matrix(
+                matrix_path,
+                catalog,
+                expected_source,
+            )
+
+
+@pytest.mark.asyncio
+async def test_formal_remote_eval_requires_matrix_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    manifest_path, dataset_path = _write_formal_inputs(tmp_path)
+    client = _NeverCalledRemoteClient(
+        api_key="test-key",
+        base_url="https://provider.example/v1",
+        model="locked-model",
+        max_retries=0,
+    )
+    _NeverCalledRemoteClient.calls = 0
+
+    with pytest.raises(ValueError, match="production execution matrix"):
+        await run_skill_selection_eval(
+            _config(
+                tmp_path,
+                manifest_path,
+                dataset_path,
+                run_id="skill-selection-formal-without-matrix",
+                required_case_count=1_000,
+                minimum_accuracy=0.948,
+            ),
+            client,
+        )
+
+    assert _NeverCalledRemoteClient.calls == 0
 
 
 @pytest.mark.asyncio
@@ -454,6 +660,70 @@ async def test_provider_tool_selection_writes_gold_free_smoke_receipt(
     assert (
         RunArtifacts(
             "skill-selection-smoke", tmp_path / "eval_results"
+        ).verify_checksums()
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_execution_matrix_receipt_pins_archived_bytes(tmp_path: Path) -> None:
+    manifest_path, dataset_path = _write_inputs(tmp_path)
+    repository_root = Path(__file__).resolve().parents[2]
+    matrix_path = tmp_path / "skills-matrix.json"
+    _write_execution_matrix(
+        matrix_path,
+        manifest_path,
+        skill_selection_module.source_pin(repository_root),
+    )
+    matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+    matrix_payload["run_id"] = "sk-1234567890"
+    matrix_path.write_text(json.dumps(matrix_payload), encoding="utf-8")
+    server, _ = _provider_server()
+    client = OpenAIClient(
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="locked-model",
+        timeout=10.0,
+        max_retries=0,
+    )
+    config = replace(
+        _config(
+            tmp_path,
+            manifest_path,
+            dataset_path,
+            run_id="skill-selection-matrix-artifact",
+            required_case_count=4,
+        ),
+        execution_matrix_path=matrix_path,
+    )
+    try:
+        receipt = await run_skill_selection_eval(config, client)
+        resumed = await run_skill_selection_eval(replace(config, resume=True), client)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    archived = (
+        tmp_path
+        / "eval_results"
+        / "skill-selection-matrix-artifact"
+        / "skill-execution-matrix.json"
+    )
+    assert receipt["execution_matrix"]["artifact_sha256"] == hashlib.sha256(
+        archived.read_bytes()
+    ).hexdigest()
+    assert resumed["execution_matrix"]["artifact_sha256"] == receipt[
+        "execution_matrix"
+    ]["artifact_sha256"]
+    archived_payload = json.loads(archived.read_text(encoding="utf-8"))
+    assert "run_id" not in archived_payload
+    assert archived_payload["run_id_sha256"] == hashlib.sha256(
+        b"sk-1234567890"
+    ).hexdigest()
+    assert receipt["artifacts"]["execution_matrix"] == archived.name
+    assert (
+        RunArtifacts(
+            "skill-selection-matrix-artifact", tmp_path / "eval_results"
         ).verify_checksums()
         == []
     )

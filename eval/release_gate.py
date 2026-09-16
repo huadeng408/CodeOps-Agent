@@ -302,21 +302,47 @@ def _skills_predicate(payload: dict[str, Any]) -> None:
         raise ValueError("locked 1,000 cases and 40 runnable skills are required")
     denominator = scoring.get("denominator")
     correct = scoring.get("correct")
-    if denominator != 1000 or not isinstance(correct, (int, float)) or correct < 948:
+    if denominator != 1000 or type(correct) is not int or not 948 <= correct <= denominator:
         raise ValueError("skill selection must be at least 948/1000")
-    if provider.get("model_revision_status") in (None, "MODEL_IDENTITY_UNVERIFIED"):
+    if provider.get("model_revision_status") not in {
+        "VERIFIED",
+        "MODEL_IDENTITY_VERIFIED",
+    }:
         raise ValueError("provider model revision is not verified")
+    manifest_sha256 = str(catalog.get("sha256", ""))
+    if not SHA256_RE.fullmatch(manifest_sha256):
+        raise ValueError("evaluated Skill manifest SHA-256 is missing")
     matrix = payload.get("execution_matrix", {})
     matrix_failures = matrix.get("failures")
+    matrix_denominator = matrix.get("denominator")
     if (
-        matrix.get("denominator", 0) < 40
-        or matrix.get("passed") != matrix.get("denominator")
+        matrix_denominator != catalog.get("skill_count")
+        or matrix_denominator < 40
+        or matrix.get("passed") != matrix_denominator
         or matrix_failures != []
         or matrix.get("production_loader") is not True
         or matrix.get("metadata_only_discovery") is not True
-        or matrix.get("lazy_body_loads", 0) < 40
+        or matrix.get("lazy_body_loads") != matrix_denominator
     ):
         raise ValueError("at least 40 Skills must pass the production discovery and lazy-load matrix")
+    source_pin = payload.get("source_pin")
+    if matrix.get("source_pin") != source_pin:
+        raise ValueError("Skill execution matrix is not bound to the evaluation source")
+    if matrix.get("manifest_sha256") != manifest_sha256:
+        raise ValueError("Skill execution matrix is not bound to the evaluated manifest")
+    artifact_sha256 = str(matrix.get("artifact_sha256", ""))
+    catalog_sha256 = str(matrix.get("catalog_sha256", ""))
+    if not SHA256_RE.fullmatch(artifact_sha256) or not SHA256_RE.fullmatch(catalog_sha256):
+        raise ValueError("Skill execution matrix artifact and catalog pins are required")
+    artifacts = payload.get("artifacts", {})
+    raw_evidence = payload.get("raw_evidence", {})
+    if artifacts.get("execution_matrix") != "skill-execution-matrix.json":
+        raise ValueError("Skill execution matrix artifact path is missing")
+    if (
+        raw_evidence.get("execution_matrix_sha256") != artifact_sha256
+        or raw_evidence.get("execution_matrix_catalog_sha256") != catalog_sha256
+    ):
+        raise ValueError("raw Skill execution matrix evidence does not match the receipt pins")
 
 
 def _swebench_predicate(payload: dict[str, Any]) -> None:

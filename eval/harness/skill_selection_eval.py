@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from eval.harness.artifacts import RunArtifacts
-from eval.harness.redaction import redact_credential_text
+from eval.harness.redaction import redact_credential_text, redact_credential_value
 from eval.harness.skill_selection_checkpoint import SkillSelectionCheckpoint
 from eval.harness.source_pin import source_pin
 from orchestrator.config import load_dotenv
@@ -54,6 +54,7 @@ class SkillSelectionEvalConfig:
     manifest_path: Path
     dataset_path: Path
     model: str
+    execution_matrix_path: Path | None = None
     max_output_tokens: int = 64
     timeout_s: float = 120.0
     max_concurrency: int = 10
@@ -211,6 +212,153 @@ def _selection_system_prompt(catalog: _Catalog) -> str:
     return "\n".join(lines)
 
 
+def _matrix_catalog_sha256(entries: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256(b"skill-execution-matrix-catalog-v1\0")
+
+    def add_uint(value: int) -> None:
+        digest.update(value.to_bytes(8, byteorder="big", signed=False))
+
+    def add_text(value: str) -> None:
+        encoded = value.encode("utf-8")
+        add_uint(len(encoded))
+        digest.update(encoded)
+
+    add_uint(len(entries))
+    for entry in entries:
+        add_text(entry["name"])
+        tools = entry.get("tools", [])
+        add_uint(len(tools))
+        for tool in tools:
+            add_text(tool)
+        digest.update(b"\x01" if entry["model_invocable"] else b"\x00")
+        digest.update(b"\x01" if entry["user_invocable"] else b"\x00")
+        add_text(entry["body_sha256"])
+    return digest.hexdigest()
+
+
+def _load_execution_matrix(
+    path: str | Path,
+    catalog: _Catalog,
+    expected_source_pin: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    matrix_path = Path(path).resolve()
+    try:
+        raw = matrix_path.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Skill execution matrix must be readable JSON") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("Skill execution matrix schema_version must be 1")
+    if payload.get("status") != "VERIFIED":
+        raise ValueError("Skill execution matrix is not VERIFIED")
+    matrix_run_id = payload.get("run_id")
+    if (
+        not isinstance(matrix_run_id, str)
+        or not matrix_run_id
+        or Path(matrix_run_id).name != matrix_run_id
+        or matrix_run_id in {".", ".."}
+    ):
+        raise ValueError("Skill execution matrix run_id is invalid")
+    if payload.get("source_pin") != expected_source_pin:
+        raise ValueError("Skill execution matrix source pin does not match this run")
+    if payload.get("manifest_sha256") != catalog.sha256:
+        raise ValueError("Skill execution matrix does not match the Skill manifest")
+    execution = payload.get("execution_matrix")
+    if not isinstance(execution, dict):
+        raise ValueError("Skill execution matrix summary is missing")
+    denominator = execution.get("denominator")
+    if (
+        denominator != len(catalog.names)
+        or execution.get("passed") != denominator
+        or execution.get("failures") != []
+        or execution.get("production_loader") is not True
+        or execution.get("metadata_only_discovery") is not True
+        or execution.get("lazy_body_loads") != denominator
+    ):
+        raise ValueError("Skill execution matrix did not pass the full production catalog")
+    entries = payload.get("skills")
+    if not isinstance(entries, list) or len(entries) != denominator:
+        raise ValueError("Skill execution matrix entries are incomplete")
+    names: set[str] = set()
+    ordered_names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Skill execution matrix entry is malformed")
+        required_keys = {
+            "name",
+            "model_invocable",
+            "user_invocable",
+            "body_sha256",
+        }
+        allowed_keys = required_keys | {"tools"}
+        tools = entry.get("tools", [])
+        if (
+            not required_keys.issubset(entry)
+            or not set(entry).issubset(allowed_keys)
+            or not isinstance(entry.get("name"), str)
+            or not isinstance(entry.get("body_sha256"), str)
+            or not isinstance(entry.get("model_invocable"), bool)
+            or not isinstance(entry.get("user_invocable"), bool)
+            or not isinstance(tools, list)
+            or any(not isinstance(tool, str) or not tool.strip() for tool in tools)
+        ):
+            raise ValueError("Skill execution matrix entry is malformed")
+        name = str(entry.get("name", "")).strip()
+        body_sha256 = str(entry.get("body_sha256", ""))
+        if not name or name in names or re.fullmatch(r"[0-9a-f]{64}", body_sha256) is None:
+            raise ValueError("Skill execution matrix entry is not uniquely body-pinned")
+        names.add(name)
+        ordered_names.append(name)
+    if names != set(catalog.names):
+        raise ValueError("Skill execution matrix names do not match the Skill manifest")
+    if ordered_names != sorted(ordered_names):
+        raise ValueError("Skill execution matrix entries must use stable name order")
+    catalog_sha256 = str(payload.get("catalog_sha256", ""))
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", catalog_sha256) is None
+        or catalog_sha256 != _matrix_catalog_sha256(entries)
+    ):
+        raise ValueError("Skill execution matrix catalog checksum does not match its entries")
+    summary = {
+        "denominator": denominator,
+        "passed": execution["passed"],
+        "failures": [],
+        "production_loader": True,
+        "metadata_only_discovery": True,
+        "lazy_body_loads": execution["lazy_body_loads"],
+        "manifest_sha256": catalog.sha256,
+        "catalog_sha256": catalog_sha256,
+        "source_pin": expected_source_pin,
+    }
+    return summary, payload
+
+
+def _archive_execution_matrix(
+    artifacts: RunArtifacts,
+    payload: dict[str, Any],
+    *,
+    resume: bool,
+) -> str:
+    name = "skill-execution-matrix.json"
+    archived_payload = dict(payload)
+    archived_payload["run_id_sha256"] = _sha256_text(archived_payload.pop("run_id"))
+    if redact_credential_value(archived_payload) != archived_payload:
+        raise ValueError("Skill execution matrix contains credential-shaped metadata")
+    if resume:
+        path = (artifacts.root / name).resolve()
+        if not path.is_relative_to(artifacts.root) or not path.is_file():
+            raise ValueError("resume requires the archived Skill execution matrix")
+        try:
+            archived = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("archived Skill execution matrix is unreadable") from exc
+        if archived != archived_payload:
+            raise ValueError("archived Skill execution matrix does not match this run")
+    else:
+        path = artifacts.write(name, archived_payload)
+    return _sha256_bytes(path.read_bytes())
+
+
 def load_skill_selection_dataset(
     dataset_path: str | Path,
     manifest_path: str | Path,
@@ -356,6 +504,7 @@ def _checkpoint_contract(
     endpoint: dict[str, str],
     prompt_pins: dict[str, str],
     budget: dict[str, int | float],
+    execution_matrix: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -374,6 +523,7 @@ def _checkpoint_contract(
         "endpoint": endpoint,
         "prompt_pins": prompt_pins,
         "budget": budget,
+        "execution_matrix": execution_matrix,
     }
 
 
@@ -558,6 +708,34 @@ async def run_skill_selection_eval(
     )
     scope, transport_failure, endpoint = _evidence_scope(evaluation_client)
     run_source_pin = source_pin(Path(__file__).resolve().parents[2])
+    execution_matrix: dict[str, Any] | None = None
+    execution_matrix_payload: dict[str, Any] | None = None
+    if config.execution_matrix_path is not None:
+        execution_matrix, execution_matrix_payload = _load_execution_matrix(
+            config.execution_matrix_path,
+            catalog,
+            run_source_pin,
+        )
+    formal_remote_lane = (
+        scope == "REMOTE_PROVIDER_TOOL_SELECTION"
+        and config.required_case_count == 1_000
+    )
+    if formal_remote_lane and (
+        len(catalog.names) < 40 or config.minimum_accuracy < 0.948
+    ):
+        raise ValueError(
+            "formal remote Skill selection requires at least 40 Skills and a 0.948 threshold"
+        )
+    if formal_remote_lane and execution_matrix is None:
+        raise ValueError(
+            "formal remote Skill selection requires a source-bound production execution matrix"
+        )
+    if execution_matrix is not None and execution_matrix_payload is not None:
+        execution_matrix["artifact_sha256"] = _archive_execution_matrix(
+            artifacts,
+            execution_matrix_payload,
+            resume=config.resume,
+        )
     prompt_pins = _prompt_pins(catalog)
     budget = _budget_pin(config, evaluation_client, len(dataset.cases))
     contract = _checkpoint_contract(
@@ -568,6 +746,7 @@ async def run_skill_selection_eval(
         endpoint,
         prompt_pins,
         budget,
+        execution_matrix,
     )
     checkpoint_path = (artifacts.root / _CHECKPOINT_FILENAME).resolve()
     if not checkpoint_path.is_relative_to(artifacts.root):
@@ -739,6 +918,7 @@ async def run_skill_selection_eval(
             "system_fingerprints": sorted(fingerprints),
         },
         "budget": budget,
+        "execution_matrix": execution_matrix,
         "checkpoint": {
             "contract_sha256": contract_sha256,
             "resumed": config.resume,
@@ -762,6 +942,11 @@ async def run_skill_selection_eval(
             "checkpoint": _CHECKPOINT_FILENAME,
             "run_manifest": "run-manifest.json",
             "checksum_file": "checksums.sha256",
+            "execution_matrix": (
+                "skill-execution-matrix.json"
+                if execution_matrix_payload is not None
+                else None
+            ),
         },
     }
     artifacts.write("receipt.json", receipt)
@@ -787,6 +972,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", default=Path("eval_results"), type=Path)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--execution-matrix",
+        type=Path,
+        default=None,
+        help="source-bound production Skill load matrix required by the formal remote lane",
+    )
     parser.add_argument("--max-output-tokens", default=64, type=int)
     parser.add_argument("--timeout", default=120.0, type=float)
     parser.add_argument("--max-concurrency", default=10, type=int)
@@ -812,6 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path=args.manifest,
         dataset_path=args.dataset,
         model=args.model,
+        execution_matrix_path=args.execution_matrix,
         max_output_tokens=args.max_output_tokens,
         timeout_s=args.timeout,
         max_concurrency=args.max_concurrency,
