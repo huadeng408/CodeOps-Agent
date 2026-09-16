@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -54,5 +55,44 @@ func TestBuildContextEnvelopeProducesMetadataOnlyLayers(t *testing.T) {
 	}
 	if strings.Contains(string(raw), content) || strings.Contains(string(raw), "fixture-secret") || strings.Contains(string(raw), "PRIVATE_CONTEXT_VALUE") {
 		t.Fatalf("context envelope leaked raw content: %s", raw)
+	}
+}
+
+func TestManagerContextEnvelopeUsesVerifiedSessionLedger(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AGENT.md"), []byte("project instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewSQLiteEventStore(filepath.Join(root, ".agent", "sessions.sqlite"))
+	manager := NewManager(store)
+	t.Cleanup(func() { _ = manager.Close() })
+	if created := manager.NewSession(root); created.ID == "" {
+		t.Fatal("session was not created")
+	}
+	manager.RecordToolCall("src/main.go")
+
+	envelope, err := manager.ContextEnvelope(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"AGENT.md": false, "src/main.go": false}
+	for _, item := range envelope.P1 {
+		if _, ok := want[item.Path]; ok {
+			want[item.Path] = true
+		}
+	}
+	for path, found := range want {
+		if !found {
+			t.Fatalf("P1 did not include %s: %+v", path, envelope.P1)
+		}
+	}
+	if len(envelope.Events) == 0 || envelope.LedgerChecksum == "" {
+		t.Fatalf("ledger metadata missing: %+v", envelope)
 	}
 }

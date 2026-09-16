@@ -18,6 +18,7 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/handler"
+	"code-agent/internal/mcp"
 	"code-agent/internal/memory"
 	"code-agent/internal/middleware"
 	"code-agent/internal/model"
@@ -51,6 +52,20 @@ import (
 type managedContinuation struct {
 	runner session.ContinuationModule
 	client *harnessorch.Client
+}
+
+func configureContinuationMCP(ctx context.Context, manager *mcp.Manager, workspaceRoot, configured string) ([]error, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return nil, nil
+	}
+	if !filepath.IsAbs(configured) {
+		configured = filepath.Join(workspaceRoot, configured)
+	}
+	if err := manager.LoadConfigFile(configured); err != nil {
+		return nil, err
+	}
+	return manager.StartAll(ctx), nil
 }
 
 func (m *managedContinuation) RequestContinuation(ctx context.Context, cmd session.ContinueCommand) (session.RunView, error) {
@@ -272,6 +287,24 @@ func main() {
 	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
 		workspaceRoot = "."
 	}
+	continuationMCP := mcp.NewManager()
+	mcpStartErrors, err := configureContinuationMCP(context.Background(), continuationMCP, workspaceRoot, os.Getenv("CODE_AGENT_MCP_CONFIG"))
+	if err != nil {
+		log.Errorf("load continuation MCP config: %v", err)
+		return
+	}
+	for _, startErr := range mcpStartErrors {
+		log.Errorf("start continuation MCP server: %v", startErr)
+	}
+	if err := continuationMCP.WriteToolsManifest(workspaceRoot); err != nil {
+		log.Errorf("write continuation MCP manifest: %v", err)
+		return
+	}
+	defer func() {
+		for _, server := range continuationMCP.ListServers() {
+			_ = continuationMCP.Stop(server.Name)
+		}
+	}()
 	// WorktreeManager is only a runtime index. The canonical ledger owns the
 	// active lease and terminal lifecycle facts; replay it before accepting
 	// browser continuations so a restart cannot orphan an agent checkout.
@@ -293,6 +326,15 @@ func main() {
 			}
 		}
 	}
+	// Telemetry is initialized before continuation workers so every executor,
+	// Memory module, and durable Agent run shares the admitted request parent.
+	telemetry := genai.NewTelemetry(context.Background())
+	searchService.SetTracer(telemetry)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = telemetry.Shutdown(shutdownCtx)
+	}()
 	// Browser continuations use the Go-owned SessionRunner. The gRPC client is
 	// connection-only; actor, run identity, history, and callbacks are supplied
 	// per request so concurrent Sessions cannot cross-write one another.
@@ -302,6 +344,8 @@ func main() {
 	}
 	continuationRoot := workspaceRoot
 	continuationExecutors := newContinuationToolExecutors(continuationRoot)
+	continuationExecutors.SetTracer(telemetry)
+	continuationExecutors.SetMCPManager(continuationMCP)
 	continuationPermissions := continuationPermissionController()
 	continuationTools := continuationExecutors
 	continuationSlot := session.NewContinuationSlot()
@@ -311,7 +355,9 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
+		client.SetTracer(telemetry)
 		sessionMemory := memory.NewLedgerMemory(ledger, client.ReflectMemory)
+		sessionMemory.SetTracer(telemetry)
 		client.OnAgentSpawn = func(spawnCtx context.Context, spawn *codeagentpb.AgentSpawn) error {
 			if spawn == nil {
 				return fmt.Errorf("agent spawn payload is required")
@@ -372,13 +418,22 @@ func main() {
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
 			WorkerID: workerID, Permissions: continuationPermissions,
 			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
-			Memory: sessionMemory,
+			Memory: sessionMemory, Tracer: telemetry,
+			AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
+				binding, ok := continuationMCP.ResolveBinding(name)
+				return session.AgentToolBinding{Name: binding.Name, Server: binding.Server, InputSchemaSHA256: binding.InputSchemaSHA256, ServerConfigSHA256: binding.ServerConfigSHA256}, ok
+			},
 			AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
 				tree, err := workspaceManager.SpawnAgent(ctx, worktree.AgentSpawnRequest{RequestID: request.TaskID, ParentSessionID: request.ParentSessionID, ChildSessionID: request.ChildSessionID, WorktreeName: request.TaskID, Retain: true})
 				if err != nil {
 					return "", err
 				}
+				if err := continuationMCP.WriteToolsManifest(tree.Path); err != nil {
+					_ = workspaceManager.CleanupAgent(ctx, tree.RequestID, true, "mcp manifest unavailable")
+					return "", err
+				}
 				if err := appendPersistedWorktreeEvent(ctx, ledger, tree.ParentSessionID, persistedWorktreeActiveEvent, tree, "independent agent task"); err != nil {
+					_ = workspaceManager.CleanupAgent(ctx, tree.RequestID, true, "ledger persist failed")
 					return "", err
 				}
 				return tree.Path, nil
@@ -391,15 +446,6 @@ func main() {
 	defer continuationSupervisor.Close()
 	defer continuationExecutors.Close()
 	wsTickets := session.NewWebSocketTickets(30 * time.Second)
-
-	// Telemetry: create tracer and wire into handlers and services.
-	telemetry := genai.NewTelemetry(context.Background())
-	searchService.SetTracer(telemetry)
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = telemetry.Shutdown(shutdownCtx)
-	}()
 
 	processor := pipeline.NewProcessor(
 		documentParser,
@@ -499,7 +545,7 @@ func main() {
 		}
 
 		sessions := apiV1.Group("/sessions")
-		sessions.Use(middleware.AuthMiddleware(jwtManager, userService))
+		sessions.Use(middleware.TraceContextMiddleware(), middleware.AuthMiddleware(jwtManager, userService))
 		{
 			sessionHandler := handler.NewSessionHandlerWithWorktree(workbench, wsTickets, workspaceManager)
 			sessions.POST("", sessionHandler.Create)

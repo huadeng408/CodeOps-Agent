@@ -14,6 +14,7 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/telemetry/genai"
 
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -54,6 +55,11 @@ type ToolCall struct {
 	Name               string
 	ParametersJSON     string
 	RequiredPermission codeagentpb.PermissionLevel
+	// MCPBinding is Harness-only metadata pinned when a parent delegates a
+	// dynamic tool. It is never accepted from the model transport.
+	MCPServer             string
+	MCPInputSchemaSHA256  string
+	MCPServerConfigSHA256 string
 }
 
 type ToolResult struct {
@@ -392,6 +398,11 @@ func (c *Client) injectTraceMetadata(ctx context.Context) context.Context {
 	pairs := []string{"traceparent", tp}
 	if ts := sc.TraceState().String(); ts != "" {
 		pairs = append(pairs, "tracestate", ts)
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.Baggage{}.Inject(genai.DetachedTraceContext(ctx, ""), carrier)
+	if admitted := strings.TrimSpace(carrier.Get("baggage")); admitted != "" {
+		pairs = append(pairs, "baggage", admitted)
 	}
 	return metadata.AppendToOutgoingContext(ctx, pairs...)
 }
@@ -952,14 +963,16 @@ func (c *Client) startToolSpan(ctx context.Context, call ToolCall) (context.Cont
 	return ctx, sp
 }
 
-// finishToolSpan sets the result attribute and ends the span.
+// finishToolSpan records only a bounded outcome marker. Tool output and error
+// text may contain source, credentials, or provider details and must never be
+// copied into telemetry.
 func finishToolSpan(sp genai.Span, result ToolResult) {
 	if sp == nil {
 		return
 	}
-	sp.SetAttributes(genai.ToolCallResultKV(result.Output))
 	if result.Error != "" || result.ExitCode != 0 {
-		sp.RecordError(fmt.Errorf("%s (exit=%d)", result.Error, result.ExitCode))
+		genai.MarkSpanError(sp)
+		sp.AddEvent("tool.error")
 	}
 	sp.End()
 }

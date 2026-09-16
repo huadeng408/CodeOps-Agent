@@ -22,9 +22,12 @@ import (
 const maxMultimodalBytes = 20 << 20
 
 type ToolRequest struct {
-	Name           string         `json:"name"`
-	Arguments      map[string]any `json:"arguments,omitempty"`
-	OwnerSessionID string         `json:"owner_session_id,omitempty"`
+	Name                  string         `json:"name"`
+	Arguments             map[string]any `json:"arguments,omitempty"`
+	OwnerSessionID        string         `json:"owner_session_id,omitempty"`
+	MCPServer             string         `json:"-"`
+	MCPInputSchemaSHA256  string         `json:"-"`
+	MCPServerConfigSHA256 string         `json:"-"`
 }
 
 type ToolResult struct {
@@ -281,6 +284,7 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 func (e *Executor) executeMCPTool(ctx context.Context, req ToolRequest) (ToolResult, bool, error) {
 	e.mu.Lock()
 	manager := e.mcp
+	tracer := e.tracer
 	e.mu.Unlock()
 	if manager == nil {
 		return ToolResult{}, false, nil
@@ -288,14 +292,30 @@ func (e *Executor) executeMCPTool(ctx context.Context, req ToolRequest) (ToolRes
 	if _, ok := manager.ResolveTool(req.Name); !ok {
 		return ToolResult{}, false, nil
 	}
-	result, err := manager.CallTool(ctx, req.Name, req.Arguments)
+	var span genai.Span
+	if tracer != nil {
+		ctx, span = tracer.StartSpan(ctx, "tool.mcp", genai.OperationExecuteTool, genai.SystemGenAI)
+		span.SetAttributes(genai.ToolNameKV(req.Name))
+		defer span.End()
+	}
+	var result mcp.ToolCallResult
+	var err error
+	if req.MCPServer != "" || req.MCPInputSchemaSHA256 != "" || req.MCPServerConfigSHA256 != "" {
+		result, err = manager.CallToolBound(ctx, mcp.ToolBinding{
+			Name: req.Name, Server: req.MCPServer, InputSchemaSHA256: req.MCPInputSchemaSHA256, ServerConfigSHA256: req.MCPServerConfigSHA256,
+		}, req.Arguments)
+	} else {
+		result, err = manager.CallTool(ctx, req.Name, req.Arguments)
+	}
 	output := mcpToolOutput(result)
 	if err != nil {
+		genai.MarkSpanError(span)
 		return ToolResult{Name: req.Name, Output: output, Error: err.Error(), ExitCode: 1}, true, err
 	}
 	exitCode := 0
 	errorText := ""
 	if result.IsError {
+		genai.MarkSpanError(span)
 		exitCode = 1
 		errorText = output
 	}
@@ -312,10 +332,22 @@ func mcpToolOutput(result mcp.ToolCallResult) string {
 	return strings.Join(parts, "\n")
 }
 
-func (e *Executor) executeSkill(_ context.Context, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeSkill(ctx context.Context, args map[string]any) (result ToolResult, err error) {
 	e.mu.Lock()
 	manager := e.skills
+	tracer := e.tracer
 	e.mu.Unlock()
+	var span genai.Span
+	if tracer != nil {
+		ctx, span = tracer.StartSpan(ctx, "skill.load", genai.OperationExecuteTool, genai.SystemGenAI)
+		span.SetAttributes(genai.ToolNameKV("Skill"))
+		defer func() {
+			if err != nil || result.Error != "" || result.ExitCode != 0 {
+				genai.MarkSpanError(span)
+			}
+			span.End()
+		}()
+	}
 	if manager == nil {
 		return ToolResult{Name: "Skill", Error: "skills manager not available", ExitCode: 1}, nil
 	}

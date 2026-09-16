@@ -17,6 +17,9 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
+	"code-agent/internal/telemetry/genai"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -169,12 +172,25 @@ type WorkingDirToolExecutionAdapter interface {
 	ExecuteInWorkingDir(context.Context, identity.Actor, string, string, orchestrator.ToolCall) orchestrator.ToolResult
 }
 
+// sessionResourceReleaser is optional. Agent executors implement it to drop
+// per-session process state after a durable task reaches a terminal state;
+// ReleaseSession must be idempotent because terminal replay is also idempotent.
+type sessionResourceReleaser interface {
+	ReleaseSession(string) error
+}
+
 // ToolExecutionFunc adapts the Harness-owned tool executor without exposing
 // executor internals to the continuation module.
 type ToolExecutionFunc func(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult
 
 func (f ToolExecutionFunc) Execute(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
 	return f(ctx, actor, sessionID, call)
+}
+
+func (r *SessionRunner) releaseSessionResources(sessionID string) {
+	if releaser, ok := r.tools.(sessionResourceReleaser); ok {
+		_ = releaser.ReleaseSession(sessionID)
+	}
 }
 
 type SessionRunnerOptions struct {
@@ -187,15 +203,19 @@ type SessionRunnerOptions struct {
 	QueueSize        int
 	// WorkerCount controls bounded cross-session execution concurrency.
 	// Runs from the same session remain serialized by the durable run CAS.
-	WorkerCount      int
-	Now              func() time.Time
-	Permissions      *permission.Controller
-	AgentSpawn       orchestrator.AgentSpawnHandler
-	AgentLifecycle   orchestrator.AgentLifecycleHandler
-	Memory           SessionMemory
-	AgentWorkspace   func(context.Context, AgentWorkspaceRequest) (string, error)
+	WorkerCount    int
+	Now            func() time.Time
+	Permissions    *permission.Controller
+	AgentSpawn     orchestrator.AgentSpawnHandler
+	AgentLifecycle orchestrator.AgentLifecycleHandler
+	Memory         SessionMemory
+	AgentWorkspace func(context.Context, AgentWorkspaceRequest) (string, error)
+	// AgentToolBinding resolves dynamic tools before delegation and again before
+	// every child call. Static Agent Card tools remain local policy.
+	AgentToolBinding func(string) (AgentToolBinding, bool)
 	AgentApproval    func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
 	AgentWorkerCount int
+	Tracer           genai.Tracer
 }
 
 type SessionRunner struct {
@@ -211,6 +231,7 @@ type SessionRunner struct {
 	activeAgentRuns map[runKey]context.CancelFunc
 	queuedMu        sync.Mutex
 	queued          map[runKey]struct{}
+	queuedContexts  map[runKey]context.Context
 	lifecycleMu     sync.RWMutex
 	closed          bool
 	wg              sync.WaitGroup
@@ -482,7 +503,7 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	ctx, cancel := context.WithCancel(context.Background())
 	runner := &SessionRunner{
 		workbench: workbench, conversation: conversation, tools: tools, options: options,
-		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}),
+		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}), queuedContexts: make(map[runKey]context.Context),
 		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]context.CancelFunc),
 	}
 	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount)
@@ -537,7 +558,7 @@ func (r *SessionRunner) requestContinuation(ctx context.Context, command Continu
 		if (command.CheckpointHash != "" && existing.view.CheckpointHash != command.CheckpointHash) || existing.actor.ScopeKey() != actor.ScopeKey() {
 			return RunView{}, fmt.Errorf("%w: requestId is already bound to another continuation", ErrSessionStateConflict)
 		}
-		r.enqueue(runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
+		r.enqueue(ctx, runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
 		return existing.view, nil
 	}
 	current, err := reduceSessionView(events)
@@ -563,7 +584,7 @@ func (r *SessionRunner) requestContinuation(ctx context.Context, command Continu
 					if (command.CheckpointHash != "" && existing.view.CheckpointHash != command.CheckpointHash) || existing.actor.ScopeKey() != actor.ScopeKey() {
 						return RunView{}, fmt.Errorf("%w: requestId is already bound to another continuation", ErrSessionStateConflict)
 					}
-					r.enqueue(runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
+					r.enqueue(ctx, runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
 					return existing.view, nil
 				}
 			}
@@ -575,7 +596,7 @@ func (r *SessionRunner) requestContinuation(ctx context.Context, command Continu
 		SessionID: command.SessionID, RunID: runID, RequestID: command.RequestID,
 		Status: RunQueued, CheckpointHash: payload.CheckpointHash,
 	}
-	r.enqueue(runKey{sessionID: command.SessionID, runID: runID}, time.Time{})
+	r.enqueue(ctx, runKey{sessionID: command.SessionID, runID: runID}, time.Time{})
 	return view, nil
 }
 
@@ -627,7 +648,7 @@ func (r *SessionRunner) SubmitMessage(ctx context.Context, command SubmitMessage
 			if !messageExists || existing.actor.ScopeKey() != actor.ScopeKey() {
 				return RunView{}, fmt.Errorf("%w: requestId is already bound to another turn", ErrSessionStateConflict)
 			}
-			r.enqueue(runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
+			r.enqueue(ctx, runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
 			return existing.view, nil
 		}
 		if active, projectErr := hasActiveRun(events); projectErr != nil {
@@ -904,7 +925,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				r.lifecycleMu.RUnlock()
 				return ErrSessionRunnerClosed
 			}
-			r.enqueue(runKey{sessionID: sessionID, runID: runID}, wakeAt)
+			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID}, wakeAt)
 			r.lifecycleMu.RUnlock()
 		}
 	}
@@ -929,6 +950,7 @@ func (r *SessionRunner) Close() error {
 	if cancel == nil {
 		r.queuedMu.Lock()
 		clear(r.queued)
+		clear(r.queuedContexts)
 		for len(r.queue) > 0 {
 			<-r.queue
 		}
@@ -939,6 +961,7 @@ func (r *SessionRunner) Close() error {
 	r.wg.Wait()
 	r.queuedMu.Lock()
 	clear(r.queued)
+	clear(r.queuedContexts)
 	for {
 		select {
 		case <-r.queue:
@@ -951,13 +974,25 @@ func (r *SessionRunner) Close() error {
 
 func (r *SessionRunner) now() time.Time { return r.options.Now().UTC() }
 
-func (r *SessionRunner) enqueue(key runKey, wakeAt time.Time) {
+func (r *SessionRunner) enqueue(ctx context.Context, key runKey, wakeAt time.Time) {
+	traceCtx := genai.DetachedTraceContext(ctx, key.sessionID)
 	r.queuedMu.Lock()
+	if r.queued == nil {
+		r.queued = make(map[runKey]struct{})
+	}
+	if r.queuedContexts == nil {
+		r.queuedContexts = make(map[runKey]context.Context)
+	}
 	if _, exists := r.queued[key]; exists {
+		queuedCtx := r.queuedContexts[key]
+		if (queuedCtx == nil || !trace.SpanContextFromContext(queuedCtx).IsValid()) && trace.SpanContextFromContext(traceCtx).IsValid() {
+			r.queuedContexts[key] = traceCtx
+		}
 		r.queuedMu.Unlock()
 		return
 	}
 	r.queued[key] = struct{}{}
+	r.queuedContexts[key] = traceCtx
 	r.queuedMu.Unlock()
 	r.wg.Add(1)
 	go func() {
@@ -968,22 +1003,28 @@ func (r *SessionRunner) enqueue(key runKey, wakeAt time.Time) {
 			select {
 			case <-timer.C:
 			case <-r.ctx.Done():
-				r.releaseQueued(key)
+				_ = r.releaseQueued(key)
 				return
 			}
 		}
 		select {
 		case r.targetQueue(key) <- key:
 		case <-r.ctx.Done():
-			r.releaseQueued(key)
+			_ = r.releaseQueued(key)
 		}
 	}()
 }
 
-func (r *SessionRunner) releaseQueued(key runKey) {
+func (r *SessionRunner) releaseQueued(key runKey) context.Context {
 	r.queuedMu.Lock()
+	ctx := r.queuedContexts[key]
 	delete(r.queued, key)
+	delete(r.queuedContexts, key)
 	r.queuedMu.Unlock()
+	if ctx == nil {
+		return genai.DetachedTraceContext(nil, key.sessionID)
+	}
+	return ctx
 }
 
 func (r *SessionRunner) targetQueue(key runKey) chan runKey {
@@ -1000,36 +1041,55 @@ func (r *SessionRunner) workerLoop(queue chan runKey) {
 		case <-r.ctx.Done():
 			return
 		case key := <-queue:
-			r.releaseQueued(key)
-			r.execute(key)
+			traceCtx := r.releaseQueued(key)
+			r.execute(traceCtx, key)
 		}
 	}
 }
 
-func (r *SessionRunner) execute(key runKey) {
-	defer r.completeAgentTurn(context.Background(), key)
+func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
+	executionCtx, cancelExecution := context.WithCancel(traceCtx)
+	stopRunnerCancel := context.AfterFunc(r.ctx, cancelExecution)
+	defer stopRunnerCancel()
+	defer cancelExecution()
+	traceCtx = executionCtx
+	completionCtx := traceCtx
+	defer func() { r.completeAgentTurn(completionCtx, key) }()
 	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
 	defer stopWatching()
-	lease, waitUntil, err := r.claim(r.ctx, key)
+	lease, waitUntil, err := r.claim(traceCtx, key)
 	if err != nil {
 		return
 	}
 	if !waitUntil.IsZero() {
-		r.enqueue(key, waitUntil)
+		r.enqueue(traceCtx, key, waitUntil)
 		return
 	}
-	r.recordProgress(r.ctx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
-	if committed, committedErr := r.hasCommittedAssistant(r.ctx, key); committedErr != nil {
+	spanName := "agent.main"
+	agentName := "main"
+	if strings.HasPrefix(key.sessionID, "agent-") {
+		spanName, agentName = "agent.subagent", "subagent"
+	}
+	var agentSpan genai.Span
+	if r.options.Tracer != nil {
+		traceCtx, agentSpan = r.options.Tracer.StartSpan(traceCtx, spanName, genai.OperationInvokeAgent, genai.SystemGenAI)
+		completionCtx = traceCtx
+		agentSpan.SetAttributes(genai.AgentNameKV(agentName))
+		defer agentSpan.End()
+	}
+	r.recordProgress(traceCtx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
+	if committed, committedErr := r.hasCommittedAssistant(traceCtx, key); committedErr != nil {
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, committedErr)
 		return
 	} else if committed {
-		r.recordProgress(r.ctx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
-		if r.appendTerminal(context.Background(), key, lease, runCompletedEventType, "") == nil {
-			r.commitSessionMemory(context.Background(), key)
+		r.recordProgress(traceCtx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
+		if r.appendTerminal(traceCtx, key, lease, runCompletedEventType, "") == nil {
+			r.commitSessionMemory(traceCtx, key)
 		}
 		return
 	}
-	runCtx, cancel := context.WithCancel(r.ctx)
+	runCtx, cancel := context.WithCancel(traceCtx)
 	defer cancel()
 	if strings.HasPrefix(key.sessionID, "agent-") {
 		r.agentMu.Lock()
@@ -1045,6 +1105,7 @@ func (r *SessionRunner) execute(key runKey) {
 	if err != nil {
 		cancel()
 		<-heartbeatDone
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, err)
 		return
 	}
@@ -1056,6 +1117,7 @@ func (r *SessionRunner) execute(key runKey) {
 	if strings.TrimSpace(request.Input) == "" && len(request.History) == 0 {
 		cancel()
 		<-heartbeatDone
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, errors.New("continuation has no input or history"))
 		return
 	}
@@ -1111,6 +1173,7 @@ func (r *SessionRunner) execute(key runKey) {
 		},
 	}
 	result, runErr := r.conversation.RunConversation(runCtx, request, handlers)
+	postRunCtx := context.WithoutCancel(runCtx)
 	cancel()
 	<-heartbeatDone
 	select {
@@ -1131,7 +1194,7 @@ func (r *SessionRunner) execute(key runKey) {
 	// current lease as the fencing record and retry the same durable run only
 	// after it expires; Python can then resume its run-bound checkpoint.
 	if runErr != nil && orchestrator.IsConnectionError(runErr) {
-		if retryErr := r.requeueAfterLease(key, lease); retryErr == nil {
+		if retryErr := r.requeueAfterLease(postRunCtx, key, lease); retryErr == nil {
 			return
 		}
 	}
@@ -1139,31 +1202,35 @@ func (r *SessionRunner) execute(key runKey) {
 		if runErr == nil {
 			runErr = errors.New("orchestrator returned an unsuccessful terminal state")
 		}
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, runErr)
 		return
 	}
 	message := strings.TrimSpace(result.Message)
 	if message == "" {
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, errors.New("orchestrator returned an empty response"))
 		return
 	}
-	if err := r.appendLeasedSurface(context.Background(), key, lease, "assistant/message", messagePayload{
+	if err := r.appendLeasedSurface(postRunCtx, key, lease, "assistant/message", messagePayload{
 		Author: "assistant", Content: message, RunID: key.runID,
 	}); err != nil {
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, err)
 		return
 	}
-	if err := r.appendTerminal(context.Background(), key, lease, runCompletedEventType, ""); err != nil {
+	if err := r.appendTerminal(postRunCtx, key, lease, runCompletedEventType, ""); err != nil {
+		genai.MarkSpanError(agentSpan)
 		r.fail(key, lease, err)
 		return
 	}
-	r.recordCompletedProgress(context.Background(), key)
-	r.completeAgentTurn(context.Background(), key)
-	r.commitSessionMemory(context.Background(), key)
+	r.recordCompletedProgress(postRunCtx, key)
+	r.completeAgentTurn(postRunCtx, key)
+	r.commitSessionMemory(postRunCtx, key)
 }
 
-func (r *SessionRunner) requeueAfterLease(key runKey, lease runLeasePayload) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (r *SessionRunner) requeueAfterLease(parent context.Context, key runKey, lease runLeasePayload) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 	if err != nil {
@@ -1180,7 +1247,7 @@ func (r *SessionRunner) requeueAfterLease(key runKey, lease runLeasePayload) err
 	if projection.view.LeaseUntil != nil && projection.view.LeaseUntil.After(wakeAt) {
 		wakeAt = *projection.view.LeaseUntil
 	}
-	r.enqueue(key, wakeAt)
+	r.enqueue(ctx, key, wakeAt)
 	return nil
 }
 
@@ -1548,7 +1615,25 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool ledger unavailable", ExitCode: 1}, true
 	}
-	policyAllowed := agentAllowed(events, call.Name)
+	policyAllowed, delegatedBinding, policyErr := agentToolPolicy(events, call.Name)
+	if policyErr != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
+	}
+	bindingChanged := false
+	if delegatedBinding != nil {
+		current, ok := AgentToolBinding{}, false
+		if r.options.AgentToolBinding != nil {
+			current, ok = r.options.AgentToolBinding(call.Name)
+		}
+		if !ok || !validAgentToolBinding(current) || current != *delegatedBinding {
+			policyAllowed = false
+			bindingChanged = true
+		} else {
+			call.MCPServer = delegatedBinding.Server
+			call.MCPInputSchemaSHA256 = delegatedBinding.InputSchemaSHA256
+			call.MCPServerConfigSHA256 = delegatedBinding.ServerConfigSHA256
+		}
+	}
 	if task, _, taskErr := projectAgentTask(events); taskErr != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
 	} else if task != nil {
@@ -1634,7 +1719,11 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: approvalErr.Error(), ExitCode: 1}, unsafe
 	}
 	if approval == ApprovalDenied {
-		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool approval denied", ExitCode: 1}
+		reason := "tool approval denied"
+		if bindingChanged {
+			reason = "delegated tool binding changed"
+		}
+		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: reason, ExitCode: 1}
 		if err := r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID)); err != nil {
 			result.Error = "tool result persistence failed"
 			return result, true

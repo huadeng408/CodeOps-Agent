@@ -18,10 +18,11 @@ type SessionMemory interface {
 }
 
 type MemoryQuery struct {
-	Query     string `json:"query"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Detail    string `json:"detail,omitempty"`
+	Query           string `json:"query"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
+	Kind            string `json:"kind,omitempty"`
+	Detail          string `json:"detail,omitempty"`
+	SourceSessionID string `json:"-"`
 }
 
 type MemoryCommand struct {
@@ -103,6 +104,12 @@ func (r *SessionRunner) recallSessionMemory(ctx context.Context, events []Event,
 	if err != nil || view.Status == "deleted" {
 		result.Error = "session memory owner is unavailable"
 		return result
+	}
+	if task, _, taskErr := projectAgentTask(events); taskErr != nil {
+		result.Error = "session memory scope is unavailable"
+		return result
+	} else if task != nil {
+		args.SourceSessionID = view.ID
 	}
 	var output string
 	if advanced, ok := r.options.Memory.(AdvancedSessionMemory); ok {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"code-agent/internal/mcp"
 	"code-agent/internal/skills"
 )
 
@@ -43,5 +44,48 @@ func TestSkillToolReadsConfinedResourceWithProvenance(t *testing.T) {
 	result, _ = executor.Execute(context.Background(), ToolRequest{Name: "Skill", Arguments: map[string]any{"name": "workflow", "resource": "guide.txt"}})
 	if result.ExitCode == 0 || !strings.Contains(result.Error, "not model-invocable") {
 		t.Fatalf("resource bypassed invocation policy: %+v", result)
+	}
+}
+
+func TestSkillAndMCPSpansDoNotRecordArgumentsOrResults(t *testing.T) {
+	executor := NewExecutor(t.TempDir())
+	t.Cleanup(func() { _ = executor.Close() })
+	tracer := &recordingTracer{}
+	executor.SetTracer(tracer)
+
+	skillManager := skills.NewManager()
+	skillManager.Register(skills.Skill{Name: "trace-safe", Description: "Trace test", Prompt: "SKILL_RESULT_SECRET_SENTINEL"})
+	executor.SetSkillsManager(skillManager)
+	result, err := executor.Execute(context.Background(), ToolRequest{Name: "Skill", Arguments: map[string]any{
+		"name": "trace-safe", "args": "SKILL_ARGUMENT_SECRET_SENTINEL",
+	}})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("skill result = %+v, err=%v", result, err)
+	}
+
+	mcpManager := mcp.NewManager()
+	mcpManager.RegisterTool(mcp.ToolDefinition{Name: "fixture__inspect", Server: "offline"})
+	executor.SetMCPManager(mcpManager)
+	_, _ = executor.Execute(context.Background(), ToolRequest{Name: "fixture__inspect", Arguments: map[string]any{
+		"token": "MCP_ARGUMENT_SECRET_SENTINEL",
+	}})
+
+	if len(tracer.spans) != 2 || tracer.spans[0].name != "skill.load" || tracer.spans[1].name != "tool.mcp" {
+		t.Fatalf("spans = %+v", tracer.spans)
+	}
+	for _, span := range tracer.spans {
+		if !span.ended {
+			t.Fatalf("span %s was not ended", span.name)
+		}
+		for _, attr := range span.attrs {
+			if strings.Contains(attr.Value.Emit(), "SECRET_SENTINEL") {
+				t.Fatalf("span %s leaked payload in %s", span.name, attr.Key)
+			}
+		}
+		for _, event := range span.events {
+			if strings.Contains(event, "SECRET_SENTINEL") {
+				t.Fatalf("span %s leaked payload in event", span.name)
+			}
+		}
 	}
 }

@@ -11,10 +11,12 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/config"
 	"code-agent/internal/identity"
+	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"code-agent/internal/skills"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -82,9 +84,12 @@ func (a *App) handleAgentsCommand(ctx context.Context, fields []string) {
 }
 
 type cliAgentTools struct {
-	cfg   config.Config
-	mu    sync.Mutex
-	items map[string]*tools.Executor
+	cfg    config.Config
+	mu     sync.Mutex
+	items  map[string]*tools.Executor
+	tracer genai.Tracer
+	mcp    *mcp.Manager
+	mcps   map[string]*mcp.Manager
 }
 
 func (a *cliAgentTools) Execute(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
@@ -96,11 +101,27 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 	executor := a.items[sessionID]
 	if executor == nil {
 		executor = tools.NewExecutor(dir)
-		manager := skills.NewManager()
+		executor.SetTracer(a.tracer)
+		mcpManager := a.mcp
+		if mcpManager != nil {
+			var err error
+			mcpManager, err = mcpManager.CloneForWorkingDir(ctx, dir)
+			if err != nil {
+				a.mu.Unlock()
+				_ = executor.Close()
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "child MCP manager unavailable", ExitCode: 1}
+			}
+			if a.mcps == nil {
+				a.mcps = make(map[string]*mcp.Manager)
+			}
+			a.mcps[sessionID] = mcpManager
+		}
+		executor.SetMCPManager(mcpManager)
+		skillManager := skills.NewManager()
 		user, _ := os.UserHomeDir()
-		_ = manager.Discover(skills.DiscoveryOptions{ProjectDSHDir: filepath.Join(dir, ".dsh", "skills"), ProjectAgentsDir: filepath.Join(dir, ".agents", "skills"), ProjectDir: filepath.Join(dir, ".agent", "skills"),
+		_ = skillManager.Discover(skills.DiscoveryOptions{ProjectDSHDir: filepath.Join(dir, ".dsh", "skills"), ProjectAgentsDir: filepath.Join(dir, ".agents", "skills"), ProjectDir: filepath.Join(dir, ".agent", "skills"),
 			Directories: a.cfg.SkillDirectories, UserDSHDir: filepath.Join(user, ".dsh", "skills"), UserAgentsDir: filepath.Join(user, ".agents", "skills"), GlobalDir: filepath.Join(user, ".agent", "skills")})
-		executor.SetSkillsManager(manager)
+		executor.SetSkillsManager(skillManager)
 		if a.cfg.Sandbox.Enabled {
 			executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{Backend: a.cfg.Sandbox.Backend, WSLDistro: a.cfg.Sandbox.WSLDistro, TrustRoot: dir, Image: a.cfg.Sandbox.Image, AllowWorkspaceWrite: a.cfg.Sandbox.AllowWorkspaceWrite,
 				MemoryLimit: a.cfg.Sandbox.MemoryLimit, CPULimit: a.cfg.Sandbox.CPULimit, PidsLimit: a.cfg.Sandbox.PidsLimit, TmpfsSize: a.cfg.Sandbox.TmpfsSize}))
@@ -115,7 +136,10 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 	if json.Unmarshal([]byte(call.ParametersJSON), &arguments) != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid child tool parameters", ExitCode: 1}
 	}
-	result, err := executor.Execute(ctx, tools.ToolRequest{Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID})
+	result, err := executor.Execute(ctx, tools.ToolRequest{
+		Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
+		MCPServer: call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
+	})
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
 	for _, change := range result.Changes {
 		out.Changes = append(out.Changes, orchestrator.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
@@ -129,6 +153,25 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 	return out
 }
 
+func (a *cliAgentTools) ReleaseSession(sessionID string) error {
+	a.mu.Lock()
+	executor := a.items[sessionID]
+	delete(a.items, sessionID)
+	manager := a.mcps[sessionID]
+	delete(a.mcps, sessionID)
+	a.mu.Unlock()
+	var first error
+	if executor != nil {
+		first = executor.Close()
+	}
+	if manager != nil {
+		if err := manager.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 func (a *cliAgentTools) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -138,6 +181,12 @@ func (a *cliAgentTools) Close() error {
 			first = err
 		}
 	}
+	for _, manager := range a.mcps {
+		if err := manager.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
 	a.items = make(map[string]*tools.Executor)
+	a.mcps = make(map[string]*mcp.Manager)
 	return first
 }

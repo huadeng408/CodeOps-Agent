@@ -16,6 +16,7 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/session"
+	"code-agent/internal/telemetry/genai"
 )
 
 type MemoryReflector func(context.Context, *pb.MemoryReflectionRequest) (*pb.MemoryReflectionResponse, error)
@@ -180,9 +181,19 @@ func actorFromMemoryEvents(events []session.Event) (identity.Actor, error) {
 	return identity.Actor{}, session.ErrSessionOwnerRequired
 }
 
-func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.LedgerSnapshot, owner uint, commit trajectoryCommit) error {
+func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.LedgerSnapshot, owner uint, commit trajectoryCommit) (err error) {
 	if m.reflector == nil {
 		return nil
+	}
+	ctx = genai.WithEvalInstance(ctx, commit.Trajectory.SessionID)
+	ctx, span := m.startSpan(ctx, "memory.reflect", genai.OperationInvokeAgent)
+	if span != nil {
+		defer func() {
+			if err != nil {
+				genai.MarkSpanError(span)
+			}
+			span.End()
+		}()
 	}
 	sourceID := commit.Trajectory.SessionID + ":" + commit.Trajectory.SourceChecksum
 	_, _, applied, err := m.catalog(ctx, owner)
@@ -380,7 +391,7 @@ func (m *LedgerMemory) sourceSessions(ctx context.Context, owner uint) ([]sessio
 	return views, nil
 }
 
-func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail string) ([]Memory, error) {
+func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail, sourceSessionID string) ([]Memory, error) {
 	if detail == "" {
 		detail = "overview"
 	}
@@ -395,6 +406,15 @@ func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail s
 	for _, entry := range entries {
 		if entry.Deleted || entry.ExpiresAt != nil && !entry.ExpiresAt.After(time.Now()) {
 			continue
+		}
+		if sourceSessionID != "" {
+			scoped := len(entry.Origins) > 0
+			for _, origin := range entry.Origins {
+				scoped = scoped && origin.SessionID == sourceSessionID
+			}
+			if !scoped {
+				continue
+			}
 		}
 		validOrigins := make([]memoryOrigin, 0, len(entry.Origins))
 		for _, origin := range entry.Origins[len(entry.Origins)-1:] {
@@ -462,7 +482,7 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		return "", err
 	}
 	if command.Action == "list" {
-		items, err := m.experienceItems(ctx, owner, "abstract")
+		items, err := m.experienceItems(ctx, owner, "abstract", "")
 		if err != nil {
 			return "", err
 		}
@@ -477,7 +497,7 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if !ok || item.Deleted || item.ExpiresAt != nil && !item.ExpiresAt.After(time.Now()) {
 			return "", errors.New("memory not found")
 		}
-		valid, err := m.experienceItems(ctx, owner, "full")
+		valid, err := m.experienceItems(ctx, owner, "full", "")
 		if err != nil {
 			return "", err
 		}

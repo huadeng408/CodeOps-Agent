@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -37,6 +38,40 @@ MODEL_FAST_DEFAULT: str = "gpt-5.5-openai-compact"
 
 _otel_initialised = False
 _otel_shutdown = lambda: None
+_EVAL_JOIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,95}")
+
+
+class _EvalJoinSpanProcessor:
+    """Stamp only admitted evaluation baggage onto production spans."""
+
+    def on_start(self, span, parent_context=None) -> None:
+        try:
+            from opentelemetry import baggage
+
+            existing = dict(getattr(span, "attributes", {}) or {})
+            for key in ("eval.run_id", "eval.instance_id"):
+                value = baggage.get_baggage(key, context=parent_context)
+                if (
+                    key not in existing
+                    and value is not None
+                    and _EVAL_JOIN_ID.fullmatch(str(value))
+                ):
+                    span.set_attribute(key, str(value))
+        except Exception:
+            return None
+        return None
+
+    def on_end(self, span) -> None:
+        return None
+
+    def _on_ending(self, span) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
 
 
 def get_model_fast() -> str:
@@ -93,6 +128,7 @@ def configure_otel():
         exporter = OTLPSpanExporter(endpoint=endpoint)
         processor = BatchSpanProcessor(exporter)
         provider = TracerProvider(resource=resource)
+        provider.add_span_processor(_EvalJoinSpanProcessor())
         provider.add_span_processor(processor)
         trace.set_tracer_provider(provider)
     except Exception as exc:

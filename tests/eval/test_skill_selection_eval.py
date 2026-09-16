@@ -381,6 +381,31 @@ def test_skill_selection_prompt_exposes_catalog_as_structured_metadata(
     assert "expected_skill" not in prompt
 
 
+def test_skill_selection_defaults_use_formal_output_budget() -> None:
+    config = SkillSelectionEvalConfig(
+        run_id="default-budget",
+        artifact_root=Path("eval_results"),
+        manifest_path=Path(".agent/skills.json"),
+        dataset_path=Path("data/eval/skills/skill-selection-v1.json"),
+        model="deepseek-v4-pro",
+    )
+    args = skill_selection_module._parser().parse_args(
+        [
+            "--manifest",
+            ".agent/skills.json",
+            "--dataset",
+            "data/eval/skills/skill-selection-v1.json",
+            "--run-id",
+            "default-budget",
+            "--model",
+            "deepseek-v4-pro",
+        ]
+    )
+
+    assert config.max_output_tokens == 512
+    assert args.max_output_tokens == 512
+
+
 def test_execution_matrix_accepts_source_bound_40_skill_catalog(tmp_path: Path) -> None:
     manifest_path, _ = _write_formal_inputs(tmp_path)
     repository_root = Path(__file__).resolve().parents[2]
@@ -615,12 +640,15 @@ async def test_provider_tool_selection_writes_gold_free_smoke_receipt(
     )
     try:
         receipt = await run_skill_selection_eval(
-            _config(
-                tmp_path,
-                manifest_path,
-                dataset_path,
-                run_id="skill-selection-smoke",
-                required_case_count=4,
+            replace(
+                _config(
+                    tmp_path,
+                    manifest_path,
+                    dataset_path,
+                    run_id="skill-selection-smoke",
+                    required_case_count=4,
+                ),
+                max_output_tokens=512,
             ),
             client,
         )
@@ -648,6 +676,7 @@ async def test_provider_tool_selection_writes_gold_free_smoke_receipt(
         user_message = request["messages"][-1]
         assert set(user_message) == {"role", "content"}
         assert "expected_skill" not in user_message["content"]
+        assert request["max_tokens"] == 512
         assert request["tool_choice"] == {
             "type": "function",
             "function": {"name": "Skill"},

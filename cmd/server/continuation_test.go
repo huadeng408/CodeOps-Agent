@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"code-agent/internal/identity"
+	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/tools"
 )
@@ -137,5 +138,57 @@ func TestConfigureContinuationSkillsKeepsBuiltinsWhenOptionalDirectoryMissing(t 
 	})
 	if err != nil || result.Error != "" || result.Output == "" {
 		t.Fatalf("built-in Skill should remain available: err=%v result=%+v", err, result)
+	}
+}
+
+func TestContinuationChildDoesNotReuseHarnessMCPProcess(t *testing.T) {
+	root := t.TempDir()
+	mcpManager := mcp.NewManager()
+	mcpManager.RegisterTool(mcp.ToolDefinition{Name: "e2e_echo", Server: "fixture"})
+	manager := newContinuationToolExecutors(root)
+	manager.SetMCPManager(mcpManager)
+	defer manager.Close()
+
+	result := manager.ExecuteInWorkingDir(context.Background(), identity.Actor{}, "agent-child", root, orchestrator.ToolCall{
+		ID: "mcp-call", Name: "e2e_echo", ParametersJSON: `{"text":"hello"}`,
+	})
+	if !strings.Contains(result.Error, "unknown tool") {
+		t.Fatalf("child executor reused the parent MCP catalog: %+v", result)
+	}
+}
+
+func TestContinuationToolExecutorsReleaseOneSession(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"child", "child-other"} {
+		path := filepath.Join(root, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "README.md"), []byte(dir), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager := newContinuationToolExecutors(root)
+	defer manager.Close()
+	for _, tc := range []struct{ sessionID, dir string }{{"agent-child", "child"}, {"agent-child-other", "child-other"}} {
+		result := manager.ExecuteInWorkingDir(context.Background(), identity.Actor{}, tc.sessionID, filepath.Join(root, tc.dir), orchestrator.ToolCall{
+			ID: tc.sessionID, Name: "Read", ParametersJSON: `{"path":"README.md"}`,
+		})
+		if result.Error != "" {
+			t.Fatalf("create executor for %s: %s", tc.sessionID, result.Error)
+		}
+	}
+	if err := manager.ReleaseSession("agent-child"); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.items) != 1 {
+		t.Fatalf("executor count after release = %d, want 1", len(manager.items))
+	}
+	for key := range manager.items {
+		if !strings.HasPrefix(key, "agent-child-other\x00") {
+			t.Fatalf("wrong executor survived release: %q", key)
+		}
 	}
 }

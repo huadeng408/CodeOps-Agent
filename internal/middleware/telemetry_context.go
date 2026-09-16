@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TraceContextMiddleware restores the remote W3C parent for internal HTTP
@@ -16,13 +17,16 @@ func TraceContextMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		carrier := propagation.HeaderCarrier(c.Request.Header)
 		ctx := propagation.TraceContext{}.Extract(c.Request.Context(), carrier)
-		extracted := propagation.Baggage{}.Extract(ctx, carrier)
 
 		members := make([]baggage.Member, 0, 2)
-		for _, key := range []string{genai.AttrEvalRunID, genai.AttrEvalInstanceID} {
-			member := baggage.FromContext(extracted).Member(key)
-			if member.Value() != "" {
-				members = append(members, member)
+		spanContext := trace.SpanContextFromContext(ctx)
+		if spanContext.IsValid() && spanContext.IsRemote() {
+			extracted := propagation.Baggage{}.Extract(ctx, carrier)
+			for _, key := range []string{genai.AttrEvalRunID, genai.AttrEvalInstanceID} {
+				member := baggage.FromContext(extracted).Member(key)
+				if genai.ValidEvalJoinID(member.Value()) {
+					members = append(members, member)
+				}
 			}
 		}
 		if bag, err := baggage.New(members...); err == nil {

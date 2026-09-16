@@ -107,7 +107,7 @@ func (a *CLIAdapter) List() []Memory {
 	if err != nil {
 		return nil
 	}
-	items, err := a.module.experienceItems(context.Background(), owner, "full")
+	items, err := a.module.experienceItems(context.Background(), owner, "full", "")
 	if err != nil {
 		return nil
 	}

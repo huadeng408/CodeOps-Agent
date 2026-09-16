@@ -15,6 +15,7 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -29,10 +30,20 @@ type AgentWorkspaceRequest struct {
 }
 
 type agentTaskCreated struct {
-	Task         json.RawMessage `json:"task"`
-	Signature    string          `json:"signature"`
-	AllowedTools []string        `json:"allowed_tools"`
-	Actor        identity.Actor  `json:"actor"`
+	Task                 json.RawMessage    `json:"task"`
+	Signature            string             `json:"signature"`
+	AllowedTools         []string           `json:"allowed_tools"`
+	ExternalToolBindings []AgentToolBinding `json:"external_tool_bindings,omitempty"`
+	Actor                identity.Actor     `json:"actor"`
+}
+
+// AgentToolBinding pins a dynamic MCP tool to the server and canonical schema
+// admitted by the Harness when the task was created.
+type AgentToolBinding struct {
+	Name               string `json:"name"`
+	Server             string `json:"server"`
+	InputSchemaSHA256  string `json:"input_schema_sha256"`
+	ServerConfigSHA256 string `json:"server_config_sha256"`
 }
 
 type agentTaskLink struct {
@@ -75,6 +86,16 @@ func agentCard(kind string) (*pb.AgentCard, []string, error) {
 
 func agentTool(name string) bool {
 	return name == "SpawnAgent" || name == "AgentTask" || name == "PublishArtifact"
+}
+
+func staticAgentTool(name string) bool {
+	switch name {
+	case "Read", "Glob", "Grep", "Skill", "RecallMemory", "TodoWrite", "PlanWrite",
+		"PublishArtifact", "AskUser", "AgentTask", "Edit", "Write", "Bash", "Git":
+		return true
+	default:
+		return false
+	}
 }
 func taskTerminal(status string) bool {
 	return status == "completed" || status == "failed" || status == "canceled"
@@ -204,14 +225,30 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	} else if !errors.Is(err, ErrSessionNotFound) {
 		return "", err
 	}
+	externalBindings := []AgentToolBinding{}
 	if len(args.AllowedTools) > 0 {
 		subset := []string{}
+		seen := make(map[string]bool)
 		for _, name := range args.AllowedTools {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
 			found := false
 			for _, permitted := range allowed {
 				if name == permitted {
 					found = true
 					break
+				}
+			}
+			if !found && args.Kind != "general" && args.Kind != "background" {
+				return "", ErrInvalidSessionInput
+			}
+			if !found && r.options.AgentToolBinding != nil {
+				binding, ok := r.options.AgentToolBinding(name)
+				if ok && binding.Name == name && validAgentToolBinding(binding) {
+					found = true
+					externalBindings = append(externalBindings, binding)
 				}
 			}
 			if !found {
@@ -220,7 +257,12 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 			subset = append(subset, name)
 		}
 		// Lifecycle communication is mandatory even with a narrower tool set.
-		allowed = append(subset, "PublishArtifact", "AskUser", "AgentTask")
+		allowed = subset
+		for _, name := range []string{"PublishArtifact", "AskUser", "AgentTask"} {
+			if !seen[name] {
+				allowed = append(allowed, name)
+			}
+		}
 	}
 	workingDir := parentDir
 	if args.Kind == "general" || args.Kind == "background" {
@@ -290,7 +332,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 			return "", err
 		}
 	}
-	if err := r.appendAgentFact(ctx, taskID, "agent/task-created", agentTaskCreated{Task: taskJSON, Signature: signature, AllowedTools: allowed, Actor: childActor}, func(events []Event) bool {
+	if err := r.appendAgentFact(ctx, taskID, "agent/task-created", agentTaskCreated{Task: taskJSON, Signature: signature, AllowedTools: allowed, ExternalToolBindings: externalBindings, Actor: childActor}, func(events []Event) bool {
 		for _, event := range events {
 			if event.Type == "agent/task-created" {
 				return true
@@ -398,6 +440,9 @@ func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {
 			}
 			task = &pb.AgentTask{}
 			if protojson.Unmarshal(created.Task, task) != nil || task.SchemaVersion != "agent.v2" || task.ChildSessionId != event.SessionID || task.Id != event.SessionID || len(task.Messages) != 1 || created.Actor.Validate() != nil || created.Actor.SessionID != event.SessionID {
+				return nil, created, ErrEventIntegrity
+			}
+			if !validAgentToolBindings(created) {
 				return nil, created, ErrEventIntegrity
 			}
 		case "agent/task-message", "agent/task-input-required", "agent/task-artifact", "agent/task-canceled":
@@ -822,7 +867,19 @@ func (r *SessionRunner) askAgentInput(ctx context.Context, actor identity.Actor,
 	return result
 }
 
-func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (string, error) {
+func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (output string, err error) {
+	ctx = genai.WithEvalInstance(ctx, actor.SessionID)
+	var span genai.Span
+	if r.options.Tracer != nil {
+		ctx, span = r.options.Tracer.StartSpan(ctx, "artifact.publish", genai.OperationExecuteTool, genai.SystemGenAI)
+		span.SetAttributes(genai.ToolNameKV("PublishArtifact"))
+		defer func() {
+			if err != nil {
+				genai.MarkSpanError(span)
+			}
+			span.End()
+		}()
+	}
 	task, _, err := r.readAgentTask(ctx, owner, actor.SessionID, actor.SessionID)
 	if err != nil || task.Status == "canceled" {
 		return "", ErrSessionNotFound
@@ -1020,7 +1077,11 @@ func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask,
 	if err := r.appendAgentFact(ctx, task.ChildSessionId, "agent/task-canceled", agentTaskMutation{RequestID: requestID}, agentMutationExists("agent/task-canceled", requestID)); err != nil {
 		return err
 	}
-	return r.fenceAgentCancellation(ctx, task)
+	if err := r.fenceAgentCancellation(ctx, task); err != nil {
+		return err
+	}
+	r.releaseSessionResources(task.ChildSessionId)
+	return nil
 }
 
 func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
@@ -1105,7 +1166,13 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 		return
 	}
 	task, created, err := projectAgentTask(snapshot.Events)
-	if err != nil || task == nil || task.Status == "canceled" {
+	if err != nil || task == nil {
+		return
+	}
+	if taskTerminal(task.Status) {
+		defer r.releaseSessionResources(key.sessionID)
+	}
+	if task.Status == "canceled" {
 		return
 	}
 	if task.Status == "completed" {
@@ -1154,18 +1221,61 @@ func (r *SessionRunner) agentRequest(events []Event, request *orchestrator.Conve
 	return nil
 }
 
-func agentAllowed(events []Event, name string) bool {
+func agentToolPolicy(events []Event, name string) (bool, *AgentToolBinding, error) {
 	task, created, err := projectAgentTask(events)
-	if err != nil || task != nil && task.Status == "canceled" {
-		return false
+	if err != nil {
+		return false, nil, err
+	}
+	if task != nil && task.Status == "canceled" {
+		return false, nil, nil
 	}
 	if task == nil {
-		return true
+		return true, nil, nil
 	}
 	for _, allowed := range created.AllowedTools {
 		if name == allowed {
-			return true
+			if staticAgentTool(name) {
+				return true, nil, nil
+			}
+			if task.Card == nil || task.Card.Id != "general" && task.Card.Id != "background" {
+				return false, nil, nil
+			}
+			for _, binding := range created.ExternalToolBindings {
+				if binding.Name == name {
+					copy := binding
+					return true, &copy, nil
+				}
+			}
+			// Legacy dynamic delegations without an immutable binding fail closed.
+			return false, nil, nil
 		}
 	}
-	return false
+	return false, nil, nil
+}
+
+func validAgentToolBindings(created agentTaskCreated) bool {
+	allowed := make(map[string]bool, len(created.AllowedTools))
+	for _, name := range created.AllowedTools {
+		if strings.TrimSpace(name) == "" || allowed[name] {
+			return false
+		}
+		allowed[name] = true
+	}
+	seen := make(map[string]bool, len(created.ExternalToolBindings))
+	for _, binding := range created.ExternalToolBindings {
+		if !validAgentToolBinding(binding) || !allowed[binding.Name] || staticAgentTool(binding.Name) || seen[binding.Name] {
+			return false
+		}
+		seen[binding.Name] = true
+	}
+	return true
+}
+
+func validAgentToolBinding(binding AgentToolBinding) bool {
+	if strings.TrimSpace(binding.Name) != binding.Name || binding.Name == "" || strings.TrimSpace(binding.Server) != binding.Server || binding.Server == "" || len(binding.InputSchemaSHA256) != 64 || len(binding.ServerConfigSHA256) != 64 {
+		return false
+	}
+	_, schemaErr := hex.DecodeString(binding.InputSchemaSHA256)
+	_, configErr := hex.DecodeString(binding.ServerConfigSHA256)
+	return schemaErr == nil && configErr == nil && strings.ToLower(binding.InputSchemaSHA256) == binding.InputSchemaSHA256 && strings.ToLower(binding.ServerConfigSHA256) == binding.ServerConfigSHA256
 }

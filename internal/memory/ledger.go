@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"code-agent/internal/session"
+	"code-agent/internal/telemetry/genai"
 )
 
 const trajectoryCommittedEvent = "memory/trajectory-committed"
@@ -26,6 +28,8 @@ type LedgerMemory struct {
 	ledger    session.EventLog
 	workbench *session.Workbench
 	reflector MemoryReflector
+	tracerMu  sync.RWMutex
+	tracer    genai.Tracer
 }
 
 var _ session.SessionMemory = (*LedgerMemory)(nil)
@@ -36,6 +40,29 @@ func NewLedgerMemory(ledger session.EventLog, reflectors ...MemoryReflector) *Le
 		m.reflector = reflectors[0]
 	}
 	return m
+}
+
+// SetTracer wires lifecycle spans without changing Memory's ledger ownership.
+func (m *LedgerMemory) SetTracer(tracer genai.Tracer) {
+	if m == nil {
+		return
+	}
+	m.tracerMu.Lock()
+	m.tracer = tracer
+	m.tracerMu.Unlock()
+}
+
+func (m *LedgerMemory) startSpan(ctx context.Context, name, operation string) (context.Context, genai.Span) {
+	if m == nil {
+		return ctx, nil
+	}
+	m.tracerMu.RLock()
+	tracer := m.tracer
+	m.tracerMu.RUnlock()
+	if tracer == nil {
+		return ctx, nil
+	}
+	return tracer.StartSpan(ctx, name, operation, genai.SystemGenAI)
 }
 
 func (m *LedgerMemory) Commit(ctx context.Context, sessionID string) error {
@@ -88,7 +115,19 @@ func (m *LedgerMemory) Recall(ctx context.Context, ownerID uint, query string, m
 	return m.RecallWithOptions(ctx, ownerID, session.MemoryQuery{Query: query, MaxTokens: maxTokens})
 }
 
-func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, options session.MemoryQuery) (string, error) {
+func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, options session.MemoryQuery) (output string, err error) {
+	if options.SourceSessionID != "" {
+		ctx = genai.WithEvalInstance(ctx, options.SourceSessionID)
+	}
+	ctx, span := m.startSpan(ctx, "memory.recall", genai.OperationRetrieve)
+	if span != nil {
+		defer func() {
+			if err != nil {
+				genai.MarkSpanError(span)
+			}
+			span.End()
+		}()
+	}
 	query, maxTokens := options.Query, options.MaxTokens
 	if m == nil || m.ledger == nil {
 		return "", errors.New("session ledger is required")
@@ -108,6 +147,9 @@ func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, opti
 	}
 	items := make([]Memory, 0, len(views))
 	for _, view := range views {
+		if options.SourceSessionID != "" && view.ID != options.SourceSessionID {
+			continue
+		}
 		snapshot, err := session.ReadVerifiedSnapshot(ctx, m.ledger, view.ID)
 		if err != nil {
 			return "", err
@@ -132,7 +174,7 @@ func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, opti
 		item.Checksum = checksumMemory(item)
 		items = append(items, item)
 	}
-	experiences, err := m.experienceItems(ctx, ownerID, options.Detail)
+	experiences, err := m.experienceItems(ctx, ownerID, options.Detail, options.SourceSessionID)
 	if err != nil {
 		return "", err
 	}

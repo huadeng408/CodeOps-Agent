@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/permission"
 )
@@ -247,6 +248,31 @@ func (m *Manager) Current() Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return cloneSession(m.current)
+}
+
+// ContextEnvelope returns a verified, metadata-only projection of the current
+// Session Ledger and workspace for a Harness-managed model request.
+func (m *Manager) ContextEnvelope(ctx context.Context) (*codeagentpb.ContextEnvelope, error) {
+	m.mu.Lock()
+	current := cloneSession(m.current)
+	store := m.store
+	m.mu.Unlock()
+	if current.ID == "" {
+		return nil, errors.New("context envelope requires a current session")
+	}
+	ledgerStore, ok := store.(interface{ Ledger() (EventLog, error) })
+	if !ok {
+		return nil, errors.New("context envelope requires a Session Ledger")
+	}
+	ledger, err := ledgerStore.Ledger()
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := ReadVerifiedSnapshot(ctx, ledger, current.ID)
+	if err != nil {
+		return nil, err
+	}
+	return buildContextEnvelope(current.WorkingDir, snapshot.Events)
 }
 
 func (m *Manager) Append(role Role, content string) Session {

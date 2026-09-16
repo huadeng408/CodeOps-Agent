@@ -6,6 +6,10 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestOperationNameConstants(t *testing.T) {
@@ -89,6 +93,109 @@ func TestEvalJoinAttributesReadsOnlyPresentBaggageKeys(t *testing.T) {
 	}
 	if got := values[attribute.Key(AttrEvalInstanceID)].AsString(); got != "instance-1" {
 		t.Fatalf("instance ID = %q, want instance-1", got)
+	}
+}
+
+func TestEvalJoinRejectsUnsafeIdentifiers(t *testing.T) {
+	ctx := WithEvalJoinBaggage(context.Background(), "secret value with spaces", "instance,inject=1")
+	if attrs := EvalJoinAttributes(ctx); len(attrs) != 0 {
+		t.Fatalf("unsafe join attributes = %+v, want none", attrs)
+	}
+	if ValidEvalJoinID("") || ValidEvalJoinID(" leading") || ValidEvalJoinID("run,other=value") || ValidEvalJoinID(string(make([]byte, 97))) {
+		t.Fatal("unsafe evaluation join ID was accepted")
+	}
+	if !ValidEvalJoinID("run-1.safe:case_2") {
+		t.Fatal("safe evaluation join ID was rejected")
+	}
+}
+
+func TestDetachedTraceContextKeepsOnlyParentAndAdmittedBaggage(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	tracer := provider.Tracer("test")
+
+	parentCtx, parent := tracer.Start(context.Background(), "parent")
+	untrusted, err := baggage.NewMember("untrusted", "must-not-cross")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bag, err := baggage.New(untrusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type privateKey struct{}
+	parentCtx = context.WithValue(baggage.ContextWithBaggage(parentCtx, bag), privateKey{}, "private-value")
+	parentCtx = WithEvalJoinBaggage(parentCtx, "run-1", "caller-instance")
+
+	detached := DetachedTraceContext(parentCtx, "child-session")
+	if got := detached.Value(privateKey{}); got != nil {
+		t.Fatalf("private context value crossed queue: %v", got)
+	}
+	if got := baggage.FromContext(detached).Member("untrusted").Value(); got != "" {
+		t.Fatalf("untrusted baggage crossed queue: %q", got)
+	}
+	if got := baggage.FromContext(detached).Member(AttrEvalRunID).Value(); got != "run-1" {
+		t.Fatalf("run ID = %q, want run-1", got)
+	}
+	if got := baggage.FromContext(detached).Member(AttrEvalInstanceID).Value(); got != "child-session" {
+		t.Fatalf("instance ID = %q, want child-session", got)
+	}
+
+	_, child := tracer.Start(detached, "child")
+	child.End()
+	parent.End()
+	var childSpan tracetest.SpanStub
+	for _, span := range recorder.Ended() {
+		if span.Name() == "child" {
+			childSpan = tracetest.SpanStubFromReadOnlySpan(span)
+		}
+	}
+	if !childSpan.SpanContext.IsValid() || childSpan.Parent.SpanID() != trace.SpanContextFromContext(parentCtx).SpanID() {
+		t.Fatalf("child parent = %s, want %s", childSpan.Parent.SpanID(), trace.SpanContextFromContext(parentCtx).SpanID())
+	}
+}
+
+func TestGenAITelemetryStartSpanAddsEvalJoinAttributes(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	telemetry := &GenAITelemetry{provider: provider, tracer: provider.Tracer("test")}
+	ctx := WithEvalJoinBaggage(context.Background(), "run-1", "instance-1")
+	_, span := telemetry.StartSpan(ctx, "agent.main", OperationInvokeAgent, SystemGenAI)
+	span.End()
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(ended))
+	}
+	attrs := map[string]string{}
+	for _, attr := range ended[0].Attributes() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+	if attrs[AttrEvalRunID] != "run-1" || attrs[AttrEvalInstanceID] != "instance-1" {
+		t.Fatalf("eval join attributes = %+v", attrs)
+	}
+}
+
+func TestMarkSpanErrorSetsContentFreeOTelStatus(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	telemetry := &GenAITelemetry{provider: provider, tracer: provider.Tracer("test")}
+	_, span := telemetry.StartSpan(context.Background(), "tool.mcp", OperationExecuteTool, SystemGenAI)
+
+	MarkSpanError(span)
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(ended))
+	}
+	if status := ended[0].Status(); status.Code != codes.Error || status.Description != "" {
+		t.Fatalf("status = %+v, want content-free error", status)
+	}
+	if len(ended[0].Events()) != 0 {
+		t.Fatalf("error status unexpectedly recorded an event: %+v", ended[0].Events())
 	}
 }
 

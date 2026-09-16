@@ -2679,6 +2679,12 @@ class ConversationRunner:
     # ── project context helpers ──────────────────────────────────────
 
     def _project_context(self) -> str:
+        if self.harness_managed:
+            return (
+                "Project instructions are Harness-controlled metadata. "
+                "Use the authorized Read tool for AGENT.md when it is listed "
+                "as a P3 candidate; do not read project files directly."
+            )
         content = load_agent_instructions(self.project_root, self.working_dir)
         return content or "_No AGENT.md instructions found._"
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,12 +19,38 @@ import (
 )
 
 type independentAgentFixture struct {
-	mu           sync.Mutex
-	requests     []orchestrator.ConversationRequest
-	started      chan struct{}
-	mode         string
-	inputRelease chan struct{}
-	writeResult  orchestrator.ToolResult
+	mu             sync.Mutex
+	requests       []orchestrator.ConversationRequest
+	started        chan struct{}
+	mode           string
+	inputRelease   chan struct{}
+	writeResult    orchestrator.ToolResult
+	externalResult orchestrator.ToolResult
+}
+
+type agentResourceRecorder struct {
+	released chan string
+}
+
+func (r *agentResourceRecorder) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
+	return orchestrator.ToolResult{Error: "unexpected effect dispatch", ExitCode: 1}
+}
+
+func (r *agentResourceRecorder) ReleaseSession(sessionID string) error {
+	r.released <- sessionID
+	return nil
+}
+
+func waitForAgentRelease(t *testing.T, recorder *agentResourceRecorder, sessionID string) {
+	t.Helper()
+	select {
+	case got := <-recorder.released:
+		if got != sessionID {
+			t.Fatalf("released session = %q, want %q", got, sessionID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("session %s resources were not released", sessionID)
+	}
 }
 
 func (f *independentAgentFixture) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
@@ -60,6 +87,9 @@ func (f *independentAgentFixture) RunConversation(ctx context.Context, request o
 		if f.mode == "approved-write" && f.writeResult.Error != "" {
 			return orchestrator.ConversationResult{}, errors.New("write rejected")
 		}
+	}
+	if f.mode == "external" {
+		f.externalResult = handlers.Tool(ctx, orchestrator.ToolCall{ID: "external", Name: "e2e_echo", ParametersJSON: `{"text":"hello"}`})
 	}
 	result := handlers.Tool(ctx, orchestrator.ToolCall{ID: "artifact", Name: "PublishArtifact", ParametersJSON: `{"artifact":{"name":"Analysis","parts":[{"data_json":"{\"finding\":\"source verified\"}"}]}}`})
 	if result.Error != "" {
@@ -279,6 +309,41 @@ func TestIndependentAgentInputMessageAndFailureStates(t *testing.T) {
 	}
 }
 
+func TestIndependentAgentReleasesOnlyTerminalTaskResources(t *testing.T) {
+	t.Run("completed", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
+		recorder := &agentResourceRecorder{released: make(chan string, 4)}
+		runner.tools = recorder
+		task := agentTestCall(t, runner, actor, "complete-release", "SpawnAgent", `{"kind":"explore","title":"complete","objective":"finish"}`)
+		waitForAgentRelease(t, recorder, task.ChildSessionId)
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{mode: "failed"})
+		recorder := &agentResourceRecorder{released: make(chan string, 4)}
+		runner.tools = recorder
+		task := agentTestCall(t, runner, actor, "failed-release", "SpawnAgent", `{"kind":"explore","title":"fail","objective":"fail"}`)
+		waitForAgentRelease(t, recorder, task.ChildSessionId)
+	})
+
+	t.Run("input required then canceled", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{mode: "input"})
+		recorder := &agentResourceRecorder{released: make(chan string, 4)}
+		runner.tools = recorder
+		task := agentTestCall(t, runner, actor, "input-retain", "SpawnAgent", `{"kind":"plan","title":"input","objective":"ask"}`)
+		if task.Status != "input_required" {
+			t.Fatalf("task status = %s", task.Status)
+		}
+		select {
+		case released := <-recorder.released:
+			t.Fatalf("input-required session released early: %s", released)
+		default:
+		}
+		task = agentTestCall(t, runner, actor, "input-cancel", "AgentTask", `{"action":"cancel","task_id":"`+task.Id+`"}`)
+		waitForAgentRelease(t, recorder, task.ChildSessionId)
+	})
+}
+
 func TestIndependentAgentCancellationAndReadOnlyPolicy(t *testing.T) {
 	fixture := &independentAgentFixture{mode: "blocked", started: make(chan struct{})}
 	runner, _, actor := agentTestRunner(t, fixture)
@@ -313,6 +378,70 @@ func TestIndependentAgentCancellationAndReadOnlyPolicy(t *testing.T) {
 	_ = agentTestCall(t, readRunner, readActor, "read-only", "SpawnAgent", `{"kind":"explore","title":"inspect","objective":"read only"}`)
 	if readonly.writeResult.Error == "" {
 		t.Fatal("read-only child was allowed to write")
+	}
+}
+
+func TestIndependentAgentRequiresExplicitRegisteredExternalTool(t *testing.T) {
+	fixture := &independentAgentFixture{}
+	runner, _, actor := agentTestRunner(t, fixture)
+	runner.options.AgentWorkspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
+		return request.ParentWorkingDir, nil
+	}
+	runner.options.AgentToolBinding = func(name string) (AgentToolBinding, bool) {
+		return AgentToolBinding{Name: name, Server: "fixture", InputSchemaSHA256: strings.Repeat("a", 64), ServerConfigSHA256: strings.Repeat("c", 64)}, name == "e2e_echo"
+	}
+
+	task := agentTestCall(t, runner, actor, "external", "SpawnAgent", `{"kind":"general","title":"inspect","objective":"use the delegated MCP tool","allowed_tools":["e2e_echo"]}`)
+	fixture.mu.Lock()
+	request := fixture.requests[0]
+	fixture.mu.Unlock()
+	if task.Status != "completed" || !slices.Contains(request.AllowedTools, "e2e_echo") {
+		t.Fatalf("registered external tool was not delegated: task=%s tools=%v", task, request.AllowedTools)
+	}
+
+	denied := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
+		ID: "unregistered", Name: "SpawnAgent",
+		ParametersJSON: `{"kind":"explore","title":"inspect","objective":"use an unknown tool","allowed_tools":["not_registered"]}`,
+	})
+	if denied.ExitCode == 0 || denied.Error == "" {
+		t.Fatalf("unregistered external tool was delegated: %+v", denied)
+	}
+	readOnlyDenied := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
+		ID: "read-only-external", Name: "SpawnAgent",
+		ParametersJSON: `{"kind":"explore","title":"inspect","objective":"use an external tool","allowed_tools":["e2e_echo"]}`,
+	})
+	if readOnlyDenied.ExitCode == 0 || readOnlyDenied.Error == "" {
+		t.Fatalf("read-only Agent Card accepted a dynamic MCP tool: %+v", readOnlyDenied)
+	}
+}
+
+func TestIndependentAgentPinsAndRevalidatesExternalToolBinding(t *testing.T) {
+	fixture := &independentAgentFixture{mode: "external"}
+	runner, _, actor := agentTestRunner(t, fixture)
+	runner.options.AgentWorkspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
+		return request.ParentWorkingDir, nil
+	}
+	calls := 0
+	runner.options.AgentToolBinding = func(name string) (AgentToolBinding, bool) {
+		calls++
+		configChecksum := strings.Repeat("c", 64)
+		if calls > 1 {
+			configChecksum = strings.Repeat("d", 64)
+		}
+		return AgentToolBinding{Name: name, Server: "fixture", InputSchemaSHA256: strings.Repeat("a", 64), ServerConfigSHA256: configChecksum}, name == "e2e_echo"
+	}
+
+	task := agentTestCall(t, runner, actor, "binding-drift", "SpawnAgent", `{"kind":"general","title":"inspect","objective":"use MCP","allowed_tools":["e2e_echo"]}`)
+	if fixture.externalResult.Error != "delegated tool binding changed" || fixture.externalResult.ExitCode == 0 {
+		t.Fatalf("drifted external binding was not rejected: %+v", fixture.externalResult)
+	}
+	events, err := runner.workbench.ledger.Events(context.Background(), task.ChildSessionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, created, err := projectAgentTask(events)
+	if err != nil || len(created.ExternalToolBindings) != 1 || created.ExternalToolBindings[0].ServerConfigSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("task-created binding was not durably pinned: created=%+v err=%v", created, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from concurrent import futures
@@ -50,6 +51,46 @@ from .todo.manager import TodoManager
 MAX_GRPC_MESSAGE_BYTES = 32 * 1024 * 1024
 _CONTEXT_ENVELOPE_VERSION = 1
 _CONTEXT_SECTION_BYTES = (12_000, 8_000, 8_000, 3_000)
+_EVAL_JOIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,95}")
+
+
+def _admitted_grpc_trace_context(metadata):
+    """Restore W3C parent plus the two safe evaluation baggage keys."""
+    try:
+        md = dict(metadata) if metadata else {}
+        traceparent = md.get("traceparent", "").strip()
+        if not traceparent:
+            return None
+        from opentelemetry import baggage, context as otel_context, trace
+        from opentelemetry.baggage.propagation import W3CBaggagePropagator
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator,
+        )
+
+        trace_carrier = {"traceparent": traceparent}
+        tracestate = md.get("tracestate", "").strip()
+        if tracestate:
+            trace_carrier["tracestate"] = tracestate
+        parent_ctx = TraceContextTextMapPropagator().extract(
+            carrier=trace_carrier,
+            context=otel_context.Context(),
+        )
+        span_context = trace.get_current_span(parent_ctx).get_span_context()
+        if not span_context.is_valid or not span_context.is_remote:
+            return None
+        baggage_header = md.get("baggage", "").strip()
+        if not baggage_header:
+            return parent_ctx
+        extracted = W3CBaggagePropagator().extract(
+            carrier={"baggage": baggage_header}, context=parent_ctx
+        )
+        for key in ("eval.run_id", "eval.instance_id"):
+            value = baggage.get_baggage(key, context=extracted)
+            if value is not None and _EVAL_JOIN_ID.fullmatch(str(value)):
+                parent_ctx = baggage.set_baggage(key, str(value), context=parent_ctx)
+        return parent_ctx
+    except Exception:
+        return None
 
 
 def _render_context_envelope(envelope) -> str:
@@ -540,16 +581,10 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         # the runner become correct children of the Go invoke_agent span.
         otel_token = None
         try:
-            md = dict(context.invocation_metadata()) if context.invocation_metadata() else {}
-            traceparent = md.get("traceparent", "").strip()
-            if traceparent:
+            parent_ctx = _admitted_grpc_trace_context(context.invocation_metadata())
+            if parent_ctx is not None:
                 from opentelemetry import context as otel_context
-                from opentelemetry.trace.propagation.tracecontext import (
-                    TraceContextTextMapPropagator,
-                )
 
-                propagator = TraceContextTextMapPropagator()
-                parent_ctx = propagator.extract(carrier={"traceparent": traceparent})
                 otel_token = otel_context.attach(parent_ctx)
         except Exception:
             pass

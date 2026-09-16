@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"code-agent/internal/telemetry/genai"
+
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
@@ -42,5 +44,43 @@ func TestTraceContextMiddlewareExtractsW3CContextAndEvalJoinBaggage(t *testing.T
 
 	if resp.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+}
+
+func TestTraceContextMiddlewareRejectsUnsafeEvalBaggage(t *testing.T) {
+	router := gin.New()
+	router.Use(TraceContextMiddleware())
+	router.GET("/", func(c *gin.Context) {
+		bag := baggage.FromContext(c.Request.Context())
+		if bag.Member(genai.AttrEvalRunID).Value() != "" || bag.Member(genai.AttrEvalInstanceID).Value() != "" {
+			t.Fatal("unsafe evaluation baggage was admitted")
+		}
+		c.Status(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("baggage", "eval.run_id=unsafe%20run,eval.instance_id=bad%2Cvalue")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestTraceContextMiddlewareRejectsEvalBaggageWithoutRemoteParent(t *testing.T) {
+	router := gin.New()
+	router.Use(TraceContextMiddleware())
+	router.GET("/", func(c *gin.Context) {
+		bag := baggage.FromContext(c.Request.Context())
+		if bag.Member(genai.AttrEvalRunID).Value() != "" || bag.Member(genai.AttrEvalInstanceID).Value() != "" {
+			t.Fatal("evaluation baggage without a remote trace parent was admitted")
+		}
+		c.Status(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("baggage", "eval.run_id=run-1,eval.instance_id=instance-1")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
 	}
 }

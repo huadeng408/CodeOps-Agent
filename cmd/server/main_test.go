@@ -6,15 +6,33 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"code-agent/internal/mcp"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/session"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestConfigureContinuationMCPRequiresExplicitConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := mcp.NewManager()
+	errs, err := configureContinuationMCP(context.Background(), manager, root, "")
+	if err != nil || len(errs) != 0 || len(manager.ListServers()) != 0 {
+		t.Fatalf("implicit repository MCP config was loaded: errors=%v err=%v servers=%v", errs, err, manager.ListServers())
+	}
+	if _, err := configureContinuationMCP(context.Background(), manager, root, ".mcp.json"); err == nil {
+		t.Fatal("explicit invalid MCP config was ignored")
+	}
+}
 
 func TestResolveSearchTraceIndexRequiresSingleExpectedAliasTarget(t *testing.T) {
 	resolve := func(_ context.Context, alias string) ([]string, error) {

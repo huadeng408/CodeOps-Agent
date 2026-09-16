@@ -38,6 +38,9 @@ import (
 	"code-agent/internal/tools"
 	"code-agent/internal/undo"
 	"code-agent/internal/worktree"
+
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Options struct {
@@ -117,7 +120,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	mcpManager := mcp.NewManager()
 	_ = mcpManager.LoadConfigFile(resolveConfigPath(cfg.ProjectRoot, cfg.MCPConfig))
 	_ = mcpManager.StartAll(context.Background())
-	_ = mcpManager.WriteToolsManifest(filepath.Join(cfg.ProjectRoot, ".agent", "mcp-tools.json"))
+	_ = mcpManager.WriteToolsManifest(cfg.ProjectRoot)
 	hookEngine := hooks.NewEngine()
 	for _, hookConfig := range cfg.Hooks {
 		hookEngine.RegisterCommandHook(hooks.CommandHook{
@@ -247,12 +250,22 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		app.ledgerMemory = memory.NewLedgerMemory(ledger, func(ctx context.Context, request *codeagentpb.MemoryReflectionRequest) (*codeagentpb.MemoryReflectionResponse, error) {
 			return app.orchestrator.ReflectMemory(ctx, request)
 		})
+		app.ledgerMemory.SetTracer(telemetry)
 		if app.orchestrator != nil {
-			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor)}
+			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
-				Permissions: app.permissions, Memory: app.ledgerMemory, AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
+				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry,
+				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
+					binding, ok := mcpManager.ResolveBinding(name)
+					return session.AgentToolBinding{Name: binding.Name, Server: binding.Server, InputSchemaSHA256: binding.InputSchemaSHA256, ServerConfigSHA256: binding.ServerConfigSHA256}, ok
+				}, AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
 					tree, err := app.worktree.SpawnAgent(ctx, worktree.AgentSpawnRequest{RequestID: request.TaskID, ParentSessionID: request.ParentSessionID, ChildSessionID: request.ChildSessionID, WorktreeName: request.TaskID, Retain: true})
 					if err != nil {
+						return "", err
+					}
+					if err := mcpManager.WriteToolsManifest(tree.Path); err != nil {
+						_ = app.worktree.CleanupAgent(ctx, tree.RequestID, true, "mcp manifest unavailable")
+						app.session.SetWorktrees(sessionWorktrees(app.worktree.List()))
 						return "", err
 					}
 					app.session.SetWorktrees(sessionWorktrees(app.worktree.List()))
@@ -492,10 +505,13 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 		return "[orchestrator stub] " + input
 	}
 
-	// Root invoke_agent span for the turn so every child span
-	// (tools, inference on the Python side) nests under it.
-	teleCtx, span := a.telemetry.StartSpan(ctx, "invoke_agent code-agent", genai.OperationInvokeAgent, genai.SystemGenAI)
-	span.SetAttributes(genai.AgentNameKV("code-agent"))
+	// Bind the root span to the concrete Session. The CLI admits only the
+	// explicit evaluation run ID; invalid or arbitrary environment data is not
+	// copied into baggage.
+	current := a.session.Current()
+	teleCtx := cliTelemetryContext(ctx, current.ID)
+	teleCtx, span := a.telemetry.StartSpan(teleCtx, "agent.main", genai.OperationInvokeAgent, genai.SystemGenAI)
+	span.SetAttributes(genai.AgentNameKV("main"))
 	defer span.End()
 
 	reply, err := a.converse(teleCtx, input)
@@ -533,8 +549,21 @@ func (a *App) handleUserInput(ctx context.Context, input string) string {
 		}
 	}
 
-	span.RecordError(err)
+	span.AddEvent("agent.error")
+	genai.MarkSpanError(span)
 	return "[orchestrator error] " + err.Error()
+}
+
+func cliTelemetryContext(ctx context.Context, sessionID string) context.Context {
+	runID := strings.TrimSpace(os.Getenv("CODE_AGENT_EVAL_RUN_ID"))
+	if genai.ValidEvalJoinID(runID) {
+		carrier := propagation.MapCarrier{"traceparent": strings.TrimSpace(os.Getenv("CODE_AGENT_EVAL_TRACEPARENT"))}
+		parent := propagation.TraceContext{}.Extract(ctx, carrier)
+		if spanContext := trace.SpanContextFromContext(parent); spanContext.IsValid() && spanContext.IsRemote() {
+			ctx = parent
+		}
+	}
+	return genai.WithEvalJoinBaggage(ctx, runID, sessionID)
 }
 
 func (a *App) handleCompactionUpdate(update *codeagentpb.CompactionUpdate) error {
@@ -566,10 +595,14 @@ func (a *App) converse(ctx context.Context, input string) (string, error) {
 			memoryContext, _ = a.ledgerMemory.Recall(ctx, owner, input, 1200)
 		}
 	}
+	contextEnvelope, err := a.session.ContextEnvelope(ctx)
+	if err != nil {
+		return "", fmt.Errorf("build harness context: %w", err)
+	}
 	result, err := a.orchestrator.RunConversation(ctx, orchestrator.ConversationRequest{
 		Input: input, SessionID: current.ID, WorkingDir: current.WorkingDir, Actor: current.Actor,
 		History: orchestratorHistory(current.Messages, input), State: planTodoSnapshot(current),
-		HarnessManaged: true, MemoryContextJSON: memoryContext,
+		HarnessManaged: true, MemoryContextJSON: memoryContext, ContextEnvelope: contextEnvelope,
 	}, orchestrator.ConversationHandlers{
 		Tool: a.handleToolCall, Event: a.handleOrchestratorEvent, AskUser: a.handleAskUserRequest,
 		TextDelta: a.orchestrator.OnTextDelta, Compaction: a.handleCompactionUpdate, PlanTodo: a.handlePlanTodoUpdate,

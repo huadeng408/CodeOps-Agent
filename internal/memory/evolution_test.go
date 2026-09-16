@@ -47,7 +47,7 @@ func TestMemoryManualRetentionTagsAndSourceInvalidation(t *testing.T) {
 	if json.Unmarshal([]byte(encoded), &entry) != nil || entry.ExpiresAt == nil || len(entry.Tags) != 1 {
 		t.Fatalf("retained memory = %s", encoded)
 	}
-	items, err := module.experienceItems(ctx, 7, "full")
+	items, err := module.experienceItems(ctx, 7, "full", "")
 	if err != nil || len(items) != 1 || !strings.Contains(strings.Join(items[0].Tags, ","), "testing") {
 		t.Fatalf("memory tags lost: %v %v", items, err)
 	}
@@ -61,7 +61,7 @@ func TestMemoryManualRetentionTagsAndSourceInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err = module.experienceItems(ctx, 7, "full")
+	items, err = module.experienceItems(ctx, 7, "full", "")
 	if err != nil || len(items) != 0 {
 		t.Fatal("expired memory recalled")
 	}
@@ -83,7 +83,7 @@ func TestMemoryManualRetentionTagsAndSourceInvalidation(t *testing.T) {
 	if err := workbench.Delete(ctx, 7, id, int64(view.EventCount)); err != nil {
 		t.Fatal(err)
 	}
-	items, err = module.experienceItems(ctx, 7, "full")
+	items, err = module.experienceItems(ctx, 7, "full", "")
 	if err != nil || len(items) != 0 {
 		t.Fatalf("deleted source recalled: %v %v", items, err)
 	}
@@ -177,11 +177,11 @@ func TestMemoryReflectionEvolutionProgressiveRecallAndForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	runMemoryFixture(t, ledger, 7, "source-verified ledger testing after forget", module, &memoryConversationFixture{})
-	items, err := module.experienceItems(context.Background(), 7, "full")
+	items, err := module.experienceItems(context.Background(), 7, "full", "")
 	if err != nil || len(items) != 0 {
 		t.Fatalf("forgotten memory resurrected: %+v %v", items, err)
 	}
-	foreign, err := module.experienceItems(context.Background(), 8, "full")
+	foreign, err := module.experienceItems(context.Background(), 8, "full", "")
 	if err != nil || len(foreign) != 0 {
 		t.Fatal("cross-owner recall")
 	}
@@ -198,7 +198,7 @@ func TestMemoryReflectionInvalidProvenanceKeepsSuccessfulTask(t *testing.T) {
 		blocked = blocked || event.Type == "memory/commit-blocked"
 		terminal = terminal || event.Type == "session/run-completed"
 	}
-	items, err := module.experienceItems(context.Background(), 7, "full")
+	items, err := module.experienceItems(context.Background(), 7, "full", "")
 	if !blocked || !terminal || err != nil || len(items) != 0 {
 		t.Fatalf("unsafe proposal changed task outcome: blocked=%v terminal=%v items=%v err=%v", blocked, terminal, items, err)
 	}

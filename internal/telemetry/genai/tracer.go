@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -30,6 +31,23 @@ type Span interface {
 	RecordError(err error)
 	AddEvent(name string)
 }
+
+// MarkSpanError sets a content-free failure status on production OTel spans.
+// Test or adapter spans that do not expose status fall back to a fixed error
+// marker so callers never need to pass credential-bearing error text.
+func MarkSpanError(span Span) {
+	if span == nil {
+		return
+	}
+	if setter, ok := span.(interface{ SetStatus(codes.Code, string) }); ok {
+		setter.SetStatus(codes.Error, "")
+		return
+	}
+	span.RecordError(errSpanFailed)
+}
+
+var errSpanFailed = fmt.Errorf("operation failed")
+
 // Tracer is the public interface for creating gen_ai spans. Both the real
 // GenAITelemetry and NoopTracer implement it.
 type Tracer interface {
@@ -51,10 +69,13 @@ type GenAITelemetry struct {
 // otelSpan wraps an OTel trace.Span so it satisfies our Span interface.
 type otelSpan struct{ s trace.Span }
 
-func (w *otelSpan) End()                                { w.s.End() }
+func (w *otelSpan) End()                                  { w.s.End() }
 func (w *otelSpan) SetAttributes(a ...attribute.KeyValue) { w.s.SetAttributes(a...) }
 func (w *otelSpan) RecordError(err error)                 { w.s.RecordError(err) }
 func (w *otelSpan) AddEvent(n string)                     { w.s.AddEvent(n) }
+func (w *otelSpan) SetStatus(code codes.Code, description string) {
+	w.s.SetStatus(code, description)
+}
 
 // NewTelemetry initialises the OTel SDK with an OTLP HTTP exporter pointed at
 // the given endpoint (or the OTEL_EXPORTER_OTLP_ENDPOINT / default localhost:6006).
@@ -118,8 +139,13 @@ func NewTelemetry(ctx context.Context) Tracer {
 // returned context carries the new span and can be passed to child-span
 // helpers.
 func (t *GenAITelemetry) StartSpan(ctx context.Context, name string, operation string, provider string) (context.Context, Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, sp := t.tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindInternal))
-	sp.SetAttributes(GenAIAttributes(operation, provider)...)
+	attrs := GenAIAttributes(operation, provider)
+	attrs = append(attrs, EvalJoinAttributes(ctx)...)
+	sp.SetAttributes(attrs...)
 	return ctx, &otelSpan{s: sp}
 }
 
@@ -150,10 +176,10 @@ func (n *NoopTracer) Shutdown(ctx context.Context) error { return nil }
 
 type noopSpan struct{}
 
-func (n *noopSpan) End()                                     {}
+func (n *noopSpan) End()                                      {}
 func (n *noopSpan) SetAttributes(attrs ...attribute.KeyValue) {}
-func (n *noopSpan) RecordError(err error)                    {}
-func (n *noopSpan) AddEvent(name string)                     {}
+func (n *noopSpan) RecordError(err error)                     {}
+func (n *noopSpan) AddEvent(name string)                      {}
 
 // ---------------------------------------------------------------------------
 // internal helpers

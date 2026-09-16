@@ -177,6 +177,9 @@ func contextEventPaths(events []Event) []string {
 		seen[relative] = true
 		paths = append(paths, relative)
 	}
+	// Project instructions are metadata-only here. The model must use the
+	// Harness-authorized Read tool before their contents enter context.
+	add("AGENT.md")
 	for _, event := range events {
 		switch event.Type {
 		case codeModifiedEventType:
@@ -189,18 +192,33 @@ func contextEventPaths(events []Event) []string {
 			if json.Unmarshal(event.Payload, &payload) != nil {
 				continue
 			}
-			var arguments map[string]any
-			if json.Unmarshal([]byte(payload.ArgumentsJSON), &arguments) != nil {
+			contextArgumentPaths(payload.ArgumentsJSON, add)
+		case sessionStateEventType:
+			var snapshot Session
+			if json.Unmarshal(event.Payload, &snapshot) != nil {
 				continue
 			}
-			for _, key := range []string{"path", "file_path"} {
-				if value, ok := arguments[key].(string); ok {
-					add(value)
-				}
+			for _, value := range snapshot.Metrics.FilesModified {
+				add(value)
+			}
+			for _, invocation := range snapshot.Invocations {
+				contextArgumentPaths(invocation.ArgumentsJSON, add)
 			}
 		}
 	}
 	return paths
+}
+
+func contextArgumentPaths(raw string, add func(string)) {
+	var arguments map[string]any
+	if json.Unmarshal([]byte(raw), &arguments) != nil {
+		return
+	}
+	for _, key := range []string{"path", "file_path"} {
+		if value, ok := arguments[key].(string); ok {
+			add(value)
+		}
+	}
 }
 
 func safeContextPath(value string) bool {

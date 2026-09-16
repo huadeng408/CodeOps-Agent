@@ -29,10 +29,21 @@ type ErrorObject struct {
 }
 
 type ToolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty"`
-	Server      string          `json:"server"`
+	Name               string          `json:"name"`
+	Description        string          `json:"description"`
+	InputSchema        json.RawMessage `json:"input_schema,omitempty"`
+	InputSchemaSHA256  string          `json:"input_schema_sha256"`
+	ServerConfigSHA256 string          `json:"server_config_sha256"`
+	Server             string          `json:"server"`
+}
+
+// ToolBinding is the immutable identity delegated to a child Agent. The
+// description is deliberately excluded because it does not affect calls.
+type ToolBinding struct {
+	Name               string `json:"name"`
+	Server             string `json:"server"`
+	InputSchemaSHA256  string `json:"input_schema_sha256"`
+	ServerConfigSHA256 string `json:"server_config_sha256"`
 }
 
 func (t *ToolDefinition) UnmarshalJSON(data []byte) error {

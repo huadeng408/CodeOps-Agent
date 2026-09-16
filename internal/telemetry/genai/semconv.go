@@ -13,10 +13,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -107,6 +109,8 @@ const (
 
 const attrSystemLegacy = "gen_ai.system" // deprecated in favour of gen_ai.provider.name
 
+var evalJoinIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
+
 // optInExperimental reports whether OTEL_SEMCONV_STABILITY_OPT_IN includes
 // gen_ai_latest_experimental.
 func optInExperimental() bool {
@@ -150,6 +154,71 @@ func EvalInstanceIDKV(instanceID string) attribute.KeyValue {
 	return attribute.String(AttrEvalInstanceID, instanceID)
 }
 
+// ValidEvalJoinID accepts only short opaque identifiers suitable for trace
+// correlation. It deliberately rejects whitespace and baggage delimiters.
+func ValidEvalJoinID(value string) bool {
+	return evalJoinIDPattern.MatchString(value)
+}
+
+// WithEvalJoinBaggage replaces caller-controlled baggage with the two
+// admitted evaluation join keys while retaining cancellation and other
+// request-scoped context values.
+func WithEvalJoinBaggage(ctx context.Context, runID, instanceID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	members := make([]baggage.Member, 0, 2)
+	for _, item := range []struct{ key, value string }{
+		{AttrEvalRunID, strings.TrimSpace(runID)},
+		{AttrEvalInstanceID, strings.TrimSpace(instanceID)},
+	} {
+		key, value := item.key, item.value
+		if !ValidEvalJoinID(value) {
+			continue
+		}
+		member, err := baggage.NewMember(key, value)
+		if err == nil {
+			members = append(members, member)
+		}
+	}
+	bag, err := baggage.New(members...)
+	if err != nil {
+		return baggage.ContextWithBaggage(ctx, baggage.Baggage{})
+	}
+	return baggage.ContextWithBaggage(ctx, bag)
+}
+
+// WithEvalInstance binds downstream spans to the concrete Harness Session
+// while preserving a previously admitted evaluation run identifier.
+func WithEvalInstance(ctx context.Context, instanceID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runID := baggage.FromContext(ctx).Member(AttrEvalRunID).Value()
+	return WithEvalJoinBaggage(ctx, runID, instanceID)
+}
+
+// DetachedTraceContext captures only the current SpanContext and admitted
+// evaluation baggage. It is safe to retain across asynchronous runner queues.
+// A non-empty instanceID replaces the caller-supplied instance with the
+// concrete Harness Session that will execute the work.
+func DetachedTraceContext(ctx context.Context, instanceID string) context.Context {
+	detached := context.Background()
+	if ctx != nil {
+		if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+			detached = trace.ContextWithSpanContext(detached, spanContext)
+		}
+	}
+	runID := ""
+	if ctx != nil {
+		runID = baggage.FromContext(ctx).Member(AttrEvalRunID).Value()
+		if strings.TrimSpace(instanceID) == "" {
+			instanceID = baggage.FromContext(ctx).Member(AttrEvalInstanceID).Value()
+		}
+	}
+	return WithEvalJoinBaggage(detached, runID, instanceID)
+}
+
 // EvalJoinAttributes copies the admitted eval join keys from W3C baggage into
 // a child span. The boundary middleware accepts only these keys, so deeper
 // embedding and rerank spans can remain correlated without recording arbitrary
@@ -160,10 +229,10 @@ func EvalJoinAttributes(ctx context.Context) []attribute.KeyValue {
 	}
 	bag := baggage.FromContext(ctx)
 	attrs := make([]attribute.KeyValue, 0, 2)
-	if runID := bag.Member(AttrEvalRunID).Value(); runID != "" {
+	if runID := bag.Member(AttrEvalRunID).Value(); ValidEvalJoinID(runID) {
 		attrs = append(attrs, EvalRunIDKV(runID))
 	}
-	if instanceID := bag.Member(AttrEvalInstanceID).Value(); instanceID != "" {
+	if instanceID := bag.Member(AttrEvalInstanceID).Value(); ValidEvalJoinID(instanceID) {
 		attrs = append(attrs, EvalInstanceIDKV(instanceID))
 	}
 	return attrs

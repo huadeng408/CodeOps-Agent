@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,6 +162,35 @@ func TestLedgerMemoryRecallToolKeepsHarnessCallResultAndRejectsOwnerInjection(t 
 	runMemoryFixture(t, ledger, 7, "reject owner injection", module, fixture)
 	if fixture.result.ExitCode == 0 || fixture.result.Output != "" || fixture.result.Error != "invalid memory recall parameters" {
 		t.Fatalf("owner injection accepted: %+v", fixture.result)
+	}
+}
+
+func TestLedgerMemorySourceSessionScopeExcludesSiblingFacts(t *testing.T) {
+	ledger := openMemoryLedger(t)
+	var reflections atomic.Int32
+	module := NewLedgerMemory(ledger, reflectionFixture(&reflections, false))
+	parentID := runMemoryFixture(t, ledger, 7, "PARENT_PRIVATE_HISTORY", module, &memoryConversationFixture{})
+	childID := runMemoryFixture(t, ledger, 7, "CHILD_PRIVATE_HISTORY", module, &memoryConversationFixture{})
+	if parentID == childID || reflections.Load() != 2 {
+		t.Fatalf("fixture sessions/reflections = %q %q %d", parentID, childID, reflections.Load())
+	}
+
+	encoded, err := module.RecallWithOptions(context.Background(), 7, session.MemoryQuery{
+		Query: "PRIVATE_HISTORY", MaxTokens: 8000, SourceSessionID: childID,
+	})
+	if err != nil || !strings.Contains(encoded, "CHILD_PRIVATE_HISTORY") || strings.Contains(encoded, "PARENT_PRIVATE_HISTORY") {
+		t.Fatalf("scoped trajectory recall = %s, err=%v", encoded, err)
+	}
+
+	encoded, err = module.RecallWithOptions(context.Background(), 7, session.MemoryQuery{
+		Query: "source verified ledger testing", Detail: "full", MaxTokens: 8000, SourceSessionID: childID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result RecallResult
+	if json.Unmarshal([]byte(encoded), &result) != nil || len(result.Entries) != 0 {
+		t.Fatalf("mixed-origin experience crossed child scope: %s", encoded)
 	}
 }
 

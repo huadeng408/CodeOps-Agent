@@ -355,8 +355,10 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     raw_marker = "RAW_P3_CONTENT_MUST_REQUIRE_READ"
+    project_instruction_marker = "PROJECT_INSTRUCTIONS_MUST_REQUIRE_HARNESS_READ"
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text(raw_marker, encoding="utf-8")
+    (tmp_path / "AGENT.md").write_text(project_instruction_marker, encoding="utf-8")
     app = OrchestratorServer(
         ServerConfig(
             project_root=str(tmp_path),
@@ -425,6 +427,7 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
         assert "P3 candidates (raw content not injected)" in system_prompt
         assert "src/app.py" in system_prompt
         assert raw_marker not in system_prompt
+        assert project_instruction_marker not in system_prompt
     finally:
         server.stop(grace=0)
         app.close()

@@ -10,8 +10,10 @@ import (
 	"sync"
 
 	"code-agent/internal/identity"
+	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/skills"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
 )
 
@@ -47,13 +49,36 @@ func configureContinuationSkills(executor *tools.Executor, root string) error {
 // continuationToolExecutors keeps mutable Executor cwd/job state scoped to a
 // durable Session instead of sharing one process-global working directory.
 type continuationToolExecutors struct {
-	root  string
-	mu    sync.Mutex
-	items map[string]*tools.Executor
+	root   string
+	mu     sync.Mutex
+	items  map[string]*tools.Executor
+	tracer genai.Tracer
+	mcp    *mcp.Manager
+	mcps   map[string]*mcp.Manager
 }
 
 func newContinuationToolExecutors(root string) *continuationToolExecutors {
-	return &continuationToolExecutors{root: root, items: make(map[string]*tools.Executor)}
+	return &continuationToolExecutors{root: root, items: make(map[string]*tools.Executor), mcps: make(map[string]*mcp.Manager)}
+}
+
+func (m *continuationToolExecutors) SetTracer(tracer genai.Tracer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tracer = tracer
+	for _, executor := range m.items {
+		executor.SetTracer(tracer)
+	}
+}
+
+func (m *continuationToolExecutors) SetMCPManager(manager *mcp.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mcp = manager
+	for key, executor := range m.items {
+		if m.mcps[key] == nil {
+			executor.SetMCPManager(manager)
+		}
+	}
 }
 
 func (m *continuationToolExecutors) Execute(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
@@ -61,7 +86,7 @@ func (m *continuationToolExecutors) Execute(ctx context.Context, actor identity.
 }
 
 func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ identity.Actor, sessionID, workingDir string, call orchestrator.ToolCall) orchestrator.ToolResult {
-	executor, err := m.executor(sessionID, workingDir)
+	executor, err := m.executor(ctx, sessionID, workingDir)
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: err.Error(), ExitCode: 1}
 	}
@@ -77,7 +102,10 @@ func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ i
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	result, execErr := executor.Execute(ctx, tools.ToolRequest{Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID})
+	result, execErr := executor.Execute(ctx, tools.ToolRequest{
+		Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
+		MCPServer: call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
+	})
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
 	for _, change := range result.Changes {
 		out.Changes = append(out.Changes, orchestrator.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
@@ -91,7 +119,7 @@ func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ i
 	return out
 }
 
-func (m *continuationToolExecutors) executor(sessionID, workingDir string) (*tools.Executor, error) {
+func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, workingDir string) (*tools.Executor, error) {
 	key := strings.TrimSpace(sessionID) + "\x00" + filepath.Clean(strings.TrimSpace(workingDir))
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -107,6 +135,18 @@ func (m *continuationToolExecutors) executor(sessionID, workingDir string) (*too
 		trustRoot = dir
 	}
 	executor := tools.NewExecutor(trustRoot)
+	executor.SetTracer(m.tracer)
+	manager := m.mcp
+	if strings.HasPrefix(sessionID, "agent-") && manager != nil {
+		var cloneErr error
+		manager, cloneErr = manager.CloneForWorkingDir(ctx, dir)
+		if cloneErr != nil {
+			_ = executor.Close()
+			return nil, fmt.Errorf("start child MCP manager: %w", cloneErr)
+		}
+		m.mcps[key] = manager
+	}
+	executor.SetMCPManager(manager)
 	if err := executor.SetWorkingDir(dir); err != nil {
 		_ = executor.Close()
 		return nil, fmt.Errorf("set session working directory: %w", err)
@@ -119,6 +159,41 @@ func (m *continuationToolExecutors) executor(sessionID, workingDir string) (*too
 	return executor, nil
 }
 
+func (m *continuationToolExecutors) ReleaseSession(sessionID string) error {
+	prefix := strings.TrimSpace(sessionID) + "\x00"
+	if prefix == "\x00" {
+		return nil
+	}
+	m.mu.Lock()
+	items := make([]*tools.Executor, 0, 1)
+	managers := make([]*mcp.Manager, 0, 1)
+	for key, executor := range m.items {
+		if strings.HasPrefix(key, prefix) {
+			items = append(items, executor)
+			delete(m.items, key)
+		}
+	}
+	for key, manager := range m.mcps {
+		if strings.HasPrefix(key, prefix) {
+			managers = append(managers, manager)
+			delete(m.mcps, key)
+		}
+	}
+	m.mu.Unlock()
+	var first error
+	for _, executor := range items {
+		if err := executor.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	for _, manager := range managers {
+		if err := manager.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 func (m *continuationToolExecutors) Close() error {
 	m.mu.Lock()
 	items := make([]*tools.Executor, 0, len(m.items))
@@ -126,10 +201,20 @@ func (m *continuationToolExecutors) Close() error {
 		items = append(items, executor)
 	}
 	m.items = make(map[string]*tools.Executor)
+	managers := make([]*mcp.Manager, 0, len(m.mcps))
+	for _, manager := range m.mcps {
+		managers = append(managers, manager)
+	}
+	m.mcps = make(map[string]*mcp.Manager)
 	m.mu.Unlock()
 	var firstErr error
 	for _, executor := range items {
 		if err := executor.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, manager := range managers {
+		if err := manager.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

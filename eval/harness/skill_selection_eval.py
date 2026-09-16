@@ -29,6 +29,7 @@ _SYSTEM_PROMPT = (
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _CHECKPOINT_FILENAME = "checkpoint.sqlite3"
 _SELECTIONS_FILENAME = "selections.jsonl"
+_DEFAULT_MAX_OUTPUT_TOKENS = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +56,7 @@ class SkillSelectionEvalConfig:
     dataset_path: Path
     model: str
     execution_matrix_path: Path | None = None
-    max_output_tokens: int = 64
+    max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
     timeout_s: float = 120.0
     max_concurrency: int = 10
     minimum_accuracy: float = 0.948
@@ -1004,7 +1005,9 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="source-bound production Skill load matrix required by the formal remote lane",
     )
-    parser.add_argument("--max-output-tokens", default=64, type=int)
+    parser.add_argument(
+        "--max-output-tokens", default=_DEFAULT_MAX_OUTPUT_TOKENS, type=int
+    )
     parser.add_argument("--timeout", default=120.0, type=float)
     parser.add_argument("--max-concurrency", default=10, type=int)
     parser.add_argument("--minimum-accuracy", default=0.948, type=float)
