@@ -13,6 +13,7 @@ from eval.harness.fault_injection import (
     run_fault_injection,
     verify_receipt,
 )
+from orchestrator.workflows import SQLiteWorkflowStore, WorkerResult, WorkerState, WorkflowRun
 
 
 class _FinishedProcess:
@@ -64,6 +65,7 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     }
     assert receipt["fault_injection"]["requested"] == 2
     assert receipt["fault_injection"]["applied"] == 2
+    assert receipt["fault_injection"]["termination_attempts"] >= 2
     assert all(event["stage_id"].startswith("stage-") for event in receipt["fault_injection"]["evidence"])
     assert receipt["recovery"]["denominator"] == 6
     assert receipt["recovery"]["successes"] == 6
@@ -177,12 +179,160 @@ def test_fault_target_rejects_progress_from_previous_process(tmp_path: Path) -> 
         started_at=time.time(),
     )
 
-    target = fault_injection._select_fault_target(
-        {0: (_RunningProcess(), record)},
-        progress_root,
-    )
+    store = SQLiteWorkflowStore(tmp_path / "workflow.sqlite")
+    try:
+        target = fault_injection._select_fault_target(
+            {0: (_RunningProcess(), record)},
+            progress_root,
+            store,
+        )
+    finally:
+        store.close()
 
     assert target is None
+
+
+def test_fault_target_requires_running_checkpoint_owned_by_current_process(
+    tmp_path: Path,
+) -> None:
+    progress_root = tmp_path / "progress"
+    progress_root.mkdir()
+    (progress_root / "worker-0.json").write_text(
+        json.dumps(
+            {
+                "slot": 0,
+                "pid": 999,
+                "process_token": "launch-token",
+                "task_id": "task-0001",
+                "stage_id": "stage-1",
+                "state": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = fault_injection._ProcessRecord(
+        process_id="launcher-process",
+        slot=0,
+        pid=111,
+        started_at=time.time(),
+        process_token="launch-token",
+    )
+    active = {0: (_RunningProcess(), record)}
+    store = SQLiteWorkflowStore(tmp_path / "workflow.sqlite")
+    try:
+        assert fault_injection._select_fault_target(active, progress_root, store) is None
+
+        store.save(
+            WorkflowRun(
+                id="task-0001",
+                workers={
+                    "stage-1": WorkerResult(
+                        id="stage-1",
+                        provider="deterministic",
+                        state=WorkerState.RUNNING,
+                    )
+                },
+            ),
+            "stage-1",
+            "worker started",
+        )
+        store.acquire_lease("task-0001", "stage-1", "other-process", 10.0)
+        assert fault_injection._select_fault_target(active, progress_root, store) is None
+
+        other_lease = store.get_lease("task-0001", "stage-1")
+        assert other_lease is not None
+        store.release_lease(
+            "task-0001",
+            "stage-1",
+            other_lease.owner_id,
+            other_lease.token,
+        )
+        store.acquire_lease("task-0001", "stage-1", "launch-token", 10.0)
+
+        target = fault_injection._select_fault_target(active, progress_root, store)
+        assert target is not None
+        assert target[3:] == ("task-0001", "stage-1")
+    finally:
+        store.close()
+
+
+def test_fault_is_counted_only_after_process_exit_with_running_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = SQLiteWorkflowStore(tmp_path / "workflow.sqlite")
+    running = WorkflowRun(
+        id="task-0001",
+        workers={
+            "stage-1": WorkerResult(
+                id="stage-1",
+                provider="deterministic",
+                state=WorkerState.RUNNING,
+            )
+        },
+    )
+    store.save(running, "stage-1", "worker started")
+    lease = store.acquire_lease("task-0001", "stage-1", "launch-token", 10.0)
+    assert lease is not None
+    monkeypatch.setattr(fault_injection, "_terminate_process", lambda _process: True)
+    try:
+        terminated, interrupted = fault_injection._terminate_fault_target(
+            _RunningProcess(), store, ["task-0001"], "launch-token"
+        )
+        assert terminated is True
+        assert interrupted == ("task-0001", "stage-1")
+
+        completed = WorkflowRun(
+            id="task-0001",
+            workers={
+                "stage-1": WorkerResult.completed(
+                    "stage-1", "deterministic", "completed"
+                )
+            },
+        )
+        store.save(completed, "stage-1", "worker completed")
+        store.release_lease(
+            "task-0001", "stage-1", lease.owner_id, lease.token
+        )
+
+        terminated, interrupted = fault_injection._terminate_fault_target(
+            _RunningProcess(), store, ["task-0001"], "launch-token"
+        )
+        assert terminated is True
+        assert interrupted is None
+    finally:
+        store.close()
+
+
+def test_fault_injection_requires_one_durable_recovery_event_per_fault(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real_sqlite_summary = fault_injection._sqlite_summary
+
+    def without_recovery_event(store, task_ids):
+        summary = real_sqlite_summary(store, task_ids)
+        summary["recovery_event_count"] = 0
+        return summary
+
+    monkeypatch.setattr(fault_injection, "_sqlite_summary", without_recovery_event)
+    config = FaultInjectionConfig(
+        run_id="missing-recovery-event",
+        artifact_root=tmp_path / "artifacts",
+        worker_count=1,
+        task_count=2,
+        fault_count=1,
+        task_duration_s=0.08,
+        fault_interval_s=0.04,
+        timeout_s=15.0,
+    )
+
+    receipt = run_fault_injection(config)
+
+    assert receipt["status"] == "INCOMPLETE"
+    assert receipt["exit_code"] == 2
+    assert any(
+        failure["category"] == "insufficient_recovery_events"
+        for failure in receipt["failures"]
+    )
 
 
 def test_unexpected_exit_does_not_claim_stale_progress_task(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from orchestrator.workflows import (
     SQLiteWorkflowStore,
     WorkerResult,
     WorkerSpec,
+    WorkerState,
     WorkflowEngine,
     WorkflowSpec,
 )
@@ -155,6 +156,7 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
 
     records: list[_ProcessRecord] = []
     fault_events: list[dict[str, Any]] = []
+    termination_attempts: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     active: dict[int, tuple[subprocess.Popen[bytes], _ProcessRecord]] = {}
     next_launch: dict[int, bool] = {slot: True for slot in assignments}
@@ -194,27 +196,44 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                 records.append(record)
 
             if applied_faults < config.fault_count and time.monotonic() >= next_fault_at:
-                target = _select_fault_target(active, progress_root)
+                target = _select_fault_target(active, progress_root, store)
                 if target is not None:
                     slot, process, record, current_task, current_stage = target
-                    record.injected = True
-                    record.task_at_injection = current_task
-                    record.stage_at_injection = current_stage
-                    fault_events.append(
-                        {
-                            "sequence": applied_faults + 1,
+                    requested_at = time.time()
+                    terminated, interrupted_stage = _terminate_fault_target(
+                        process,
+                        store,
+                        assignments[slot],
+                        record.process_token,
+                    )
+                    if terminated:
+                        record.injected = True
+                        actual_task, actual_stage = interrupted_stage or (current_task, current_stage)
+                        record.task_at_injection = actual_task
+                        record.stage_at_injection = actual_stage
+                        attempt = {
+                            "attempt": len(termination_attempts) + 1,
                             "slot": slot,
                             "pid": record.pid,
                             "process_id": record.process_id,
-                            "task_id": current_task,
-                            "stage_id": current_stage,
+                            "task_id": actual_task,
+                            "stage_id": actual_stage,
+                            "selected_task_id": current_task,
+                            "selected_stage_id": current_stage,
                             "signal": "SIGKILL" if os.name != "nt" else "TerminateProcess",
-                            "requested_at": time.time(),
+                            "requested_at": requested_at,
+                            "confirmed_at": time.time(),
+                            "outcome": (
+                                "counted_recoverable_fault"
+                                if interrupted_stage is not None
+                                else "discarded_at_checkpoint_boundary"
+                            ),
                         }
-                    )
-                    _terminate_process(process)
-                    applied_faults += 1
-                    next_launch[slot] = True
+                        termination_attempts.append(attempt)
+                        if interrupted_stage is not None:
+                            applied_faults += 1
+                            fault_events.append({**attempt, "sequence": applied_faults})
+                        next_launch[slot] = True
                     next_fault_at = time.monotonic() + config.fault_interval_s
                 else:
                     next_fault_at = time.monotonic() + min(config.fault_interval_s, 0.01)
@@ -258,8 +277,21 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             )
 
         sqlite_summary = _sqlite_summary(store, task_ids)
+        if sqlite_summary["recovery_event_count"] < config.fault_count:
+            failures.append(
+                {
+                    "category": "insufficient_recovery_events",
+                    "message": (
+                        f"recorded {sqlite_summary['recovery_event_count']} durable recovery events "
+                        f"for {config.fault_count} process faults"
+                    ),
+                }
+            )
         store.backup_to(artifacts.root / "workflow.sqlite")
-        artifacts.write("fault-events.json", {"events": fault_events})
+        artifacts.write(
+            "fault-events.json",
+            {"events": fault_events, "termination_attempts": termination_attempts},
+        )
         artifacts.write("process-exits.json", {"exit_codes": [record.to_dict() for record in records]})
         artifacts.write(
             "process-logs.json",
@@ -324,6 +356,11 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                 "applied": applied_faults,
                 "events": len(fault_events),
                 "evidence": fault_events,
+                "termination_attempts": len(termination_attempts),
+                "discarded_at_checkpoint_boundary": sum(
+                    attempt["outcome"] == "discarded_at_checkpoint_boundary"
+                    for attempt in termination_attempts
+                ),
             },
             "recovery": {
                 "denominator": len(task_ids),
@@ -454,25 +491,65 @@ def _launch_child(
 
 
 def _select_fault_target(
-    active: dict[int, tuple[subprocess.Popen[bytes], _ProcessRecord]], progress_root: Path
+    active: dict[int, tuple[subprocess.Popen[bytes], _ProcessRecord]],
+    progress_root: Path,
+    store: SQLiteWorkflowStore,
 ) -> tuple[int, subprocess.Popen[bytes], _ProcessRecord, str, str] | None:
     for slot, (process, record) in sorted(active.items()):
         if process.poll() is not None:
             continue
         progress = _progress_for_process(progress_root, slot, record)
-        if (
-            progress.get("state") == "running"
-            and progress.get("task_id")
-            and progress.get("stage_id")
-        ):
+        if progress.get("state") == "running" and progress.get("task_id") and progress.get("stage_id"):
+            task_id = str(progress["task_id"])
+            stage_id = str(progress["stage_id"])
+            try:
+                checkpoint = store.load(task_id)
+                lease = store.get_lease(task_id, stage_id)
+            except (OSError, ValueError, sqlite3.Error):
+                continue
+            result = checkpoint.workers.get(stage_id) if checkpoint is not None else None
+            if (
+                result is None
+                or result.state is not WorkerState.RUNNING
+                or lease is None
+                or not record.process_token
+                or lease.owner_id != record.process_token
+            ):
+                continue
             return (
                 slot,
                 process,
                 record,
-                str(progress["task_id"]),
-                str(progress["stage_id"]),
+                task_id,
+                stage_id,
             )
     return None
+
+
+def _terminate_fault_target(
+    process: subprocess.Popen[bytes],
+    store: SQLiteWorkflowStore,
+    task_ids: list[str],
+    process_token: str,
+) -> tuple[bool, tuple[str, str] | None]:
+    if not _terminate_process(process):
+        return False, None
+
+    interrupted: list[tuple[str, str]] = []
+    try:
+        for task_id in task_ids:
+            checkpoint = store.load(task_id)
+            if checkpoint is None:
+                continue
+            for stage_id, result in checkpoint.workers.items():
+                if result.state is not WorkerState.RUNNING:
+                    continue
+                lease = store.get_lease(task_id, stage_id)
+                if lease is None or lease.owner_id == process_token:
+                    interrupted.append((task_id, stage_id))
+    except (OSError, ValueError, sqlite3.Error):
+        return True, None
+    return True, interrupted[0] if len(interrupted) == 1 else None
 
 
 def _reap_processes(
@@ -744,7 +821,13 @@ async def _run_child(
                 id=task_id,
                 workers=stages,
             )
-            await WorkflowEngine(store, execute, max_concurrency=1, lease_ttl_seconds=lease_ttl_s).run(spec)
+            await WorkflowEngine(
+                store,
+                execute,
+                max_concurrency=1,
+                owner_id=process_token or None,
+                lease_ttl_seconds=lease_ttl_s,
+            ).run(spec)
             _write_progress(
                 path=progress_path,
                 payload={
