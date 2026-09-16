@@ -48,6 +48,106 @@ from .skills.manager import SkillManager
 from .todo.manager import TodoManager
 
 MAX_GRPC_MESSAGE_BYTES = 32 * 1024 * 1024
+_CONTEXT_ENVELOPE_VERSION = 1
+_CONTEXT_SECTION_BYTES = (12_000, 8_000, 8_000, 3_000)
+
+
+def _render_context_envelope(envelope) -> str:
+    if envelope.schema_version != _CONTEXT_ENVELOPE_VERSION:
+        raise ValueError("unsupported context envelope version")
+    if len(envelope.p0) > 256 or len(envelope.p1) > 64 or len(envelope.p3_candidates) > 64 or len(envelope.events) > 64:
+        raise ValueError("context envelope exceeds item limits")
+
+    def digest(value: str, *, optional: bool = False) -> str:
+        value = value.strip().lower()
+        if optional and not value:
+            return ""
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError("context envelope contains an invalid checksum")
+        return value
+
+    def relative_path(value: str) -> str:
+        value = value.strip().replace("\\", "/")
+        parts = value.split("/")
+        if (
+            not value
+            or value.startswith("/")
+            or len(value) > 1024
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(char in value for char in "\x00\r\n:")
+        ):
+            raise ValueError("context envelope contains an invalid path")
+        return value
+
+    def file_lines(items) -> tuple[list[str], set[str]]:
+        lines: list[str] = []
+        paths: set[str] = set()
+        for item in items:
+            item_path = relative_path(item.path)
+            if item_path in paths or item.size_bytes < 0 or item.line_count < 0:
+                raise ValueError("context envelope contains an invalid file summary")
+            paths.add(item_path)
+            sha = digest(item.sha256, optional=True)
+            details = f"{item.size_bytes} bytes"
+            if sha:
+                details += f", {item.line_count} lines, sha256={sha}"
+            lines.append(f"- {item_path} ({details})")
+        return lines, paths
+
+    p0_lines, _ = file_lines(envelope.p0)
+    p1_lines, p1_paths = file_lines(envelope.p1)
+    p3_lines: list[str] = []
+    p3_seen: set[str] = set()
+    for value in envelope.p3_candidates:
+        item_path = relative_path(value)
+        if item_path in p3_seen or item_path not in p1_paths:
+            raise ValueError("context envelope contains an invalid P3 candidate")
+        p3_seen.add(item_path)
+        p3_lines.append(f"- {item_path}")
+
+    event_lines: list[str] = []
+    previous_seq = -1
+    for event in envelope.events:
+        event_type = " ".join(event.type.split())
+        detail = " ".join(event.detail.split())
+        if event.seq < 0 or event.seq <= previous_seq or not event_type or len(event_type) > 128 or len(detail) > 256:
+            raise ValueError("context envelope contains an invalid event summary")
+        previous_seq = event.seq
+        checksum = digest(event.checksum)
+        suffix = f": {detail}" if detail else ""
+        event_lines.append(f"- #{event.seq} {event_type}{suffix} [sha256={checksum}]")
+    head_checksum = digest(envelope.ledger_checksum) if envelope.events else ""
+    if envelope.events and (
+        envelope.ledger_seq != envelope.events[-1].seq
+        or head_checksum != envelope.events[-1].checksum.lower()
+    ):
+        raise ValueError("context envelope ledger head does not match events")
+
+    def section(title: str, lines: list[str], maximum: int) -> str:
+        kept = [title]
+        used = len(title.encode("utf-8"))
+        for line in lines:
+            size = len(("\n" + line).encode("utf-8"))
+            if used + size > maximum:
+                kept.append("[additional metadata omitted by context budget]")
+                break
+            kept.append(line)
+            used += size
+        return "\n".join(kept)
+
+    return "\n\n".join(
+        (
+            "Harness context envelope v1 (metadata only; use the authorized Read tool for P3 content).",
+            section("P0 directory summary", p0_lines, _CONTEXT_SECTION_BYTES[0]),
+            section("P1 node summaries", p1_lines, _CONTEXT_SECTION_BYTES[1]),
+            section(
+                f"Recent Session Ledger events (head #{envelope.ledger_seq} sha256={head_checksum})",
+                event_lines,
+                _CONTEXT_SECTION_BYTES[2],
+            ),
+            section("P3 candidates (raw content not injected)", p3_lines, _CONTEXT_SECTION_BYTES[3]),
+        )
+    )
 
 
 @dataclass(slots=True)
@@ -366,6 +466,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         working_dir = ""
         harness_managed = False
         memory_context = ""
+        harness_context = ""
         agent_task = None
         allowed_tools = ()
         for message in request_iterator:
@@ -377,6 +478,13 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 working_dir = self._validate_working_dir(user_input.working_dir, session_id, context)
                 harness_managed = user_input.harness_managed
                 memory_context = user_input.memory_context_json
+                if user_input.HasField("context_envelope"):
+                    if not harness_managed:
+                        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "context envelope requires a harness-managed request")
+                    try:
+                        harness_context = _render_context_envelope(user_input.context_envelope)
+                    except ValueError as exc:
+                        context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
                 agent_task = user_input.agent_task if user_input.HasField("agent_task") else None
                 allowed_tools = tuple(user_input.allowed_tools)
                 if len(memory_context) > 64000:
@@ -463,6 +571,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             if harness_managed:
                 runner.harness_managed = True
                 runner.harness_memory_context = memory_context
+                runner.harness_context = harness_context
                 runner.layered_context = None
                 runner.todo_manager = TodoManager()
                 runner.token_budget = TokenBudget(max_tokens=self.app.config.max_tokens,max_cost=self.app.config.max_cost)

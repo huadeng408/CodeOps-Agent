@@ -71,6 +71,34 @@ message UserInput {
   string memory_context_json = 8;
   AgentTask agent_task = 9;
   repeated string allowed_tools = 10;
+  ContextEnvelope context_envelope = 11;
+}
+
+// ContextEnvelope is a bounded, read-only projection produced by the Go
+// Harness. P3 carries locators only; raw file content still requires an
+// authorized Harness Read tool call.
+message ContextEnvelope {
+  uint32 schema_version = 1;
+  repeated ContextFileSummary p0 = 2;
+  repeated ContextFileSummary p1 = 3;
+  repeated string p3_candidates = 4;
+  repeated ContextEventSummary events = 5;
+  int64 ledger_seq = 6;
+  string ledger_checksum = 7;
+}
+
+message ContextFileSummary {
+  string path = 1;
+  int64 size_bytes = 2;
+  int64 line_count = 3;
+  string sha256 = 4;
+}
+
+message ContextEventSummary {
+  int64 seq = 1;
+  string type = 2;
+  string detail = 3;
+  string checksum = 4;
 }
 
 // Local agent.v2 contracts. The Harness authenticates the caller and owns

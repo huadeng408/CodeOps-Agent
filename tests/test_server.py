@@ -12,7 +12,7 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
-from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
+from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig, _render_context_envelope
 
 _CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
 
@@ -348,6 +348,95 @@ def test_converse_passes_valid_working_dir_to_runner(monkeypatch, tmp_path):
     finally:
         server.stop(grace=0)
         app.close()
+
+
+def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    raw_marker = "RAW_P3_CONTENT_MUST_REQUIRE_READ"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text(raw_marker, encoding="utf-8")
+    app = OrchestratorServer(
+        ServerConfig(
+            project_root=str(tmp_path),
+            working_dir=str(tmp_path),
+            memory_dir=str(tmp_path / "memory"),
+        )
+    )
+    app.llm = HistoryFakeLLM()
+    service = OrchestratorService(app)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "session-context-envelope"
+    try:
+        envelope = orchestrator_pb2.ContextEnvelope(
+            schema_version=1,
+            p0=[
+                orchestrator_pb2.ContextFileSummary(
+                    path="src/app.py", size_bytes=len(raw_marker)
+                )
+            ],
+            p1=[
+                orchestrator_pb2.ContextFileSummary(
+                    path="src/app.py",
+                    size_bytes=len(raw_marker),
+                    line_count=1,
+                    sha256="a" * 64,
+                )
+            ],
+            p3_candidates=["src/app.py"],
+            events=[
+                orchestrator_pb2.ContextEventSummary(
+                    seq=0, type="session/created", checksum="b" * 64
+                )
+            ],
+            ledger_seq=0,
+            ledger_checksum="b" * 64,
+        )
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(
+                                    text="inspect metadata",
+                                    session_id=session_id,
+                                    actor=_session_actor(session_id),
+                                    working_dir=str(tmp_path),
+                                    harness_managed=True,
+                                    context_envelope=envelope,
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        assert responses[-1].done.success is True
+        system_prompt = "\n".join(
+            message.content for message in app.llm.requests[0].messages if message.role == "system"
+        )
+        assert "P0 directory summary" in system_prompt
+        assert "P1 node summaries" in system_prompt
+        assert "P3 candidates (raw content not injected)" in system_prompt
+        assert "src/app.py" in system_prompt
+        assert raw_marker not in system_prompt
+    finally:
+        server.stop(grace=0)
+        app.close()
+
+
+def test_context_envelope_rejects_paths_outside_harness_workspace() -> None:
+    envelope = orchestrator_pb2.ContextEnvelope(
+        schema_version=1,
+        p0=[orchestrator_pb2.ContextFileSummary(path="../outside.txt", size_bytes=1)],
+    )
+    with pytest.raises(ValueError, match="invalid path"):
+        _render_context_envelope(envelope)
 
 
 @pytest.mark.parametrize("working_dir, expected", [("relative", "absolute")])

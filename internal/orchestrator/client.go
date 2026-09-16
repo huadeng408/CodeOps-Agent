@@ -154,6 +154,7 @@ type ConversationRequest struct {
 	State             *codeagentpb.PlanTodoSnapshot
 	HarnessManaged    bool
 	MemoryContextJSON string
+	ContextEnvelope   *codeagentpb.ContextEnvelope
 	AgentTask         *codeagentpb.AgentTask
 	AllowedTools      []string
 }
@@ -630,6 +631,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				Actor:             actorProto(actor),
 				HarnessManaged:    request.HarnessManaged,
 				MemoryContextJson: request.MemoryContextJSON,
+				ContextEnvelope:   request.ContextEnvelope,
 				AgentTask:         request.AgentTask,
 				AllowedTools:      request.AllowedTools,
 			},

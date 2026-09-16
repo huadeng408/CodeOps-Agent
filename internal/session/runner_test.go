@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -552,6 +553,9 @@ func TestSessionRunnerContinuationCarriesCanonicalWorkingDir(t *testing.T) {
 	ledger := openWorkbenchTestLedger(t)
 	workbench := NewWorkbench(ledger, nil)
 	workingDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workingDir, "README.md"), []byte("workspace metadata only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "title", "goal", workingDir)
 	if err != nil {
 		t.Fatal(err)
@@ -578,8 +582,19 @@ func TestSessionRunnerContinuationCarriesCanonicalWorkingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
-	if got := conversation.lastRequest(t).WorkingDir; got != workingDir {
+	request := conversation.lastRequest(t)
+	if got := request.WorkingDir; got != workingDir {
 		t.Fatalf("conversation working dir = %q, want %q", got, workingDir)
+	}
+	if request.ContextEnvelope == nil || request.ContextEnvelope.SchemaVersion != contextEnvelopeVersion {
+		t.Fatalf("context envelope = %+v", request.ContextEnvelope)
+	}
+	found := false
+	for _, item := range request.ContextEnvelope.P0 {
+		found = found || item.Path == "README.md"
+	}
+	if !found || len(request.ContextEnvelope.Events) == 0 || request.ContextEnvelope.LedgerChecksum == "" {
+		t.Fatalf("context envelope missing workspace or ledger metadata: %+v", request.ContextEnvelope)
 	}
 }
 

@@ -1382,6 +1382,12 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		Actor: projection.actor, History: history, State: planTodo,
 		HarnessManaged: true,
 	}
+	if workingDir != "" {
+		request.ContextEnvelope, err = buildContextEnvelope(workingDir, events)
+		if err != nil {
+			return orchestrator.ConversationRequest{}, err
+		}
+	}
 	if err := r.agentRequest(events, &request); err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
