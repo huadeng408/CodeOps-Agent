@@ -325,6 +325,31 @@ provider-backed 语义质量、40 Skills 的真实可运行矩阵、948/1000、T
 准确的 60 个提交路径通过不输出值的秘密/运行产物扫描及 cached diff check。
 本段为只追加证据的文档更新；前端、AGENTS.md 与用户原有运行树均未纳入提交。
 
+### 多阶段 Workflow 与简历红线门禁（2026-09-16）
+
+状态：`IMPLEMENTED`。故障评测中的每个任务由单个短 Worker 改为三个有依赖关系的
+阶段，阶段开始前先由 `WorkflowEngine` 把 `RUNNING` checkpoint 和 lease 写入
+SQLite，父进程只在观察到具体 `task_id + stage_id` 后注入进程终止。收据新增
+600 阶段分母、完整 checkpoint 数、恢复事件数、被中断阶段及三阶段 workload pin；
+单阶段短任务不再满足 canonical 定义。
+
+修复了替换进程早于旧 lease 过期启动时可能永久等待的问题：引擎运行期间持续回收
+过期 lease，并将失主的 `RUNNING` 阶段恢复为 `PENDING`。新增回归实际复现“新进程
+先启动、旧 lease 后过期”的顺序，并证明同一进程无需再次重启即可继续。
+
+统一 release gate 新增 `extension-onboarding`、`agent-e2e` 与 `terminalbench` 三条
+证据 lane，并收紧已有四条 lane：要求同范围模块接入工时、40/40 production
+Skill discovery/lazy-load 矩阵、provider-backed 独立子 Agent 到 Memory/Artifact/
+MCP/沙箱的单 Trace readback、Terminal-Bench 官方 Harness，以及 SWE-bench 的
+8/20 基线 pin。旧 SHA、fixture、单阶段 smoke 或缺模型身份的收据均 fail closed。
+
+定向 `python -m pytest -q tests/eval/test_release_gate.py
+tests/eval/test_fault_injection.py tests/test_workflows.py` 退出 0（37 passed）；全量
+`python -m pytest -q` 退出 0（2343 passed, 16 skipped, 3 warnings），
+`go test ./... -count=1` 与 `go vet ./...` 均退出 0。当前尚未在提交后的干净源码上
+运行新的 8/200/30 canonical workload，因此该指标在新 receipt 生成前仍为
+`BLOCKED`，不继承旧的单阶段结果。
+
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成
 前不进入版本控制；外部 page-Qrels trust root 由运行环境配置，缺失时发布路径

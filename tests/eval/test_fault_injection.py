@@ -53,15 +53,27 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
     assert receipt["raw_evidence"]["task_manifest_sha256"] == receipt["data_pin"]["task_manifest_sha256"]
     assert receipt["budget"]["worker_count"] == 2
     assert receipt["budget"]["task_count"] == 6
+    assert receipt["budget"]["stage_count"] == 3
     assert receipt["budget"]["lease_ttl_s"] == 0.5
     assert receipt["budget"]["canonical"] is False
-    assert receipt["budget"]["canonical_target"] == {"worker_count": 8, "task_count": 200, "fault_count": 30}
+    assert receipt["budget"]["canonical_target"] == {
+        "worker_count": 8,
+        "task_count": 200,
+        "fault_count": 30,
+        "stage_count": 3,
+    }
     assert receipt["fault_injection"]["requested"] == 2
     assert receipt["fault_injection"]["applied"] == 2
+    assert all(event["stage_id"].startswith("stage-") for event in receipt["fault_injection"]["evidence"])
     assert receipt["recovery"]["denominator"] == 6
     assert receipt["recovery"]["successes"] == 6
     assert receipt["recovery"]["success_rate"] == 1.0
+    assert receipt["recovery"]["stage_denominator"] == 18
+    assert receipt["recovery"]["completed_stages"] == 18
+    assert receipt["recovery"]["resume_events"] >= 2
+    assert receipt["recovery"]["checkpoint_complete"] is True
     assert receipt["sqlite"]["event_count"] > 0
+    assert receipt["sqlite"]["completed_stage_count"] == 18
     assert len(receipt["processes"]["exit_codes"]) >= 2
     assert verify_receipt(config.artifact_root / config.run_id) == []
     artifact_path = config.artifact_root / config.run_id / "workflow.sqlite"
@@ -70,6 +82,8 @@ def test_fault_injection_recovers_real_processes_and_emits_receipt(tmp_path: Pat
         artifact_event_count = artifact_store.execute("select count(*) from workflow_events").fetchone()[0]
         assert artifact_event_count == receipt["sqlite"]["event_count"]
         assert artifact_store.execute("select count(*) from workflow_checkpoints").fetchone()[0] == 6
+        checkpoints = artifact_store.execute("select state_json from workflow_checkpoints").fetchall()
+        assert all(len(json.loads(row[0])["workers"]) == 3 for row in checkpoints)
     finally:
         artifact_store.close()
     assert verify_receipt(config.artifact_root / config.run_id) == []

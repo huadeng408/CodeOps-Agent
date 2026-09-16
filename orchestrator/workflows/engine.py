@@ -221,6 +221,10 @@ class WorkflowEngine:
                 return False
 
     def _refresh_run(self, run: WorkflowRun, workers: Mapping[str, WorkerSpec]) -> WorkflowRun:
+        # A replacement process can start before the previous owner's lease
+        # expires. Reap on every poll so that it can recover the checkpoint
+        # without requiring yet another process restart.
+        self._store.reap_expired_leases()
         latest = self._store.load(run.id)
         if latest is None:
             return run

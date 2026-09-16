@@ -241,6 +241,54 @@ def test_records_running_worker_recovery_before_resuming(tmp_path: Path) -> None
     )
 
 
+def test_recovers_when_replacement_starts_before_previous_lease_expires(tmp_path: Path) -> None:
+    calls: list[str] = []
+    store = SQLiteWorkflowStore(tmp_path / "workflows.sqlite")
+    spec = WorkflowSpec(
+        id="live-lease-recovery",
+        workers=[WorkerSpec(id="worker", title="Worker", objective="resume")],
+    )
+    store.save(
+        WorkflowRun(
+            id=spec.id,
+            workers={
+                "worker": WorkerResult(
+                    id="worker",
+                    provider="default",
+                    state=WorkerState.RUNNING,
+                    attempts=1,
+                )
+            },
+        ),
+        "worker",
+        "worker started",
+    )
+    assert store.acquire_lease(spec.id, "worker", "dead-process", 0.05) is not None
+
+    async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
+        calls.append(worker.id)
+        return WorkerResult.completed(worker.id, worker.provider, "resumed")
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            WorkflowEngine(
+                store,
+                execute,
+                lease_ttl_seconds=0.05,
+                lease_poll_interval_seconds=0.01,
+            ).run(spec),
+            timeout=1.0,
+        )
+    )
+
+    assert calls == ["worker"]
+    assert result.workers["worker"].state is WorkerState.COMPLETED
+    assert any(
+        worker_id == "worker" and detail == "worker recovered from previous process"
+        for _sequence, worker_id, _state, detail in store.events(spec.id)
+    )
+
+
 def test_isolates_failed_worker_and_blocks_only_its_dependents(tmp_path: Path) -> None:
     async def execute(worker: WorkerSpec, _upstream: dict[str, WorkerResult]) -> WorkerResult:
         if worker.id == "broken":

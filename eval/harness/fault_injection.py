@@ -46,6 +46,7 @@ class FaultInjectionConfig:
     worker_count: int = 8
     task_count: int = 200
     fault_count: int = 30
+    stage_count: int = 3
     task_duration_s: float = 0.08
     fault_interval_s: float = 0.04
     lease_ttl_s: float = 0.5
@@ -60,6 +61,8 @@ class FaultInjectionConfig:
             raise ValueError("worker_count and task_count must be positive")
         if self.fault_count < 0:
             raise ValueError("fault_count must not be negative")
+        if self.stage_count < 2:
+            raise ValueError("stage_count must be at least two")
         if self.task_duration_s <= 0 or self.fault_interval_s <= 0 or self.lease_ttl_s <= 0 or self.timeout_s <= 0:
             raise ValueError("durations and timeout must be positive")
         if not self.model_pin.strip():
@@ -75,6 +78,7 @@ class _ProcessRecord:
     process_token: str = ""
     injected: bool = False
     task_at_injection: str = ""
+    stage_at_injection: str = ""
     ended_at: float | None = None
     exit_code: int | None = None
     log_path: Path | None = None
@@ -90,6 +94,7 @@ class _ProcessRecord:
             "exit_code": self.exit_code,
             "injected": self.injected,
             "task_at_injection": self.task_at_injection,
+            "stage_at_injection": self.stage_at_injection,
         }
 
 
@@ -109,12 +114,19 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
     progress_root.mkdir(parents=True, exist_ok=True)
     task_ids = [f"task-{index:04d}" for index in range(1, config.task_count + 1)]
     assignments = _assign_tasks(task_ids, config.worker_count)
+    stage_ids = [f"stage-{index}" for index in range(1, config.stage_count + 1)]
     task_manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": config.run_id,
         "tasks": task_ids,
         "assignments": assignments,
         "worker_count": config.worker_count,
+        "workload": {
+            "kind": "checkpointed_dependency_pipeline",
+            "stage_count": config.stage_count,
+            "stage_ids": stage_ids,
+            "stage_duration_s": config.task_duration_s,
+        },
     }
     task_manifest_bytes = json.dumps(task_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     data_pin = hashlib.sha256(task_manifest_bytes).hexdigest()
@@ -131,7 +143,11 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             "model_pin": config.model_pin,
             "source_pin": source_pin,
             "data_pin": {"task_manifest_sha256": data_pin},
-            "capabilities": {"real_subprocesses": True, "sqlite_checkpoints": True},
+            "capabilities": {
+                "real_subprocesses": True,
+                "sqlite_checkpoints": True,
+                "multi_stage_pipeline": True,
+            },
         }
     )
     artifacts.write("task-manifest.json", task_manifest)
@@ -169,6 +185,7 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                     progress_root / f"worker-{slot}.json",
                     config.task_duration_s,
                     config.lease_ttl_s,
+                    config.stage_count,
                     runtime_root / "logs",
                     config.crash_once_task_id,
                     runtime_root / "crash-once.marker",
@@ -179,9 +196,10 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             if applied_faults < config.fault_count and time.monotonic() >= next_fault_at:
                 target = _select_fault_target(active, progress_root)
                 if target is not None:
-                    slot, process, record, current_task = target
+                    slot, process, record, current_task, current_stage = target
                     record.injected = True
                     record.task_at_injection = current_task
+                    record.stage_at_injection = current_stage
                     fault_events.append(
                         {
                             "sequence": applied_faults + 1,
@@ -189,6 +207,7 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                             "pid": record.pid,
                             "process_id": record.process_id,
                             "task_id": current_task,
+                            "stage_id": current_stage,
                             "signal": "SIGKILL" if os.name != "nt" else "TerminateProcess",
                             "requested_at": time.time(),
                         }
@@ -277,21 +296,34 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
             "source_pin": source_pin,
             "data_pin": {"task_manifest_sha256": data_pin},
             "model_pin": config.model_pin,
+            "workload": {
+                "kind": "checkpointed_dependency_pipeline",
+                "stage_count": config.stage_count,
+                "dependency_edges_per_task": config.stage_count - 1,
+            },
             "budget": {
                 "worker_count": config.worker_count,
                 "task_count": config.task_count,
                 "fault_count": config.fault_count,
+                "stage_count": config.stage_count,
                 "task_duration_s": config.task_duration_s,
+                "estimated_task_duration_s": config.task_duration_s * config.stage_count,
                 "fault_interval_s": config.fault_interval_s,
                 "lease_ttl_s": config.lease_ttl_s,
                 "timeout_s": config.timeout_s,
                 "canonical": _is_canonical(config),
-                "canonical_target": {"worker_count": 8, "task_count": 200, "fault_count": 30},
+                "canonical_target": {
+                    "worker_count": 8,
+                    "task_count": 200,
+                    "fault_count": 30,
+                    "stage_count": 3,
+                },
             },
             "fault_injection": {
                 "requested": config.fault_count,
                 "applied": applied_faults,
                 "events": len(fault_events),
+                "evidence": fault_events,
             },
             "recovery": {
                 "denominator": len(task_ids),
@@ -299,6 +331,14 @@ def run_fault_injection(config: FaultInjectionConfig) -> dict[str, Any]:
                 "failures": len(task_ids) - recovery_successes,
                 "success_rate": recovery_rate,
                 "incomplete_task_ids": incomplete,
+                "stage_denominator": config.task_count * config.stage_count,
+                "completed_stages": sqlite_summary["completed_stage_count"],
+                "resume_events": sqlite_summary["recovery_event_count"],
+                "resumed_workflows": sqlite_summary["resumed_workflow_count"],
+                "checkpoint_complete": (
+                    sqlite_summary["completed_stage_count"]
+                    == config.task_count * config.stage_count
+                ),
             },
             "processes": {
                 "started": len(records),
@@ -366,6 +406,7 @@ def _launch_child(
     progress_path: Path,
     task_duration_s: float,
     lease_ttl_s: float,
+    stage_count: int,
     log_root: Path,
     crash_once_task_id: str | None,
     crash_marker: Path,
@@ -389,6 +430,8 @@ def _launch_child(
         str(task_duration_s),
         "--lease-ttl",
         str(lease_ttl_s),
+        "--stages",
+        str(stage_count),
         "--process-token",
         process_token,
     ]
@@ -412,13 +455,23 @@ def _launch_child(
 
 def _select_fault_target(
     active: dict[int, tuple[subprocess.Popen[bytes], _ProcessRecord]], progress_root: Path
-) -> tuple[int, subprocess.Popen[bytes], _ProcessRecord, str] | None:
+) -> tuple[int, subprocess.Popen[bytes], _ProcessRecord, str, str] | None:
     for slot, (process, record) in sorted(active.items()):
         if process.poll() is not None:
             continue
         progress = _progress_for_process(progress_root, slot, record)
-        if progress.get("state") == "running" and progress.get("task_id"):
-            return slot, process, record, str(progress["task_id"])
+        if (
+            progress.get("state") == "running"
+            and progress.get("task_id")
+            and progress.get("stage_id")
+        ):
+            return (
+                slot,
+                process,
+                record,
+                str(progress["task_id"]),
+                str(progress["stage_id"]),
+            )
     return None
 
 
@@ -528,7 +581,12 @@ def _read_log(path: Path | None) -> str:
 
 
 def _is_canonical(config: FaultInjectionConfig) -> bool:
-    return config.worker_count == 8 and config.task_count == 200 and config.fault_count == 30
+    return (
+        config.worker_count == 8
+        and config.task_count == 200
+        and config.fault_count == 30
+        and config.stage_count == 3
+    )
 
 
 def _completed_tasks(store: SQLiteWorkflowStore, task_ids: list[str]) -> set[str]:
@@ -551,20 +609,34 @@ def _sqlite_summary(store: SQLiteWorkflowStore, task_ids: list[str]) -> dict[str
     state_counts: Counter[str] = Counter()
     detail_counts: Counter[str] = Counter()
     event_count = 0
+    completed_stage_count = 0
+    recovery_event_count = 0
+    resumed_workflows: set[str] = set()
     per_workflow: dict[str, int] = {}
     for task_id in task_ids:
+        checkpoint = store.load(task_id)
+        if checkpoint is not None:
+            completed_stage_count += sum(
+                result.state.value == "completed" for result in checkpoint.workers.values()
+            )
         events = store.events(task_id)
         per_workflow[task_id] = len(events)
         event_count += len(events)
         for _sequence, _worker_id, state, detail in events:
             state_counts[state] += 1
             detail_counts[detail] += 1
+            if detail == "worker recovered from previous process":
+                recovery_event_count += 1
+                resumed_workflows.add(task_id)
     return {
         "workflow_count": len(task_ids),
         "event_count": event_count,
         "state_counts": dict(sorted(state_counts.items())),
         "detail_counts": dict(sorted(detail_counts.items())),
         "events_per_workflow": per_workflow,
+        "completed_stage_count": completed_stage_count,
+        "recovery_event_count": recovery_event_count,
+        "resumed_workflow_count": len(resumed_workflows),
     }
 
 
@@ -615,6 +687,7 @@ async def _run_child(
     progress_path: Path,
     duration: float,
     lease_ttl_s: float,
+    stage_count: int,
     process_token: str = "",
     crash_task_id: str | None = None,
     crash_marker: Path | None = None,
@@ -629,7 +702,7 @@ async def _run_child(
                     "pid": os.getpid(),
                     "process_token": process_token,
                     "task_id": task_id,
-                    "state": "running",
+                    "state": "starting",
                 },
             )
             if crash_task_id == task_id and crash_marker is not None and _claim_once_marker(crash_marker):
@@ -640,12 +713,36 @@ async def _run_child(
                 _upstream: dict[str, WorkerResult],
                 task_id: str = task_id,
             ) -> WorkerResult:
+                _write_progress(
+                    path=progress_path,
+                    payload={
+                        "slot": slot,
+                        "pid": os.getpid(),
+                        "process_token": process_token,
+                        "task_id": task_id,
+                        "stage_id": worker.id,
+                        "state": "running",
+                    },
+                )
                 await asyncio.sleep(duration)
-                return WorkerResult.completed(worker.id, worker.provider, f"completed:{task_id}")
+                return WorkerResult.completed(
+                    worker.id,
+                    worker.provider,
+                    f"completed:{task_id}:{worker.id}",
+                )
 
+            stages = [
+                WorkerSpec(
+                    id=f"stage-{index}",
+                    title=f"Stage {index} for {task_id}",
+                    objective="checkpoint, resume, and preserve dependency output",
+                    depends_on=(f"stage-{index - 1}",) if index > 1 else (),
+                )
+                for index in range(1, stage_count + 1)
+            ]
             spec = WorkflowSpec(
                 id=task_id,
-                workers=[WorkerSpec(id="worker", title=f"Long task {task_id}", objective="checkpoint and recover")],
+                workers=stages,
             )
             await WorkflowEngine(store, execute, max_concurrency=1, lease_ttl_seconds=lease_ttl_s).run(spec)
             _write_progress(
@@ -655,6 +752,7 @@ async def _run_child(
                     "pid": os.getpid(),
                     "process_token": process_token,
                     "task_id": task_id,
+                    "stage_id": f"stage-{stage_count}",
                     "state": "completed",
                 },
             )
@@ -671,6 +769,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--progress", type=Path)
     parser.add_argument("--task-duration", type=float, default=0.08)
     parser.add_argument("--lease-ttl", type=float, default=0.5)
+    parser.add_argument("--stages", type=int, default=3)
     parser.add_argument("--process-token", default="")
     parser.add_argument("--crash-task", default=None)
     parser.add_argument("--crash-marker", type=Path, default=None)
@@ -699,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.progress,
                 args.task_duration,
                 args.lease_ttl,
+                args.stages,
                 args.process_token,
                 args.crash_task,
                 args.crash_marker,
@@ -713,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             worker_count=args.workers,
             task_count=args.tasks,
             fault_count=args.faults,
+            stage_count=args.stages,
             task_duration_s=args.task_duration,
             fault_interval_s=args.fault_interval,
             lease_ttl_s=args.lease_ttl,

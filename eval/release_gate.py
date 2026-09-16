@@ -226,17 +226,37 @@ def _workflow_predicate(payload: dict[str, Any]) -> None:
     target = budget.get("canonical_target") if isinstance(budget, dict) else None
     if not isinstance(target, dict):
         target = budget if isinstance(budget, dict) else {}
-    expected = {"worker_count": 8, "task_count": 200, "fault_count": 30}
+    expected = {"worker_count": 8, "task_count": 200, "fault_count": 30, "stage_count": 3}
     if any(target.get(key) != value for key, value in expected.items()):
         raise ValueError("canonical target must be 8 workers, 200 tasks and 30 faults")
     if not isinstance(budget, dict) or budget.get("canonical") is not True:
         raise ValueError("receipt is not marked canonical")
     injection = payload.get("fault_injection", {})
     recovery = payload.get("recovery", {})
+    workload = payload.get("workload", {})
+    sqlite_summary = payload.get("sqlite", {})
+    if workload.get("kind") != "checkpointed_dependency_pipeline" or workload.get("stage_count") != 3:
+        raise ValueError("workflow tasks must be three-stage checkpointed dependency pipelines")
     if injection.get("requested") != 30 or injection.get("applied") != 30:
         raise ValueError("30 real process faults were not applied")
+    evidence = injection.get("evidence")
+    if (
+        not isinstance(evidence, list)
+        or len(evidence) != 30
+        or any(not isinstance(item, dict) or not item.get("task_id") or not item.get("stage_id") for item in evidence)
+    ):
+        raise ValueError("each process fault must identify the checkpointed task stage it interrupted")
     if recovery.get("denominator") != 200 or float(recovery.get("success_rate", 0)) < 0.985:
         raise ValueError("recovery rate is below 98.5% or denominator is not 200")
+    if (
+        recovery.get("stage_denominator") != 600
+        or recovery.get("completed_stages") != 600
+        or recovery.get("checkpoint_complete") is not True
+        or int(recovery.get("resume_events", 0)) < 30
+    ):
+        raise ValueError("all 600 stages and at least 30 durable recovery events are required")
+    if sqlite_summary.get("completed_stage_count") != 600:
+        raise ValueError("SQLite checkpoints do not contain all 600 completed stages")
     if payload.get("checksum_verification") not in ([], None):
         raise ValueError("receipt checksum verification failed")
 
@@ -258,6 +278,19 @@ def _context_predicate(payload: dict[str, Any]) -> None:
         raise ValueError("both context arms must complete")
     if baseline.get("reported_model") != layered.get("reported_model"):
         raise ValueError("context arms used different models")
+    provider = payload.get("provider", {})
+    if provider.get("model_revision_status") != "MODEL_IDENTITY_VERIFIED":
+        raise ValueError("context provider model revision is not verified")
+    data_pin = payload.get("data_pin", {})
+    if not SHA256_RE.fullmatch(str(data_pin.get("task_sha256", ""))):
+        raise ValueError("context task pin is missing")
+    budget = payload.get("budget", {})
+    if (
+        budget.get("calls_per_arm") != 1
+        or not isinstance(budget.get("max_output_tokens_per_arm"), int)
+        or budget.get("max_output_tokens_per_arm", 0) <= 0
+    ):
+        raise ValueError("context arms do not share one fixed output budget")
 
 
 def _skills_predicate(payload: dict[str, Any]) -> None:
@@ -273,6 +306,17 @@ def _skills_predicate(payload: dict[str, Any]) -> None:
         raise ValueError("skill selection must be at least 948/1000")
     if provider.get("model_revision_status") in (None, "MODEL_IDENTITY_UNVERIFIED"):
         raise ValueError("provider model revision is not verified")
+    matrix = payload.get("execution_matrix", {})
+    matrix_failures = matrix.get("failures")
+    if (
+        matrix.get("denominator", 0) < 40
+        or matrix.get("passed") != matrix.get("denominator")
+        or matrix_failures != []
+        or matrix.get("production_loader") is not True
+        or matrix.get("metadata_only_discovery") is not True
+        or matrix.get("lazy_body_loads", 0) < 40
+    ):
+        raise ValueError("at least 40 Skills must pass the production discovery and lazy-load matrix")
 
 
 def _swebench_predicate(payload: dict[str, Any]) -> None:
@@ -284,6 +328,105 @@ def _swebench_predicate(payload: dict[str, Any]) -> None:
         raise ValueError("official SWE-bench scorer is missing")
     if verdict.get("submitted_instances") != 20 or verdict.get("resolved_instances", 0) < 18:
         raise ValueError("official SWE-bench result must be at least 18/20")
+    baseline = payload.get("baseline", {})
+    if (
+        baseline.get("submitted_instances") != 20
+        or baseline.get("resolved_instances") != 8
+        or not SHA256_RE.fullmatch(str(baseline.get("receipt_sha256", "")))
+    ):
+        raise ValueError("the locked 8/20 baseline receipt is missing")
+
+
+def _extension_onboarding_predicate(payload: dict[str, Any]) -> None:
+    measurement = payload.get("measurement", {})
+    baseline = measurement.get("baseline", {})
+    candidate = measurement.get("candidate", {})
+    scope = payload.get("scope", {})
+    verification = payload.get("verification", {})
+    if measurement.get("unit") != "engineer_hours" or measurement.get("same_scope") is not True:
+        raise ValueError("module onboarding must compare the same scope in engineer-hours")
+    if float(baseline.get("value", 0)) < 16.0:
+        raise ValueError("module onboarding baseline must record at least two working days")
+    candidate_hours = float(candidate.get("value", 0))
+    if candidate_hours <= 0 or candidate_hours > 8.0:
+        raise ValueError("plugin-based module onboarding must complete within eight engineer-hours")
+    if not SHA256_RE.fullmatch(str(scope.get("contract_sha256", ""))):
+        raise ValueError("module onboarding scope contract is not pinned")
+    if verification.get("targeted_tests") is not True or verification.get("runtime_e2e") is not True:
+        raise ValueError("module onboarding tests and runtime E2E are required")
+
+
+def _agent_e2e_predicate(payload: dict[str, Any]) -> None:
+    provider = payload.get("provider", {})
+    isolation = payload.get("isolation", {})
+    checks = payload.get("checks", {})
+    trace = payload.get("trace", {})
+    if provider.get("backed") is not True or provider.get("model_revision_status") != "MODEL_IDENTITY_VERIFIED":
+        raise ValueError("agent E2E must use a provider with verified model identity")
+    if (
+        not isolation.get("parent_session_id")
+        or not isolation.get("child_session_id")
+        or isolation.get("parent_session_id") == isolation.get("child_session_id")
+    ):
+        raise ValueError("agent E2E does not prove an independent child session")
+    required_checks = {
+        "agent_card",
+        "message_text_file_json",
+        "task_lifecycle",
+        "isolated_child_context",
+        "skill_lazy_loaded",
+        "harness_authorized_tool",
+        "mcp_call",
+        "sandbox_enforced",
+        "artifact_pinned",
+        "memory_reflection_written",
+        "restart_recall",
+        "ledger_hash_chain",
+    }
+    missing = sorted(name for name in required_checks if checks.get(name) is not True)
+    if missing:
+        raise ValueError("agent E2E checks are missing: " + ", ".join(missing))
+    required_spans = {
+        "agent.main",
+        "agent.subagent",
+        "skill.load",
+        "tool.mcp",
+        "artifact.publish",
+        "memory.reflect",
+        "memory.recall",
+    }
+    observed_spans = trace.get("observed_spans")
+    if (
+        trace.get("backend_readback") is not True
+        or trace.get("single_trace") is not True
+        or not isinstance(observed_spans, list)
+        or not required_spans.issubset(set(observed_spans))
+    ):
+        raise ValueError("agent E2E OpenTelemetry readback is incomplete")
+
+
+def _terminalbench_predicate(payload: dict[str, Any]) -> None:
+    scorer = payload.get("scorer", {})
+    verdict = payload.get("official_verdict", {})
+    provider = payload.get("provider", {})
+    trace = payload.get("trace", {})
+    dataset = payload.get("dataset_pin", {})
+    if scorer.get("name") != "terminal_bench.Harness":
+        raise ValueError("official Terminal-Bench harness is missing")
+    submitted = verdict.get("submitted_instances")
+    if (
+        not isinstance(submitted, int)
+        or submitted < 1
+        or verdict.get("scored_instances") != submitted
+        or verdict.get("resolved_instances", 0) < 1
+    ):
+        raise ValueError("Terminal-Bench requires at least one resolved, officially scored task")
+    if provider.get("backed") is not True or provider.get("model_revision_status") != "MODEL_IDENTITY_VERIFIED":
+        raise ValueError("Terminal-Bench provider model identity is not verified")
+    if trace.get("official_runner_parentage") is not True or trace.get("backend_readback") is not True:
+        raise ValueError("Terminal-Bench official runner trace readback is incomplete")
+    if not SHA256_RE.fullmatch(str(dataset.get("sha256", ""))):
+        raise ValueError("Terminal-Bench dataset pin is missing")
 
 
 def _redacted_failure_tail(stdout: str, stderr: str, *, max_chars: int = 600) -> str:
@@ -368,9 +511,12 @@ def evaluate_release(
 
     data_root = root / "data" / "eval"
     lane_specs = (
+        ("extension-onboarding", _extension_onboarding_predicate),
         ("workflow", _workflow_predicate),
         ("context-token", _context_predicate),
         ("skills", _skills_predicate),
+        ("agent-e2e", _agent_e2e_predicate),
+        ("terminalbench", _terminalbench_predicate),
         ("swebench", _swebench_predicate),
     )
     for lane, predicate in lane_specs:
