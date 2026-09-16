@@ -712,6 +712,21 @@ async def test_execution_matrix_receipt_pins_archived_bytes(tmp_path: Path) -> N
     assert receipt["execution_matrix"]["artifact_sha256"] == hashlib.sha256(
         archived.read_bytes()
     ).hexdigest()
+    assert receipt["raw_evidence"]["execution_matrix_sha256"] == receipt[
+        "execution_matrix"
+    ]["artifact_sha256"]
+    assert receipt["raw_evidence"]["execution_matrix_catalog_sha256"] == receipt[
+        "execution_matrix"
+    ]["catalog_sha256"]
+    assert receipt["raw_evidence"]["checkpoint_sha256"] == hashlib.sha256(
+        (tmp_path / "eval_results" / config.run_id / "checkpoint.sqlite3").read_bytes()
+    ).hexdigest()
+    assert receipt["raw_evidence"]["selection_results_sha256"] == hashlib.sha256(
+        (tmp_path / "eval_results" / config.run_id / "selections.jsonl").read_bytes()
+    ).hexdigest()
+    assert receipt["raw_evidence"]["run_manifest_sha256"] == hashlib.sha256(
+        (tmp_path / "eval_results" / config.run_id / "run-manifest.json").read_bytes()
+    ).hexdigest()
     assert resumed["execution_matrix"]["artifact_sha256"] == receipt[
         "execution_matrix"
     ]["artifact_sha256"]

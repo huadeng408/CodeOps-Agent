@@ -127,6 +127,10 @@ def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
 
 
+def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(path.read_bytes())
+
+
 def _status_exit_code(status: str) -> int:
     return 0 if status in {"VERIFIED", "SMOKE_PASS"} else 2
 
@@ -887,6 +891,27 @@ async def run_skill_selection_eval(
         if passed
         else "BLOCKED"
     )
+    raw_evidence: dict[str, Any] = {
+        "storage_scope": "LOCAL_IGNORED",
+        "artifact_root": (
+            f"{Path(config.artifact_root).as_posix().rstrip('/')}/{config.run_id}"
+        ),
+        "checkpoint_sha256": _sha256_file(checkpoint_path),
+        "run_manifest_sha256": _sha256_file(artifacts.root / "run-manifest.json"),
+        "selection_results_sha256": _sha256_file(
+            artifacts.root / _SELECTIONS_FILENAME
+        ),
+    }
+    if execution_matrix is not None:
+        raw_evidence.update(
+            {
+                "execution_matrix_sha256": execution_matrix["artifact_sha256"],
+                "execution_matrix_catalog_sha256": execution_matrix[
+                    "catalog_sha256"
+                ],
+            }
+        )
+
     receipt: dict[str, Any] = {
         "schema_version": 1,
         "status": status,
@@ -937,6 +962,7 @@ async def run_skill_selection_eval(
         "selection_issue_case_ids": issue_ids,
         "operational_failure_case_ids": [result.case_id for result in operational],
         "failures": failures,
+        "raw_evidence": raw_evidence,
         "artifacts": {
             "selection_results": _SELECTIONS_FILENAME,
             "checkpoint": _CHECKPOINT_FILENAME,
