@@ -346,9 +346,18 @@ MCP/沙箱的单 Trace readback、Terminal-Bench 官方 Harness，以及 SWE-ben
 定向 `python -m pytest -q tests/eval/test_release_gate.py
 tests/eval/test_fault_injection.py tests/test_workflows.py` 退出 0（37 passed）；全量
 `python -m pytest -q` 退出 0（2343 passed, 16 skipped, 3 warnings），
-`go test ./... -count=1` 与 `go vet ./...` 均退出 0。当前尚未在提交后的干净源码上
-运行新的 8/200/30 canonical workload，因此该指标在新 receipt 生成前仍为
-`BLOCKED`，不继承旧的单阶段结果。
+`go test ./... -count=1` 与 `go vet ./...` 均退出 0。
+
+提交并推送 `c02098ac718950915403995531d12338b2085588` 后，在忽略目录中的干净本地
+clone 运行 canonical workload，命令退出 0：8 Worker 完成 200/200 个三阶段任务，
+30/30 次进程终止均绑定具体阶段，600/600 阶段 checkpoint 完整，产生 30 条耐久
+恢复事件、9 个实际恢复的 workflow、1712 条 SQLite 事件，失败为 0，恢复率
+100%。完整产物位于
+`eval_results/workflow/fault-20260916-multistage-c02098ac/`，receipt SHA-256 为
+`f79c8262bfab6fbfbc2089a502fb3a73a287a635a202ecdfdb7dd95a2845cf1`，
+checksum 复核为 0 问题，文本秘密扫描无候选。该结果已达到 Workflow 数值门槛；
+因本段文档更新会产生新 HEAD，须在新 HEAD 上同配置复跑并以纯 receipt 提交后，
+统一 release gate 才可把 Workflow lane 标为 `VERIFIED`。
 
 本快照仍不能把目标指标或完整 Go Harness/LangGraph/Redis/MySQL/MCP 闭环称为
 `VERIFIED`，除非仓库中有新鲜的端到端 receipt。人工评审批次在 verdict 对账完成
