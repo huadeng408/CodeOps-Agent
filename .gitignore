@@ -123,6 +123,7 @@ results/
 tmp/
 temp/
 scratch/
+/.scratch/
 
 # AI workflow internals (plans, specs — not project docs)
 .superpowers/

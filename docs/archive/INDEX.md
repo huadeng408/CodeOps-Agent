@@ -47,6 +47,7 @@ Dated working logs from 2026-07-30 through 2026-09-01, including the 2026-08-14 
 
 - Frozen map: [design-map/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md](design-map/DESIGN-MAP-2026-08-07-HARNESS-MULTIMODAL-RAG-EVAL-OBSERVABILITY.md)
 - Plans and specs: `plans/` and `plans/superpowers/`
+- Archived OpenViking-inspired memory plan: `plans/openviking-memory-2026-10-06/` (historical; not the active CodeOps-Agent memory design)
 - Recovered session notes: `superseded/CLAUDE-CODE-*.md`
 
 ## Run artifacts (local JSON)
