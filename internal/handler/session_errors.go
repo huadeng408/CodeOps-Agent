@@ -52,7 +52,7 @@ func sessionErrorStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-func writeSessionError(c *gin.Context, err error, fallback string) {
+func writeSessionError(c *gin.Context, err error, fallback string, workbenches ...session.WorkbenchModule) {
 	status := sessionErrorStatus(err)
 	message := fallback
 	if errors.Is(err, session.ErrContinuationUnavailable) || errors.Is(err, session.ErrSessionRunnerClosed) {
@@ -60,5 +60,18 @@ func writeSessionError(c *gin.Context, err error, fallback string) {
 	} else if status == http.StatusBadRequest || status == http.StatusConflict {
 		message = err.Error()
 	}
-	c.JSON(status, gin.H{"code": status, "message": message, "data": nil})
+	body := gin.H{"code": status, "message": message, "data": nil}
+	if status == http.StatusConflict && c.Param("id") != "" {
+		// A conflict is a stale client cursor, so return the authoritative
+		// cursor alongside the error. The browser can refresh and retry a
+		// non-destructive user message without guessing.
+		if len(workbenches) > 0 {
+			if owner, ownerErr := authenticatedOwner(c); ownerErr == nil && workbenches[0] != nil {
+				if view, viewErr := workbenches[0].Get(c.Request.Context(), owner, c.Param("id")); viewErr == nil {
+					body["cursor"] = gin.H{"sessionId": view.ID, "eventCount": view.EventCount}
+				}
+			}
+		}
+	}
+	c.JSON(status, body)
 }

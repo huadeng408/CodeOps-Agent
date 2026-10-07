@@ -194,7 +194,7 @@ func (h *EventHandler) SubmitMessage(c *gin.Context) {
 		ExpectedSeq: *req.ExpectedSeq, Content: req.Content, Actor: actor,
 	})
 	if err != nil {
-		writeSessionError(c, err, "failed to submit message")
+		writeSessionError(c, err, "failed to submit message", h.workbench)
 		return
 	}
 	writeSessionData(c, http.StatusAccepted, run)

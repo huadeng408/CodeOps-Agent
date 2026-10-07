@@ -101,16 +101,11 @@ func (h *UserHandler) Login(c *gin.Context) {
 	}
 
 	log.Infof("User '%s' logged in successfully", req.Username)
-	// Browser clients authenticate with HttpOnly cookies; the JSON fields stay
-	// temporarily for existing non-browser clients during migration.
 	token.SetAuthCookies(c.Writer, c.Request, accessToken, refreshToken, 24*60*60, 7*24*60*60)
 	c.JSON(http.StatusOK, gin.H{
 		"code":    http.StatusOK,
 		"message": "Login successful",
-		"data": gin.H{
-			"token":        accessToken,
-			"refreshToken": refreshToken,
-		},
+		"data":    gin.H{"authenticated": true},
 	})
 }
 

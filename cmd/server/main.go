@@ -223,7 +223,6 @@ func main() {
 	tikaClient := tika.NewClient(cfg.Tika)
 	documentParser := documentparser.New(tikaClient, mineru.NewClient())
 	embeddingClient := embedding.NewClient(cfg.Embedding)
-	orchestratorClient := orchestrator.NewClient(cfg.AI.Orchestrator)
 	orchestratorMemoryClient := orchestrator.NewMemoryClient(cfg.AI.Orchestrator)
 	ingestionClient := orchestrator.NewIngestionClient(cfg.AI.Orchestrator)
 	rerankerClient := reranker.NewClient(cfg.Reranker)
@@ -269,7 +268,6 @@ func main() {
 	conversationService := service.NewConversationService(conversationRepo)
 	memoryService := service.NewMemoryService(memoryRepo, embeddingClient, orchestratorMemoryClient, rerankerClient, es.ESClient, cfg.Memory)
 	orchestratorSupportService := service.NewOrchestratorSupportService(searchService, memoryService, conversationRepo, rerankerClient, docVectorRepo, userService)
-	chatService := service.NewChatService(searchService, memoryService, conversationRepo, orchestratorClient, docVectorRepo, userService)
 	// WebSocket Hub
 	wsHub := handler.NewWebSocketHub()
 	ledgerPath := strings.TrimSpace(cfg.Harness.SessionLedgerPath)
@@ -447,6 +445,21 @@ func main() {
 	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
 	r.Use(middleware.RequestLogger(), gin.Recovery())
 	r.GET("/healthz", healthzHandlerWithContinuation(func() string { return embeddingPreflightStatus }, continuationSupervisor.Status))
+	r.GET("/readyz", readinessHandler(func() string { return embeddingPreflightStatus }, continuationSupervisor.Status, func() map[string]CapabilityStatus {
+		provider := CapabilityStatus{State: "degraded", Reason: "LangGraph orchestrator is disabled; knowledge-base APIs remain available"}
+		if cfg.AI.Orchestrator.Enabled && strings.TrimSpace(cfg.AI.Orchestrator.SharedSecret) != "" {
+			provider = CapabilityStatus{State: "ok", Reason: "orchestrator client configured"}
+		}
+		sandboxState, sandboxReason := continuationExecutors.sandbox.Capability()
+		return map[string]CapabilityStatus{
+			"sandbox":      {State: sandboxState, Reason: sandboxReason},
+			"provider":     provider,
+			"embedding":    capabilityFromStatus(embeddingPreflightStatus),
+			"memory":       {State: "ok", Reason: "Session Ledger is open"},
+			"trace":        {State: "degraded", Reason: "trace export is best effort"},
+			"continuation": continuationCapability(continuationSupervisor.Status()),
+		}
+	}))
 
 	apiV1 := r.Group("/api/v1")
 	{
@@ -539,12 +552,8 @@ func main() {
 		wsHandler := handler.NewWebSocketHandlerWithWorkbench(wsHub, workbench, wsTickets)
 		r.GET("/api/v1/sessions/:id/ws", wsHandler.HandleWebSocket)
 
-		chatGroup := apiV1.Group("/chat")
-		chatHandler := handler.NewChatHandler(chatService, userService, jwtManager)
-		{
-			chatGroup.GET("/websocket-token", chatHandler.GetWebsocketStopToken)
-		}
-		r.GET("/chat/:token", chatHandler.Handle)
+		// Legacy /chat/:token and its token-in-URL ticket endpoint were removed.
+		// Session WebSocket tickets above are the only supported browser transport.
 
 		admin := apiV1.Group("/admin")
 		admin.Use(middleware.AuthMiddleware(jwtManager, userService), middleware.AdminAuthMiddleware())
@@ -669,6 +678,54 @@ func resolveTraceIndexForStartup(ctx context.Context, strict bool, readAlias, ex
 // ops/automation can judge whether retrieval is fully healthy.
 func healthzHandler(statusFn func() string) gin.HandlerFunc {
 	return healthzHandlerWithContinuation(statusFn, nil)
+}
+
+type CapabilityStatus struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+func capabilityFromStatus(status string) CapabilityStatus {
+	status = strings.TrimSpace(status)
+	if status == "ok" {
+		return CapabilityStatus{State: "ok"}
+	}
+	return CapabilityStatus{State: "degraded", Reason: status}
+}
+
+func continuationCapability(status session.ContinuationSupervisorStatus) CapabilityStatus {
+	if status.Attached {
+		return CapabilityStatus{State: "ok", Reason: "orchestrator stream attached"}
+	}
+	if strings.TrimSpace(status.LastHealthError) != "" {
+		return CapabilityStatus{State: "degraded", Reason: status.LastHealthError}
+	}
+	return CapabilityStatus{State: "unknown", Reason: "continuation supervisor has not attached"}
+}
+
+func readinessHandler(embeddingFn func() string, continuationFn func() session.ContinuationSupervisorStatus, capabilitiesFn func() map[string]CapabilityStatus) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		capabilities := map[string]CapabilityStatus{}
+		if capabilitiesFn != nil {
+			capabilities = capabilitiesFn()
+		}
+		ready := true
+		for _, capability := range capabilities {
+			if capability.State == "blocked" {
+				ready = false
+			}
+		}
+		body := gin.H{"status": "ready", "ready": ready, "embedding_preflight": embeddingFn(), "capabilities": capabilities}
+		if continuationFn != nil {
+			body["continuation"] = continuationFn()
+		}
+		status := http.StatusOK
+		if !ready {
+			status = http.StatusServiceUnavailable
+			body["status"] = "blocked"
+		}
+		c.JSON(status, body)
+	}
 }
 
 func healthzHandlerWithContinuation(statusFn func() string, continuationFn func() session.ContinuationSupervisorStatus) gin.HandlerFunc {

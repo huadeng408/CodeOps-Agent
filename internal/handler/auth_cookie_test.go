@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,6 +55,14 @@ func TestLoginWritesBrowserAuthCookies(t *testing.T) {
 		t.Fatalf("status = %d; body=%s", response.Code, response.Body.String())
 	}
 	assertHandlerAuthCookies(t, response.Result().Cookies(), "new-access", "new-refresh", false)
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(body)
+	if strings.Contains(string(encoded), "new-access") || strings.Contains(string(encoded), "new-refresh") {
+		t.Fatalf("login response leaked credentials: %s", encoded)
+	}
 }
 
 func TestRefreshReadsCookieAndRotatesBothCredentials(t *testing.T) {
@@ -74,6 +83,9 @@ func TestRefreshReadsCookieAndRotatesBothCredentials(t *testing.T) {
 		t.Fatalf("refresh input = %q, want cookie credential", stub.refreshInput)
 	}
 	assertHandlerAuthCookies(t, response.Result().Cookies(), "rotated-access", "rotated-refresh", false)
+	if strings.Contains(response.Body.String(), "rotated-access") || strings.Contains(response.Body.String(), "rotated-refresh") {
+		t.Fatalf("refresh response leaked credentials: %s", response.Body.String())
+	}
 }
 
 func TestLogoutUsesCookiesAndClearsBothCredentials(t *testing.T) {

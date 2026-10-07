@@ -12,6 +12,7 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/skills"
 	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
@@ -49,16 +50,65 @@ func configureContinuationSkills(executor *tools.Executor, root string) error {
 // continuationToolExecutors keeps mutable Executor cwd/job state scoped to a
 // durable Session instead of sharing one process-global working directory.
 type continuationToolExecutors struct {
-	root   string
-	mu     sync.Mutex
-	items  map[string]*tools.Executor
-	tracer genai.Tracer
-	mcp    *mcp.Manager
-	mcps   map[string]*mcp.Manager
+	root    string
+	mu      sync.Mutex
+	items   map[string]*tools.Executor
+	sandbox *lazySandboxRunner
+	tracer  genai.Tracer
+	mcp     *mcp.Manager
+	mcps    map[string]*mcp.Manager
+}
+
+// lazySandboxRunner keeps server startup and read-only sessions responsive
+// while preserving the sandbox package's fail-closed behaviour. It never
+// executes a host process when backend selection fails.
+type lazySandboxRunner struct {
+	config sandbox.Config
+	once   sync.Once
+	mu     sync.RWMutex
+	runner *sandbox.RoutingRunner
+}
+
+func newLazySandboxRunner(config sandbox.Config) *lazySandboxRunner {
+	return &lazySandboxRunner{config: config}
+}
+
+func (r *lazySandboxRunner) init() *sandbox.RoutingRunner {
+	r.once.Do(func() {
+		r.mu.Lock()
+		r.runner = sandbox.NewSandboxRunner(r.config)
+		r.mu.Unlock()
+	})
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.runner
+}
+
+func (r *lazySandboxRunner) Run(ctx context.Context, request sandbox.Request) (sandbox.Result, error) {
+	return r.init().Run(ctx, request)
+}
+
+func (r *lazySandboxRunner) Start(ctx context.Context, request sandbox.Request) (sandbox.Process, error) {
+	return r.init().Start(ctx, request)
+}
+
+func (r *lazySandboxRunner) Capability() (string, string) {
+	r.mu.RLock()
+	runner := r.runner
+	r.mu.RUnlock()
+	if runner == nil {
+		return "unknown", "sandbox backend has not been probed"
+	}
+	if backend := runner.Backend(); backend != "" && backend != "unavailable" {
+		return "ok", "sandbox backend: " + string(backend)
+	}
+	return "blocked", "no isolated sandbox backend is available"
 }
 
 func newContinuationToolExecutors(root string) *continuationToolExecutors {
-	return &continuationToolExecutors{root: root, items: make(map[string]*tools.Executor), mcps: make(map[string]*mcp.Manager)}
+	config := sandbox.DefaultConfig()
+	config.TrustRoot = root
+	return &continuationToolExecutors{root: root, items: make(map[string]*tools.Executor), sandbox: newLazySandboxRunner(config), mcps: make(map[string]*mcp.Manager)}
 }
 
 func (m *continuationToolExecutors) SetTracer(tracer genai.Tracer) {
@@ -135,6 +185,10 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 		trustRoot = dir
 	}
 	executor := tools.NewExecutor(trustRoot)
+	// All continuation executors share the same lazy, isolated runner. The
+	// runner's trust root is the parent workspace, so child worktrees remain
+	// confined without probing Docker once per session.
+	executor.SetSandbox(m.sandbox)
 	executor.SetTracer(m.tracer)
 	manager := m.mcp
 	if strings.HasPrefix(sessionID, "agent-") && manager != nil {

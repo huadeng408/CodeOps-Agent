@@ -224,6 +224,18 @@ func TestContinuationToolExecutorsIsolateConcurrentWorkingDirs(t *testing.T) {
 	}
 }
 
+func TestContinuationExecutorsAlwaysInstallFailClosedSandbox(t *testing.T) {
+	manager := newContinuationToolExecutors(t.TempDir())
+	defer manager.Close()
+	executor, err := manager.executor(context.Background(), "browser-session", manager.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !executor.HasSandbox() {
+		t.Fatal("browser continuation executor has no sandbox")
+	}
+}
+
 func TestConfigureContinuationSkillsKeepsBuiltinsWhenOptionalDirectoryMissing(t *testing.T) {
 	root := t.TempDir()
 	executor := tools.NewExecutor(root)

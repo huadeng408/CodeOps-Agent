@@ -173,6 +173,19 @@ func TestHealthzReportsContinuationRecoveryBackoff(t *testing.T) {
 	}
 }
 
+func TestReadinessReportsCapabilityStates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/readyz", readinessHandler(func() string { return "degraded: embedding preflight failed" }, nil, func() map[string]CapabilityStatus {
+		return map[string]CapabilityStatus{"sandbox": {State: "unknown", Reason: "probe pending"}, "provider": {State: "blocked", Reason: "disabled"}}
+	}))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "probe pending") || !strings.Contains(recorder.Body.String(), "disabled") {
+		t.Fatalf("readiness = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSearchReadIndexUsesConfiguredCorpusReadAlias(t *testing.T) {
 	cfg := serverconfig.Config{
 		Elasticsearch: serverconfig.ElasticsearchConfig{IndexName: "knowledge_base"},

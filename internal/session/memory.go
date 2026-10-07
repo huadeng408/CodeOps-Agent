@@ -46,6 +46,9 @@ func (r *SessionRunner) commitSessionMemory(ctx context.Context, key runKey) {
 		return
 	}
 	if events, err := r.workbench.ledger.Events(ctx, key.sessionID); err == nil {
+		if state, _, ok := latestMemoryCommitState(events, key.runID); ok && (state == "committed" || state == "permanently_blocked") {
+			return
+		}
 		if task, _, err := projectAgentTask(events); err != nil || task != nil && (task.Status == "input_required" || task.Status == "canceled") {
 			return
 		}
@@ -66,8 +69,27 @@ func (r *SessionRunner) commitSessionMemory(ctx context.Context, key runKey) {
 		if err != nil {
 			return
 		}
+		previousAttempts := 0
+		for _, event := range events {
+			if event.Type != "memory/commit-blocked" {
+				continue
+			}
+			var receipt struct {
+				RunID   string `json:"run_id"`
+				Attempt int    `json:"attempt"`
+			}
+			if json.Unmarshal(event.Payload, &receipt) == nil && receipt.RunID == key.runID && receipt.Attempt > previousAttempts {
+				previousAttempts = receipt.Attempt
+			}
+		}
+		attemptNumber := previousAttempts + 1
+		status := "pending"
+		if attemptNumber >= 5 {
+			status = "permanently_blocked"
+		}
 		_, err = r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), "memory/commit-blocked", map[string]any{
-			"schema_version": 1, "run_id": key.runID, "error_code": "memory_commit_unavailable", "retryable": true,
+			"schema_version": 1, "run_id": key.runID, "error_code": "memory_commit_unavailable", "retryable": status == "pending", "status": status, "attempt": attemptNumber,
+			"next_retry_at": r.now().Add(time.Duration(attemptNumber) * time.Minute),
 		})
 		if err == nil {
 			r.workbench.signal(key.sessionID)
@@ -77,6 +99,32 @@ func (r *SessionRunner) commitSessionMemory(ctx context.Context, key runKey) {
 			return
 		}
 	}
+}
+
+// latestMemoryCommitState reads durable pending receipts for one terminal run.
+// A missing receipt is retryable; permanently blocked work stays closed across
+// process restarts. Successful commits are already represented by the
+// trajectory/catalog facts and do not need another ledger event.
+func latestMemoryCommitState(events []Event, runID string) (string, time.Time, bool) {
+	var state string
+	var retryAt time.Time
+	found := false
+	for _, event := range events {
+		if event.Type != "memory/commit-blocked" {
+			continue
+		}
+		var receipt struct {
+			RunID       string    `json:"run_id"`
+			Status      string    `json:"status"`
+			NextRetryAt time.Time `json:"next_retry_at"`
+		}
+		if json.Unmarshal(event.Payload, &receipt) != nil || receipt.RunID != runID {
+			continue
+		}
+		found = true
+		state, retryAt = receipt.Status, receipt.NextRetryAt
+	}
+	return state, retryAt, found
 }
 
 func projectionOwner(events []Event) uint {

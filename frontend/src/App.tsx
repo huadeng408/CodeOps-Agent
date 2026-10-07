@@ -465,6 +465,30 @@ function App() {
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
+      // A user message is idempotent by requestId, so one automatic retry is
+      // safe after refreshing the canonical ledger cursor. Other operations
+      // continue to require an explicit retry/approval.
+      if (cause instanceof ApiError && cause.status === 409) {
+        try {
+          await retryPendingMessage(
+            { sessionId: selectedSession.id, content, requestId },
+            async (sessionId) => {
+              const fresh = await api.getSession(sessionId);
+              setSelectedSession(fresh);
+              setSessions((items) => items.map((item) => item.id === fresh.id ? fresh : item));
+              return { sessionId: fresh.id, eventCount: fresh.eventCount };
+            },
+            (request) => api.submitMessage(request.sessionId, request.content, request.expectedSeq, request.requestId),
+          );
+          setPendingRetry(null);
+          setMessage('');
+          removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
+          await refreshSelected();
+          return;
+        } catch (retryCause) {
+          cause = retryCause;
+        }
+      }
       setPendingRetry({ sessionId: selectedSession.id, content, requestId });
       setMessage(content);
       setError(sendFailureMessage(cause));

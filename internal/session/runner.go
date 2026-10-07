@@ -949,6 +949,16 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				}
 			}
 			wakeAt := time.Time{}
+			memoryRecovery := run.terminal
+			if memoryRecovery {
+				state, retryAt, found := latestMemoryCommitState(events, runID)
+				if found && state == "permanently_blocked" {
+					continue
+				}
+				if found && retryAt.After(r.now()) {
+					wakeAt = retryAt
+				}
+			}
 			if !run.terminal && run.view.LeaseUntil != nil && run.view.LeaseUntil.After(r.now()) {
 				wakeAt = *run.view.LeaseUntil
 			}
@@ -957,7 +967,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				r.lifecycleMu.RUnlock()
 				return ErrSessionRunnerClosed
 			}
-			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID, memoryRecovery: run.terminal}, wakeAt)
+			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID, memoryRecovery: memoryRecovery}, wakeAt)
 			r.lifecycleMu.RUnlock()
 		}
 	}

@@ -44,6 +44,17 @@ func openHandlerTestWorkbench(t *testing.T) (*session.Workbench, *session.SQLite
 
 type testContinuationModule struct{}
 
+type conflictContinuationModule struct{}
+
+func (conflictContinuationModule) RequestContinuation(context.Context, session.ContinueCommand) (session.RunView, error) {
+	return session.RunView{}, session.ErrSequenceConflict
+}
+func (conflictContinuationModule) SubmitMessage(context.Context, session.SubmitMessageCommand) (session.RunView, error) {
+	return session.RunView{}, session.ErrSequenceConflict
+}
+func (conflictContinuationModule) Recover(context.Context) error { return nil }
+func (conflictContinuationModule) Close() error                  { return nil }
+
 type handlerApprovalConversation struct{}
 
 func (handlerApprovalConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
@@ -242,6 +253,21 @@ func TestSubmitMessageRouteStartsNaturalLanguageTurnIdempotently(t *testing.T) {
 	})
 	if foreign.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || foreign.Body.String() != missing.Body.String() {
 		t.Fatalf("foreign=%d %q missing=%d %q", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
+	}
+}
+
+func TestSubmitMessageConflictIncludesCanonicalCursor(t *testing.T) {
+	workbench, _ := openHandlerTestWorkbench(t)
+	created, err := workbench.Create(context.Background(), 7, "repo", "conflict", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := messageSubmissionRouter(7, workbench, conflictContinuationModule{})
+	response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/messages", map[string]any{
+		"requestId": "conflict-1", "expectedSeq": int64(0), "content": "retry me",
+	})
+	if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte(`"eventCount":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"sessionId":"`+created.ID+`"`)) {
+		t.Fatalf("conflict response lacks canonical cursor: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
