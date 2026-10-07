@@ -1,0 +1,6 @@
+CodeOps-Agent
+Copyright 2026 CodeOps-Agent contributors
+
+This distribution includes third-party dependencies. Their respective
+copyright notices and license terms remain applicable; see the dependency
+metadata in go.mod, go.sum, pyproject.toml, uv.lock, and frontend/package.json.

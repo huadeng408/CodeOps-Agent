@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "code-agent"
 version = "0.1.0"
 description = "Local code agent skeleton"
+license = {text = "Apache-2.0"}
+authors = [{name = "CodeOps-Agent contributors"}]
 requires-python = ">=3.11"
 
 dependencies = [

@@ -36,6 +36,8 @@ notes/
 # Agent-specific permissions and local overrides are machine-owned.
 .claude/settings.json
 .claude/settings.local.json
+# Optional local Claude skills are not part of the CodeOps-Agent distribution.
+.claude/skills/
 
 # Logs
 *.log
