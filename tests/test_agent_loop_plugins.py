@@ -73,6 +73,41 @@ def test_event_metadata_is_immutable():
         event.metadata["count"] = 2
 
 
+def test_strategy_extension_can_add_context_and_block_tool_without_executing_it():
+    registry = AgentLoopPluginRegistry()
+    registry.register_extension("context", "prepare_context", lambda event: {"context": ["bounded context"]})
+    registry.register_extension("guard", "before_tool", lambda event: {"blocked": True, "message": "denied"})
+
+    event = LoopEvent(
+        "1",
+        "session-x",
+        1,
+        "before_tool",
+        {"tool_name": "Bash"},
+        {"tool_call_id": "call-1", "arguments": {"command": "whoami"}},
+    )
+    context = registry.dispatch_extension(
+        "prepare_context", LoopEvent("1", "session-x", 1, "prepare_context")
+    )
+    blocked = registry.dispatch_extension("before_tool", event)
+
+    assert context.context == ("bounded context",)
+    assert blocked.blocked is True
+    assert blocked.message == "denied"
+    assert blocked.tool_arguments == {}
+
+
+def test_strategy_extension_errors_are_redacted():
+    registry = AgentLoopPluginRegistry()
+    registry.register_extension("secret-shaped", "after_model", lambda event: 1)
+    result = registry.dispatch_extension("after_model", LoopEvent("1", "s", 0, "after_model"))
+    assert result.errors == [{
+        "plugin": "<redacted-plugin>",
+        "error_type": "TypeError",
+        "code": "plugin_extension_failed",
+    }]
+
+
 class _PluginLoopLLM:
     model = "local-plugin-loop"
 

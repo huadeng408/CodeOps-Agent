@@ -796,6 +796,7 @@ func eventSourceBelongsToRun(events []Event, sourceSeq int64, runID string) bool
 		runCompletedEventType, runFailedEventType, "execution_result",
 		"user/message", "assistant/message", "tool/call", "tool/result",
 		toolDispatchedType, toolUnknownEventType, planTodoEventType,
+		commitPendingEventType, commitDoneEventType,
 		compactionEventType, codeModifiedEventType, progressEventType,
 		approvalPendingEventType, approvalApprovedEventType, approvalDeniedEventType:
 		// allowed canonical run facts

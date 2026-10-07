@@ -71,6 +71,37 @@ func secureFilePath(root, target string) (string, error) {
 	return absTarget, nil
 }
 
+// workspaceRelativePath converts a path that has already passed the file
+// safety checks into the canonical path form used by session change receipts.
+// Receipts are rooted at the workspace rather than the current session
+// working directory, so absolute model arguments and nested working
+// directories produce the same stable identifier.
+func workspaceRelativePath(root, target string) (string, error) {
+	if root == "" {
+		root = "."
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("workspace root symlink resolution failed: %w", err)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(realRoot, filepath.Clean(absTarget))
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes workspace: %s", target)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
 func samePath(left, right string) bool {
 	left = filepath.Clean(left)
 	right = filepath.Clean(right)

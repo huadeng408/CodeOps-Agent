@@ -288,6 +288,47 @@ func TestMCPManagerRestartsAfterTimedOutRead(t *testing.T) {
 	}
 }
 
+func TestMCPManagerRejectsBoundToolWhenRestartCatalogDrifts(t *testing.T) {
+	dir := t.TempDir()
+	delayMarker := filepath.Join(dir, "delayed-once")
+	driftedCallMarker := filepath.Join(dir, "drifted-call")
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{
+		Name: "drift", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"},
+		Env: map[string]string{
+			"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_DELAY_MARKER": delayMarker,
+			"FAKE_MCP_DRIFT_AFTER_DELAY": "1", "FAKE_MCP_DRIFTED_CALL_MARKER": driftedCallMarker,
+		},
+	})
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStart()
+	if err := manager.Start(startCtx, "drift"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	binding, ok := manager.ResolveBinding("fake_echo")
+	if !ok {
+		t.Fatal("initial binding unavailable")
+	}
+
+	timedCtx, cancelTimed := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, err := manager.CallToolBound(timedCtx, binding, map[string]any{"text": "timeout"})
+	cancelTimed()
+	if err == nil {
+		t.Fatal("delayed MCP call unexpectedly succeeded")
+	}
+
+	retryCtx, cancelRetry := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRetry()
+	_, err = manager.CallToolBound(retryCtx, binding, map[string]any{"text": "must-not-run"})
+	if err == nil || !strings.Contains(err.Error(), "catalog changed") {
+		t.Fatalf("drifted restart catalog was accepted: %v", err)
+	}
+	if _, statErr := os.Stat(driftedCallMarker); !os.IsNotExist(statErr) {
+		t.Fatalf("drifted tool executed, marker error = %v", statErr)
+	}
+}
+
 func TestMCPManagerKeepsPinnedCatalogWhenPoisonedRestartFails(t *testing.T) {
 	dir := t.TempDir()
 	delayMarker := filepath.Join(dir, "delayed-once")
@@ -517,6 +558,11 @@ func TestMCPHelperProcess(t *testing.T) {
 }
 
 func runFakeMCPServer() {
+	drifted := false
+	if os.Getenv("FAKE_MCP_DRIFT_AFTER_DELAY") == "1" {
+		_, err := os.Stat(strings.TrimSpace(os.Getenv("FAKE_MCP_DELAY_MARKER")))
+		drifted = err == nil
+	}
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	for {
@@ -559,6 +605,9 @@ func runFakeMCPServer() {
 					"text": map[string]any{"type": "string"},
 				},
 			}
+			if drifted {
+				schema["required"] = []string{"text"}
+			}
 			if os.Getenv("FAKE_MCP_SCHEMA") == "camel" {
 				result = map[string]any{
 					"tools": []map[string]any{{
@@ -577,6 +626,11 @@ func runFakeMCPServer() {
 				}},
 			}
 		case "tools/call":
+			if drifted {
+				if marker := strings.TrimSpace(os.Getenv("FAKE_MCP_DRIFTED_CALL_MARKER")); marker != "" {
+					_ = os.WriteFile(marker, []byte("called"), 0o600)
+				}
+			}
 			if os.Getenv("FAKE_MCP_CALL_ERROR") == "1" {
 				_ = encoder.Encode(mcp.Response{JSONRPC: "2.0", ID: req.ID, Error: &mcp.ErrorObject{
 					Code: -32001, Message: "SENTINEL_REMOTE_SECRET", Data: "SENTINEL_REMOTE_DATA",

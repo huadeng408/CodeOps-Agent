@@ -125,9 +125,10 @@ func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, o
 	}
 
 	projection := trajectoryProjection{
-		openTools: make(map[string]string),
-		runs:      make(map[string]struct{}),
-		terminals: make(map[string]string),
+		openTools:     make(map[string]trajectoryTool),
+		abandonedRuns: make(map[string]struct{}),
+		runs:          make(map[string]struct{}),
+		terminals:     make(map[string]string),
 	}
 	for _, event := range selected {
 		if err := projection.consume(event); err != nil {
@@ -140,7 +141,7 @@ func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, o
 
 	outcome := trajectoryOutcomeIncomplete
 	complete := false
-	if projection.terminalSeen && !projection.uncertain && len(projection.openTools) == 0 && projection.allRunsTerminal() {
+	if projection.terminalSeen && !projection.uncertain && len(projection.openTools) == 0 && len(projection.abandonedRuns) == 0 && projection.allRunsTerminal() {
 		outcome = projection.terminalOutcome
 		complete = outcome == trajectoryOutcomeCompleted || outcome == trajectoryOutcomeFailed
 	}
@@ -252,12 +253,21 @@ type trajectoryProjection struct {
 	haveSource      bool
 	sources         []TrajectorySource
 	lines           []string
-	openTools       map[string]string
+	openTools       map[string]trajectoryTool
+	abandonedRuns   map[string]struct{}
 	runs            map[string]struct{}
 	terminals       map[string]string
 	terminalSeen    bool
 	terminalOutcome string
 	uncertain       bool
+}
+
+type trajectoryTool struct {
+	runID      string
+	toolName   string
+	pending    bool
+	approved   bool
+	dispatched bool
 }
 
 func (p *trajectoryProjection) consume(event session.Event) error {
@@ -297,9 +307,52 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		if _, exists := p.openTools[key]; exists {
 			return trajectoryPayloadError(event, "duplicate open tool call")
 		}
-		p.openTools[key] = payload.ToolName
+		p.openTools[key] = trajectoryTool{runID: payload.RunID, toolName: payload.ToolName}
 		p.addRun(payload.RunID)
 		p.add(event, "Tool call: "+safeTrajectoryText(safeIdentifier(payload.ToolName)))
+	case "approval/pending", "approval/approved", "approval/denied":
+		var payload struct {
+			RunID      string `json:"run_id"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolName   string `json:"tool_name"`
+		}
+		if err := decodeObject(event, &payload); err != nil {
+			return err
+		}
+		if strings.TrimSpace(payload.RunID) == "" || strings.TrimSpace(payload.ToolCallID) == "" || strings.TrimSpace(payload.ToolName) == "" {
+			return trajectoryPayloadError(event, "approval identity is required")
+		}
+		key := trajectoryToolKey(payload.RunID, payload.ToolCallID)
+		tool, exists := p.openTools[key]
+		if !exists || tool.toolName != payload.ToolName {
+			return trajectoryPayloadError(event, "approval has no matching open tool call")
+		}
+		tool.pending = true
+		switch event.Type {
+		case "approval/approved":
+			tool.approved = true
+		}
+		p.openTools[key] = tool
+	case "tool/dispatched":
+		var payload struct {
+			RunID      string `json:"run_id"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolName   string `json:"tool_name"`
+		}
+		if err := decodeObject(event, &payload); err != nil {
+			return err
+		}
+		if strings.TrimSpace(payload.RunID) == "" || strings.TrimSpace(payload.ToolCallID) == "" || strings.TrimSpace(payload.ToolName) == "" {
+			return trajectoryPayloadError(event, "dispatch identity is required")
+		}
+		key := trajectoryToolKey(payload.RunID, payload.ToolCallID)
+		tool, exists := p.openTools[key]
+		if !exists || tool.toolName != payload.ToolName {
+			return trajectoryPayloadError(event, "dispatch has no matching open tool call")
+		}
+		tool.dispatched = true
+		p.openTools[key] = tool
+		p.addRun(payload.RunID)
 	case "tool/result":
 		var payload struct {
 			RunID      string `json:"run_id"`
@@ -314,7 +367,8 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 			return trajectoryPayloadError(event, "tool result identity is required")
 		}
 		key := trajectoryToolKey(payload.RunID, payload.ToolCallID)
-		if toolName, exists := p.openTools[key]; !exists || toolName != payload.ToolName {
+		tool, exists := p.openTools[key]
+		if !exists || tool.toolName != payload.ToolName {
 			return trajectoryPayloadError(event, "tool result has no matching call")
 		}
 		delete(p.openTools, key)
@@ -337,7 +391,8 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		if err := decodeObject(event, &payload); err != nil {
 			return err
 		}
-		if toolName, exists := p.openTools[trajectoryToolKey(payload.RunID, payload.ToolCallID)]; !exists || toolName != payload.ToolName {
+		tool, exists := p.openTools[trajectoryToolKey(payload.RunID, payload.ToolCallID)]
+		if !exists || tool.toolName != payload.ToolName {
 			return trajectoryPayloadError(event, "code modification has no matching open tool call")
 		}
 		path := strings.TrimSpace(payload.Path)
@@ -364,6 +419,8 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		if description == "" {
 			description = operation + " " + path
 		}
+		tool.dispatched = true
+		p.openTools[trajectoryToolKey(payload.RunID, payload.ToolCallID)] = tool
 		p.add(event, "code/modified: "+description)
 	case "session/run-completed", "session/run-failed":
 		var payload struct {
@@ -385,6 +442,17 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 			return trajectoryPayloadError(event, "duplicate run terminal: "+previous)
 		}
 		p.terminals[runID] = outcome
+		// A failed run may contain an explicitly pending approval that was never
+		// approved, dispatched, or code-modified. The Harness cannot execute that
+		// call, so keep its audit source but release it from the open set. Calls
+		// without pending approval evidence, successful terminals, and every
+		// approved/dispatched call remain fail-closed for legacy compatibility.
+		for key, tool := range p.openTools {
+			if tool.runID == runID && outcome == trajectoryOutcomeFailed && tool.pending && !tool.approved && !tool.dispatched {
+				delete(p.openTools, key)
+				p.abandonedRuns[runID] = struct{}{}
+			}
+		}
 		p.terminalSeen = true
 		p.terminalOutcome = outcome
 		p.add(event, "Run outcome: "+outcome)
@@ -460,6 +528,11 @@ func (p *trajectoryProjection) add(event session.Event, line string) {
 
 func (p *trajectoryProjection) addRun(runID string) {
 	if runID = strings.TrimSpace(runID); runID != "" {
+		for abandonedRunID := range p.abandonedRuns {
+			if abandonedRunID != runID {
+				delete(p.abandonedRuns, abandonedRunID)
+			}
+		}
 		p.runs[runID] = struct{}{}
 	}
 }

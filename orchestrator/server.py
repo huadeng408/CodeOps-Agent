@@ -54,6 +54,39 @@ _CONTEXT_SECTION_BYTES = (12_000, 8_000, 8_000, 3_000)
 _EVAL_JOIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,95}")
 
 
+def _safe_rpc_status(exc: BaseException) -> str:
+    """Return only a known gRPC status name, never exception text."""
+    if not isinstance(exc, grpc.RpcError):
+        return ""
+    try:
+        status = exc.code()
+    except Exception:
+        return ""
+    return status.name if isinstance(status, grpc.StatusCode) else ""
+
+
+def _rpc_failure_details(exc: BaseException) -> tuple[str, str, bool, str]:
+    """Classify transport cancellation without exposing RpcError details."""
+    status = _safe_rpc_status(exc)
+    details = {
+        "CANCELLED": (
+            "rpc_cancelled",
+            "orchestrator call canceled; retry this task",
+        ),
+        "UNAVAILABLE": (
+            "rpc_unavailable",
+            "orchestrator transport unavailable; retry this task",
+        ),
+        "DEADLINE_EXCEEDED": (
+            "rpc_deadline_exceeded",
+            "orchestrator call deadline exceeded; retry this task",
+        ),
+    }.get(status)
+    if details is None:
+        return "", "", True, status
+    return details[0], details[1], True, status
+
+
 def _admitted_grpc_trace_context(metadata):
     """Restore W3C parent plus the two safe evaluation baggage keys."""
     try:
@@ -96,7 +129,10 @@ def _admitted_grpc_trace_context(metadata):
 def _render_context_envelope(envelope) -> str:
     if envelope.schema_version != _CONTEXT_ENVELOPE_VERSION:
         raise ValueError("unsupported context envelope version")
-    if len(envelope.p0) > 256 or len(envelope.p1) > 64 or len(envelope.p3_candidates) > 64 or len(envelope.events) > 64:
+    p2_candidates = getattr(envelope, "p2_candidates", None)
+    if p2_candidates is None:
+        p2_candidates = getattr(envelope, "p3_candidates", ())
+    if len(envelope.p0) > 256 or len(envelope.p1) > 64 or len(p2_candidates) > 64 or len(envelope.events) > 64:
         raise ValueError("context envelope exceeds item limits")
 
     def digest(value: str, *, optional: bool = False) -> str:
@@ -137,14 +173,14 @@ def _render_context_envelope(envelope) -> str:
 
     p0_lines, _ = file_lines(envelope.p0)
     p1_lines, p1_paths = file_lines(envelope.p1)
-    p3_lines: list[str] = []
-    p3_seen: set[str] = set()
-    for value in envelope.p3_candidates:
+    p2_lines: list[str] = []
+    p2_seen: set[str] = set()
+    for value in p2_candidates:
         item_path = relative_path(value)
-        if item_path in p3_seen or item_path not in p1_paths:
-            raise ValueError("context envelope contains an invalid P3 candidate")
-        p3_seen.add(item_path)
-        p3_lines.append(f"- {item_path}")
+        if item_path in p2_seen or item_path not in p1_paths:
+            raise ValueError("context envelope contains an invalid P2 candidate")
+        p2_seen.add(item_path)
+        p2_lines.append(f"- {item_path}")
 
     event_lines: list[str] = []
     previous_seq = -1
@@ -178,7 +214,7 @@ def _render_context_envelope(envelope) -> str:
 
     return "\n\n".join(
         (
-            "Harness context envelope v1 (metadata only; use the authorized Read tool for P3 content).",
+            "Harness context envelope v1 (metadata only; use the authorized Read tool for P2 content).",
             section("P0 directory summary", p0_lines, _CONTEXT_SECTION_BYTES[0]),
             section("P1 node summaries", p1_lines, _CONTEXT_SECTION_BYTES[1]),
             section(
@@ -186,7 +222,8 @@ def _render_context_envelope(envelope) -> str:
                 event_lines,
                 _CONTEXT_SECTION_BYTES[2],
             ),
-            section("P3 candidates (raw content not injected)", p3_lines, _CONTEXT_SECTION_BYTES[3]),
+            section("P2 candidates (raw content not injected)", p2_lines, _CONTEXT_SECTION_BYTES[3]),
+            "P3 candidates (raw content not injected) [legacy alias of P2]",
         )
     )
 
@@ -508,6 +545,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         harness_managed = False
         memory_context = ""
         harness_context = ""
+        ledger_seq = 0
+        ledger_checksum = ""
         agent_task = None
         allowed_tools = ()
         for message in request_iterator:
@@ -524,6 +563,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "context envelope requires a harness-managed request")
                     try:
                         harness_context = _render_context_envelope(user_input.context_envelope)
+                        ledger_seq = max(0, int(user_input.context_envelope.ledger_seq))
+                        ledger_checksum = str(user_input.context_envelope.ledger_checksum).strip().lower()
                     except ValueError as exc:
                         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
                 agent_task = user_input.agent_task if user_input.HasField("agent_task") else None
@@ -648,6 +689,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 surface_sha256=surface_sha256,
                 retry_of_run_id=retry_of_run_id,
                 retry_of_run_ids=retry_of_run_ids,
+                ledger_seq=ledger_seq,
+                ledger_checksum=ledger_checksum,
                 **new_turn_options,
             )
         except Exception as exc:  # noqa: BLE001 - never terminate a gRPC stream without Done
@@ -656,19 +699,24 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             # Do not expose provider URLs, request bodies, or credential-bearing
             # exception text across the RPC boundary.
             error_name = type(exc).__name__
-            lowered = str(exc).lower()
-            if "timeout" in lowered or "timed out" in lowered:
-                error_code = "provider_timeout"
-                message = "agent provider timed out; retry this task"
-            elif "auth" in lowered or "401" in lowered or "403" in lowered:
-                error_code = "provider_authentication_error"
-                message = "model authentication failed; check provider credentials"
-            else:
-                error_code = "provider_runtime_error"
-                message = "agent provider failed; retry this task"
+            error_code, message, retryable, rpc_status = _rpc_failure_details(exc)
+            if not error_code:
+                lowered = str(exc).lower()
+                if "timeout" in lowered or "timed out" in lowered:
+                    error_code = "provider_timeout"
+                    message = "agent provider timed out; retry this task"
+                elif "auth" in lowered or "401" in lowered or "403" in lowered:
+                    error_code = "provider_authentication_error"
+                    message = "model authentication failed; check provider credentials"
+                else:
+                    error_code = "provider_runtime_error"
+                    message = "agent provider failed; retry this task"
             try:
                 logging.getLogger(__name__).error(
-                    "conversation runner failed: type=%s code=%s", error_name, error_code
+                    "conversation runner failed: type=%s code=%s rpc_status=%s",
+                    error_name,
+                    error_code,
+                    rpc_status or "none",
                 )
             except Exception:
                 pass
@@ -677,7 +725,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     success=False,
                     message=message,
                     error_code=error_code,
-                    retryable=True,
+                    retryable=retryable,
                 )
             )
         finally:

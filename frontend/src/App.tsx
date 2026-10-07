@@ -9,6 +9,7 @@ import { createContinuationRequestId } from './continuationRequest';
 import { retryPendingMessage, sendFailureMessage } from './sendRetry';
 import { compactionPresentation, isCompactionEvent } from './compactionPresentation';
 import { mergeSessionEvents } from './eventMerge';
+import { groupProgressByMessage, hideGroupedProgress } from './progressGrouping';
 
 function renderInlineMarkdown(value: string): ReactNode {
   const parts = value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
@@ -93,10 +94,6 @@ function persistedSessionCursor(sessionId: string, cursor: number): void {
   }
 }
 
-function sessionDraftKey(sessionId: string): string {
-  return `codeops:draft:${sessionId}`;
-}
-
 function sessionMessageRequestKey(sessionId: string): string {
   return `codeops:message-request:${sessionId}`;
 }
@@ -156,6 +153,10 @@ function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
+function sessionStatusLabel(status: Session['status']): string {
+  return status === 'running' ? '运行中' : status === 'queued' ? '排队中' : status === 'paused' ? '已暂停' : '已完成';
+}
+
 type EventKind = 'messages' | 'tools' | 'approvals' | 'code' | 'progress';
 
 function renderProgressContent(event: SessionEvent): ReactNode {
@@ -185,7 +186,7 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [message, setMessage] = useState('');
-  const [isDarkTheme, setIsDarkTheme] = useState(() => readLocalStorage('theme') === 'dark');
+  const [isDarkTheme, setIsDarkTheme] = useState(() => readLocalStorage('theme') !== 'light');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -195,10 +196,11 @@ function App() {
   const [newTitle, setNewTitle] = useState('');
   const [newProject, setNewProject] = useState('default-project');
   const [newGoal, setNewGoal] = useState('');
+  const [newWorkingDir, setNewWorkingDir] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [statusDraft, setStatusDraft] = useState<Session['status']>('running');
-  const [showDetails, setShowDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1101px)').matches);
   const [continuationHealth, setContinuationHealth] = useState<ContinuationRuntimeStatus | null>(null);
   const [continuationHealthKnown, setContinuationHealthKnown] = useState(false);
   const selectionGenerationRef = useRef(0);
@@ -230,30 +232,6 @@ function App() {
   useEffect(() => {
     if (selectedSession) setStatusDraft(selectedSession.status);
   }, [selectedSession?.id, selectedSession?.status]);
-
-  useEffect(() => {
-    if (!selectedSession) {
-      setMessage('');
-      return;
-    }
-    try {
-      setMessage(readLocalStorage(sessionDraftKey(selectedSession.id)) || '');
-    } catch {
-      setMessage('');
-    }
-  }, [selectedSession?.id]);
-
-  useEffect(() => {
-    if (!selectedSession) return;
-    try {
-      const draft = message.trim();
-      if (draft) writeLocalStorage(sessionDraftKey(selectedSession.id), message);
-      else removeLocalStorage(sessionDraftKey(selectedSession.id));
-    } catch {
-      // Draft persistence is a convenience; canonical ledger recovery does
-      // not depend on browser storage being available.
-    }
-  }, [message, selectedSession?.id]);
 
   const syncSessions = useCallback(async (preferredID?: string) => {
     const data = await api.listSessions();
@@ -399,9 +377,10 @@ function App() {
     setBusy(true);
     setError('');
     try {
-      const created = await api.createSession(newProject.trim() || 'default-project', newTitle.trim(), newGoal.trim());
+      const created = await api.createSession(newProject.trim() || 'default-project', newTitle.trim(), newGoal.trim(), newWorkingDir.trim());
       setNewTitle('');
       setNewGoal('');
+      setNewWorkingDir('');
       setShowCreate(false);
       await syncSessions(created.id);
     } catch (cause) {
@@ -483,7 +462,6 @@ function App() {
       await api.submitMessage(selectedSession.id, content, selectedSession.eventCount, requestId);
       setPendingRetry(null);
       setMessage('');
-      removeLocalStorage(sessionDraftKey(selectedSession.id));
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
@@ -515,7 +493,6 @@ function App() {
       );
       setPendingRetry(null);
       setMessage('');
-      removeLocalStorage(sessionDraftKey(pending.sessionId));
       removeLocalStorage(sessionMessageRequestKey(pending.sessionId));
       await refreshSelected();
     } catch (cause) {
@@ -570,22 +547,41 @@ function App() {
     (groups[session.projectName] ||= []).push(session);
     return groups;
   }, {} as Record<string, Session[]>), [sessions]);
+  const harnessLabel = !continuationHealthKnown
+    ? 'Harness 检查中'
+    : continuationHealth?.attached === false
+      ? 'Harness 恢复中'
+      : 'Harness 已连接';
 
   if (loading) return <div className="loading-screen">正在加载...</div>;
 
   return (
     <div className={`app-frame ${showDetails ? 'details-open' : ''}`}>
+      <nav className="app-rail" aria-label="主导航">
+        <div className="rail-logo" aria-label="CodeOps Agent">C</div>
+        <button className="rail-btn active" type="button" title="Agent 工作区" aria-label="Agent 工作区">✦</button>
+        <button className="rail-btn" type="button" title="工作区" aria-label="工作区">▦</button>
+        <button className="rail-btn" type="button" title="变更" aria-label="变更">⌘</button>
+        <button className="rail-btn" type="button" title="搜索" aria-label="搜索">⌕</button>
+        <span className="rail-spacer" />
+        <button className="rail-btn" type="button" title="设置" aria-label="设置">⚙</button>
+        <span className="rail-avatar" aria-label="当前用户">ME</span>
+      </nav>
       <aside className="sidebar">
         <div className="sidebar-header">
-          <div className="sidebar-brand">CodeOps Agent</div>
+          <div className="sidebar-brand"><strong>localcode</strong><span>▾</span></div>
           <div className="sidebar-actions">
             <button className="icon-btn" type="button" title="退出登录" aria-label="退出登录" onClick={() => void handleLogout()} disabled={busy}>↪</button>
-            <button className="new-session-btn" type="button" onClick={() => setShowCreate((value) => !value)} disabled={busy}>+ 新建</button>
+            <button className="icon-btn" type="button" title="更多" aria-label="更多">···</button>
           </div>
         </div>
+        <button className="new-session-btn" type="button" onClick={() => setShowCreate((value) => !value)} disabled={busy}><span>＋</span>新建代码任务</button>
+        <div className="sidebar-search" aria-label="搜索任务"><span>⌕</span><span>搜索任务和消息</span><kbd>⌘ K</kbd></div>
+        <div className="sidebar-tabs" aria-label="任务筛选"><span className="active">所有任务</span><span>运行中</span><span>已归档</span></div>
         {showCreate && (
           <form className="create-session-form" onSubmit={(event) => void handleCreateSession(event)}>
             <input aria-label="项目" value={newProject} onChange={(event) => setNewProject(event.target.value)} placeholder="项目" />
+            <input aria-label="工作目录" value={newWorkingDir} onChange={(event) => setNewWorkingDir(event.target.value)} placeholder="工作目录（默认当前目录）" />
             <input aria-label="标题" autoFocus value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="会话标题" />
             <textarea aria-label="目标" value={newGoal} onChange={(event) => setNewGoal(event.target.value)} placeholder="目标（可选）" rows={2} />
             <button className="primary-btn" type="submit" disabled={busy || !newTitle.trim()}>{busy ? '创建中...' : '创建会话'}</button>
@@ -613,7 +609,8 @@ function App() {
                 {selectedSession?.title || '选择一个会话'}
               </button>
             )}
-            {selectedSession && <span className={`status-chip ${selectedSession.status}`}>{selectedSession.status}</span>}
+            {selectedSession && <span className={`status-chip ${selectedSession.status}`}>{sessionStatusLabel(selectedSession.status)}</span>}
+            {selectedSession && <div className="conversation-subline"><span className="branch-pill">main</span><span>·</span><span>{selectedSession.projectName}</span><span>·</span><span>{selectedSession.eventCount} events</span></div>}
           </div>
           <div className="header-actions">
             {selectedSession && <select aria-label="会话状态" value={statusDraft} onChange={(event) => { const next = event.target.value as Session['status']; setStatusDraft(next); void handleStatus(next); }} disabled={busy || selectedSession.status === 'queued'}>
@@ -621,27 +618,28 @@ function App() {
             </select>}
             {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && <button className="subtle-btn header-continue-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || !continuationHealthKnown || continuationHealth?.attached !== true}>{busy ? '继续中...' : !continuationHealthKnown ? '检查编排器...' : continuationHealth?.attached !== true ? '编排器恢复中...' : '继续任务'}</button>}
             {selectedSession?.status === 'paused' && selectedSession.run?.checkpointHash && !continuationHealthKnown && <span className="continuation-health recovering" role="status">等待编排器健康状态</span>}
+            <span className={`harness-chip ${continuationHealth?.attached === false ? 'recovering' : ''}`}><span />{harnessLabel}</span>
+            <div className="mode-switch" aria-label="Agent 模式"><button className="active" type="button">Agent</button><button type="button">Plan</button></div>
             <button className="icon-btn" type="button" title="切换主题" aria-label="切换主题" onClick={() => setIsDarkTheme((value) => !value)}>{isDarkTheme ? '☀' : '◐'}</button>
             <button className="icon-btn" type="button" title="打开会话详情" aria-label="打开会话详情" onClick={() => setShowDetails((value) => !value)}>▣</button>
             {selectedSession && <button className="icon-btn danger" type="button" title="删除会话" aria-label="删除会话" onClick={() => void handleDelete()} disabled={busy}>⌫</button>}
           </div>
         </header>
         {error && <div className="global-error" role="alert">{error}{pendingRetry && selectedSession?.id === pendingRetry.sessionId && <button className="subtle-btn retry-message-btn" type="button" onClick={() => void handleRetryMessage()} disabled={busy}>{busy ? '重试中...' : '重试发送'}</button>}</div>}
-        {selectedSession?.run?.status === 'failed' && <div className="global-error" role="alert">{selectedSession.run.error || '任务执行失败'}。可点击“继续任务”重试。</div>}
+        {selectedSession?.run?.status === 'failed' && <div className="global-error" role="alert">{selectedSession.run.error || '任务执行失败'}。<button className="subtle-btn retry-message-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || !continuationHealthKnown || continuationHealth?.attached !== true}>{busy ? '继续中...' : '继续此任务'}</button></div>}
         {(selectedSession?.run?.status === 'queued' || selectedSession?.run?.status === 'running') && <div className="stream-status" role="status">{selectedSession.run.status === 'queued' ? '任务排队中...' : '正在处理，请稍候...'}</div>}
         <div className="message-list" ref={messageListRef}>
           {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} activeRun={selectedSession.run} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
-          {selectedSession?.lastUserInput && !message && <button className="restore-input-btn" type="button" onClick={() => setMessage(selectedSession.lastUserInput || '')} disabled={busy}>恢复上次输入</button>}
           <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <button className="send-btn" type="submit" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '处理中...' : '发送'}</button>
+          <div className="composer-footer"><div className="composer-meta"><span>＋ 附加文件</span><span><strong>权限</strong> 工具调用按需审批</span><span><strong>模型</strong> 已配置模型</span></div><div className="composer-hint">Enter 发送 · Shift+Enter 换行</div><button className="send-btn" type="submit" aria-label="发送" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '…' : '↑'}</button></div>
         </form>
       </main>
 
       <aside className={`task-panel ${showDetails ? 'open' : ''}`}>
         <div className="task-panel-header">
-          <span>会话状态</span>
+          <div><strong>工作区审查</strong><small>变更、检查与上下文</small></div>
           <button className="icon-btn" type="button" title="关闭会话详情" aria-label="关闭会话详情" onClick={() => setShowDetails(false)}>×</button>
         </div>
         <div className="task-list">
@@ -683,6 +681,7 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
       <div className="todo-items">{session.planTodo.todos.map((item, index) => <div className="todo-item" key={`${item.content}-${index}`}><span className={`todo-state ${item.status}`}>{item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}</span><span>{item.activeForm || item.content}</span></div>)}</div>
     </details>}
     <div className="status-row"><span>项目</span><strong>{session.projectName}</strong></div>
+    <div className="status-row"><span>工作目录</span><strong className="path-value" title={session.workingDir}>{session.workingDir || '当前目录'}</strong></div>
     <div className="status-row"><span>事件</span><strong>{session.eventCount}</strong></div>
     <div className="status-row"><span>更新</span><strong>{new Date(session.updatedAt).toLocaleString()}</strong></div>
     {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
@@ -745,12 +744,11 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
     else if (event.type === 'user/message' || event.type === 'assistant/message') summary.messages += 1;
     return summary;
   }, { tools: 0, approvals: 0, codeChanges: 0, messages: 0, progress: 0 });
-  const progressEvents = activeEvents.filter((event) => event.progress || isCompactionEvent(event));
-  const latestProgress = progressEvents[progressEvents.length - 1];
+	const progressByMessage = useMemo(() => groupProgressByMessage(activeEvents), [activeEvents]);
 	const decidedApprovals = new Set(activeEvents
 		.filter((event) => event.approval && event.approval.decision !== 'pending')
 		.map((event) => `${event.approval?.runId}\0${event.approval?.toolCallId}`));
-  const visibleEvents = eventFilter === 'all' ? activeEvents : activeEvents.filter((event) => eventFilter === 'messages'
+  const visibleEvents = eventFilter === 'all' ? hideGroupedProgress(activeEvents, progressByMessage) : activeEvents.filter((event) => eventFilter === 'messages'
     ? event.type === 'user/message' || event.type === 'assistant/message'
       || (event.approval?.decision === 'pending'
         && !decidedApprovals.has(`${event.approval.runId}\0${event.approval.toolCallId}`)
@@ -801,7 +799,6 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">
     <div className="stream-status"><span className={`connection-dot ${socket.state}`} />{socket.state === 'connected' ? '实时' : socket.state === 'reconnecting' ? '重连中' : '离线'}<span className="execution-summary" aria-label="执行记录摘要">消息 {executionSummary.messages} · 工具 {executionSummary.tools} · 审批 {executionSummary.approvals} · 修改 {executionSummary.codeChanges} · 进展 {executionSummary.progress}</span><label className="event-filter">筛选<select aria-label="执行记录筛选" value={eventFilter} onChange={(event) => setEventFilter(event.target.value as typeof eventFilter)}><option value="all">全部</option><option value="messages">消息</option><option value="tools">工具</option><option value="approvals">审批</option><option value="code">修改</option><option value="progress">进展</option></select></label>{socket.lastError && <span>{socket.lastError}</span>}</div>
-     {latestProgress && (() => { const progress = latestProgress.progress || compactionPresentation(latestProgress); return progress && <div className="latest-progress" role="status" aria-label="当前进展"><span className="latest-progress-label">当前进展</span><strong>{progress.title}</strong><span>{progress.summary}</span>{progressEvents.length > 1 && <details><summary>查看历史进展（{progressEvents.length}）</summary><div className="progress-history">{progressEvents.slice(0, -1).reverse().map((event) => { const item = event.progress || compactionPresentation(event); return item && <div key={event.id}><b>{item.title}</b><span>{item.summary}</span></div>; })}</div></details>}</div>; })()}
     {error && <div className="inline-error" role="alert">{error}</div>}
 	    {visibleEvents.length === 0 ? <div className="empty-state"><strong>{activeEvents.length === 0 ? '还没有消息' : '没有匹配的执行记录'}</strong><span>{activeEvents.length === 0 ? '发送第一条消息开始这个会话。' : '切换筛选条件查看其他事件。'}</span></div> : visibleEvents.map((event) => {
 			const approvalKey = event.approval ? `${event.approval.runId}\0${event.approval.toolCallId}` : '';
@@ -817,6 +814,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 				<button className="approval-btn deny" type="button" onClick={() => void handleApproval(event, 'denied')} disabled={decidingApproval !== ''}>拒绝</button>
 				{decidingApproval === approvalKey && <span role="status">提交中...</span>}
 			</div>}
+			{event.type === 'user/message' && progressByMessage.get(event.id)?.length ? <details className="message-progress" open={activeRun?.status === 'running' || activeRun?.status === 'queued'}><summary>执行进展（{progressByMessage.get(event.id)?.length}）</summary><div className="message-progress-list">{progressByMessage.get(event.id)?.map((progress) => { const item = progress.progress || compactionPresentation(progress); return item && <div className="message-progress-item" key={progress.id}><strong>{item.title}</strong><span>{item.summary}</span></div>; })}</div></details> : null}
 	    </article>;
 		})}
   </div>;

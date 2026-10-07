@@ -302,12 +302,18 @@ class MemoryMigrationReport:
 
 @dataclass(frozen=True, slots=True)
 class ContextSnapshot:
+    """P0/P1/P2 projection; ``p3`` remains a read-only legacy alias."""
+
     p0: str
     p1: str
-    p3: dict[str, str]
+    p2: dict[str, str]
     events_text: str
     estimated_input_tokens: int
     estimated_baseline_tokens: int
+
+    @property
+    def p3(self) -> dict[str, str]:
+        return self.p2
 
 
 class SQLiteContextStore:
@@ -801,7 +807,7 @@ class SQLiteContextStore:
 
 
 class LayeredContext:
-    """Build P0/P1/P3 context from a repository and persisted session events."""
+    """Build P0/P1/P2 context from a repository and persisted session events."""
 
     def __init__(
         self,
@@ -863,15 +869,15 @@ class LayeredContext:
             )
         p1 = "\n".join(p1_lines)
 
-        p3: dict[str, str] = {}
+        p2: dict[str, str] = {}
         for path in resolved:
             relative = path.relative_to(self.project_root).as_posix()
             if path in unavailable:
-                p3[relative] = "[file unavailable]"
+                p2[relative] = "[file unavailable]"
                 continue
             lower_name = path.name.lower()
             if lower_name in _SENSITIVE_FILES or lower_name.startswith(".env."):
-                p3[relative] = "[sensitive file omitted]"
+                p2[relative] = "[sensitive file omitted]"
                 continue
             try:
                 with path.open("rb") as handle:
@@ -880,11 +886,11 @@ class LayeredContext:
                 text = _redact_text(_decode_bounded_utf8(data, self.max_raw_bytes))
                 if truncated:
                     text += "\n[raw content truncated]"
-                p3[relative] = text
+                p2[relative] = text
             except UnicodeDecodeError:
-                p3[relative] = "[binary file omitted]"
+                p2[relative] = "[binary file omitted]"
             except OSError:
-                p3[relative] = "[file unavailable]"
+                p2[relative] = "[file unavailable]"
 
         event_lines = [
             f"#{event.sequence} {event.kind}: "
@@ -904,11 +910,11 @@ class LayeredContext:
         if len(events_text) > self.max_event_chars:
             events_text = "[older event content truncated; canonical Session Ledger retains earlier events]\n" + events_text[-self.max_event_chars :]
         baseline_bytes = sum(self._safe_size(path) for path in files) + len(events_text.encode("utf-8"))
-        rendered = "\n".join((p0, p1, events_text, *p3.values()))
+        rendered = "\n".join((p0, p1, events_text, *p2.values()))
         return ContextSnapshot(
             p0=p0,
             p1=p1,
-            p3=p3,
+            p2=p2,
             events_text=events_text,
             estimated_input_tokens=_estimate_tokens(_redact_text(rendered)),
             estimated_baseline_tokens=max(1, (baseline_bytes + 3) // 4),

@@ -135,3 +135,29 @@ body[data-ds-dark-theme] .error-message {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Keep authentication inside the same restrained workbench language. */
+.login-container {
+  min-height: 100dvh;
+  background: #0d0f12;
+  color: #f3f5f7;
+}
+
+.login-card {
+  max-width: 390px;
+  padding: 28px;
+  border: 1px solid #2c323a;
+  border-radius: 8px;
+  background: #14171b;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 35%);
+}
+
+.login-card h1 { color: #f3f5f7; font-size: 20px; letter-spacing: -.02em; }
+.login-tabs { border-bottom-color: #2c323a; }
+.login-tabs button { color: #7d8792; }
+.login-tabs button.active { color: #84b9ff; border-bottom-color: #84b9ff; }
+.form-group label { color: #c4cad2; font-size: 12px; }
+.form-group input { border-color: #2c323a; border-radius: 6px; background: #0d0f12; color: #f3f5f7; }
+.form-group input:focus { border-color: #84b9ff; }
+.submit-btn { border-radius: 6px; background: #cfe2ff; color: #102039; }
+.submit-btn:hover:not(:disabled) { background: #e2edff; box-shadow: none; transform: none; }

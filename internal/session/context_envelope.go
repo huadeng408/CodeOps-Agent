@@ -63,7 +63,7 @@ func buildContextEnvelope(workingDir string, events []Event) (*codeagentpb.Conte
 			continue
 		}
 		envelope.P1 = append(envelope.P1, summary)
-		envelope.P3Candidates = append(envelope.P3Candidates, relative)
+		envelope.P2Candidates = append(envelope.P2Candidates, relative)
 	}
 
 	start := len(events) - maxContextEvents

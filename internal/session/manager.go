@@ -811,6 +811,92 @@ func (m *Manager) AppendWorktreeLifecycle(event WorktreeLifecycle) Session {
 	return cloneSession(m.current)
 }
 
+// ApplyWorktreeTransition atomically updates one parent Session's active
+// worktree projection and append-only lifecycle audit record. The target is
+// explicit because child callbacks may finish after the CLI switches Session.
+func (m *Manager) ApplyWorktreeTransition(ctx context.Context, sessionID string, tree WorktreeState, terminal bool, event WorktreeLifecycle) (Session, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	tree.RequestID = strings.TrimSpace(tree.RequestID)
+	event.RequestID = strings.TrimSpace(event.RequestID)
+	event.ParentSessionID = strings.TrimSpace(event.ParentSessionID)
+	event.ChildSessionID = strings.TrimSpace(event.ChildSessionID)
+	event.LeaseID = strings.TrimSpace(event.LeaseID)
+	event.Status = strings.TrimSpace(event.Status)
+	event.Reason = strings.TrimSpace(event.Reason)
+	if sessionID == "" || tree.RequestID == "" || event.RequestID != tree.RequestID || event.ParentSessionID != sessionID || event.ChildSessionID != tree.ChildSessionID || event.LeaseID != tree.LeaseID || event.Status == "" {
+		return Session{}, errors.New("invalid worktree transition")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var previous Session
+	if m.current.ID == sessionID {
+		previous = cloneSession(m.current)
+	} else {
+		loaded, err := m.store.Load(ctx, sessionID)
+		if err != nil {
+			return Session{}, err
+		}
+		if loaded == nil {
+			return Session{}, ErrNotFound
+		}
+		previous = cloneSession(*loaded)
+	}
+	candidate := cloneSession(previous)
+	changed := false
+	index := -1
+	for i, existing := range candidate.Worktrees {
+		if existing.RequestID == tree.RequestID {
+			index = i
+			break
+		}
+		if !terminal && existing.Name == tree.Name && existing.RequestID != tree.RequestID {
+			return Session{}, errors.New("worktree transition name conflicts with another request")
+		}
+	}
+	if terminal {
+		if index >= 0 {
+			candidate.Worktrees = append(candidate.Worktrees[:index], candidate.Worktrees[index+1:]...)
+			changed = true
+		}
+	} else if index < 0 {
+		candidate.Worktrees = append(candidate.Worktrees, tree)
+		changed = true
+	} else if candidate.Worktrees[index] != tree {
+		candidate.Worktrees[index] = tree
+		changed = true
+	}
+
+	recorded := false
+	for _, existing := range candidate.WorktreeEvents {
+		if existing.RequestID == event.RequestID && existing.ParentSessionID == event.ParentSessionID && existing.ChildSessionID == event.ChildSessionID && existing.LeaseID == event.LeaseID && existing.Status == event.Status {
+			recorded = true
+			break
+		}
+	}
+	if !recorded {
+		if event.CreatedAt.IsZero() {
+			event.CreatedAt = time.Now()
+		}
+		candidate.WorktreeEvents = append(candidate.WorktreeEvents, event)
+		changed = true
+	}
+	if !changed {
+		return cloneSession(previous), nil
+	}
+	candidate.UpdatedAt = time.Now()
+	if err := m.store.Save(ctx, candidate); err != nil {
+		return cloneSession(previous), err
+	}
+	if m.current.ID == sessionID {
+		m.current = cloneSession(candidate)
+	}
+	return cloneSession(candidate), nil
+}
+
 func (m *Manager) MergeMetadata(values map[string]string) Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()

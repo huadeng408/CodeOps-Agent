@@ -33,6 +33,7 @@ type Server struct {
 	State       ServerState
 	LastError   string
 	StartedAt   time.Time
+	catalog     map[string]ToolBinding
 	cmd         *exec.Cmd
 	stdin       io.WriteCloser
 	stdout      *bufio.Reader
@@ -170,31 +171,14 @@ func (m *Manager) StartContext(ctx context.Context, name string) error {
 		return err
 	}
 
-	normalized := make([]ToolDefinition, 0, len(tools))
-	seen := make(map[string]struct{}, len(tools))
-	for _, tool := range tools {
-		tool.Server = server.Config.Name
-		tool.ServerConfigSHA256 = serverConfigSHA256(server.Config)
-		tool, err = normalizeToolDefinition(tool)
-		if err != nil {
-			_ = stopServerProcess(server)
-			m.mu.Lock()
-			server.State = ServerStopped
-			server.LastError = err.Error()
-			m.mu.Unlock()
-			return err
-		}
-		if _, duplicate := seen[tool.Name]; duplicate {
-			err = fmt.Errorf("duplicate mcp tool %q from server %q", tool.Name, server.Config.Name)
-			_ = stopServerProcess(server)
-			m.mu.Lock()
-			server.State = ServerStopped
-			server.LastError = err.Error()
-			m.mu.Unlock()
-			return err
-		}
-		seen[tool.Name] = struct{}{}
-		normalized = append(normalized, tool)
+	normalized, err := normalizeServerTools(server, tools)
+	if err != nil {
+		_ = stopServerProcess(server)
+		m.mu.Lock()
+		server.State = ServerStopped
+		server.LastError = err.Error()
+		m.mu.Unlock()
+		return err
 	}
 
 	m.mu.Lock()
@@ -213,8 +197,10 @@ func (m *Manager) StartContext(ctx context.Context, name string) error {
 	server.State = ServerRunning
 	server.StartedAt = time.Now()
 	server.LastError = ""
+	server.catalog = make(map[string]ToolBinding, len(normalized))
 	for _, tool := range normalized {
 		m.tools[tool.Name] = tool
+		server.catalog[tool.Name] = ToolBinding{Name: tool.Name, Server: tool.Server, InputSchemaSHA256: tool.InputSchemaSHA256, ServerConfigSHA256: tool.ServerConfigSHA256}
 	}
 	m.mu.Unlock()
 	return nil
@@ -294,6 +280,7 @@ func (m *Manager) Stop(name string) error {
 	server.State = ServerStopped
 	server.LastError = ""
 	server.poisoned = false
+	server.catalog = nil
 	for toolName, tool := range m.tools {
 		if tool.Server == name {
 			delete(m.tools, toolName)
@@ -497,6 +484,39 @@ func normalizeToolDefinition(tool ToolDefinition) (ToolDefinition, error) {
 	return tool, nil
 }
 
+func normalizeServerTools(server *Server, tools []ToolDefinition) ([]ToolDefinition, error) {
+	normalized := make([]ToolDefinition, 0, len(tools))
+	seen := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		tool.Server = server.Config.Name
+		tool.ServerConfigSHA256 = serverConfigSHA256(server.Config)
+		var err error
+		tool, err = normalizeToolDefinition(tool)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[tool.Name]; duplicate {
+			return nil, fmt.Errorf("duplicate mcp tool %q from server %q", tool.Name, server.Config.Name)
+		}
+		seen[tool.Name] = struct{}{}
+		normalized = append(normalized, tool)
+	}
+	return normalized, nil
+}
+
+func serverCatalogMatches(pinned map[string]ToolBinding, tools []ToolDefinition) bool {
+	if len(pinned) != len(tools) {
+		return false
+	}
+	for _, tool := range tools {
+		binding, ok := pinned[tool.Name]
+		if !ok || binding != (ToolBinding{Name: tool.Name, Server: tool.Server, InputSchemaSHA256: tool.InputSchemaSHA256, ServerConfigSHA256: tool.ServerConfigSHA256}) {
+			return false
+		}
+	}
+	return true
+}
+
 func validSHA256(value string) bool {
 	if len(value) != 64 || strings.ToLower(value) != value {
 		return false
@@ -620,6 +640,18 @@ func listServerTools(ctx context.Context, server *Server) ([]ToolDefinition, err
 	if err != nil {
 		return nil, err
 	}
+	return decodeServerTools(raw)
+}
+
+func listServerToolsLocked(ctx context.Context, server *Server) ([]ToolDefinition, error) {
+	raw, err := sendRequestLocked(ctx, server, "tools/list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return decodeServerTools(raw)
+}
+
+func decodeServerTools(raw json.RawMessage) ([]ToolDefinition, error) {
 	var payload struct {
 		Tools []ToolDefinition `json:"tools"`
 	}
@@ -650,6 +682,23 @@ func sendRequest(ctx context.Context, server *Server, method string, params any)
 			// kill it and retry the same pinned server configuration.
 			server.poisoned = true
 			return nil, fmt.Errorf("re-init mcp server: %w", err)
+		}
+		tools, err := listServerToolsLocked(ctx, server)
+		if err != nil {
+			_ = stopServerProcess(server)
+			server.poisoned = true
+			return nil, fmt.Errorf("re-list mcp server tools: %w", err)
+		}
+		normalized, err := normalizeServerTools(server, tools)
+		if err != nil {
+			_ = stopServerProcess(server)
+			server.poisoned = true
+			return nil, fmt.Errorf("validate restarted mcp server catalog: %w", err)
+		}
+		if !serverCatalogMatches(server.catalog, normalized) {
+			_ = stopServerProcess(server)
+			server.poisoned = true
+			return nil, errors.New("mcp server tool catalog changed after restart")
 		}
 		server.poisoned = false
 	}

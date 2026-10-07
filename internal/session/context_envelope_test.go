@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestBuildContextEnvelopeProducesMetadataOnlyLayers(t *testing.T) {
@@ -46,8 +48,8 @@ func TestBuildContextEnvelopeProducesMetadataOnlyLayers(t *testing.T) {
 	if !foundP0 || len(envelope.P1) != 1 || envelope.P1[0].Path != "src/example.txt" || envelope.P1[0].LineCount != 2 || len(envelope.P1[0].Sha256) != 64 {
 		t.Fatalf("layered file metadata = %+v", envelope)
 	}
-	if len(envelope.P3Candidates) != 1 || envelope.P3Candidates[0] != "src/example.txt" {
-		t.Fatalf("P3 candidates = %v", envelope.P3Candidates)
+	if len(envelope.P2Candidates) != 1 || envelope.P2Candidates[0] != "src/example.txt" {
+		t.Fatalf("P2 candidates = %v", envelope.P2Candidates)
 	}
 	raw, err := protojson.Marshal(envelope)
 	if err != nil {
@@ -55,6 +57,27 @@ func TestBuildContextEnvelopeProducesMetadataOnlyLayers(t *testing.T) {
 	}
 	if strings.Contains(string(raw), content) || strings.Contains(string(raw), "fixture-secret") || strings.Contains(string(raw), "PRIVATE_CONTEXT_VALUE") {
 		t.Fatalf("context envelope leaked raw content: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"p2Candidates"`) || strings.Contains(string(raw), `"p3Candidates"`) {
+		t.Fatalf("context envelope did not use canonical P2 field: %s", raw)
+	}
+}
+
+func TestContextEnvelopeP2KeepsFieldFourWireCompatibility(t *testing.T) {
+	legacy := append([]byte{0x22, byte(len("src/example.txt"))}, []byte("src/example.txt")...)
+	var envelope codeagentpb.ContextEnvelope
+	if err := proto.Unmarshal(legacy, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if got := envelope.GetP2Candidates(); len(got) != 1 || got[0] != "src/example.txt" {
+		t.Fatalf("legacy wire field did not decode as P2: %v", got)
+	}
+	if got := envelope.GetP3Candidates(); len(got) != 1 || got[0] != "src/example.txt" {
+		t.Fatalf("legacy accessor did not alias P2: %v", got)
+	}
+	wire, err := proto.Marshal(&envelope)
+	if err != nil || string(wire) != string(legacy) {
+		t.Fatalf("field 4 changed: wire=%x, err=%v", wire, err)
 	}
 }
 

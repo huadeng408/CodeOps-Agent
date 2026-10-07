@@ -75,6 +75,44 @@ func TestScrubEnvironmentRemovesCredentialShapedVariables(t *testing.T) {
 	}
 }
 
+func TestScrubEnvironmentRemovesHarnessProviderControlVariables(t *testing.T) {
+	input := []string{
+		"PATH=/bin",
+		"CODE_AGENT_PROVIDER_CONFIG=C:\\private\\provider.json",
+		"CODE_AGENT_PROVIDER_PROFILE=primary",
+		"CODE_AGENT_REQUIRE_HARNESS_WORKTREE=1",
+		"LLM_PROVIDER=openai",
+		"MODEL_FAST=gpt-fast",
+		"THINKING_ENABLED=false",
+		"CODE_AGENT_E2E_SANDBOX_IMAGE=alpine:3.20",
+		"CODE_AGENT_EVAL_RUN_ID=run-1",
+	}
+
+	got := safety.ScrubEnvironment(input)
+	joined := strings.Join(got, "\n")
+	for _, blocked := range []string{
+		"CODE_AGENT_PROVIDER_CONFIG",
+		"CODE_AGENT_PROVIDER_PROFILE",
+		"CODE_AGENT_REQUIRE_HARNESS_WORKTREE",
+		"LLM_PROVIDER",
+		"MODEL_FAST",
+		"THINKING_ENABLED",
+	} {
+		if strings.Contains(joined, blocked+"=") {
+			t.Fatalf("Harness/provider control variable leaked: %q", blocked)
+		}
+	}
+	for _, preserved := range []string{
+		"PATH=/bin",
+		"CODE_AGENT_E2E_SANDBOX_IMAGE=alpine:3.20",
+		"CODE_AGENT_EVAL_RUN_ID=run-1",
+	} {
+		if !strings.Contains(joined, preserved) {
+			t.Fatalf("non-control environment entry was removed: %q", preserved)
+		}
+	}
+}
+
 func TestAnalyzerRejectsGitRepositoryEscapeAndCommandHooks(t *testing.T) {
 	analyzer := safety.NewAnalyzer()
 	cases := [][]string{

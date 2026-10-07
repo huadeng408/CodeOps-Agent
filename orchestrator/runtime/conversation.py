@@ -26,6 +26,7 @@ from orchestrator.context import (
 )
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.graph.nodes import GraphState
+from orchestrator.graph.sub_agent_graph import SubAgentState, build_sub_agent_graph
 from orchestrator.identity import ActorIdentity, ActorIdentityError
 from orchestrator.llm.client import (
     COMPLEXITY_FAST_THRESHOLD,
@@ -68,7 +69,7 @@ from orchestrator.workflows import (
 )
 
 from .tools import ToolRegistry
-from .agent_loop import AgentLoopPluginRegistry, LoopEvent
+from .agent_loop import AgentLoopPluginRegistry, LoopDispatchResult, LoopEvent
 from .hooks import CommandRegistry, HookEvent, HookRegistry, HookDispatchResult
 from .extensions import ExtensionInvocationError, ExtensionRegistry
 
@@ -328,11 +329,15 @@ class ConversationRunner:
     harness_memory_context: str = ""
     harness_context: str = ""
     agent_task_context: str = ""
+    ledger_seq: int = 0
+    ledger_checksum: str = ""
     _pending_compaction_updates: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _context_persistence_error: str = field(default="", init=False, repr=False)
     _checkpoint_persistence_error: str = field(default="", init=False, repr=False)
+    _checkpoint_revision: int = field(default=0, init=False, repr=False)
     _loop_plugin_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _pending_loop_context: list[str] = field(default_factory=list, init=False, repr=False)
     _loop_last_turn: int = field(default=0, init=False, repr=False)
     _active_route: PreparedRoute | None = field(default=None, init=False, repr=False)
     _hook_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
@@ -417,6 +422,8 @@ class ConversationRunner:
         retry_of_run_id: str = "",
         retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
         new_turn: bool = False,
+        ledger_seq: int = 0,
+        ledger_checksum: str = "",
     ) -> ConversationCheckpoint | None:
         """Read and validate the latest normal-conversation checkpoint.
 
@@ -430,6 +437,8 @@ class ConversationRunner:
             return None
         requested_run_id = str(run_id).strip()
         requested_surface_sha256 = str(surface_sha256).strip()
+        requested_ledger_seq = max(0, int(ledger_seq or 0))
+        requested_ledger_checksum = str(ledger_checksum).strip().lower()
         requested_retry_of_run_id = str(retry_of_run_id).strip()
         requested_retry_of_run_ids = self._normalise_retry_run_ids(
             requested_retry_of_run_id, retry_of_run_ids
@@ -488,13 +497,23 @@ class ConversationRunner:
         if checkpoint_session and checkpoint_session != session_id:
             raise ValueError("checkpoint session id does not match request")
         expected_surface_sha256 = str(metadata.get("surface_sha256", "")).strip()
+        expected_ledger_seq = max(0, int(metadata.get("ledger_seq", 0) or 0))
+        expected_ledger_checksum = str(metadata.get("ledger_checksum", "")).strip().lower()
         expected_history_digest = str(metadata.get("history_sha256", "")).strip()
         if resume and requested_surface_sha256:
             if not expected_surface_sha256:
                 raise ValueError("checkpoint surface sha256 is missing")
             if expected_surface_sha256 != requested_surface_sha256:
                 raise ValueError("checkpoint surface sha256 does not match request")
-        elif expected_history_digest and history_digest and expected_history_digest != history_digest:
+        if requested_ledger_checksum:
+            if expected_ledger_seq != requested_ledger_seq or expected_ledger_checksum != requested_ledger_checksum:
+                raise ValueError("checkpoint ledger identity does not match request")
+        elif (
+            expected_history_digest
+            and history_digest
+            and expected_history_digest != history_digest
+            and str(metadata.get("phase", "")).strip() not in {"tool_before", "tool_after"}
+        ):
             # A normal invocation has no stable continuation identity. Its
             # history must match an unfinished checkpoint exactly. A completed
             # checkpoint is already a durable result; the next user message
@@ -549,11 +568,14 @@ class ConversationRunner:
         retry_of_run_id: str = "",
         retry_of_run_ids: list[str] | tuple[str, ...] | None = None,
         new_turn: bool = False,
+        ledger_seq: int = 0,
+        ledger_checksum: str = "",
     ) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         """Run one conversation while containing observation-plugin failures."""
 
         self._loop_plugin_errors.clear()
         self._loop_plugin_metadata.clear()
+        self._pending_loop_context.clear()
         self._hook_errors.clear()
         self._pending_hook_context.clear()
         self._hook_stop_message = ""
@@ -561,6 +583,7 @@ class ConversationRunner:
         self._loop_last_turn = 0
         self._context_persistence_error = ""
         self._checkpoint_persistence_error = ""
+        self._checkpoint_revision = 0
         self._active_actor = actor
         self._active_run_id = str(run_id).strip()
         active_retry_of_run_id = str(retry_of_run_id).strip()
@@ -576,6 +599,8 @@ class ConversationRunner:
         self._resume_requested = bool(resume)
         self._new_turn_requested = bool(new_turn)
         self._active_surface_sha256 = str(surface_sha256).strip()
+        self.ledger_seq = max(0, int(ledger_seq or 0))
+        self.ledger_checksum = str(ledger_checksum or "").strip().lower()
         if self._resume_requested and not self._active_run_id:
             raise ValueError("continuation run id is required when resume is true")
         if self._resume_requested and not self._active_surface_sha256:
@@ -671,6 +696,12 @@ class ConversationRunner:
                 plan_todo_snapshot=plan_todo_snapshot,
             )
         finally:
+            self._dispatch_loop_extension(
+                "finish_turn",
+                session_id=session_id,
+                turn=self._loop_last_turn,
+                metadata={"success": not bool(self._checkpoint_persistence_error)},
+            )
             self._dispatch_hook(
                 "session_end",
                 session_id=session_id,
@@ -757,6 +788,8 @@ class ConversationRunner:
             retry_of_run_id=self._active_retry_of_run_id,
             retry_of_run_ids=self._active_retry_of_run_ids,
             new_turn=self._new_turn_requested,
+            ledger_seq=self.ledger_seq,
+            ledger_checksum=self.ledger_checksum,
         )
         start_turn = 1
         if checkpoint is not None and (
@@ -872,6 +905,24 @@ class ConversationRunner:
                             for context in pre_step.context
                         ),
                     ]
+                if self._pending_loop_context:
+                    candidate_messages = [
+                        *candidate_messages,
+                        *(ChatMessage(role="system", content=context) for context in self._pending_loop_context),
+                    ]
+                    self._pending_loop_context.clear()
+                prepare_context = self._dispatch_loop_extension(
+                    "prepare_context",
+                    session_id=session_id,
+                    turn=turn,
+                    metadata={**self._route_metadata(), "allow_tools": True},
+                    payload={"message_count": len(candidate_messages), "intent": intent_text},
+                )
+                if prepare_context.context:
+                    candidate_messages = [
+                        *candidate_messages,
+                        *(ChatMessage(role="system", content=context) for context in prepare_context.context),
+                    ]
                 request_messages = self._compact_messages(
                     candidate_messages,
                     session_id=session_id,
@@ -885,7 +936,7 @@ class ConversationRunner:
                 if request_messages != candidate_messages:
                     messages = request_messages
                 yield from self._emit_compaction_updates()
-                self._emit_loop_event(
+                before_model = self._emit_loop_event(
                     "model_before",
                     session_id=session_id,
                     turn=turn,
@@ -894,7 +945,14 @@ class ConversationRunner:
                         "message_count": len(request_messages),
                         "allow_tools": True,
                     },
+                    payload={"message_count": len(request_messages), "intent": intent_text},
                 )
+                if before_model.context:
+                    request_messages = [
+                        *request_messages,
+                        *(ChatMessage(role="system", content=context) for context in before_model.context),
+                    ]
+                    messages = request_messages
                 self._write_graph_checkpoint(
                     session_id,
                     phase="model_before",
@@ -1041,7 +1099,7 @@ class ConversationRunner:
                 )
                 return
             self._assign_tool_call_ids(response.tool_calls, session_id=session_id, turn=turn)
-            self._emit_loop_event(
+            after_model = self._emit_loop_event(
                 "model_after",
                 session_id=session_id,
                 turn=turn,
@@ -1051,6 +1109,7 @@ class ConversationRunner:
                     "tool_call_count": len(response.tool_calls),
                     "model_identity": dict(response.model_identity),
                 },
+                payload={"text_length": len(response.text), "tool_call_count": len(response.tool_calls)},
             )
             self._write_graph_checkpoint(
                 session_id,
@@ -1079,6 +1138,7 @@ class ConversationRunner:
                 },
                 metadata=self._route_metadata(),
             )
+            self._pending_loop_context.extend(after_model.context)
             # If the interrupt arrived just as the response came back, stop
             # before consuming tokens / tool calls for a stale turn. Text (if
             # any) was already streamed incrementally above, so do not re-emit.
@@ -1236,12 +1296,20 @@ class ConversationRunner:
                         },
                     )
                     continue
-                self._emit_loop_event(
+                before_tool = self._emit_loop_event(
                     "tool_before",
                     session_id=session_id,
                     turn=turn,
                     metadata={"tool_name": call.name, "has_call_id": bool(call_id)},
+                    payload={
+                        "tool_call_id": call_id,
+                        "arguments": dict(call.arguments),
+                        "arguments_json": self._call_arguments_json(call),
+                    },
                 )
+                if before_tool.tool_arguments:
+                    call.arguments = {**call.arguments, **before_tool.tool_arguments}
+                    call.arguments_json = json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":"))
                 pre_tool = self._dispatch_hook(
                     "pre_tool",
                     session_id=session_id,
@@ -1259,8 +1327,11 @@ class ConversationRunner:
                         ChatMessage(role="system", content=context)
                         for context in pre_tool.context
                     )
-                if pre_tool.blocked:
-                    message = pre_tool.messages[-1] if pre_tool.messages else "blocked by pre-tool hook"
+                if pre_tool.blocked or before_tool.blocked:
+                    message = (
+                        before_tool.message if before_tool.blocked and before_tool.message
+                        else ("blocked by agent loop extension" if before_tool.blocked else (pre_tool.messages[-1] if pre_tool.messages else "blocked by pre-tool hook"))
+                    )
                     blocked_result = ChatMessage(
                         role="tool",
                         name=call.name,
@@ -1275,7 +1346,7 @@ class ConversationRunner:
                         {
                             "tool_call_id": call_id,
                             "tool_name": call.name,
-                            "status": "hook_blocked",
+                            "status": "plugin_blocked" if before_tool.blocked else "hook_blocked",
                         },
                     )
                     self._emit_loop_event(
@@ -1286,6 +1357,7 @@ class ConversationRunner:
                             "tool_name": call.name,
                             "is_error": True,
                             "hook_blocked": True,
+                            "plugin_blocked": before_tool.blocked,
                             "hook_dispatched": True,
                         },
                     )
@@ -1312,6 +1384,23 @@ class ConversationRunner:
                             metadata={"tool_name": call.name, "is_error": True},
                         )
                         continue
+                    self._write_graph_checkpoint(
+                        session_id,
+                        phase="tool_before",
+                        turn=turn,
+                        done=False,
+                        tool_rounds=turn,
+                        tool_request_count=1,
+                        tool_call_id=call_id,
+                    )
+                    if self._checkpoint_persistence_error:
+                        yield self._finish(
+                            session_id,
+                            False,
+                            "checkpoint_persistence_unavailable",
+                            turn=turn,
+                        )
+                        return
                     if self.harness_managed and self.agent_task_context:
                         yield self._tool_request(call, self._call_arguments_json(call))
                     else:
@@ -1566,6 +1655,23 @@ class ConversationRunner:
                     parent_session_id = _sub_agent_parent_session_id(session_id)
                     child_session_id = _sub_agent_child_session_id(session_id, call_id)
                     worktree_name = _sub_agent_worktree_name(request_id)
+                    self._write_graph_checkpoint(
+                        session_id,
+                        phase="tool_before",
+                        turn=turn,
+                        done=False,
+                        tool_rounds=turn,
+                        tool_request_count=1,
+                        tool_call_id=call_id,
+                    )
+                    if self._checkpoint_persistence_error:
+                        yield self._finish(
+                            session_id,
+                            False,
+                            "checkpoint_persistence_unavailable",
+                            turn=turn,
+                        )
+                        return
                     yield orchestrator_pb2.OrchestratorMessage(
                         agent_spawn=orchestrator_pb2.AgentSpawn(
                             kind=spawn["kind"],
@@ -1793,6 +1899,23 @@ class ConversationRunner:
                         consecutive_errors = 0
                     continue
 
+                self._write_graph_checkpoint(
+                    session_id,
+                    phase="tool_before",
+                    turn=turn,
+                    done=False,
+                    tool_rounds=turn,
+                    tool_request_count=1,
+                    tool_call_id=call_id,
+                )
+                if self._checkpoint_persistence_error:
+                    yield self._finish(
+                        session_id,
+                        False,
+                        "checkpoint_persistence_unavailable",
+                        turn=turn,
+                    )
+                    return
                 yield request
                 result = self._next_tool_result(request_iterator, call_id)
                 if result is None:
@@ -2555,14 +2678,16 @@ class ConversationRunner:
         session_id: str,
         turn: int,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Dispatch bounded lifecycle metadata without changing loop control."""
+        payload: dict[str, Any] | None = None,
+    ) -> LoopDispatchResult:
+        """Dispatch observation metadata and the matching strategy extension."""
 
         self._loop_last_turn = max(self._loop_last_turn, int(turn))
         event_metadata = dict(metadata or {})
         if self._active_run_id:
             event_metadata.setdefault("run_id", self._active_run_id)
         registry = self.loop_plugins
+        extension = LoopDispatchResult()
         if registry is not None:
             result = registry.emit(
                 LoopEvent(
@@ -2571,6 +2696,7 @@ class ConversationRunner:
                     turn=max(0, int(turn)),
                     phase=phase,
                     metadata=event_metadata,
+                    payload=payload or {},
                 )
             )
             self._loop_plugin_errors.extend(result.errors)
@@ -2578,6 +2704,29 @@ class ConversationRunner:
                 self._loop_plugin_metadata.append(
                     {"phase": phase, "metadata": dict(result.metadata)}
                 )
+            extension_phase = {
+                "model_before": "before_model",
+                "model_after": "after_model",
+                "tool_before": "before_tool",
+                "tool_after": "after_tool",
+            }.get(phase)
+            if extension_phase:
+                extension = registry.dispatch_extension(
+                    extension_phase,
+                    LoopEvent(
+                        schema_version="1",
+                        session_id=session_id,
+                        turn=max(0, int(turn)),
+                        phase=extension_phase,
+                        metadata=event_metadata,
+                        payload=payload or {},
+                    ),
+                )
+                self._loop_plugin_errors.extend(extension.errors)
+                if extension.metadata:
+                    self._loop_plugin_metadata.append(
+                        {"phase": extension_phase, "metadata": dict(extension.metadata)}
+                    )
         if phase == "tool_after" and not event_metadata.get("hook_dispatched"):
             post_tool = self._dispatch_hook(
                 "post_tool",
@@ -2599,6 +2748,37 @@ class ConversationRunner:
                     if post_tool.messages
                     else "blocked by post-tool hook"
                 )
+        return extension
+
+    def _dispatch_loop_extension(
+        self,
+        phase: str,
+        *,
+        session_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> LoopDispatchResult:
+        registry = self.loop_plugins
+        if registry is None:
+            return LoopDispatchResult()
+        result = registry.dispatch_extension(
+            phase,
+            LoopEvent(
+                schema_version="1",
+                session_id=session_id,
+                turn=max(0, int(turn)),
+                phase=phase,
+                metadata={**(metadata or {}), **({"run_id": self._active_run_id} if self._active_run_id else {})},
+                payload=payload or {},
+            ),
+        )
+        self._loop_plugin_errors.extend(result.errors)
+        if result.metadata:
+            self._loop_plugin_metadata.append(
+                {"phase": phase, "metadata": dict(result.metadata)}
+            )
+        return result
 
     @staticmethod
     def _should_enable_thinking(
@@ -2683,7 +2863,7 @@ class ConversationRunner:
             return (
                 "Project instructions are Harness-controlled metadata. "
                 "Use the authorized Read tool for AGENT.md when it is listed "
-                "as a P3 candidate; do not read project files directly."
+                "as a P2 candidate; use the authorized Read tool to load raw content."
             )
         content = load_agent_instructions(self.project_root, self.working_dir)
         return content or "_No AGENT.md instructions found._"
@@ -2987,6 +3167,23 @@ class ConversationRunner:
         deferred_recoveries: list[ChatMessage] = []
         if request_calls:
             request_ids = [self._tool_call_id(call) for call in request_calls]
+            self._write_graph_checkpoint(
+                session_id,
+                phase="tool_before",
+                turn=turn,
+                done=False,
+                tool_rounds=turn,
+                tool_request_count=len(request_calls),
+                tool_requests=request_calls,
+            )
+            if self._checkpoint_persistence_error:
+                yield self._finish(
+                    session_id,
+                    False,
+                    "checkpoint_persistence_unavailable",
+                    turn=turn,
+                )
+                return consecutive_errors, True
             yield self._tool_request_batch(request_calls)
             results = self._next_tool_results(request_iterator, request_ids)
             if results is None:
@@ -3387,6 +3584,9 @@ class ConversationRunner:
                 "tool_call_id": tool_call_id,
                 "history_sha256": self._active_history_digest,
                 "surface_sha256": self._active_surface_sha256,
+                "ledger_seq": max(0, int(self.ledger_seq or 0)),
+                "ledger_checksum": str(self.ledger_checksum or "").strip().lower(),
+                "checkpoint_revision": self._checkpoint_revision + 1,
                 "retry_root_run_id": (
                     self._active_retry_root_run_id
                     or self._active_retry_of_run_id
@@ -3400,6 +3600,7 @@ class ConversationRunner:
         )
         try:
             self.graph.write_checkpoint(state, thread_id=session_id)
+            self._checkpoint_revision += 1
         except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
             if (
                 isinstance(exc, RuntimeError)
@@ -4071,40 +4272,36 @@ class ConversationRunner:
                 objective=str(spawn["objective"]),
                 context=context_payload,
             )
-        else:
-            executor = self.sub_agent_executor
-            if executor is None:
-                executor = ProcessAgentExecutor(
-                    project_root=self.project_root,
-                    working_dir=self.working_dir,
-                )
+            return {
+                "status": result.status,
+                "summary": result.summary,
+                "artifacts": result.artifacts,
+                "notes": result.notes,
+            }
+
+        executor = self.sub_agent_executor or ProcessAgentExecutor(
+            project_root=self.project_root,
+            working_dir=self.working_dir,
+        )
+
+        def delegate(task: dict[str, object]) -> dict[str, object]:
             try:
+                kwargs: dict[str, object] = {
+                    "kind": str(spawn["kind"]),
+                    "title": str(spawn["title"]),
+                    "objective": str(spawn["objective"]),
+                    "context": context_payload,
+                    "request_id": request_id,
+                    "parent_session_id": parent_session_id,
+                    "child_session_id": child_session_id,
+                    "cancel_event": cancel_event,
+                }
                 if self.require_harness_worktree:
-                    worktree_name = _sub_agent_worktree_name(request_id)
-                    worktree_path = Path(self.project_root) / ".agent" / "worktrees" / worktree_name
-                    result = executor.run(
-                        kind=str(spawn["kind"]),
-                        title=str(spawn["title"]),
-                        objective=str(spawn["objective"]),
-                        context=context_payload,
-                        request_id=request_id,
-                        parent_session_id=parent_session_id,
-                        child_session_id=child_session_id,
-                        worktree_path=worktree_path,
+                    kwargs.update(
+                        worktree_path=Path(self.project_root) / ".agent" / "worktrees" / _sub_agent_worktree_name(request_id),
                         require_worktree=True,
-                        cancel_event=cancel_event,
                     )
-                else:
-                    result = executor.run(
-                        kind=str(spawn["kind"]),
-                        title=str(spawn["title"]),
-                        objective=str(spawn["objective"]),
-                        context=context_payload,
-                        request_id=request_id,
-                        parent_session_id=parent_session_id,
-                        child_session_id=child_session_id,
-                        cancel_event=cancel_event,
-                    )
+                child = executor.run(**kwargs)
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                 return {
                     "status": "failed",
@@ -4112,12 +4309,33 @@ class ConversationRunner:
                     "artifacts": [],
                     "notes": [f"error_type: {type(exc).__name__}"],
                 }
-        return {
-            "status": result.status,
-            "summary": result.summary,
-            "artifacts": result.artifacts,
-            "notes": result.notes,
-        }
+            return {
+                "status": child.status,
+                "summary": child.summary,
+                "artifacts": child.artifacts,
+                "notes": child.notes,
+            }
+
+        graph = build_sub_agent_graph(
+            delegate=delegate,
+            collect=lambda value: dict(value),
+            verify=lambda value: str(value.get("status", "")).lower() in {"completed", "ok", "success"},
+        )
+        try:
+            state = graph.run(
+                SubAgentState(
+                    goal=str(spawn["objective"]),
+                    tasks=[{"id": "task-1", "objective": str(spawn["objective"])}],
+                )
+            )
+            return dict(state.results.get("task-1", {
+                "status": "failed",
+                "summary": "sub-agent execution failed",
+                "artifacts": [],
+                "notes": state.errors,
+            }))
+        finally:
+            graph.close()
 
     def _queue_compaction_update(
         self,

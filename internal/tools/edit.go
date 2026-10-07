@@ -23,6 +23,10 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 	if err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
+	changePath, err := workspaceRelativePath(e.Root, abs)
+	if err != nil {
+		return ToolResult{Name: "Edit", Error: err.Error()}, err
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
@@ -55,7 +59,7 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 		Name:   "Edit",
 		Output: fmt.Sprintf("edited %s (%d replacement%s)", filepath.ToSlash(path), countForOutput(count, replaceAll), pluralSuffix(countForOutput(count, replaceAll))),
 		Changes: []Change{{
-			Path:   filepath.ToSlash(path),
+			Path:   changePath,
 			Before: before,
 			After:  replaced,
 		}},

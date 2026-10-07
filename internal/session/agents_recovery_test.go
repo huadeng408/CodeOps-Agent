@@ -197,4 +197,80 @@ func TestIndependentAgentRecoveryCompletesCancellationFence(t *testing.T) {
 			t.Fatal("cancellation crash left a runnable child")
 		}
 	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sqliteLedger := ledger.(*SQLiteEventLog)
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stats := sqliteLedger.db.Stats(); stats.OpenConnections != 0 {
+		t.Fatalf("ledger connections after close: %+v", stats)
+	}
+}
+
+func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *testing.T) {
+	ctx := context.Background()
+	fixture := &independentAgentFixture{mode: "input"}
+	runner, _, actor := agentTestRunner(t, fixture)
+	runner.options.AgentWorkspace = func(context.Context, AgentWorkspaceRequest) (string, error) {
+		return t.TempDir(), nil
+	}
+	var lifecycleCalls atomic.Int32
+	lifecycle := func(_ context.Context, event *pb.AgentLifecycle) error {
+		if event.GetStatus() != "cancelled" {
+			t.Fatalf("lifecycle status = %q", event.GetStatus())
+		}
+		if lifecycleCalls.Add(1) <= 2 {
+			return errors.New("fixture lifecycle failure")
+		}
+		return nil
+	}
+	runner.options.AgentLifecycle = lifecycle
+	task := agentTestCall(t, runner, actor, "spawn-lifecycle-recovery", "SpawnAgent", `{"kind":"general","title":"recover cleanup","objective":"ask before cleanup"}`)
+	result := runner.ExecuteAgentTool(ctx, actor, actor.SessionID, orchestrator.ToolCall{
+		ID: "cancel-lifecycle-recovery", Name: "AgentTask",
+		ParametersJSON: `{"action":"cancel","task_id":"` + task.Id + `"}`,
+	})
+	if result.Error == "" || lifecycleCalls.Load() != 1 {
+		t.Fatalf("initial lifecycle failure = result=%+v calls=%d", result, lifecycleCalls.Load())
+	}
+	retry := runner.ExecuteAgentTool(ctx, actor, actor.SessionID, orchestrator.ToolCall{
+		ID: "cancel-lifecycle-recovery-retry", Name: "AgentTask",
+		ParametersJSON: `{"action":"cancel","task_id":"` + task.Id + `"}`,
+	})
+	if retry.Error == "" || lifecycleCalls.Load() != 2 {
+		t.Fatalf("cancel retry did not retry failed lifecycle: result=%+v calls=%d", retry, lifecycleCalls.Load())
+	}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered := NewSessionRunner(NewWorkbench(runner.workbench.ledger, nil), fixture, nil, SessionRunnerOptions{AgentLifecycle: lifecycle})
+	t.Cleanup(func() { _ = recovered.Close() })
+	if err := recovered.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleCalls.Load() != 3 {
+		t.Fatalf("recovered lifecycle calls = %d, want 3", lifecycleCalls.Load())
+	}
+	if err := recovered.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleCalls.Load() != 3 {
+		t.Fatalf("acknowledged lifecycle was repeated: %d calls", lifecycleCalls.Load())
+	}
+	events, err := recovered.workbench.ledger.Events(ctx, task.ChildSessionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledgements := 0
+	for _, event := range events {
+		if event.Type == agentWorkspaceLifecycleAcknowledgedEventType {
+			acknowledgements++
+		}
+	}
+	if acknowledgements != 1 {
+		t.Fatalf("workspace lifecycle acknowledgements = %d, want 1", acknowledgements)
+	}
 }

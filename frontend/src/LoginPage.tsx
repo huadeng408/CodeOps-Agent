@@ -73,6 +73,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             <label>Email</label>
             <input
               type="email"
+                autoComplete="username"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -84,6 +85,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             <label>Password</label>
             <input
               type="password"
+              autoComplete={isLogin ? 'current-password' : 'new-password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required

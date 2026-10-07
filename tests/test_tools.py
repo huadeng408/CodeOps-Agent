@@ -21,6 +21,31 @@ def test_memory_tool_exposes_budget_but_not_owner() -> None:
     assert spec.parameters["additionalProperties"] is False
 
 
+def test_manage_memory_kind_matches_legal_experience_kinds() -> None:
+    spec = ToolRegistry().get("ManageMemory")
+    assert spec is not None
+    assert spec.permission == orchestrator_pb2.ALWAYS_ASK
+    assert spec.parameters["required"] == ["action"]
+    assert "kind" not in spec.parameters["required"]
+    action = spec.parameters["properties"]["action"]
+    assert action["enum"] == ["list", "read", "remember", "forget", "retain"]
+    kind = spec.parameters["properties"]["kind"]
+    assert kind["type"] == "string"
+    assert kind["enum"] == [
+        "profile",
+        "preferences",
+        "entities",
+        "events",
+        "cases",
+        "patterns",
+    ]
+    assert "user_preference" not in kind["enum"]
+    assert "trajectories" not in kind["enum"]
+    expected_revision = spec.parameters["properties"]["expected_revision"]
+    assert expected_revision["type"] == "integer"
+    assert expected_revision["minimum"] == 0
+
+
 def test_spawn_agent_owns_message_and_tool_allowlist_schema() -> None:
     registry = ToolRegistry()
     spawn = registry.get("SpawnAgent")

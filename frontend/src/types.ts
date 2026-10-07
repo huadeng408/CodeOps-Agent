@@ -4,12 +4,12 @@ export interface Session {
   projectName: string;
   title: string;
   goal: string;
+  workingDir: string;
   status: 'queued' | 'running' | 'paused' | 'done';
   eventCount: number;
   createdAt: string;
   updatedAt: string;
   run?: SessionRun;
-  lastUserInput?: string;
   planTodo?: PlanTodo;
 }
 

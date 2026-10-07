@@ -1229,11 +1229,17 @@ func TestSessionRunnerCloseClearsQueuedRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runner := &SessionRunner{
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, 1),
+		agentQueue: make(chan runKey, 1), memoryQueue: make(chan runKey, 1),
 		queued: make(map[runKey]struct{}),
 	}
-	key := runKey{sessionID: "session-close", runID: "run-close"}
-	runner.queued[key] = struct{}{}
-	runner.queue <- key
+	for _, key := range []runKey{
+		{sessionID: "session-close", runID: "run-close"},
+		{sessionID: "agent-close", runID: "run-close"},
+		{sessionID: "session-close", runID: "run-memory", memoryRecovery: true},
+	} {
+		runner.queued[key] = struct{}{}
+		runner.targetQueue(key) <- key
+	}
 	if err := runner.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -1243,8 +1249,60 @@ func TestSessionRunnerCloseClearsQueuedRuns(t *testing.T) {
 	if queued != 0 {
 		t.Fatalf("queued runs after close = %d, want 0", queued)
 	}
-	if len(runner.queue) != 0 {
-		t.Fatalf("buffered runs after close = %d, want 0", len(runner.queue))
+	for _, queue := range []chan runKey{runner.queue, runner.agentQueue, runner.memoryQueue} {
+		if len(queue) != 0 {
+			t.Fatalf("buffered runs after close = %d, want 0", len(queue))
+		}
+	}
+}
+
+func TestSessionRunnerCloseWithoutWorkersAndNilQueues(t *testing.T) {
+	for _, withQueues := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queues=%t", withQueues), func(t *testing.T) {
+			runner := &SessionRunner{}
+			if withQueues {
+				runner.queue = make(chan runKey, 1)
+				runner.agentQueue = make(chan runKey, 1)
+				runner.memoryQueue = make(chan runKey, 1)
+				for _, queue := range []chan runKey{runner.queue, runner.agentQueue, runner.memoryQueue} {
+					queue <- runKey{sessionID: "session-close", runID: "run-close"}
+				}
+			}
+			for i := 0; i < 2; i++ {
+				if err := runner.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, queue := range []chan runKey{runner.queue, runner.agentQueue, runner.memoryQueue} {
+				if len(queue) != 0 {
+					t.Fatalf("buffered runs after close = %d, want 0", len(queue))
+				}
+			}
+		})
+	}
+}
+
+func TestSessionRunnerBoundsWorkersIncludingMemoryRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		main, agents      int
+		wantMain, wantSub int
+	}{
+		{name: "defaults", wantMain: 4, wantSub: 4},
+		{name: "maximum", main: 6, agents: 4, wantMain: 5, wantSub: 4},
+		{name: "fewer children", main: 6, agents: 1, wantMain: 6, wantSub: 1},
+		{name: "over configured maxima", main: 100, agents: 100, wantMain: 5, wantSub: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := NewSessionRunner(nil, nil, nil, SessionRunnerOptions{WorkerCount: tc.main, AgentWorkerCount: tc.agents})
+			defer runner.Close()
+			if got := runner.options.WorkerCount + runner.options.AgentWorkerCount + 1; got > 10 {
+				t.Fatalf("worker slots including terminal memory = %d, want <=10", got)
+			}
+			if runner.options.WorkerCount != tc.wantMain || runner.options.AgentWorkerCount != tc.wantSub {
+				t.Fatalf("normalized workers = %d main/%d child, want %d/%d", runner.options.WorkerCount, runner.options.AgentWorkerCount, tc.wantMain, tc.wantSub)
+			}
+		})
 	}
 }
 
@@ -1771,6 +1829,12 @@ func TestSessionRunnerEmitsOnlyOneSlowRunNarration(t *testing.T) {
 	if narrations != 1 {
 		t.Fatalf("slow-run narrations = %d, want exactly 1", narrations)
 	}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Verify(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSessionRunnerRetrySearchesAllFailedPredecessorsForToolReceipt(t *testing.T) {
@@ -2239,6 +2303,12 @@ func TestSessionRunnerCompletesPersistedAssistantWithoutCallingModelAgain(t *tes
 		t.Fatal(err)
 	}
 	terminal := waitForRunStatus(t, runner, created.ID, "run-output", RunCompleted)
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Verify(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
 	if terminal.Attempt != 2 {
 		t.Fatalf("persisted output recovery = %+v", terminal)
 	}
@@ -2393,4 +2463,29 @@ func waitForRunStatus(t *testing.T, runner *SessionRunner, sessionID, runID stri
 	view, err := runner.Run(context.Background(), sessionID, runID)
 	t.Fatalf("run did not reach %q: view=%+v err=%v", status, view, err)
 	return RunView{}
+}
+
+func TestPendingCommitsRecoveryProtocol(t *testing.T) {
+	runID := "run-commit"
+	payload := commitPayload{CommitID: commitIDFor(runID, "call-1"), RunID: runID, ToolCallID: "call-1", ToolName: "Write"}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []Event{{Seq: 7, Type: commitPendingEventType, Payload: raw, Checksum: "pending-checksum"}}
+	pending := pendingCommits(events, runID)
+	if len(pending) != 1 || pending[0].ToolName != "Write" || pending[0].PendingSeq != 7 || pending[0].PendingChecksum != "pending-checksum" {
+		t.Fatalf("pending commit projection = %#v", pending)
+	}
+	done, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events = append(events, Event{Seq: 8, Type: commitDoneEventType, Payload: done})
+	if recovered := pendingCommits(events, runID); len(recovered) != 0 {
+		t.Fatalf("completed commit remained pending: %#v", recovered)
+	}
+	if recovered := pendingCommits(events, "other-run"); len(recovered) != 0 {
+		t.Fatalf("foreign commit leaked into recovery: %#v", recovered)
+	}
 }

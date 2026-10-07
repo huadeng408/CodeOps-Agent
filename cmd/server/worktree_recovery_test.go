@@ -4,12 +4,26 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/session"
 	"code-agent/internal/worktree"
 )
+
+type failTerminalAppendLog struct {
+	session.EventLog
+	failed atomic.Bool
+}
+
+func (l *failTerminalAppendLog) Append(ctx context.Context, sessionID string, expectedSeq int64, eventType string, payload any) (session.Event, error) {
+	if eventType == persistedWorktreeTerminalEvent && l.failed.CompareAndSwap(false, true) {
+		return session.Event{}, errors.New("fixture terminal append failure")
+	}
+	return l.EventLog.Append(ctx, sessionID, expectedSeq, eventType, payload)
+}
 
 func TestRestorePersistedWorktreesReplaysOnlyActiveLeases(t *testing.T) {
 	ctx := context.Background()
@@ -54,6 +68,102 @@ func TestRestorePersistedWorktreesReplaysOnlyActiveLeases(t *testing.T) {
 	}
 }
 
+func TestAgentLifecycleRetriesTerminalAppendAfterCleanup(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "repo", "browser", "retry cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	tree := worktree.Worktree{
+		Name: "retry-agent", Path: filepath.Join(root, ".agent", "worktrees", "retry-agent"), BaseRef: "HEAD", Active: true,
+		RequestID: "request-retry", ParentSessionID: created.ID, ChildSessionID: "child-retry",
+		LeaseID: "lease-66666666666666666666666666666666", LeaseExpiresAt: time.Now().Add(time.Hour), Status: worktree.AgentWorktreeActive,
+	}
+	if err := appendPersistedWorktreeEvent(ctx, ledger, created.ID, persistedWorktreeActiveEvent, tree, "spawned"); err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(root, "HEAD")
+	if err := manager.RestoreChecked([]worktree.Worktree{tree}); err != nil {
+		t.Fatal(err)
+	}
+	fault := &failTerminalAppendLog{EventLog: ledger}
+	lifecycle := &codeagentpb.AgentLifecycle{RequestId: tree.RequestID, ChildSessionId: tree.ChildSessionID, LeaseId: tree.LeaseID, Status: "cancelled", Reason: "cancel"}
+	if err := handlePersistedAgentLifecycle(ctx, fault, manager, lifecycle); err == nil {
+		t.Fatal("terminal append failure was hidden")
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("cleanup did not run before injected persistence failure: %#v", got)
+	}
+	active, err := persistedActiveWorktrees(ctx, ledger)
+	if err != nil || len(active) != 1 || active[0].RequestID != tree.RequestID {
+		t.Fatalf("durable active fact was not recoverable: active=%#v err=%v", active, err)
+	}
+	if err := handlePersistedAgentLifecycle(ctx, fault, manager, lifecycle); err != nil {
+		t.Fatalf("terminal retry: %v", err)
+	}
+	if err := handlePersistedAgentLifecycle(ctx, fault, manager, lifecycle); err != nil {
+		t.Fatalf("idempotent terminal retry: %v", err)
+	}
+	active, err = persistedActiveWorktrees(ctx, ledger)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("terminal retry left active worktree: active=%#v err=%v", active, err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals := 0
+	for _, event := range events {
+		if event.Type == persistedWorktreeTerminalEvent {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("terminal events = %d, want 1", terminals)
+	}
+}
+
+func TestRestorePersistedWorktreesKeepsFailedWorkspaceManaged(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "repo", "browser", "retain failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	tree := worktree.Worktree{
+		Name: "failed-agent", Path: filepath.Join(root, ".agent", "worktrees", "failed-agent"), BaseRef: "HEAD", Active: true,
+		RequestID: "request-failed", ParentSessionID: created.ID, ChildSessionID: "child-failed",
+		LeaseID: "lease-77777777777777777777777777777777", LeaseExpiresAt: time.Now().Add(time.Hour), Status: worktree.AgentWorktreeActive,
+	}
+	if err := appendPersistedWorktreeEvent(ctx, ledger, created.ID, persistedWorktreeActiveEvent, tree, "spawned"); err != nil {
+		t.Fatal(err)
+	}
+	tree.Active = false
+	tree.Status = "failed"
+	if err := appendPersistedWorktreeEvent(ctx, ledger, created.ID, persistedWorktreeTerminalEvent, tree, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(root, "HEAD")
+	if err := restorePersistedWorktrees(ctx, ledger, manager); err != nil {
+		t.Fatal(err)
+	}
+	got := manager.List()
+	if len(got) != 1 || got[0].RequestID != tree.RequestID || got[0].Status != worktree.AgentWorktreeActive {
+		t.Fatalf("failed workspace was not retained for recovery: %#v", got)
+	}
+}
+
 func TestRestorePersistedWorktreesRejectsCorruptEvent(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
@@ -72,6 +182,44 @@ func TestRestorePersistedWorktreesRejectsCorruptEvent(t *testing.T) {
 	err = restorePersistedWorktrees(ctx, ledger, worktree.NewManager(t.TempDir(), "HEAD"))
 	if !errors.Is(err, session.ErrEventIntegrity) {
 		t.Fatalf("restore corrupt event error = %v, want ErrEventIntegrity", err)
+	}
+}
+
+func TestPersistedAgentLifecycleRejectsUnknownOrMismatchedIdentity(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "repo", "browser", "identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	tree := worktree.Worktree{
+		Name: "identity-agent", Path: filepath.Join(root, ".agent", "worktrees", "identity-agent"), BaseRef: "HEAD", Active: true,
+		RequestID: "request-identity", ParentSessionID: created.ID, ChildSessionID: "child-identity",
+		LeaseID: "lease-88888888888888888888888888888888", LeaseExpiresAt: time.Now().Add(time.Hour), Status: worktree.AgentWorktreeActive,
+	}
+	if err := appendPersistedWorktreeEvent(ctx, ledger, created.ID, persistedWorktreeActiveEvent, tree, "spawned"); err != nil {
+		t.Fatal(err)
+	}
+	manager := worktree.NewManager(root, "HEAD")
+	if err := manager.RestoreChecked([]worktree.Worktree{tree}); err != nil {
+		t.Fatal(err)
+	}
+	for _, lifecycle := range []*codeagentpb.AgentLifecycle{
+		{RequestId: "missing", ChildSessionId: tree.ChildSessionID, Status: "cancelled"},
+		{RequestId: tree.RequestID, ChildSessionId: "other-child", Status: "cancelled"},
+		{RequestId: tree.RequestID, ChildSessionId: tree.ChildSessionID, LeaseId: "wrong-lease", Status: "cancelled"},
+	} {
+		if err := handlePersistedAgentLifecycle(ctx, ledger, manager, lifecycle); err == nil {
+			t.Fatalf("mismatched lifecycle unexpectedly succeeded: %#v", lifecycle)
+		}
+	}
+	if got := len(manager.List()); got != 1 {
+		t.Fatalf("rejected lifecycle changed managed worktrees: %d", got)
 	}
 }
 

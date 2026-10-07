@@ -46,6 +46,10 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 	if err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
+	changePath, err := workspaceRelativePath(e.Root, abs)
+	if err != nil {
+		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
+	}
 
 	editMode, _ := stringArg(args, "edit_mode", "mode")
 	editMode = strings.ToLower(strings.TrimSpace(editMode))
@@ -148,7 +152,7 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 		Name:   "NotebookEdit",
 		Output: summary,
 		Changes: []Change{{
-			Path:   filepath.ToSlash(path),
+			Path:   changePath,
 			Before: before,
 			After:  string(encoded),
 		}},

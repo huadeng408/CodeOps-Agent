@@ -23,15 +23,17 @@ import (
 )
 
 const (
-	runLeasedEventType    = "session/run-leased"
-	runHeartbeatEventType = "session/run-heartbeat"
-	runCompletedEventType = "session/run-completed"
-	runFailedEventType    = "session/run-failed"
-	runCanceledEventType  = "session/run-canceled"
-	toolDispatchedType    = "tool/dispatched"
-	toolUnknownEventType  = "tool/unknown"
-	planTodoEventType     = "session/plan-todo"
-	progressEventType     = "session/progress"
+	runLeasedEventType     = "session/run-leased"
+	runHeartbeatEventType  = "session/run-heartbeat"
+	runCompletedEventType  = "session/run-completed"
+	runFailedEventType     = "session/run-failed"
+	runCanceledEventType   = "session/run-canceled"
+	toolDispatchedType     = "tool/dispatched"
+	toolUnknownEventType   = "tool/unknown"
+	commitPendingEventType = "commit_pending"
+	commitDoneEventType    = "commit_done"
+	planTodoEventType      = "session/plan-todo"
+	progressEventType      = "session/progress"
 )
 
 var (
@@ -227,19 +229,29 @@ type SessionRunner struct {
 	cancel          context.CancelFunc
 	queue           chan runKey
 	agentQueue      chan runKey
+	memoryQueue     chan runKey
 	agentMu         sync.Mutex
 	activeAgentRuns map[runKey]context.CancelFunc
-	queuedMu        sync.Mutex
-	queued          map[runKey]struct{}
-	queuedContexts  map[runKey]context.Context
-	lifecycleMu     sync.RWMutex
-	closed          bool
+	// agentLifecycleMu serializes callback-plus-acknowledgement so concurrent
+	// terminal observers cannot clean the same managed workspace twice.
+	agentLifecycleMu sync.Mutex
+	queuedMu         sync.Mutex
+	queued           map[runKey]struct{}
+	queuedContexts   map[runKey]context.Context
+	lifecycleMu      sync.RWMutex
+	closed           bool
+	// admissionClosed closes the WaitGroup admission gate before Close waits.
+	// It is atomic because enqueue can be called from a worker while a public
+	// request still holds lifecycleMu.RLock.
+	admissionClosed atomic.Bool
+	enqueueMu       sync.Mutex
 	wg              sync.WaitGroup
 }
 
 type runKey struct {
-	sessionID string
-	runID     string
+	sessionID      string
+	runID          string
+	memoryRecovery bool
 }
 
 type runLeasePayload struct {
@@ -274,6 +286,20 @@ type toolResultPayload struct {
 	Error      string `json:"error,omitempty"`
 	ExitCode   int32  `json:"exit_code"`
 	Truncated  bool   `json:"truncated,omitempty"`
+}
+
+// commitPayload binds one side-effect attempt to the append-only Ledger.
+// A pending record is written before dispatch; the matching done record is
+// written only while closing the run. If a process dies in between, recovery
+// sees the pending record and must not execute the mutating tool again.
+type commitPayload struct {
+	CommitID        string `json:"commit_id"`
+	RunID           string `json:"run_id"`
+	ToolCallID      string `json:"tool_call_id"`
+	ToolName        string `json:"tool_name"`
+	ArgumentsJSON   string `json:"arguments_json,omitempty"`
+	PendingSeq      int64  `json:"pending_seq,omitempty"`
+	PendingChecksum string `json:"pending_checksum,omitempty"`
 }
 
 // planTodoPayload is the canonical, whole-value Plan/Todo projection emitted
@@ -497,6 +523,10 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 	if options.AgentWorkerCount <= 0 || options.AgentWorkerCount > 4 {
 		options.AgentWorkerCount = 4
 	}
+	// Reserve one of the ten execution slots for terminal memory recovery.
+	if options.WorkerCount+options.AgentWorkerCount > 9 {
+		options.WorkerCount = 9 - options.AgentWorkerCount
+	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
@@ -505,14 +535,16 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 		workbench: workbench, conversation: conversation, tools: tools, options: options,
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}), queuedContexts: make(map[runKey]context.Context),
 		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]context.CancelFunc),
+		memoryQueue: make(chan runKey, options.QueueSize),
 	}
-	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount)
+	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount + 1)
 	for i := 0; i < options.WorkerCount; i++ {
 		go runner.workerLoop(runner.queue)
 	}
 	for i := 0; i < options.AgentWorkerCount; i++ {
 		go runner.workerLoop(runner.agentQueue)
 	}
+	go runner.workerLoop(runner.memoryQueue)
 	return runner
 }
 
@@ -910,14 +942,14 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				return err
 			}
 			if run.terminal {
-				if view.Run != nil && view.Run.RunID == runID {
-					r.completeAgentTurn(ctx, runKey{sessionID: sessionID, runID: runID})
-					r.commitSessionMemory(ctx, runKey{sessionID: sessionID, runID: runID})
+				// Repair only the latest terminal run through the existing workers;
+				// provider reflection must not consume the startup recovery window.
+				if view.Run == nil || view.Run.RunID != runID {
+					continue
 				}
-				continue
 			}
 			wakeAt := time.Time{}
-			if run.view.LeaseUntil != nil && run.view.LeaseUntil.After(r.now()) {
+			if !run.terminal && run.view.LeaseUntil != nil && run.view.LeaseUntil.After(r.now()) {
 				wakeAt = *run.view.LeaseUntil
 			}
 			r.lifecycleMu.RLock()
@@ -925,7 +957,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 				r.lifecycleMu.RUnlock()
 				return ErrSessionRunnerClosed
 			}
-			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID}, wakeAt)
+			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID, memoryRecovery: run.terminal}, wakeAt)
 			r.lifecycleMu.RUnlock()
 		}
 	}
@@ -945,36 +977,40 @@ func (r *SessionRunner) Close() error {
 		return nil
 	}
 	r.closed = true
+	r.admissionClosed.Store(true)
 	cancel := r.cancel
 	r.lifecycleMu.Unlock()
-	if cancel == nil {
-		r.queuedMu.Lock()
-		clear(r.queued)
-		clear(r.queuedContexts)
-		for len(r.queue) > 0 {
-			<-r.queue
-		}
-		r.queuedMu.Unlock()
-		return nil
+	// Drain any enqueue already inside the admission section before waiting on
+	// the group. This prevents a worker from calling Add after Wait begins.
+	r.enqueueMu.Lock()
+	r.enqueueMu.Unlock()
+	if cancel != nil {
+		cancel()
+		r.wg.Wait()
 	}
-	cancel()
-	r.wg.Wait()
 	r.queuedMu.Lock()
+	defer r.queuedMu.Unlock()
 	clear(r.queued)
 	clear(r.queuedContexts)
-	for {
-		select {
-		case <-r.queue:
-		default:
-			r.queuedMu.Unlock()
-			return nil
+	for _, queue := range []chan runKey{r.queue, r.agentQueue, r.memoryQueue} {
+		for len(queue) > 0 {
+			<-queue
 		}
 	}
+	return nil
 }
 
 func (r *SessionRunner) now() time.Time { return r.options.Now().UTC() }
 
 func (r *SessionRunner) enqueue(ctx context.Context, key runKey, wakeAt time.Time) {
+	if r.admissionClosed.Load() {
+		return
+	}
+	r.enqueueMu.Lock()
+	defer r.enqueueMu.Unlock()
+	if r.admissionClosed.Load() {
+		return
+	}
 	traceCtx := genai.DetachedTraceContext(ctx, key.sessionID)
 	r.queuedMu.Lock()
 	if r.queued == nil {
@@ -1028,6 +1064,9 @@ func (r *SessionRunner) releaseQueued(key runKey) context.Context {
 }
 
 func (r *SessionRunner) targetQueue(key runKey) chan runKey {
+	if key.memoryRecovery {
+		return r.memoryQueue
+	}
 	if strings.HasPrefix(key.sessionID, "agent-") {
 		return r.agentQueue
 	}
@@ -1053,6 +1092,25 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	defer stopRunnerCancel()
 	defer cancelExecution()
 	traceCtx = executionCtx
+	events, err := r.workbench.ledger.Events(traceCtx, key.sessionID)
+	if err != nil {
+		return
+	}
+	run, err := projectRun(events, key.runID)
+	if err != nil {
+		return
+	}
+	if key.memoryRecovery && !run.terminal {
+		return
+	}
+	if run.terminal {
+		view, err := reduceSessionView(events)
+		if err == nil && view.Status != "deleted" && view.Run != nil && view.Run.RunID == key.runID {
+			r.completeAgentTurn(traceCtx, key)
+			r.commitSessionMemory(traceCtx, key)
+		}
+		return
+	}
 	completionCtx := traceCtx
 	defer func() { r.completeAgentTurn(completionCtx, key) }()
 	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
@@ -1187,7 +1245,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	// durable lease non-terminal so the next process can claim it after expiry
 	// and resume from the Python checkpoint instead of projecting a false
 	// permanent failure.
-	if r.ctx.Err() != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+	if r.ctx.Err() != nil && (runErr == nil || orchestrator.IsCanceledError(runErr)) {
 		return
 	}
 	// A broken gRPC transport is not a terminal Agent outcome. Keep the
@@ -1654,6 +1712,24 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		// Retry only read-only or Ledger-idempotent operations. A failed
 		// external effect may still have changed state and must not be repeated.
 	}
+	// A crash can leave commit_pending after tool/call but before
+	// tool/dispatched. Treat that marker as an unknown external effect for
+	// mutating tools; the checkpoint must never make us execute it twice.
+	if !isReadOnlyTool(call.Name) {
+		candidateRunIDs := append([]string{key.runID}, retryOfRunIDs...)
+		for _, candidateRunID := range candidateRunIDs {
+			for _, pending := range pendingCommits(events, candidateRunID) {
+				argumentsMatch := strings.TrimSpace(pending.ArgumentsJSON) != "" && pending.ArgumentsJSON == call.ParametersJSON && strings.TrimSpace(pending.ToolName) == call.Name
+				if strings.TrimSpace(pending.ToolCallID) != call.ID && !argumentsMatch {
+					continue
+				}
+				_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{
+					RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON,
+				})
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
+			}
+		}
+	}
 	// A retry may replay a tool request whose successful result was durably
 	// committed by a failed predecessor. Reuse only that successful receipt and
 	// materialize a current-run call/result pair for auditability; never invoke
@@ -1731,6 +1807,16 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未获批准", "工具执行未获批准，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
+	pending := commitPayload{
+		CommitID: commitIDFor(key.runID, call.ID), RunID: key.runID,
+		ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON,
+	}
+	pendingEvent, err := r.appendLeasedFactEvent(ctx, key, lease.LeaseID, commitPendingEventType, pending)
+	if err != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool commit preparation failed", ExitCode: 1}, true
+	}
+	pending.PendingSeq = pendingEvent.Seq
+	pending.PendingChecksum = pendingEvent.Checksum
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed", ExitCode: 1}, true
 	}
@@ -1926,6 +2012,47 @@ func invocationProjection(events []Event, runID, callID string) invocationView {
 	return out
 }
 
+func commitIDFor(runID, callID string) string {
+	return strings.TrimSpace(runID) + "\x00" + strings.TrimSpace(callID)
+}
+
+// pendingCommits returns pending side effects which have no matching done
+// record. It deliberately treats malformed records as absent here; the
+// append-only Ledger integrity check still rejects malformed JSON before a
+// runner can use the history.
+func pendingCommits(events []Event, runID string) []commitPayload {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	pending := make(map[string]commitPayload)
+	for _, event := range events {
+		var payload commitPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.RunID) != runID {
+			continue
+		}
+		id := strings.TrimSpace(payload.CommitID)
+		if id == "" {
+			id = commitIDFor(payload.RunID, payload.ToolCallID)
+			payload.CommitID = id
+		}
+		switch event.Type {
+		case commitPendingEventType:
+			payload.PendingSeq = event.Seq
+			payload.PendingChecksum = event.Checksum
+			pending[id] = payload
+		case commitDoneEventType:
+			delete(pending, id)
+		}
+	}
+	result := make([]commitPayload, 0, len(pending))
+	for _, payload := range pending {
+		result = append(result, payload)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].PendingSeq < result[j].PendingSeq })
+	return result
+}
+
 func toolResultPayloadFrom(result orchestrator.ToolResult, runID string) toolResultPayload {
 	return toolResultPayload{RunID: runID, ToolCallID: result.ToolCallID, ToolName: result.ToolName, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode, Truncated: result.Truncated}
 }
@@ -1971,35 +2098,40 @@ func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lea
 }
 
 func (r *SessionRunner) appendLeasedFact(ctx context.Context, key runKey, leaseID, eventType string, payload any) error {
+	_, err := r.appendLeasedFactEvent(ctx, key, leaseID, eventType, payload)
+	return err
+}
+
+func (r *SessionRunner) appendLeasedFactEvent(ctx context.Context, key runKey, leaseID, eventType string, payload any) (Event, error) {
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
-			return err
+			return Event{}, err
 		}
 		view, viewErr := reduceSessionView(events)
 		if viewErr != nil {
-			return viewErr
+			return Event{}, viewErr
 		}
 		if view.Status == "deleted" {
-			return ErrSessionNotFound
+			return Event{}, ErrSessionNotFound
 		}
 		projection, err := projectRun(events, key.runID)
 		if err != nil {
-			return err
+			return Event{}, err
 		}
 		if projection.terminal || projection.leaseID != leaseID {
-			return ErrLeaseLost
+			return Event{}, ErrLeaseLost
 		}
-		_, err = r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), eventType, payload)
+		appended, err := r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), eventType, payload)
 		if err == nil {
 			r.workbench.signal(key.sessionID)
-			return nil
+			return appended, nil
 		}
 		if !errors.Is(err, ErrSequenceConflict) {
-			return err
+			return Event{}, err
 		}
 	}
-	return ErrSequenceConflict
+	return Event{}, ErrSequenceConflict
 }
 
 // recordProgress writes a bounded observational receipt. A failure to publish
@@ -2084,8 +2216,42 @@ func latestRunSourceSeq(events []Event, runID string) int64 {
 }
 
 func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
+	// Close the commit protocol before the terminal run fact. A crash before
+	// this point leaves commit_pending durable; recovery will fence the same
+	// mutating invocation instead of running it twice.
+	if err := r.closePendingCommits(ctx, key, lease); err != nil {
+		return err
+	}
 	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
 	return r.appendLeasedFact(ctx, key, lease.LeaseID, eventType, payload)
+}
+
+func (r *SessionRunner) closePendingCommits(ctx context.Context, key runKey, lease runLeasePayload) error {
+	for attempt := 0; attempt < 16; attempt++ {
+		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+		if err != nil {
+			return err
+		}
+		pending := pendingCommits(events, key.runID)
+		if len(pending) == 0 {
+			return nil
+		}
+		for _, item := range pending {
+			item.CommitID = strings.TrimSpace(item.CommitID)
+			if item.CommitID == "" {
+				item.CommitID = commitIDFor(item.RunID, item.ToolCallID)
+			}
+			if err := r.appendLeasedFact(ctx, key, lease.LeaseID, commitDoneEventType, item); err != nil {
+				if errors.Is(err, ErrSequenceConflict) {
+					break
+				}
+				return err
+			}
+		}
+		// Re-read after appending all records; this also handles another
+		// writer winning the sequence CAS without producing a duplicate done.
+	}
+	return ErrSequenceConflict
 }
 
 func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
@@ -2117,6 +2283,12 @@ func publicRunErrorCode(cause error) string {
 	switch {
 	case errors.Is(cause, ErrEventIntegrity):
 		return "event_integrity"
+	case strings.Contains(message, "rpc_deadline_exceeded"):
+		return "deadline_exceeded"
+	case strings.Contains(message, "rpc_unavailable"):
+		return "orchestrator_connection_error"
+	case strings.Contains(message, "rpc_cancelled"), orchestrator.IsCanceledError(cause):
+		return "conversation_canceled"
 	case strings.Contains(message, "provider_authentication_error"):
 		return "provider_authentication_error"
 	case strings.Contains(message, "provider_transport_error"):
@@ -2127,13 +2299,17 @@ func publicRunErrorCode(cause error) string {
 		return "context_window_exceeded"
 	case strings.Contains(message, "provider_runtime_error"):
 		return "provider_runtime_error"
+	case strings.Contains(message, "tool_round_limit"):
+		return "tool_round_limit"
+	case strings.Contains(message, "empty_model_response"):
+		return "empty_model_response"
 	case strings.Contains(message, "continuation has no input or history"):
 		return "continuation_input_missing"
 	case strings.Contains(message, "surface has changed"):
 		return "continuation_surface_changed"
 	case strings.Contains(message, "foreign") || strings.Contains(message, "unexpected"):
 		return "continuation_surface_invalid"
-	case errors.Is(cause, context.DeadlineExceeded):
+	case orchestrator.IsDeadlineError(cause):
 		return "deadline_exceeded"
 	case orchestrator.IsConnectionError(cause):
 		return "orchestrator_connection_error"
@@ -2151,15 +2327,25 @@ func publicRunError(cause error) string {
 	switch {
 	case errors.Is(cause, orchestrator.ErrCompactionPersistence):
 		return "context compaction could not be persisted; task stopped"
+	case strings.Contains(message, "rpc_deadline_exceeded"):
+		return "model request timed out; retry this task"
+	case strings.Contains(message, "rpc_cancelled"), orchestrator.IsCanceledError(cause):
+		return "conversation was canceled; retry this task"
+	case strings.Contains(message, "rpc_unavailable"):
+		return "agent provider connection failed; retry this task"
 	case strings.Contains(message, "agent provider connection failed") || strings.Contains(message, "provider_transport_error"):
 		return "agent provider connection failed; retry this task"
 	case strings.Contains(message, "agent provider failed") || strings.Contains(message, "provider_runtime_error"):
 		return "agent provider failed; retry this task"
+	case strings.Contains(message, "tool_round_limit"):
+		return "tool round limit reached; retry this task"
+	case strings.Contains(message, "empty_model_response"):
+		return "model returned an empty response; retry this task"
 	case strings.Contains(message, "401"), strings.Contains(message, "authentication_error"):
 		return "model authentication failed; check provider credentials"
 	case strings.Contains(message, "429"):
 		return "model rate limit reached; retry later"
-	case errors.Is(cause, context.DeadlineExceeded), strings.Contains(message, "timed out"), strings.Contains(message, "timeout"):
+	case orchestrator.IsDeadlineError(cause), strings.Contains(message, "timed out"), strings.Contains(message, "timeout"):
 		return "model request timed out; retry this task"
 	default:
 		return "agent continuation failed"

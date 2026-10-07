@@ -2,6 +2,7 @@ param(
     [string]$ProviderConfig = (Join-Path $env:USERPROFILE ("Desktop\api$([char]0x5bc6)$([char]0x94a5).txt")),
     [string]$ProviderProfile = '',
     [switch]$RestartOrchestrator,
+    [switch]$RestartHarness,
     [int]$DockerTimeoutSeconds = 120
 )
 
@@ -65,9 +66,29 @@ if ($RestartOrchestrator -and (Listening 50051)) {
     }
     Stop-Process -Id $listener.OwningProcess -ErrorAction Stop
     Wait-Process -Id $listener.OwningProcess -Timeout 10 -ErrorAction SilentlyContinue
+    $stopDeadline = (Get-Date).AddSeconds(10)
+    while (Listening 50051) {
+        if ((Get-Date) -ge $stopDeadline) { throw 'Orchestrator port did not close after stopping the verified process' }
+        Start-Sleep -Milliseconds 200
+    }
 }
 if (!(Listening 50051)) {
     Start-Process python -ArgumentList '-m','orchestrator.server' -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput '.tmp/interview-orchestrator.out.log' -RedirectStandardError '.tmp/interview-orchestrator.err.log' | Out-Null
+}
+if ($RestartHarness -and (Listening 8081)) {
+    $listener = Get-NetTCPConnection -LocalPort 8081 -State Listen -ErrorAction Stop | Select-Object -First 1
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)"
+    $expectedBinary = [IO.Path]::GetFullPath((Join-Path $root '.tmp/interview-server.exe'))
+    if ($process.Name -ne 'interview-server.exe' -or $process.ExecutablePath -ne $expectedBinary) {
+        throw 'Port 8081 does not belong to this workspace Harness; refusing to stop it'
+    }
+    Stop-Process -Id $listener.OwningProcess -ErrorAction Stop
+    Wait-Process -Id $listener.OwningProcess -Timeout 10 -ErrorAction SilentlyContinue
+    $stopDeadline = (Get-Date).AddSeconds(10)
+    while (Listening 8081) {
+        if ((Get-Date) -ge $stopDeadline) { throw 'Harness port did not close after stopping the verified process' }
+        Start-Sleep -Milliseconds 200
+    }
 }
 if (!(Listening 8081)) {
     & go build -o .tmp/interview-server.exe ./cmd/server

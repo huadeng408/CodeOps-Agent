@@ -861,7 +861,7 @@ class ToolRegistry:
                     "type": "object", "additionalProperties": False,
                     "properties": {
                         "action": {"type": "string", "enum": ["list", "read", "remember", "forget", "retain"]},
-                        "id": {"type": "string"}, "kind": {"type": "string"},
+                        "id": {"type": "string"}, "kind": {"type": "string", "enum": ["profile", "preferences", "entities", "events", "cases", "patterns"]},
                         "key": {"type": "string"}, "content": {"type": "string", "maxLength": 4000},
                         "expected_revision": {"type": "integer", "minimum": 0},
                         "ttl_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},

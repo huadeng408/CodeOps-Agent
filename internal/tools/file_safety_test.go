@@ -127,6 +127,56 @@ func TestFileToolsWriteAndEditProduceCompleteFileAndChanges(t *testing.T) {
 	}
 }
 
+func TestFileToolsNormalizeAbsoluteChangePaths(t *testing.T) {
+	root := t.TempDir()
+	executor := NewExecutor(root)
+	path := filepath.Join(root, "nested", "file.txt")
+
+	written, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Write", Arguments: map[string]any{"path": path, "content": "before"},
+	})
+	if err != nil {
+		t.Fatalf("absolute Write: %v", err)
+	}
+	if len(written.Changes) != 1 || written.Changes[0].Path != "nested/file.txt" {
+		t.Fatalf("absolute Write changes = %+v", written.Changes)
+	}
+
+	edited, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Edit", Arguments: map[string]any{"path": path, "old": "before", "new": "after"},
+	})
+	if err != nil {
+		t.Fatalf("absolute Edit: %v", err)
+	}
+	if len(edited.Changes) != 1 || edited.Changes[0].Path != "nested/file.txt" {
+		t.Fatalf("absolute Edit changes = %+v", edited.Changes)
+	}
+
+	notebookPath := filepath.Join(root, "nested", "analysis.ipynb")
+	notebook := `{"cells":[{"cell_type":"code","id":"cell-1","source":["before\n"],"metadata":{},"outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}`
+	if err := os.WriteFile(notebookPath, []byte(notebook), 0o644); err != nil {
+		t.Fatalf("write notebook fixture: %v", err)
+	}
+	notebookResult, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "NotebookEdit", Arguments: map[string]any{
+			"path": notebookPath, "edit_mode": "replace", "cell_index": 0, "source": "after\n",
+		},
+	})
+	if err != nil {
+		t.Fatalf("absolute NotebookEdit: %v", err)
+	}
+	if len(notebookResult.Changes) != 1 || notebookResult.Changes[0].Path != "nested/analysis.ipynb" {
+		t.Fatalf("absolute NotebookEdit changes = %+v", notebookResult.Changes)
+	}
+
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	if _, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Write", Arguments: map[string]any{"path": outside, "content": "blocked"},
+	}); err == nil {
+		t.Fatal("absolute path outside workspace unexpectedly succeeded")
+	}
+}
+
 func TestFileToolsResolveRelativePathsFromWorkingDir(t *testing.T) {
 	root := t.TempDir()
 	workingDir := filepath.Join(root, "nested", "repo")

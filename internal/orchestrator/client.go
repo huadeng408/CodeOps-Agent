@@ -230,7 +230,11 @@ type Client struct {
 	tracer genai.Tracer
 }
 
-const defaultConversationTimeout = 5 * time.Minute
+// Code tasks routinely spend several minutes waiting for tool approvals or
+// bounded workspace operations. Keep a generous client default for callers
+// that construct a client directly (the browser continuation path does this),
+// while CLI callers may still override it through ProcessConfig.
+const defaultConversationTimeout = 30 * time.Minute
 const defaultAskUserTimeout = 2 * time.Minute
 const maxGRPCMessageBytes = 32 << 20
 const maxHistoryMessages = 40
@@ -447,6 +451,26 @@ func IsConnectionError(err error) bool {
 		return containsTransportFailure(msg)
 	}
 	return containsTransportFailure(msg)
+}
+
+// IsDeadlineError recognizes both the standard context error and a gRPC
+// status wrapped by the streaming client. status.Code does not participate in
+// errors.Is, so callers that only use errors.Is misclassify a deadlined RPC as
+// an opaque continuation failure.
+func IsDeadlineError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded
+}
+
+// IsCanceledError recognizes a user/transport cancellation from either the
+// standard context sentinel or a gRPC status error.
+func IsCanceledError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled
 }
 
 func containsProviderAuthFailure(msg string) bool {

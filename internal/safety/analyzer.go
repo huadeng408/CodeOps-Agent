@@ -9,6 +9,19 @@ import (
 
 const maxGitArgumentLength = 8192
 
+// harnessControlEnvironmentKeys are process-level controls owned by the
+// Harness/orchestrator boundary. Host tools must not inherit them because a
+// child could select a provider, reload a provider file, or change Harness
+// worktree behavior outside the parent authorization path.
+var harnessControlEnvironmentKeys = map[string]struct{}{
+	"CODE_AGENT_PROVIDER_CONFIG":          {},
+	"CODE_AGENT_PROVIDER_PROFILE":         {},
+	"CODE_AGENT_REQUIRE_HARNESS_WORKTREE": {},
+	"LLM_PROVIDER":                        {},
+	"MODEL_FAST":                          {},
+	"THINKING_ENABLED":                    {},
+}
+
 type RiskLevel string
 
 const (
@@ -401,6 +414,9 @@ func ScrubEnvironment(env []string) []string {
 			continue
 		}
 		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, blocked := harnessControlEnvironmentKeys[upper]; blocked {
+			continue
+		}
 		if upper == "" || strings.HasPrefix(upper, "DSH_") || strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") {
 			continue
 		}

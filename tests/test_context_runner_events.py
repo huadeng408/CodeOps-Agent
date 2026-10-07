@@ -1311,7 +1311,7 @@ def test_batch_checkpoint_failure_stops_processing_later_results(tmp_path: Path)
         for event in app.context_store.events("session-1")
         if event.kind == "execution_result" and event.payload.get("tool_call_id")
     ]
-    assert persisted_results == ["read-1", "glob-1"]
+    assert persisted_results == ["read-1"]
     assert len([message for message in messages if message.HasField("tool_request_batch")]) == 1
     assert len(messages) == 2
     app.context_store.close()

@@ -10,18 +10,22 @@ import (
 	"testing"
 	"time"
 
+	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
 	"code-agent/internal/session"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type memoryConversationFixture struct {
 	toolArgs string
 	result   orchestrator.ToolResult
+	calls    atomic.Int32
 }
 
 func (f *memoryConversationFixture) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	f.calls.Add(1)
 	if f.toolArgs != "" {
 		f.result = handlers.Tool(ctx, orchestrator.ToolCall{ID: "recall", Name: "RecallMemory", ParametersJSON: f.toolArgs})
 	}
@@ -114,25 +118,280 @@ func TestLedgerMemoryAutomaticCommitScopeBudgetAndIdempotency(t *testing.T) {
 	}
 }
 
+type recoveredMemory struct {
+	*LedgerMemory
+	commits chan error
+}
+
+func (m *recoveredMemory) Commit(ctx context.Context, sessionID string) error {
+	err := m.LedgerMemory.Commit(ctx, sessionID)
+	m.commits <- err
+	return err
+}
+
+func awaitRecoveredMemory(t *testing.T, commits <-chan error) {
+	t.Helper()
+	select {
+	case err := <-commits:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered memory commit did not finish")
+	}
+}
+
 func TestLedgerMemoryRecoveryCommitsMissedTerminalWithoutRerunningModel(t *testing.T) {
 	ledger := openMemoryLedger(t)
 	sessionID := runMemoryFixture(t, ledger, 7, "restart memory anchor", nil, &memoryConversationFixture{})
+	original, err := ledger.Events(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	module := NewLedgerMemory(ledger)
-	runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), nil, nil, session.SessionRunnerOptions{Memory: module})
+	observed := &recoveredMemory{LedgerMemory: module, commits: make(chan error, 4)}
+	conversation := &memoryConversationFixture{}
+	runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), conversation, nil, session.SessionRunnerOptions{Memory: observed})
 	defer runner.Close()
 	if err := runner.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	awaitRecoveredMemory(t, observed.commits)
 	if result := decodeMemoryRecall(t, module, 7, "restart", 1200); len(result.Entries) != 1 || result.Entries[0].Memory.SessionID != sessionID {
 		t.Fatalf("missed commit was not recovered: %+v", result)
 	}
 	before, _ := ledger.Events(context.Background(), sessionID)
+	if len(before) != len(original)+1 || before[len(before)-1].Type != trajectoryCommittedEvent {
+		t.Fatal("terminal recovery appended execution facts instead of only the missing memory commit")
+	}
 	if err := runner.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	awaitRecoveredMemory(t, observed.commits)
 	after, _ := ledger.Events(context.Background(), sessionID)
 	if len(before) != len(after) {
 		t.Fatal("recovery was not idempotent")
+	}
+	if conversation.calls.Load() != 0 {
+		t.Fatal("terminal memory recovery reran the conversation model")
+	}
+}
+
+func TestLedgerMemoryRecoveryDoesNotBlockContinuationAttachOnReflection(t *testing.T) {
+	ledger := openMemoryLedger(t)
+	sessionID := runMemoryFixture(t, ledger, 7, "restart reflection anchor", nil, &memoryConversationFixture{})
+	started, release := make(chan struct{}), make(chan struct{})
+	var reflections atomic.Int32
+	module := NewLedgerMemory(ledger, func(ctx context.Context, request *pb.MemoryReflectionRequest) (*pb.MemoryReflectionResponse, error) {
+		close(started)
+		select {
+		case <-release:
+			return reflectionFixture(&reflections, false)(ctx, request)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	observed := &recoveredMemory{LedgerMemory: module, commits: make(chan error, 4)}
+	conversation := &memoryConversationFixture{}
+	runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), conversation, nil, session.SessionRunnerOptions{Memory: observed, WorkerCount: 1, AgentWorkerCount: 1})
+	defer runner.Close()
+	recoverCtx, cancelRecover := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelRecover()
+	if err := runner.Recover(recoverCtx); err != nil || recoverCtx.Err() != nil {
+		t.Fatalf("reflection blocked startup recovery: err=%v context=%v", err, recoverCtx.Err())
+	}
+	cancelRecover()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal reflection was not queued")
+	}
+	slot := session.NewContinuationSlot()
+	supervisor := session.NewContinuationSupervisor(slot, 100*time.Millisecond, func(context.Context) (session.ContinuationModule, error) {
+		return runner, nil
+	})
+	supervisor.Start(context.Background())
+	defer supervisor.Close()
+	deadline := time.Now().Add(time.Second)
+	for !slot.Available() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !slot.Available() || !supervisor.Status().Attached {
+		t.Fatal("blocked reflection prevented continuation attachment")
+	}
+	close(release)
+	awaitRecoveredMemory(t, observed.commits)
+	awaitRecoveredMemory(t, observed.commits)
+	if conversation.calls.Load() != 0 || reflections.Load() != 1 {
+		t.Fatalf("terminal replay called models unexpectedly: conversation=%d reflection=%d", conversation.calls.Load(), reflections.Load())
+	}
+	if result := decodeMemoryRecall(t, module, 7, "restart", 1200); len(result.Entries) != 1 || result.Entries[0].Memory.SessionID != sessionID {
+		t.Fatalf("missed commit was not recovered after reflection unblocked: %+v", result)
+	}
+}
+
+func TestLedgerMemoryRecoveryDoesNotDelayNewConversationBehindReflection(t *testing.T) {
+	ctx := context.Background()
+	ledger := openMemoryLedger(t)
+	oldSession := runMemoryFixture(t, ledger, 7, "old reflection anchor", nil, &memoryConversationFixture{})
+	original, err := ledger.Events(ctx, oldSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	var reflections atomic.Int32
+	module := NewLedgerMemory(ledger, func(ctx context.Context, request *pb.MemoryReflectionRequest) (*pb.MemoryReflectionResponse, error) {
+		if request.SessionId == oldSession {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return reflectionFixture(&reflections, false)(ctx, request)
+	})
+	observed := &recoveredMemory{LedgerMemory: module, commits: make(chan error, 8)}
+	conversation := &memoryConversationFixture{}
+	workbench := session.NewWorkbench(ledger, nil)
+	runner := session.NewSessionRunner(workbench, conversation, nil, session.SessionRunnerOptions{Memory: observed, WorkerCount: 1, AgentWorkerCount: 1})
+	defer runner.Close()
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("old reflection did not start")
+	}
+	view, err := workbench.Create(ctx, 7, "repo", "interactive task", "new interactive request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{
+		RequestID: "interactive-request", SessionID: view.ID, OwnerID: 7, ExpectedSeq: 1,
+		Content: "new interactive request", Actor: identity.Default(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	completed := false
+	for time.Now().Before(deadline) {
+		current, err := workbench.Get(ctx, 7, view.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.Run != nil && current.Run.Status == session.RunCompleted {
+			completed = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !completed {
+		t.Fatal("new conversation waited behind blocked historical reflection")
+	}
+	awaitRecoveredMemory(t, observed.commits)
+	close(release)
+	awaitRecoveredMemory(t, observed.commits)
+	before, err := ledger.Events(ctx, oldSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range before[len(original):] {
+		if !strings.HasPrefix(event.Type, "memory/") {
+			t.Fatalf("recovery appended execution fact %q", event.Type)
+		}
+	}
+	if result := decodeMemoryRecall(t, module, 7, "old reflection", 1200); len(result.Entries) != 1 || result.Entries[0].Memory.SessionID != oldSession {
+		t.Fatalf("historical memory recovery was lost: %+v", result)
+	}
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	awaitRecoveredMemory(t, observed.commits)
+	awaitRecoveredMemory(t, observed.commits)
+	after, err := ledger.Events(ctx, oldSession)
+	if err != nil || len(before) != len(after) || conversation.calls.Load() != 1 || reflections.Load() != 2 {
+		t.Fatalf("recovery was not idempotent: facts=%d/%d conversation=%d reflection=%d err=%v", len(before), len(after), conversation.calls.Load(), reflections.Load(), err)
+	}
+}
+
+func TestLedgerMemoryRecoveryDoesNotDelayNewChildAgentBehindReflection(t *testing.T) {
+	ctx := context.Background()
+	ledger := openMemoryLedger(t)
+	oldSession := runMemoryFixture(t, ledger, 7, "old child reflection anchor", nil, &memoryConversationFixture{})
+	started, release := make(chan struct{}), make(chan struct{})
+	var reflections atomic.Int32
+	module := NewLedgerMemory(ledger, func(ctx context.Context, request *pb.MemoryReflectionRequest) (*pb.MemoryReflectionResponse, error) {
+		if request.SessionId == oldSession {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return reflectionFixture(&reflections, false)(ctx, request)
+	})
+	observed := &recoveredMemory{LedgerMemory: module, commits: make(chan error, 8)}
+	conversation := &memoryConversationFixture{}
+	workbench := session.NewWorkbench(ledger, nil)
+	parent, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "parent", "delegate a new task", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := identity.Default().BindSession(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := session.NewSessionRunner(workbench, conversation, nil, session.SessionRunnerOptions{Memory: observed, WorkerCount: 1, AgentWorkerCount: 1})
+	defer runner.Close()
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("old reflection did not start")
+	}
+	result := runner.ExecuteAgentTool(ctx, actor, parent.ID, orchestrator.ToolCall{
+		ID: "interactive-child", Name: "SpawnAgent",
+		ParametersJSON: `{"kind":"explore","title":"new child task","objective":"inspect explicit repository materials","parallel":true}`,
+	})
+	if result.Error != "" || result.ExitCode != 0 {
+		t.Fatalf("SpawnAgent failed: %+v", result)
+	}
+	var task pb.AgentTask
+	if err := protojson.Unmarshal([]byte(result.Output), &task); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	completed := false
+	for time.Now().Before(deadline) {
+		view, err := workbench.Get(ctx, 7, task.ChildSessionId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Run != nil && view.Run.Status == session.RunCompleted {
+			completed = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !completed {
+		t.Fatal("new child agent waited behind blocked historical reflection")
+	}
+	awaitRecoveredMemory(t, observed.commits)
+	close(release)
+	awaitRecoveredMemory(t, observed.commits)
+	if conversation.calls.Load() != 1 || reflections.Load() != 2 {
+		t.Fatalf("unexpected model calls: conversation=%d reflection=%d", conversation.calls.Load(), reflections.Load())
+	}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Verify(ctx, task.ChildSessionId); err != nil {
+		t.Fatal(err)
 	}
 }
 

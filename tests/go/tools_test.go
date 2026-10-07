@@ -354,6 +354,69 @@ func TestExecutorGrepHeadLimitMarksResultTruncated(t *testing.T) {
 	}
 }
 
+func TestExecutorGrepSkipsRuntimeDirectoriesUnlessExplicitlyTargeted(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"src", ".agent", ".scratch", "logs", ".tmp", ".runtime", ".pytest_cache", ".mypy_cache", ".worktrees", ".claude/worktrees", ".playwright-cli", ".playwright-mcp", "eval_results", "docker-extracts", "eval/swebench_work"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, directory, "sample.txt"), []byte("search anchor\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := tools.NewExecutor(root)
+	defer executor.Close()
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "search anchor"},
+	})
+	if err != nil || strings.TrimSpace(result.Output) != "src/sample.txt" {
+		t.Fatalf("default repository search included runtime files: output=%q err=%v", result.Output, err)
+	}
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "search anchor", "path": ".runtime"},
+	})
+	if err != nil || strings.TrimSpace(result.Output) != ".runtime/sample.txt" {
+		t.Fatalf("explicit runtime search failed: output=%q err=%v", result.Output, err)
+	}
+}
+
+func TestExecutorGrepFilesWithMatchesStopsAfterFirstMatch(t *testing.T) {
+	root := t.TempDir()
+	content := "search anchor\n" + strings.Repeat("x", 2<<20) + "\n"
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+	defer executor.Close()
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "search anchor"},
+	})
+	if err != nil || strings.TrimSpace(result.Output) != "sample.txt" {
+		t.Fatalf("matching file lost after scanning unnecessary trailing content: output=%q err=%v", result.Output, err)
+	}
+}
+
+func TestExecutorGrepSkipsBinaryFilesUnlessExplicitlyTargeted(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "binary.dat"), []byte("\x00search anchor\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executor := tools.NewExecutor(root)
+	defer executor.Close()
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "search anchor"},
+	})
+	if err != nil || result.Output != "" {
+		t.Fatalf("default repository search included a binary file: output=%q err=%v", result.Output, err)
+	}
+	result, err = executor.Execute(context.Background(), tools.ToolRequest{
+		Name: "Grep", Arguments: map[string]any{"pattern": "search anchor", "path": "binary.dat"},
+	})
+	if err != nil || strings.TrimSpace(result.Output) != "binary.dat" {
+		t.Fatalf("explicit file search changed: output=%q err=%v", result.Output, err)
+	}
+}
+
 func TestExecutorGitBlocksUnsafeArguments(t *testing.T) {
 	executor := tools.NewExecutor(t.TempDir())
 	result, err := executor.Execute(context.Background(), tools.ToolRequest{

@@ -2,17 +2,115 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"code-agent/internal/identity"
 	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
+	"code-agent/internal/session"
 	"code-agent/internal/tools"
 )
+
+type absoluteEditConversation struct {
+	path string
+}
+
+func (a absoluteEditConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	result := handlers.Tool(ctx, orchestrator.ToolCall{
+		ID: "absolute-edit-call", Name: "Edit",
+		ParametersJSON: fmt.Sprintf(`{"path":%q,"old":"before","new":"after"}`, a.path),
+	})
+	if result.Error != "" || result.ExitCode != 0 {
+		return orchestrator.ConversationResult{}, fmt.Errorf("Edit failed: %s", result.Error)
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "edited"}, nil
+}
+
+func TestContinuationEditAbsolutePathPersistsCodeModification(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "src", "example.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "edit", "goal", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors := newContinuationToolExecutors(root)
+	t.Cleanup(func() { _ = executors.Close() })
+	runner := session.NewSessionRunner(workbench, absoluteEditConversation{path: path}, executors, session.SessionRunnerOptions{WorkerID: "server-test"})
+	t.Cleanup(func() { _ = runner.Close() })
+	actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "test", TenantID: "org:test", Roles: []string{"USER"}}
+	run, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{
+		RequestID: "absolute-edit-request", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(created.EventCount), Content: "edit the file", Actor: actor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		view, viewErr := runner.Run(ctx, created.ID, run.RunID)
+		if viewErr == nil && (view.Status == session.RunCompleted || view.Status == session.RunFailed) {
+			if view.Status != session.RunCompleted {
+				t.Fatalf("run failed: %+v", view)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not finish: %+v, err=%v", view, viewErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "after" {
+		t.Fatalf("edited file = %q, err=%v", string(data), err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found map[string]any
+	for _, event := range events {
+		if event.Type == "code/modified" {
+			if err := json.Unmarshal(event.Payload, &found); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("code/modified event missing; event types=%v", eventTypes(events))
+	}
+	if got, _ := found["path"].(string); got != "src/example.txt" {
+		t.Fatalf("code/modified path = %q, want workspace-relative path", found["path"])
+	}
+}
+
+func eventTypes(events []session.Event) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		types = append(types, event.Type)
+	}
+	return types
+}
 
 func TestConfigureContinuationSkillsLoadsProjectSkill(t *testing.T) {
 	root := t.TempDir()

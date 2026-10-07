@@ -50,6 +50,9 @@ func TestRunnerCommitsCompactionAndRecoversCanonicalSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForRunStatus(t, runner, created.ID, run.RunID, RunCompleted)
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
 	events, _ = ledger.Events(ctx, created.ID)
 	surface, err := ledger.Surface(ctx, created.ID)
 	if err != nil {

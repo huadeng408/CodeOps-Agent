@@ -255,6 +255,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
 				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry,
+				AgentLifecycle: app.handleAgentLifecycle,
 				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 					binding, ok := mcpManager.ResolveBinding(name)
 					return session.AgentToolBinding{Name: binding.Name, Server: binding.Server, InputSchemaSHA256: binding.InputSchemaSHA256, ServerConfigSHA256: binding.ServerConfigSHA256}, ok
@@ -265,10 +266,12 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 					}
 					if err := mcpManager.WriteToolsManifest(tree.Path); err != nil {
 						_ = app.worktree.CleanupAgent(ctx, tree.RequestID, true, "mcp manifest unavailable")
-						app.session.SetWorktrees(sessionWorktrees(app.worktree.List()))
 						return "", err
 					}
-					app.session.SetWorktrees(sessionWorktrees(app.worktree.List()))
+					if err := app.applyAgentWorktreeTransition(ctx, tree, worktree.AgentWorktreeActive, "independent agent task", false); err != nil {
+						_ = app.worktree.CleanupAgent(context.Background(), tree.RequestID, true, "session-persist-failed")
+						return "", err
+					}
 					return tree.Path, nil
 				},
 			})
@@ -712,41 +715,24 @@ func (a *App) handleAgentSpawn(ctx context.Context, spawn *codeagentpb.AgentSpaw
 	if err != nil {
 		return err
 	}
-	persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
-	if !containsAgentWorktree(persisted.Worktrees, tree.RequestID) {
+	if err := a.applyAgentWorktreeTransition(ctx, tree, worktree.AgentWorktreeActive, "spawned", false); err != nil {
 		_ = a.worktree.CleanupAgent(context.Background(), tree.RequestID, true, "session-persist-failed")
-		return errors.New("persist agent worktree lease failed")
+		return err
 	}
-	a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
-		Name:            tree.Name,
-		Path:            tree.Path,
-		BaseRef:         tree.BaseRef,
-		RequestID:       tree.RequestID,
-		ParentSessionID: tree.ParentSessionID,
-		ChildSessionID:  tree.ChildSessionID,
-		LeaseID:         tree.LeaseID,
-		Status:          worktree.AgentWorktreeActive,
-		Reason:          "spawned",
-	})
 	return nil
 }
 
-// handleAgentLifecycle validates and records a terminal child state. Completed
-// children remain readable until their lease expires so the parent run can
-// consume artifacts; failed/cancelled children are cleaned immediately.
+// handleAgentLifecycle validates and records a child state. Completed and
+// failed workspaces remain available for follow-up turns; explicit cleanup
+// states remove the checkout.
 func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
 	if a == nil || a.session == nil || a.worktree == nil || lifecycle == nil {
 		return errors.New("agent lifecycle manager is not configured")
 	}
-	tree, ok := a.worktree.FindAgent(lifecycle.GetRequestId())
-	if !ok {
-		return nil
-	}
-	if leaseID := strings.TrimSpace(lifecycle.GetLeaseId()); leaseID != "" && leaseID != tree.LeaseID {
-		return errors.New("agent lifecycle lease does not match active worktree")
-	}
-	if childID := strings.TrimSpace(lifecycle.GetChildSessionId()); childID != "" && childID != tree.ChildSessionID {
-		return errors.New("agent lifecycle child session does not match active worktree")
+	requestID := strings.TrimSpace(lifecycle.GetRequestId())
+	childID := strings.TrimSpace(lifecycle.GetChildSessionId())
+	if requestID == "" || childID == "" {
+		return errors.New("agent lifecycle request and child session are required")
 	}
 	status := strings.ToLower(strings.TrimSpace(lifecycle.GetStatus()))
 	if status == "ok" {
@@ -755,24 +741,46 @@ func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.A
 	if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
 		return errors.New("unsupported agent lifecycle status")
 	}
-	if status == "completed" {
-		completed, err := a.worktree.MarkAgentCompleted(tree.RequestID, lifecycle.GetReason())
+	tree, runtimeTree := a.worktree.FindAgent(requestID)
+	if !runtimeTree {
+		var recorded bool
+		var err error
+		tree, recorded, err = a.persistedAgentWorktree(ctx, requestID, childID, strings.TrimSpace(lifecycle.GetLeaseId()), status)
 		if err != nil {
 			return err
 		}
-		tree = completed
-		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
-	} else {
+		if recorded || tree.RequestID == "" {
+			return nil
+		}
+		merged := append(a.worktree.List(), tree)
+		if err := a.worktree.RestoreChecked(merged); err != nil {
+			return fmt.Errorf("restore agent worktree for lifecycle retry: %w", err)
+		}
+		runtimeTree = true
+	}
+	if err := validateAgentLifecycleIdentity(requestID, childID, strings.TrimSpace(lifecycle.GetLeaseId()), tree); err != nil {
+		return err
+	}
+	if status != "completed" && status != "failed" {
 		discard := status != worktree.AgentWorktreeReleased
-		if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
+		if runtimeTree {
+			if err := a.worktree.CleanupAgent(ctx, tree.RequestID, discard, lifecycle.GetReason()); err != nil {
+				return err
+			}
+		}
+		tree.Active = false
+		tree.Status = status
+		if err := a.applyAgentWorktreeTransition(ctx, tree, status, lifecycle.GetReason(), true); err != nil {
 			return err
 		}
-		persisted := a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
-		if len(persisted.Worktrees) != 0 {
-			return errors.New("persist agent worktree cleanup failed")
-		}
+		return nil
 	}
-	a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
+	return a.applyAgentWorktreeTransition(ctx, tree, status, lifecycle.GetReason(), false)
+}
+
+func (a *App) applyAgentWorktreeTransition(ctx context.Context, tree worktree.Worktree, status, reason string, terminal bool) error {
+	state := sessionWorktree(tree)
+	persisted, err := a.session.ApplyWorktreeTransition(ctx, tree.ParentSessionID, state, terminal, session.WorktreeLifecycle{
 		Name:            tree.Name,
 		Path:            tree.Path,
 		BaseRef:         tree.BaseRef,
@@ -781,8 +789,14 @@ func (a *App) handleAgentLifecycle(ctx context.Context, lifecycle *codeagentpb.A
 		ChildSessionID:  tree.ChildSessionID,
 		LeaseID:         tree.LeaseID,
 		Status:          status,
-		Reason:          lifecycle.GetReason(),
+		Reason:          reason,
 	})
+	if err != nil {
+		return fmt.Errorf("persist agent worktree transition: %w", err)
+	}
+	if terminal && containsAgentWorktreeRequest(persisted.Worktrees, tree.RequestID) || !terminal && !containsAgentWorktreeRequest(persisted.Worktrees, tree.RequestID) || !containsWorktreeLifecycle(persisted.WorktreeEvents, tree.RequestID, tree.ChildSessionID, tree.LeaseID, status) {
+		return errors.New("persist agent worktree transition failed")
+	}
 	return nil
 }
 
@@ -797,6 +811,92 @@ func containsAgentWorktree(trees []session.WorktreeState, requestID string) bool
 		}
 	}
 	return false
+}
+
+func containsAgentWorktreeRequest(trees []session.WorktreeState, requestID string) bool {
+	for _, tree := range trees {
+		if tree.RequestID == strings.TrimSpace(requestID) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWorktreeLifecycle(events []session.WorktreeLifecycle, requestID, childID, leaseID, status string) bool {
+	for _, event := range events {
+		if event.RequestID == requestID && event.ChildSessionID == childID && event.LeaseID == leaseID && event.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) persistedAgentWorktree(ctx context.Context, requestID, childID, leaseID, status string) (worktree.Worktree, bool, error) {
+	requestID = strings.TrimSpace(requestID)
+	childID = strings.TrimSpace(childID)
+	leaseID = strings.TrimSpace(leaseID)
+	if requestID == "" || childID == "" {
+		return worktree.Worktree{}, false, errors.New("agent lifecycle request and child session are required")
+	}
+	sessions, err := a.session.List(ctx)
+	if err != nil {
+		return worktree.Worktree{}, false, err
+	}
+	found := false
+	for _, item := range sessions {
+		for _, state := range item.Worktrees {
+			if state.RequestID == requestID {
+				found = true
+				tree := worktrees([]session.WorktreeState{state})[0]
+				if err := validateAgentLifecycleIdentity(requestID, childID, leaseID, tree); err != nil {
+					return worktree.Worktree{}, false, err
+				}
+				return tree, false, nil
+			}
+		}
+		for i := len(item.WorktreeEvents) - 1; i >= 0; i-- {
+			event := item.WorktreeEvents[i]
+			if event.RequestID != requestID {
+				continue
+			}
+			found = true
+			tree := worktree.Worktree{
+				Name: event.Name, Path: event.Path, BaseRef: event.BaseRef, RequestID: event.RequestID,
+				ParentSessionID: event.ParentSessionID, ChildSessionID: event.ChildSessionID, LeaseID: event.LeaseID,
+				Status: worktree.AgentWorktreeActive,
+			}
+			if err := validateAgentLifecycleIdentity(requestID, childID, leaseID, tree); err != nil {
+				return worktree.Worktree{}, false, err
+			}
+			if event.Status == status {
+				return worktree.Worktree{}, true, nil
+			}
+			if event.Status != worktree.AgentWorktreeActive {
+				return worktree.Worktree{}, false, fmt.Errorf("agent lifecycle status conflicts with recorded %s", event.Status)
+			}
+			return tree, false, nil
+		}
+	}
+	if !found {
+		return worktree.Worktree{}, false, errors.New("agent lifecycle request not found")
+	}
+	return worktree.Worktree{}, false, errors.New("agent lifecycle request is not recoverable")
+}
+
+func validateAgentLifecycleIdentity(requestID, childID, leaseID string, tree worktree.Worktree) error {
+	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(childID) == "" {
+		return errors.New("agent lifecycle request and child session are required")
+	}
+	if tree.RequestID != requestID {
+		return errors.New("agent lifecycle request does not match worktree")
+	}
+	if tree.ChildSessionID != childID {
+		return errors.New("agent lifecycle child session does not match worktree")
+	}
+	if leaseID != "" && leaseID != tree.LeaseID {
+		return errors.New("agent lifecycle lease does not match active worktree")
+	}
+	return nil
 }
 
 // restartOrchestrator asks the process manager to tear down and relaunch the
@@ -1900,7 +2000,7 @@ func (a *App) handleWorktreeCommand(fields []string) {
 			a.renderer.PrintLine("worktree create failed: " + err.Error())
 			return
 		}
-		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.persistCurrentWorktrees()
 		a.renderer.PrintLine("created worktree: " + tree.Name)
 	case "switch":
 		tree, err := a.worktree.Switch(name)
@@ -1908,7 +2008,7 @@ func (a *App) handleWorktreeCommand(fields []string) {
 			a.renderer.PrintLine("worktree switch failed: " + err.Error())
 			return
 		}
-		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.persistCurrentWorktrees()
 		a.renderer.PrintLine("switched worktree: " + tree.Name)
 	case "cleanup":
 		force := len(fields) > 3 && (fields[3] == "--discard" || fields[3] == "--force")
@@ -1922,7 +2022,7 @@ func (a *App) handleWorktreeCommand(fields []string) {
 			a.renderer.PrintLine("worktree cleanup failed: " + err.Error())
 			return
 		}
-		a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
+		a.persistCurrentWorktrees()
 		a.renderer.PrintLine("cleaned worktree: " + name)
 	default:
 		a.renderer.PrintLine("usage: /worktree <list|create|switch|cleanup> [name] [--discard]")
@@ -2021,7 +2121,14 @@ func (a *App) bindSessionActor(current session.Session) error {
 }
 
 func (a *App) restoreWorktrees(restored session.Session) {
-	if err := a.worktree.RestoreChecked(worktrees(restored.Worktrees)); err != nil {
+	merged := make([]worktree.Worktree, 0, len(a.worktree.List())+len(restored.Worktrees))
+	for _, tree := range a.worktree.List() {
+		if tree.RequestID != "" && tree.ParentSessionID != restored.ID {
+			merged = append(merged, tree)
+		}
+	}
+	merged = append(merged, worktrees(restored.Worktrees)...)
+	if err := a.worktree.RestoreChecked(merged); err != nil {
 		a.renderer.PrintLine("restore worktrees failed: " + err.Error())
 		return
 	}
@@ -2033,20 +2140,17 @@ func (a *App) restoreWorktrees(restored session.Session) {
 	if len(reaped) == 0 {
 		return
 	}
-	a.session.SetWorktrees(sessionWorktrees(a.worktree.List()))
 	for _, tree := range reaped {
-		a.session.AppendWorktreeLifecycle(session.WorktreeLifecycle{
-			Name:            tree.Name,
-			Path:            tree.Path,
-			BaseRef:         tree.BaseRef,
-			RequestID:       tree.RequestID,
-			ParentSessionID: tree.ParentSessionID,
-			ChildSessionID:  tree.ChildSessionID,
-			LeaseID:         tree.LeaseID,
-			Status:          worktree.AgentWorktreeReaped,
-			Reason:          "expired lease recovered",
-		})
+		if err := a.applyAgentWorktreeTransition(context.Background(), tree, worktree.AgentWorktreeReaped, "expired lease recovered", true); err != nil {
+			a.renderer.PrintLine("persist reaped worktree failed: " + err.Error())
+			return
+		}
 	}
+}
+
+func (a *App) persistCurrentWorktrees() {
+	current := a.session.Current()
+	a.session.SetWorktrees(sessionWorktreesForSession(a.worktree.List(), current.ID))
 }
 
 func (a *App) restoreTodos(restored session.Session) {
@@ -2376,6 +2480,20 @@ func sessionWorktrees(trees []worktree.Worktree) []session.WorktreeState {
 		})
 	}
 	return out
+}
+
+func sessionWorktree(tree worktree.Worktree) session.WorktreeState {
+	return sessionWorktrees([]worktree.Worktree{tree})[0]
+}
+
+func sessionWorktreesForSession(trees []worktree.Worktree, sessionID string) []session.WorktreeState {
+	filtered := make([]worktree.Worktree, 0, len(trees))
+	for _, tree := range trees {
+		if tree.RequestID == "" || tree.ParentSessionID == sessionID {
+			filtered = append(filtered, tree)
+		}
+	}
+	return sessionWorktrees(filtered)
 }
 
 func worktrees(trees []session.WorktreeState) []worktree.Worktree {

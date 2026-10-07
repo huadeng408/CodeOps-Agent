@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -56,6 +57,15 @@ type agentTaskMutation struct {
 	RequestID string          `json:"request_id"`
 	Message   json.RawMessage `json:"message,omitempty"`
 	Artifact  json.RawMessage `json:"artifact,omitempty"`
+}
+
+const agentWorkspaceLifecycleAcknowledgedEventType = "agent/workspace-lifecycle-acknowledged"
+
+type agentWorkspaceLifecycleAcknowledged struct {
+	RequestID      string `json:"request_id"`
+	ChildSessionID string `json:"child_session_id"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason"`
 }
 
 var agentJSON = protojson.MarshalOptions{UseProtoNames: true}
@@ -177,7 +187,7 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 	return result
 }
 
-func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identity.Actor, parentDir string, call orchestrator.ToolCall) (string, error) {
+func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identity.Actor, parentDir string, call orchestrator.ToolCall) (output string, returnErr error) {
 	var args struct {
 		Kind         string          `json:"kind"`
 		Title        string          `json:"title"`
@@ -264,16 +274,6 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 			}
 		}
 	}
-	workingDir := parentDir
-	if args.Kind == "general" || args.Kind == "background" {
-		if r.options.AgentWorkspace == nil {
-			return "", errors.New("isolated agent workspace unavailable")
-		}
-		workingDir, err = r.options.AgentWorkspace(ctx, AgentWorkspaceRequest{TaskID: taskID, ParentSessionID: actor.SessionID, ChildSessionID: taskID, ParentWorkingDir: parentDir, Kind: args.Kind})
-		if err != nil {
-			return "", err
-		}
-	}
 	message := &pb.AgentMessage{Id: "assignment", Role: "user", Parts: []*pb.AgentPart{{Payload: &pb.AgentPart_Text{Text: tools.RedactSensitive(args.Objective)}}}}
 	if len(args.Context) > 0 && string(args.Context) != "null" {
 		if !json.Valid(args.Context) || len(args.Context) > 16000 {
@@ -293,8 +293,45 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		}
 		message.Parts = append(message.Parts, extra.Parts...)
 	}
-	if err := validateAgentParts(message.Parts, parentDir, workingDir); err != nil {
+	// Validate caller-controlled structure and source files before allocating a
+	// managed checkout. A second pass below copies verified files into it.
+	if err := validateAgentParts(message.Parts, parentDir, parentDir); err != nil {
 		return "", err
+	}
+	workingDir := parentDir
+	workspaceAllocated := false
+	taskCreated := false
+	if args.Kind == "general" || args.Kind == "background" {
+		if r.options.AgentWorkspace == nil {
+			return "", errors.New("isolated agent workspace unavailable")
+		}
+		workingDir, err = r.options.AgentWorkspace(ctx, AgentWorkspaceRequest{TaskID: taskID, ParentSessionID: actor.SessionID, ChildSessionID: taskID, ParentWorkingDir: parentDir, Kind: args.Kind})
+		if err != nil {
+			return "", err
+		}
+		workspaceAllocated = true
+		defer func() {
+			if returnErr == nil || !workspaceAllocated || taskCreated {
+				return
+			}
+			var lifecycleErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				lifecycleErr = r.callAgentLifecycle(ctx, &pb.AgentLifecycle{
+					RequestId: taskID, ChildSessionId: taskID, Status: "cancelled", Reason: "agent assignment rejected",
+				})
+				if lifecycleErr == nil {
+					break
+				}
+			}
+			if lifecycleErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("compensate agent workspace: %w", lifecycleErr))
+			}
+		}()
+	}
+	if workingDir != parentDir {
+		if err := validateAgentParts(message.Parts, parentDir, workingDir); err != nil {
+			return "", err
+		}
 	}
 	if err := pinAgentFiles(message.Parts, workingDir, ".agent/materials"); err != nil {
 		return "", err
@@ -342,6 +379,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	}); err != nil {
 		return "", err
 	}
+	taskCreated = true
 	actual, metadata, err := r.readAgentTask(ctx, owner, taskID, actor.SessionID)
 	if err != nil {
 		return "", err
@@ -432,6 +470,7 @@ func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, c
 func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {
 	var task *pb.AgentTask
 	var created agentTaskCreated
+	lifecycleAcknowledged := false
 	for _, event := range events {
 		switch event.Type {
 		case "agent/task-created":
@@ -494,6 +533,14 @@ func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {
 			if task != nil {
 				task.Status = "canceled"
 			}
+		case agentWorkspaceLifecycleAcknowledgedEventType:
+			var acknowledged agentWorkspaceLifecycleAcknowledged
+			if task == nil || lifecycleAcknowledged || json.Unmarshal(event.Payload, &acknowledged) != nil ||
+				acknowledged.RequestID != task.Id || acknowledged.ChildSessionID != task.ChildSessionId ||
+				acknowledged.Status != "cancelled" || task.Status != "canceled" {
+				return nil, created, ErrEventIntegrity
+			}
+			lifecycleAcknowledged = true
 		}
 	}
 	if task != nil {
@@ -626,6 +673,9 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	}
 	if args.Action == "cancel" {
 		if task.Status == "canceled" {
+			if err := r.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
+				return "", err
+			}
 			return r.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
 		}
 		if actor.SessionID != task.ParentSessionId || taskTerminal(task.Status) {
@@ -1080,8 +1130,9 @@ func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask,
 	if err := r.fenceAgentCancellation(ctx, task); err != nil {
 		return err
 	}
+	task.Status = "canceled"
 	r.releaseSessionResources(task.ChildSessionId)
-	return nil
+	return r.reconcileAgentWorkspaceLifecycle(ctx, task)
 }
 
 func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
@@ -1149,7 +1200,13 @@ func (r *SessionRunner) recoverAgentTask(ctx context.Context, owner uint, events
 		return err
 	}
 	if task.Status == "canceled" {
-		return r.fenceAgentCancellation(ctx, task)
+		if err := r.fenceAgentCancellation(ctx, task); err != nil {
+			return err
+		}
+		return r.reconcileAgentWorkspaceLifecycle(ctx, task)
+	}
+	if task.Status == "failed" {
+		return nil
 	}
 	if _, _, err := r.readAgentTask(ctx, owner, task.Id, task.ChildSessionId); err != nil {
 		return err
@@ -1171,6 +1228,14 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 	}
 	if taskTerminal(task.Status) {
 		defer r.releaseSessionResources(key.sessionID)
+	}
+	if task.Status == "canceled" {
+		// Keep the durable canceled task untouched when the Harness callback
+		// fails. Recover() will see the missing acknowledgement and retry the
+		// cleanup on the next process start instead of projecting success.
+		if err := r.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
+			return
+		}
 	}
 	if task.Status == "canceled" {
 		return
@@ -1200,6 +1265,63 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 		return
 	}
 	_ = r.admitAgentMessages(ctx, view.UserID, key.sessionID, created.Actor)
+}
+
+func (r *SessionRunner) callAgentLifecycle(ctx context.Context, lifecycle *pb.AgentLifecycle) error {
+	if r.options.AgentLifecycle == nil {
+		return nil
+	}
+	callbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return r.options.AgentLifecycle(callbackCtx, lifecycle)
+}
+
+func (r *SessionRunner) reconcileAgentWorkspaceLifecycle(ctx context.Context, task *pb.AgentTask) error {
+	if task == nil || task.Card == nil || task.Card.Id != "general" && task.Card.Id != "background" || task.Status != "canceled" || r.options.AgentLifecycle == nil {
+		return nil
+	}
+	const status = "cancelled"
+	const reason = "independent agent task cancelled"
+
+	r.agentLifecycleMu.Lock()
+	defer r.agentLifecycleMu.Unlock()
+	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	acknowledged := agentWorkspaceLifecycleAcknowledged{
+		RequestID: task.Id, ChildSessionID: task.ChildSessionId, Status: status, Reason: reason,
+	}
+	callbackDone := false
+	for attempt := 0; attempt < 16; attempt++ {
+		snapshot, err := ReadVerifiedSnapshot(reconcileCtx, r.workbench.ledger, task.ChildSessionId)
+		if err != nil {
+			return err
+		}
+		for _, event := range snapshot.Events {
+			if event.Type != agentWorkspaceLifecycleAcknowledgedEventType {
+				continue
+			}
+			var existing agentWorkspaceLifecycleAcknowledged
+			if json.Unmarshal(event.Payload, &existing) != nil || existing != acknowledged {
+				return ErrEventIntegrity
+			}
+			return nil
+		}
+		if !callbackDone {
+			if err := r.options.AgentLifecycle(reconcileCtx, &pb.AgentLifecycle{
+				RequestId: task.Id, ChildSessionId: task.ChildSessionId, Status: status, Reason: reason,
+			}); err != nil {
+				return err
+			}
+			callbackDone = true
+		}
+		if _, err := r.workbench.ledger.Append(reconcileCtx, task.ChildSessionId, int64(len(snapshot.Events)), agentWorkspaceLifecycleAcknowledgedEventType, acknowledged); err == nil {
+			r.workbench.signal(task.ChildSessionId)
+			return nil
+		} else if !errors.Is(err, ErrSequenceConflict) {
+			return err
+		}
+	}
+	return ErrSequenceConflict
 }
 
 func (r *SessionRunner) agentRequest(events []Event, request *orchestrator.ConversationRequest) error {

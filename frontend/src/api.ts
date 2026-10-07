@@ -95,8 +95,8 @@ class ApiClient {
     return result.data || [];
   }
 
-  async createSession(projectName: string, title: string, goal = ''): Promise<Session> {
-    const result = await this.request<Session>('POST', '/sessions', { body: { projectName, title, goal } });
+  async createSession(projectName: string, title: string, goal = '', workingDir = ''): Promise<Session> {
+    const result = await this.request<Session>('POST', '/sessions', { body: { projectName, title, goal, workingDir } });
     return result.data;
   }
 

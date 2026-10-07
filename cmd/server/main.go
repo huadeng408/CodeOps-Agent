@@ -376,44 +376,7 @@ func main() {
 			return nil
 		}
 		client.OnAgentLifecycle = func(lifecycleCtx context.Context, lifecycle *codeagentpb.AgentLifecycle) error {
-			if lifecycle == nil {
-				return fmt.Errorf("agent lifecycle payload is required")
-			}
-			tree, ok := workspaceManager.FindAgent(lifecycle.GetRequestId())
-			if !ok {
-				return nil
-			}
-			if leaseID := strings.TrimSpace(lifecycle.GetLeaseId()); leaseID != "" && leaseID != tree.LeaseID {
-				return fmt.Errorf("agent lifecycle lease does not match active worktree")
-			}
-			if childID := strings.TrimSpace(lifecycle.GetChildSessionId()); childID != "" && childID != tree.ChildSessionID {
-				return fmt.Errorf("agent lifecycle child does not match active worktree")
-			}
-			status := strings.ToLower(strings.TrimSpace(lifecycle.GetStatus()))
-			if status == "ok" {
-				status = worktree.AgentWorktreeReleased
-			}
-			if status != worktree.AgentWorktreeReleased && status != "completed" && status != "failed" && status != "cancelled" && status != "reaped" {
-				return fmt.Errorf("unsupported agent lifecycle status")
-			}
-			if status == "completed" {
-				completed, markErr := workspaceManager.MarkAgentCompleted(tree.RequestID, lifecycle.GetReason())
-				if markErr != nil {
-					return markErr
-				}
-				tree = completed
-			} else {
-				discard := status != worktree.AgentWorktreeReleased
-				if cleanupErr := workspaceManager.CleanupAgent(lifecycleCtx, tree.RequestID, discard, lifecycle.GetReason()); cleanupErr != nil {
-					return cleanupErr
-				}
-				tree.Active = false
-				tree.Status = status
-			}
-			if persistErr := appendPersistedWorktreeEvent(lifecycleCtx, ledger, tree.ParentSessionID, persistedWorktreeTerminalEvent, tree, lifecycle.GetReason()); persistErr != nil {
-				return fmt.Errorf("persist agent worktree lifecycle: %w", persistErr)
-			}
-			return nil
+			return handlePersistedAgentLifecycle(lifecycleCtx, ledger, workspaceManager, lifecycle)
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
 			WorkerID: workerID, Permissions: continuationPermissions,

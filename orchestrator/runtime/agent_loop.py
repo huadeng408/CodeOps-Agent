@@ -1,8 +1,8 @@
-"""Versioned, observation-only extension points for the agent loop.
+"""Versioned extension points for the agent loop.
 
-Plugins run in the Python orchestration layer.  They receive bounded metadata
-about a lifecycle phase and cannot replace model responses, execute tools, or
-write the durable Session ledger.
+Observation plugins remain compatible.  Strategy extensions may add bounded
+context or block/adjust a pending action; they never execute tools or write the
+durable Session ledger.
 """
 
 from __future__ import annotations
@@ -23,6 +23,12 @@ LOOP_PHASES = frozenset(
         "tool_before",
         "tool_after",
         "loop_end",
+        "prepare_context",
+        "before_model",
+        "after_model",
+        "before_tool",
+        "after_tool",
+        "finish_turn",
     }
 )
 
@@ -38,6 +44,7 @@ class LoopEvent:
     turn: int
     phase: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != LOOP_SCHEMA_VERSION:
@@ -50,7 +57,10 @@ class LoopEvent:
             raise ValueError(f"unsupported loop phase: {self.phase!r}")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("metadata must be a mapping")
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("payload must be a mapping")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +69,18 @@ class LoopDispatchResult:
 
     metadata: dict[str, Any] = field(default_factory=dict)
     errors: list[dict[str, str]] = field(default_factory=list)
+    context: tuple[str, ...] = ()
+    tool_arguments: dict[str, Any] = field(default_factory=dict)
+    model: str = ""
+    blocked: bool = False
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ExtensionRegistration:
+    name: str
+    phase: str
+    callback: PluginCallback
 
 
 class AgentLoopPluginRegistry:
@@ -66,6 +88,7 @@ class AgentLoopPluginRegistry:
 
     def __init__(self) -> None:
         self._plugins: dict[str, PluginCallback] = {}
+        self._extensions: list[_ExtensionRegistration] = []
 
     def register(self, name: str, callback: PluginCallback) -> None:
         plugin_name = str(name).strip()
@@ -78,10 +101,97 @@ class AgentLoopPluginRegistry:
         self._plugins[plugin_name] = callback
 
     def unregister(self, name: str) -> None:
-        self._plugins.pop(str(name).strip(), None)
+        normalized = str(name).strip()
+        self._plugins.pop(normalized, None)
+        self._extensions = [item for item in self._extensions if item.name != normalized]
 
     def names(self) -> tuple[str, ...]:
         return tuple(self._plugins)
+
+    def register_extension(self, name: str, phase: str, callback: PluginCallback) -> None:
+        """Register one ordered strategy callback at a mutable loop seam."""
+
+        extension_name = str(name).strip()
+        if not extension_name:
+            raise ValueError("extension name must not be empty")
+        if phase not in {
+            "prepare_context",
+            "before_model",
+            "after_model",
+            "before_tool",
+            "after_tool",
+            "finish_turn",
+        }:
+            raise ValueError(f"unsupported extension phase: {phase!r}")
+        if not callable(callback):
+            raise TypeError("extension callback must be callable")
+        if any(item.name == extension_name for item in self._extensions):
+            raise ValueError(f"agent loop extension already registered: {extension_name}")
+        self._extensions.append(_ExtensionRegistration(extension_name, phase, callback))
+
+    def extension_names(self) -> tuple[str, ...]:
+        return tuple(item.name for item in self._extensions)
+
+    def dispatch_extension(self, phase: str, event: LoopEvent) -> LoopDispatchResult:
+        """Fold bounded strategy decisions while isolating plugin failures."""
+
+        if phase not in {
+            "prepare_context",
+            "before_model",
+            "after_model",
+            "before_tool",
+            "after_tool",
+            "finish_turn",
+        }:
+            raise ValueError(f"unsupported extension phase: {phase!r}")
+        metadata: dict[str, Any] = {}
+        errors: list[dict[str, str]] = []
+        contexts: list[str] = []
+        arguments: dict[str, Any] = {}
+        model = ""
+        blocked = False
+        message = ""
+        for registration in tuple(self._extensions):
+            if registration.phase != phase:
+                continue
+            try:
+                raw = registration.callback(event)
+                if raw is None:
+                    continue
+                if not isinstance(raw, Mapping):
+                    raise TypeError("extension result must be a mapping")
+                if raw.get("context"):
+                    value = raw["context"]
+                    values = value if isinstance(value, (list, tuple)) else [value]
+                    contexts.extend(redact_credential_value(str(item)) for item in values if str(item).strip())
+                if isinstance(raw.get("tool_arguments"), Mapping):
+                    arguments.update({str(key): redact_credential_value(value) for key, value in raw["tool_arguments"].items()})
+                if raw.get("model"):
+                    model = redact_credential_value(str(raw["model"]))
+                if raw.get("message"):
+                    message = redact_credential_value(str(raw["message"]))
+                if raw.get("metadata") and isinstance(raw["metadata"], Mapping):
+                    metadata.update({str(key): redact_credential_value(value) for key, value in raw["metadata"].items()})
+                blocked = blocked or bool(raw.get("blocked", raw.get("cancel", False)))
+                if blocked:
+                    break
+            except Exception as exc:  # noqa: BLE001 - one extension cannot stop the loop
+                errors.append(
+                    {
+                        "plugin": "<redacted-plugin>",
+                        "error_type": type(exc).__name__,
+                        "code": "plugin_extension_failed",
+                    }
+                )
+        return LoopDispatchResult(
+            metadata=metadata,
+            errors=errors,
+            context=tuple(contexts),
+            tool_arguments=arguments,
+            model=model,
+            blocked=blocked,
+            message=message,
+        )
 
     def emit(self, event: LoopEvent) -> LoopDispatchResult:
         metadata: dict[str, Any] = {}

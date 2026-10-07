@@ -423,24 +423,6 @@ func TestRecoveryManifestReturnsLedgerBoundResumeSummary(t *testing.T) {
 	}
 }
 
-func TestSessionViewDerivesLastUserInputFromActiveSurface(t *testing.T) {
-	workbench, _ := openHandlerTestWorkbench(t)
-	created, err := workbench.Create(context.Background(), 7, "repo", "input", "goal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := workbench.AppendUserMessage(context.Background(), 7, created.ID, 1, "unfinished instruction"); err != nil {
-		t.Fatal(err)
-	}
-	view, err := workbench.Get(context.Background(), 7, created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if view.LastUserInput != "unfinished instruction" {
-		t.Fatalf("last user input = %q", view.LastUserInput)
-	}
-}
-
 func TestCreateSessionPersistsWorkingDir(t *testing.T) {
 	workbench, _ := openHandlerTestWorkbench(t)
 	workingDir := t.TempDir()

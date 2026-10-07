@@ -75,13 +75,15 @@ message UserInput {
 }
 
 // ContextEnvelope is a bounded, read-only projection produced by the Go
-// Harness. P3 carries locators only; raw file content still requires an
+// Harness. P2 carries locators only; raw file content still requires an
 // authorized Harness Read tool call.
 message ContextEnvelope {
   uint32 schema_version = 1;
   repeated ContextFileSummary p0 = 2;
   repeated ContextFileSummary p1 = 3;
-  repeated string p3_candidates = 4;
+  // Field 4 was historically named p3_candidates. Keep its wire number so
+  // older clients continue to decode the locator list.
+  repeated string p2_candidates = 4;
   repeated ContextEventSummary events = 5;
   int64 ledger_seq = 6;
   string ledger_checksum = 7;

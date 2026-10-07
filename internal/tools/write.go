@@ -28,6 +28,10 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
+	changePath, err := workspaceRelativePath(e.Root, abs)
+	if err != nil {
+		return ToolResult{Name: "Write", Error: err.Error()}, err
+	}
 	if err := atomicWriteFile(abs, []byte(content), 0o644); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
@@ -35,7 +39,7 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 		Name:   "Write",
 		Output: "written",
 		Changes: []Change{{
-			Path:   filepath.ToSlash(path),
+			Path:   changePath,
 			Before: string(beforeBytes),
 			After:  content,
 		}},

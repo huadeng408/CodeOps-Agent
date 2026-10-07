@@ -143,6 +143,102 @@ func TestBuildSessionTrajectoryDoesNotPromoteOpenToolCall(t *testing.T) {
 	}
 }
 
+func TestBuildSessionTrajectoryKeepsLegacyOpenCallFailClosed(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	defer ledger.Close()
+	appendTrajectoryEvent(t, ctx, ledger, "legacy-open-tool", "user/message", map[string]any{"content": "legacy adapter"})
+	appendTrajectoryEvent(t, ctx, ledger, "legacy-open-tool", "tool/call", map[string]any{
+		"run_id": "run-failed", "tool_call_id": "call-1", "tool_name": "Write",
+	})
+	appendTrajectoryEvent(t, ctx, ledger, "legacy-open-tool", "session/run-failed", map[string]any{"run_id": "run-failed"})
+	appendTrajectoryEvent(t, ctx, ledger, "legacy-open-tool", "user/message", map[string]any{"content": "continue"})
+	appendTrajectoryEvent(t, ctx, ledger, "legacy-open-tool", "session/run-completed", map[string]any{"run_id": "run-complete"})
+
+	trajectory, err := memory.BuildSessionTrajectory(ctx, ledger, "legacy-open-tool", memory.TrajectoryOptions{})
+	if err != nil {
+		t.Fatalf("build trajectory: %v", err)
+	}
+	if trajectory.Complete || trajectory.Outcome != "incomplete" {
+		t.Fatalf("legacy open call was treated as safely abandoned: %+v", trajectory)
+	}
+}
+
+func TestBuildSessionTrajectoryDropsUnapprovedCallAfterFailedRun(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	defer ledger.Close()
+
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "user/message", map[string]any{"content": "first attempt"})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "tool/call", map[string]any{
+		"run_id": "run-failed", "tool_call_id": "call-unapproved", "tool_name": "Write",
+	})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "approval/pending", map[string]any{
+		"run_id": "run-failed", "tool_call_id": "call-unapproved", "tool_name": "Write", "decision": "pending",
+	})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "session/run-failed", map[string]any{"run_id": "run-failed"})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "user/message", map[string]any{"content": "retry safely"})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "tool/call", map[string]any{
+		"run_id": "run-complete", "tool_call_id": "call-read", "tool_name": "Read",
+	})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "tool/result", map[string]any{
+		"run_id": "run-complete", "tool_call_id": "call-read", "tool_name": "Read", "exit_code": 0,
+	})
+	appendTrajectoryEvent(t, ctx, ledger, "abandoned-call", "session/run-completed", map[string]any{"run_id": "run-complete"})
+
+	trajectory, err := memory.BuildSessionTrajectory(ctx, ledger, "abandoned-call", memory.TrajectoryOptions{})
+	if err != nil {
+		t.Fatalf("build trajectory: %v", err)
+	}
+	if !trajectory.Complete || trajectory.Outcome != "completed" {
+		t.Fatalf("unapproved call from failed run blocked later completion: %+v", trajectory)
+	}
+}
+
+func TestBuildSessionTrajectoryKeepsApprovedOrDispatchedCallFailClosed(t *testing.T) {
+	for _, marker := range []string{"approval/approved", "tool/dispatched"} {
+		t.Run(marker, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))
+			if err != nil {
+				t.Fatalf("open ledger: %v", err)
+			}
+			defer ledger.Close()
+
+			appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "user/message", map[string]any{"content": "first attempt"})
+			appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "tool/call", map[string]any{
+				"run_id": "run-failed", "tool_call_id": "call-uncertain", "tool_name": "Write",
+			})
+			if marker == "approval/approved" {
+				appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "approval/approved", map[string]any{
+					"run_id": "run-failed", "tool_call_id": "call-uncertain", "tool_name": "Write", "decision": "approved",
+				})
+			} else {
+				appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "tool/dispatched", map[string]any{
+					"run_id": "run-failed", "tool_call_id": "call-uncertain", "tool_name": "Write",
+				})
+			}
+			appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "session/run-failed", map[string]any{"run_id": "run-failed"})
+			appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "user/message", map[string]any{"content": "retry safely"})
+			appendTrajectoryEvent(t, ctx, ledger, "uncertain-call", "session/run-completed", map[string]any{"run_id": "run-complete"})
+
+			trajectory, err := memory.BuildSessionTrajectory(ctx, ledger, "uncertain-call", memory.TrajectoryOptions{})
+			if err != nil {
+				t.Fatalf("build trajectory: %v", err)
+			}
+			if trajectory.Complete || trajectory.Outcome != "incomplete" {
+				t.Fatalf("uncertain side effect was promoted: %+v", trajectory)
+			}
+		})
+	}
+}
+
 func TestBuildSessionTrajectoryOmitsSensitiveOutput(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))

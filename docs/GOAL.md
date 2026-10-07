@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-09-16）。
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-10-07）。
 
 历史进展、面试收据和根目录评测 JSON 已归档到 [`docs/archive/`](archive/INDEX.md)。新对话默认只读本文和 [`AGENT.md`](../AGENT.md)，不要把归档当执行指令。完整日更日志见 [`docs/archive/receipts/GOAL-log-2026-09.md`](archive/receipts/GOAL-log-2026-09.md)。
 
@@ -12,6 +12,148 @@
 - 完整的浏览器 ticket / live / reconnect 矩阵
 - 进程重启后 durable managed-worktree / Git restore
 - 发布门槛表中的官方 scorer 指标（见下文）
+- 最新 Go 全量中的 Windows SQLite 临时目录清理占用；关闭连接断言通过仍不能证明文件句柄已释放
+- 真实代码会话的反思摘要写回；最新轨迹已提交，但反思仍追加 `memory/commit-blocked`
+- 前端发送使用过期 eventCount 导致的 HTTP 409；现有“重试发送”可恢复，但根因尚未修复
+- Phoenix trace 服务不可用，当前浏览器代码任务没有可核验的 trace ID
+
+## 快速对齐改造状态（2026-10-06）
+
+状态：`IMPLEMENTED`；验收：`BLOCKED`。
+
+- `orchestrator/runtime/agent_loop.py` 已提供版本化 Loop 扩展点；模型、Context 和
+  工具参数仍受限于 Python 编排边界，实际副作用继续回到 Go Harness 校验。
+- `orchestrator/graph/sub_agent_graph.py` 已实现
+  `plan -> delegate -> collect -> verify`，使用现有 `SpawnAgent`/`AgentTask`、SQLite
+  checkpoint 和 task ID 幂等重试。
+- `ContextEnvelope` field 4 已改为 `p2_candidates`；旧 `p3_candidates`/`GetP3Candidates`
+  只保留单向读取兼容，原始内容必须经 Go `Read`。
+- Go Session Ledger 已实现 `commit_pending`/`commit_done`；无法确认 mutating tool
+  结果时 fail-closed。checkpoint 记录 `ledger_seq`、`ledger_checksum` 和
+  `checkpoint_revision`；终态反思沿用 Go CAS 写回 `Experience`。
+- 本轮源码回归：`go test ./... -count=1`、`go vet ./...`、`python -m pytest -q`、
+  `python -m compileall -q orchestrator`、`frontend/npm test`、`frontend/npm run build`
+  和 `python scripts/design_map/check.py` 均退出 0；pytest 为 `2400 passed, 18 skipped`。
+
+这些结果证明实现和本地回归，不等同于发布验证。provider-backed 跨进程 E2E、200-turn
+浏览器长对话、完整 reconnect 矩阵和官方 scorer 收据仍缺，因此保持 `BLOCKED`。
+
+## 真实浏览器十轮验收（2026-10-06）
+
+状态：`IMPLEMENTED`；验收：`BLOCKED`。在 `http://127.0.0.1:3000/` 真实登录并
+创建 Session `9f30067f9563ca510dfcddbab3288cfb`，连续完成 10 轮 provider-backed
+对话。刷新浏览器后第 1 和第 10 轮均可恢复，页面状态为 `done`，统计为
+`20 messages / 3 tools / 0 approvals / 31 progress events`，Session 事件计数为
+144。第 5 轮只读确认 `docs/GOAL.md` 存在并读取前 20 行，未写入文件，也未读取
+其他路径；浏览器控制台错误为 0。完整 receipt 为
+`.runtime/e2e/browser-long-dialogue-20261006.json`，绑定本轮 Git SHA
+`610f0be6a8ac22367e4803fd4b07df0067695a56`，并标记 `source_dirty=true`。
+
+本轮还发现并隔离了一个旧 Session `a3c69fea5c2f1b0027b607ac4199014a` 的历史账本
+损坏：事件 137 将 `agent/worktree-terminal` 错作进度源，导致启动时出现
+`partial session recovery failed`。完整 SQLite 备份保存在
+`.agent/sessions/archive/sessions-pre-corrupt-a3c69-20261006.sqlite`，SHA-256 为
+`52E70140FE76641543D4FD59662D9F47B69E99BC2C776C6973EFF08FB25BFD8A`；活动账本移除
+该旧 Session 后 `PRAGMA integrity_check` 为 `ok`，服务重启后的 `/healthz` 为
+`status=ok`、`continuation.attached=true`、`last_health_error=""`。embedding
+preflight 仍因本机未启动 `127.0.0.1:8009` 保持 `degraded`，不影响本轮对话。
+
+这次 10 轮测试仅验证普通聊天、一次只读工具调用和刷新恢复；尚未验证代码修改和
+执行测试的开发闭环，也不满足
+200 assistant-turn、compaction、完整 reconnect、managed-worktree/Git restore 或
+官方 scorer 门禁，因此整体验收继续保持 `BLOCKED`。
+
+## 第二次普通聊天十轮复测（2026-10-06，旧运行构建）
+
+状态：`IMPLEMENTED`；验收：`BLOCKED`。在同一真实前端、Go Harness 和 Python
+Orchestrator 上新建 Session `0c60099d6fb1e086e24a5d3ef5e07d35`，连续完成 10 轮
+对话，并用浏览器刷新验证历史仍在。账本共 213 条事件，包含 10 条用户消息、10 条
+助手消息、10 个完成终态、10 条 `memory/trajectory-committed`；页面最终显示
+`20 messages / 19 tools / 14 approvals / 0 modifications / 47 progress events`，
+状态为 `done`。第 3、4、6、8 轮真实触发前端 409 并发冲突，消息被保留并通过
+“重试发送”完成，未丢失；第 1、2 轮真实经过记忆工具审批，拒绝后的会话仍正常
+完成。完整 receipt 位于
+`.runtime/e2e/browser-long-dialogue-repair-20261006.json`。
+该 receipt 的 SHA-256 为
+`92901AD57ED51490FB165700B95AA33159514ED53FAFE7EE0450FE746084C854`。
+
+该会话运行时 Go 仍使用 21:37:51 的旧二进制，SHA-256 为
+`BD7ADA1CCD3830C1E9397B0BCCDA9E8FE943365B4524929F5B555E51DA9A448E`；不能把下述
+源码修复和测试自动归为该浏览器会话已验证。10 次 trajectory commit 后均有
+`memory/commit-blocked`，因此反思摘要写回仍未通过真实 runtime 验收。
+
+本轮修复了 `SessionRunner.Recover()` 的遗漏：重启恢复最新 terminal run 时，在
+`completeAgentTurn` 后补调用 `commitSessionMemory`，因此漏写的 memory commit 会被
+补交且不会重新调用模型。回归命令
+`go test ./internal/memory -run TestLedgerMemoryRecoveryCommitsMissedTerminalWithoutRerunningModel -count=1 -v`
+和 `go test ./internal/memory ./internal/session ./tests/go -run
+'LedgerMemory|LedgerSnapshot|Trajectory|MemoryCommit' -count=1` 均退出 0。
+
+全量回归：`go test ./... -count=1`、`go vet ./...`、`python -m pytest -q`、
+`frontend/npm test`、`frontend/npm run build` 和 `git diff --check` 均退出 0；pytest
+为 `2401 passed, 17 skipped, 31 warnings`，前端测试为 `12 passed`。本轮仍不是
+200-turn、compaction、完整 reconnect 矩阵、provider-backed 语义质量或官方 scorer
+证据，因此整体验收继续保持 `BLOCKED`。
+
+## 真实仓库代码任务验收（2026-10-07）
+
+状态：`IMPLEMENTED`；整体验收：`BLOCKED`。通过运行中的真实前端、Go Harness 和
+Python provider，在同一 Session `bea006d94c20fe79a0778ea30d1b2a35` 完成实际仓库
+缺陷调查、编辑、审批和测试。16 次用户请求中 14 次有助手回复和完成终态，2 次失败
+保留（用户事件 seq 1、165）；第 4 至第 16 轮连续 13 轮完成。它超过本次要求的
+10 个完整代码任务轮次，但不是 200-turn 或完整发布矩阵。
+
+真实缺陷是 Python `ManageMemory.kind` 允许任意字符串，而 Go 只接受六个类别，
+模型传入 `user_preference` 会被拒绝。产品经受约束 `Edit` 修改
+`orchestrator/runtime/tools.py` 的 enum，并在 `tests/test_tools.py` 添加契约测试，
+覆盖合法类别、非法类别、`ALWAYS_ASK`、action、可选 kind 和 revision 边界。
+这两个 Python 文件由产品工具实际修改，父 Agent 没有代写；第 12 轮绝对路径 Edit
+产生 seq 626 的 `code/modified`。人工注入的 slugify 样例未被产品修复，已经原文
+归档至 `.scratch/archive/2026-10-07-acceptance-fixtures/`，不计入真实任务。
+
+| 实际命令 | 退出码 | 完整结果与边界 |
+| --- | ---: | --- |
+| 产品 `python -m pytest -q tests/test_tools.py`，修复前 | 1 | 1 failed、13 passed；新测试 `KeyError: 'enum'` |
+| 同一命令，修复后及测试强化后 | 0 | 14 passed、1 warning |
+| 产品 `go test ./internal/memory -run TestMemoryManualRetentionTagsAndSourceInvalidation -count=1 -v` | 0 | 指定 Go 执行端回归通过 |
+| 产品 `python -m pytest -q`，第 10 轮 | 1 | 10 failed、2395 passed、17 skipped、31 warnings；原始失败保留 |
+| 产品 `python -m pytest -q tests/test_llm_providers.py tests/test_server.py tests/test_tools.py`，工具环境修复后 | 0 | 121 passed、1 warning；没有修改测试掩盖失败 |
+| 产品后台 `python -m pytest -q`，第 15 轮 | 0 | 2405 passed、0 failed、17 skipped、31 warnings，313.07 秒；总分母 2422 |
+| 父验证 `go test ./... -count=1 -json`，最新一次完整运行 | 1 | 1225 passed、1 failed、42 skipped / 1268（含子测试）；Windows SQLite TempDir 清理失败 |
+| 父验证 `go vet ./...`、`git diff --check` | 0 | 最新退出码为 0，不能抵消全量测试失败 |
+| 父验证前端 `npm test`、`npm run build` | 0 | 12/12 测试通过、构建通过；本轮未修改前端 |
+
+验收过程中修复了无边界 Grep 扫描、直接 gRPC client 的五分钟预算、恢复反思阻塞
+continuation attach、绝对路径修改收据遗漏、工具子进程继承 provider/Harness 控制
+环境、启动停止后端口仍占用，以及失败 run 的未批准 pending call 污染后续轨迹。
+恢复反思使用独立的现有 worker 队列，主任务/子 Agent/记忆 worker 总上限为 10，
+避免反思占满子 Agent 队列。定向与 race 重复验证保留完整失败分母；这些修复没有
+放宽 Go 权限、工作区校验或 CAS。SQLite 清理问题仍未解决，未改生产 SQLite、
+未加 sleep、未跳过失败测试。
+两处 Agent 测试最后只保留关闭错误及连接归零断言，移除了未证实有效的 Verify
+同步；最终版本定向 3/3、退出 0，此后未再跑全量。收据分别绑定各次源码版本，
+不能把之前的全量失败或更早的全量通过继承为最终版本通过。
+
+第 16 轮在重新构建并重启 Go/Python 后完成，Harness SHA-256 为
+`347853579E53D4847F5F9E92BE4E58293D63FE8858650CE7B19514A6D4304C31`。
+刷新后页面恢复 30 条消息、148 条工具事件、29 条审批事件、1 条修改、169 条进展，状态
+`done`；最终 Python 测试汇总和第 16 轮回复仍可见。刷新后的控制台 error/warning
+均为 0；`healthz` 为 `ok`、continuation attached、错误为空，embedding 仍 degraded。
+最新 seq 798 已有轨迹提交，seq 799 反思仍 `memory_commit_unavailable`；不把轨迹
+提交等同于 Experience 写回，也不修补历史账本。只读核查为 0 条
+`memory/reflection-proposed`；当前固定错误分类无法区分 RPC/provider、响应字段/
+来源校验或后续写入失败，具体阶段保持 unknown。额外诊断 RPC 误传 322 个来源，
+返回 `invalid_reflection_sources`（上限 64）；正常 Go 路径会先裁到 64，该诊断
+不能作为真实写回失败的根因或验收成功证据。
+
+父收据 `.runtime/e2e/browser-code-task-20261006/browser-code-acceptance.json` 汇总
+当前 HEAD `610f0be6a8ac22367e4803fd4b07df0067695a56`、dirty 文件 hashes、全部轮次/
+run ID、命令/退出码、失败与跳过、构建、截图及 artifact SHA-256；Session 审计只读
+Ledger，序号和 prev-checksum 链检查不等同于重新计算 Go 加密 checksum。
+浏览器截图为同目录 `browser-restored.png` 与 `full-pytest-browser.png`。
+运行产物只保存在本地忽略目录。Phoenix 不可用，trace ID 明确为 null；provider
+代码编辑与运行测试已观察到，但完整 trace、反思、409、Go 清理和既定发布门禁仍
+`BLOCKED`，不提交、不发布、不宣称产品改造全部完成。
 
 ## 最近新鲜验证（2026-09-14）
 
@@ -42,7 +184,7 @@ Docker/WSL2 与 OpenTelemetry。新增组件必须进入同一条可恢复、可
 - **多 Agent/Workflow**：SQLite checkpoint 编排子 Agent 与 Worker，支持并行、
   流水线和故障隔离；固定 8 Worker 执行 200 个长任务并注入 30 次真实进程故障。
 - **Context/Memory**：事件溯源持久化计划、工具调用、文件 diff 与执行结果；按
-  P0 目录摘要、P1 节点摘要、P3 原始内容三级按需加载，任务结束生成反思摘要并
+  P0 目录摘要、P1 节点摘要、P2 原始内容三级按需加载，任务结束生成反思摘要并
   写回可检索、可演化的长期记忆。Token 降幅必须用同任务、同模型、同预算对照。
 - **Skill System**：支持注册、发现、按需加载、模型自主选用与用户显式调用；至少
   接入 40 个可运行 Skill，并在锁定的 1,000 案例上评测选型准确率。
@@ -120,7 +262,7 @@ Session 存储采用一次性并行迁移，而不是双写：新会话只写 ap
 | 3 | Token 感知事务压缩、工具结果预修剪、溢出恢复、手动 `/compact` | 正常压力与强制溢出 E2E 均保持 tool-call/result 配对后删除字符截断式压缩 |
 | 4 | Worker/Subagent 调度、SQLite checkpoint、并行/流水线、故障隔离 | 8 Worker、200 长任务、30 次真实进程故障达到 `>=98.5%` 后删除旧调度路径 |
 | 5 | Hooks、命令、Skills、插件包和 MCP 生命周期扩展点 | 兼容命令及 MCP 会话 E2E 通过、Skill 选型不下降后删除散落注册路径 |
-| 6 | P0/P1/P3 Context、语义摘要、反思、检索和可演化长期记忆 | 同任务同模型输入 Token 降幅 `>=60%` 且质量不下降后删除旧上下文拼接与记忆路径 |
+| 6 | P0/P1/P2 Context、语义摘要、反思、检索和可演化长期记忆 | 同任务同模型输入 Token 降幅 `>=60%` 且质量不下降后删除旧上下文拼接与记忆路径 |
 | 7 | 统一权限/沙箱、后台 PTY/Job、取消、输出 spill 与审计 | Windows、WSL2、Docker 的真实进程与拒绝路径 E2E 通过后删除旁路执行器 |
 | 8 | Session fork/rewind、统一 Trace、评测和发布门禁 | 43 项能力全部有新鲜 E2E receipt 且最终指标达标后删除剩余兼容 Adapter |
 

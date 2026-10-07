@@ -16,6 +16,7 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type independentAgentFixture struct {
@@ -30,6 +31,58 @@ type independentAgentFixture struct {
 
 type agentResourceRecorder struct {
 	released chan string
+}
+
+type agentLifecycleRecorder struct {
+	mu        sync.Mutex
+	attempts  []*pb.AgentLifecycle
+	failCount int
+	notified  chan struct{}
+}
+
+func (r *agentLifecycleRecorder) handle(_ context.Context, lifecycle *pb.AgentLifecycle) error {
+	copy := proto.Clone(lifecycle).(*pb.AgentLifecycle)
+	r.mu.Lock()
+	r.attempts = append(r.attempts, copy)
+	shouldFail := r.failCount > 0
+	if shouldFail {
+		r.failCount--
+	}
+	r.mu.Unlock()
+	select {
+	case r.notified <- struct{}{}:
+	default:
+	}
+	if shouldFail {
+		return errors.New("fixture lifecycle failure")
+	}
+	return nil
+}
+
+func (r *agentLifecycleRecorder) snapshot() []*pb.AgentLifecycle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*pb.AgentLifecycle, len(r.attempts))
+	copy(out, r.attempts)
+	return out
+}
+
+func waitForAgentLifecycle(t *testing.T, recorder *agentLifecycleRecorder, taskID, status string) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		for _, lifecycle := range recorder.snapshot() {
+			if lifecycle.RequestId == taskID && lifecycle.ChildSessionId == taskID && lifecycle.Status == status {
+				return
+			}
+		}
+		select {
+		case <-recorder.notified:
+		case <-deadline.C:
+			t.Fatalf("agent lifecycle %s for %s was not emitted: %+v", status, taskID, recorder.snapshot())
+		}
+	}
 }
 
 func (r *agentResourceRecorder) Execute(context.Context, identity.Actor, string, orchestrator.ToolCall) orchestrator.ToolResult {
@@ -316,6 +369,16 @@ func TestIndependentAgentReleasesOnlyTerminalTaskResources(t *testing.T) {
 		runner.tools = recorder
 		task := agentTestCall(t, runner, actor, "complete-release", "SpawnAgent", `{"kind":"explore","title":"complete","objective":"finish"}`)
 		waitForAgentRelease(t, recorder, task.ChildSessionId)
+		if err := runner.Close(); err != nil {
+			t.Fatal(err)
+		}
+		ledger := runner.workbench.ledger.(*SQLiteEventLog)
+		if err := ledger.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if stats := ledger.db.Stats(); stats.OpenConnections != 0 {
+			t.Fatalf("ledger connections after close: %+v", stats)
+		}
 	})
 
 	t.Run("failed", func(t *testing.T) {
@@ -341,6 +404,122 @@ func TestIndependentAgentReleasesOnlyTerminalTaskResources(t *testing.T) {
 		}
 		task = agentTestCall(t, runner, actor, "input-cancel", "AgentTask", `{"action":"cancel","task_id":"`+task.Id+`"}`)
 		waitForAgentRelease(t, recorder, task.ChildSessionId)
+	})
+}
+
+func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
+	t.Run("completed workspace is retained", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
+		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
+		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+			return t.TempDir(), nil
+		}
+		runner.options.AgentLifecycle = recorder.handle
+
+		task := agentTestCall(t, runner, actor, "complete-workspace", "SpawnAgent", `{"kind":"general","title":"complete","objective":"finish"}`)
+		if task.Status != "completed" {
+			t.Fatalf("task status = %s", task.Status)
+		}
+		select {
+		case <-recorder.notified:
+			t.Fatalf("completed retained workspace emitted cleanup lifecycle: %+v", recorder.snapshot())
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+
+	t.Run("failed workspace is retained for a later turn", func(t *testing.T) {
+		fixture := &independentAgentFixture{mode: "failed"}
+		runner, _, actor := agentTestRunner(t, fixture)
+		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
+		workspace := t.TempDir()
+		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+			return workspace, nil
+		}
+		runner.options.AgentLifecycle = recorder.handle
+
+		task := agentTestCall(t, runner, actor, "failed-workspace", "SpawnAgent", `{"kind":"general","title":"fail","objective":"fail"}`)
+		if task.Status != "failed" {
+			t.Fatalf("task status = %s", task.Status)
+		}
+		select {
+		case <-recorder.notified:
+			t.Fatalf("failed retained workspace emitted cleanup lifecycle: %+v", recorder.snapshot())
+		case <-time.After(100 * time.Millisecond):
+		}
+		fixture.mode = ""
+		_ = agentTestCall(t, runner, actor, "retry-failed-workspace", "AgentTask", `{"action":"message","task_id":"`+task.Id+`","message":{"parts":[{"text":"retry in the same workspace"}]}}`)
+		task = agentTestCall(t, runner, actor, "wait-failed-workspace", "AgentTask", `{"action":"wait","task_id":"`+task.Id+`"}`)
+		if task.Status != "completed" || task.WorkingDir != workspace {
+			t.Fatalf("failed task did not resume in retained workspace: %s", task)
+		}
+		if _, err := os.Stat(workspace); err != nil {
+			t.Fatalf("retained workspace unavailable after retry: %v", err)
+		}
+	})
+
+	t.Run("canceled workspace is released", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{mode: "input"})
+		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
+		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+			return t.TempDir(), nil
+		}
+		runner.options.AgentLifecycle = recorder.handle
+
+		task := agentTestCall(t, runner, actor, "cancel-workspace", "SpawnAgent", `{"kind":"general","title":"cancel","objective":"ask first"}`)
+		if task.Status != "input_required" {
+			t.Fatalf("task status = %s", task.Status)
+		}
+		task = agentTestCall(t, runner, actor, "cancel-workspace-task", "AgentTask", `{"action":"cancel","task_id":"`+task.Id+`"}`)
+		waitForAgentLifecycle(t, recorder, task.Id, "cancelled")
+	})
+
+	t.Run("invalid assignment is rejected before workspace allocation", func(t *testing.T) {
+		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
+		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
+		allocations := 0
+		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+			allocations++
+			return t.TempDir(), nil
+		}
+		runner.options.AgentLifecycle = recorder.handle
+
+		result := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
+			ID: "invalid-assignment", Name: "SpawnAgent",
+			ParametersJSON: `{"kind":"general","title":"invalid","objective":"use a missing file","message":{"parts":[{"file":{"path":"missing.txt"}}]}}`,
+		})
+		if result.Error == "" {
+			t.Fatal("invalid assignment unexpectedly created a task")
+		}
+		if allocations != 0 || len(recorder.snapshot()) != 0 {
+			t.Fatalf("invalid assignment allocated workspace: allocations=%d lifecycle=%+v", allocations, recorder.snapshot())
+		}
+	})
+
+	t.Run("post-allocation failure compensates workspace", func(t *testing.T) {
+		runner, view, actor := agentTestRunner(t, &independentAgentFixture{})
+		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8), failCount: 2}
+		if err := os.WriteFile(filepath.Join(view.WorkingDir, "material.txt"), []byte("verified material"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		allocations := 0
+		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+			allocations++
+			return filepath.Join(view.WorkingDir, "missing-worktree"), nil
+		}
+		runner.options.AgentLifecycle = recorder.handle
+
+		result := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
+			ID: "post-allocation-failure", Name: "SpawnAgent",
+			ParametersJSON: `{"kind":"general","title":"invalid target","objective":"copy material","message":{"parts":[{"file":{"path":"material.txt"}}]}}`,
+		})
+		if result.Error == "" || allocations != 1 {
+			t.Fatalf("post-allocation failure was not surfaced: result=%+v allocations=%d", result, allocations)
+		}
+		taskID := "agent-" + agentDigest([]byte(actor.SessionID + "\x00post-allocation-failure"))[:32]
+		waitForAgentLifecycle(t, recorder, taskID, "cancelled")
+		if got := len(recorder.snapshot()); got != 3 {
+			t.Fatalf("compensation lifecycle attempts = %d, want 3", got)
+		}
 	})
 }
 

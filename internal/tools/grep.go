@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -58,10 +59,15 @@ func (e *Executor) executeGrep(ctx context.Context, args map[string]any) (ToolRe
 			return err
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == ".venv" || name == ".runtime" || name == "__pycache__" {
-				return filepath.SkipDir
+			if p != absRoot {
+				switch strings.ToLower(d.Name()) {
+				case ".git", "node_modules", ".venv", ".runtime", "__pycache__", ".agent", ".scratch", "logs", ".tmp", ".pytest_cache", ".mypy_cache", ".worktrees", "worktrees", ".playwright-cli", ".playwright-mcp", "eval_results", "docker-extracts", "swebench_work":
+					return filepath.SkipDir
+				}
 			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		rel, err := filepath.Rel(base, p)
@@ -79,8 +85,11 @@ func (e *Executor) executeGrep(ctx context.Context, args map[string]any) (ToolRe
 			}
 		}
 
-		fileMatches, err := grepFile(ctx, p, rel, expr, options)
+		fileMatches, err := grepFile(ctx, p, rel, expr, options, p != absRoot)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return nil
 		}
 		if len(fileMatches) > 0 {
@@ -181,15 +190,22 @@ func grepOptionsFromArgs(args map[string]any) (grepOptions, error) {
 	}, nil
 }
 
-func grepFile(ctx context.Context, path, rel string, expr *regexp.Regexp, options grepOptions) ([]grepMatch, error) {
+func grepFile(ctx context.Context, path, rel string, expr *regexp.Regexp, options grepOptions, skipBinary bool) ([]grepMatch, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
+	reader := bufio.NewReaderSize(file, 8192)
+	if skipBinary {
+		prefix, _ := reader.Peek(8192)
+		if bytes.IndexByte(prefix, 0) >= 0 {
+			return nil, nil
+		}
+	}
 	lines := []string{}
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
 		select {
@@ -197,7 +213,14 @@ func grepFile(ctx context.Context, path, rel string, expr *regexp.Regexp, option
 			return nil, ctx.Err()
 		default:
 		}
-		lines = append(lines, scanner.Text())
+		line := scanner.Text()
+		if options.OutputMode == "files_with_matches" {
+			if expr.MatchString(line) {
+				return []grepMatch{{File: rel}}, nil
+			}
+			continue
+		}
+		lines = append(lines, line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -205,6 +228,11 @@ func grepFile(ctx context.Context, path, rel string, expr *regexp.Regexp, option
 
 	matches := []grepMatch{}
 	for idx, line := range lines {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		if !expr.MatchString(line) {
 			continue
 		}

@@ -14,6 +14,19 @@ import (
 	"code-agent/internal/session"
 )
 
+type failNextSaveStore struct {
+	*session.MemoryStore
+	failNext bool
+}
+
+func (s *failNextSaveStore) Save(ctx context.Context, value session.Session) error {
+	if s.failNext {
+		s.failNext = false
+		return errors.New("fixture save failure")
+	}
+	return s.MemoryStore.Save(ctx, value)
+}
+
 func TestSessionPersistsActorIdentity(t *testing.T) {
 	m := session.NewManager(session.NewMemoryStore())
 	created := m.NewSession(t.TempDir())
@@ -455,6 +468,56 @@ func TestSessionPersistsWorktreeLifecycleEvents(t *testing.T) {
 	}
 	if len(loaded.WorktreeEvents) != 2 || loaded.WorktreeEvents[1].Status != "completed" {
 		t.Fatalf("unexpected worktree lifecycle history: %#v", loaded.WorktreeEvents)
+	}
+}
+
+func TestSessionAppliesWorktreeTransitionAtomicallyToNamedParent(t *testing.T) {
+	ctx := context.Background()
+	backend := &failNextSaveStore{MemoryStore: session.NewMemoryStore()}
+	manager := session.NewManager(backend)
+	parent := manager.NewSession("parent")
+	current := manager.NewSession("current")
+	tree := session.WorktreeState{
+		Name: "agent-a", Path: "workspace-a", BaseRef: "HEAD", Active: true,
+		RequestID: "request-a", ParentSessionID: parent.ID, ChildSessionID: "child-a",
+		LeaseID: "lease-a", LeaseExpiresAt: time.Now().Add(time.Hour), Status: "active", Retained: true,
+	}
+	active := session.WorktreeLifecycle{
+		Name: tree.Name, Path: tree.Path, BaseRef: tree.BaseRef, RequestID: tree.RequestID,
+		ParentSessionID: tree.ParentSessionID, ChildSessionID: tree.ChildSessionID, LeaseID: tree.LeaseID,
+		Status: "active", Reason: "spawned",
+	}
+	if _, err := manager.ApplyWorktreeTransition(ctx, parent.ID, tree, false, active); err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.Current(); got.ID != current.ID || len(got.Worktrees) != 0 || len(got.WorktreeEvents) != 0 {
+		t.Fatalf("named-parent transition changed current session: %#v", got)
+	}
+	persisted, err := backend.Load(ctx, parent.ID)
+	if err != nil || len(persisted.Worktrees) != 1 || len(persisted.WorktreeEvents) != 1 {
+		t.Fatalf("active transition missing: session=%#v err=%v", persisted, err)
+	}
+
+	terminal := active
+	terminal.Status = "cancelled"
+	terminal.Reason = "cancel"
+	backend.failNext = true
+	if _, err := manager.ApplyWorktreeTransition(ctx, parent.ID, tree, true, terminal); err == nil {
+		t.Fatal("transition save failure was hidden")
+	}
+	persisted, err = backend.Load(ctx, parent.ID)
+	if err != nil || len(persisted.Worktrees) != 1 || len(persisted.WorktreeEvents) != 1 {
+		t.Fatalf("failed transition partially committed: session=%#v err=%v", persisted, err)
+	}
+	if _, err := manager.ApplyWorktreeTransition(ctx, parent.ID, tree, true, terminal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyWorktreeTransition(ctx, parent.ID, tree, true, terminal); err != nil {
+		t.Fatalf("idempotent terminal retry: %v", err)
+	}
+	persisted, err = backend.Load(ctx, parent.ID)
+	if err != nil || len(persisted.Worktrees) != 0 || len(persisted.WorktreeEvents) != 2 {
+		t.Fatalf("terminal transition mismatch: session=%#v err=%v", persisted, err)
 	}
 }
 

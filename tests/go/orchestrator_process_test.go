@@ -3,6 +3,7 @@ package codeagent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -285,6 +286,17 @@ func TestProcessManagerRestartRelaunchesProcess(t *testing.T) {
 	}
 }
 
+func TestNewClientUsesLongCodeTaskDefaultTimeout(t *testing.T) {
+	client, err := orchestrator.NewClient("127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+	if got, want := client.ConversationTimeout(), 30*time.Minute; got != want {
+		t.Fatalf("ConversationTimeout() = %s, want %s", got, want)
+	}
+}
+
 // TestIsConnectionErrorClassification locks in the heuristic the harness uses
 // to decide whether to retry a turn after restarting the orchestrator.
 func TestIsConnectionErrorClassification(t *testing.T) {
@@ -306,6 +318,32 @@ func TestIsConnectionErrorClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := orchestrator.IsConnectionError(tc.err); got != tc.want {
 				t.Fatalf("IsConnectionError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConversationTransportErrorClassification(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		deadline bool
+		canceled bool
+	}{
+		{name: "context deadline", err: context.DeadlineExceeded, deadline: true},
+		{name: "grpc deadline", err: status.Error(codes.DeadlineExceeded, "context deadline exceeded"), deadline: true},
+		{name: "wrapped grpc deadline", err: fmt.Errorf("receive orchestrator message: %w", status.Error(codes.DeadlineExceeded, "context deadline exceeded")), deadline: true},
+		{name: "context canceled", err: context.Canceled, canceled: true},
+		{name: "grpc canceled", err: status.Error(codes.Canceled, "context canceled"), canceled: true},
+		{name: "runtime", err: errors.New("provider failed"), deadline: false, canceled: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := orchestrator.IsDeadlineError(tc.err); got != tc.deadline {
+				t.Fatalf("IsDeadlineError(%v) = %v, want %v", tc.err, got, tc.deadline)
+			}
+			if got := orchestrator.IsCanceledError(tc.err); got != tc.canceled {
+				t.Fatalf("IsCanceledError(%v) = %v, want %v", tc.err, got, tc.canceled)
 			}
 		})
 	}

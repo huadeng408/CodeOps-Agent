@@ -284,3 +284,40 @@ func TestExecutorBackgroundJobDoesNotForwardCredentialEnvironment(t *testing.T) 
 		t.Fatalf("credential environment reached background job: result=%+v err=%v", result, err)
 	}
 }
+
+func TestExecutorBackgroundJobDoesNotForwardHarnessProviderControls(t *testing.T) {
+	for _, name := range []string{
+		"CODE_AGENT_PROVIDER_CONFIG",
+		"CODE_AGENT_PROVIDER_PROFILE",
+		"CODE_AGENT_REQUIRE_HARNESS_WORKTREE",
+		"LLM_PROVIDER",
+		"MODEL_FAST",
+		"THINKING_ENABLED",
+	} {
+		t.Setenv(name, "must-not-reach-child")
+	}
+	t.Setenv("CODE_AGENT_E2E_SANDBOX_IMAGE", "must-reach-child")
+	executor := tools.NewExecutor(t.TempDir())
+	body := `if ($env:CODE_AGENT_PROVIDER_CONFIG -or $env:CODE_AGENT_PROVIDER_PROFILE -or $env:CODE_AGENT_REQUIRE_HARNESS_WORKTREE -or $env:LLM_PROVIDER -or $env:MODEL_FAST -or $env:THINKING_ENABLED) { exit 7 } elseif (-not $env:CODE_AGENT_E2E_SANDBOX_IMAGE) { exit 8 } else { Write-Output CLEAN_HARNESS_ENV }`
+	if runtime.GOOS != "windows" {
+		body = `if [ -n "$CODE_AGENT_PROVIDER_CONFIG" ] || [ -n "$CODE_AGENT_PROVIDER_PROFILE" ] || [ -n "$CODE_AGENT_REQUIRE_HARNESS_WORKTREE" ] || [ -n "$LLM_PROVIDER" ] || [ -n "$MODEL_FAST" ] || [ -n "$THINKING_ENABLED" ]; then exit 7; elif [ -z "$CODE_AGENT_E2E_SANDBOX_IMAGE" ]; then exit 8; else printf CLEAN_HARNESS_ENV; fi`
+	}
+	started, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "JobStart",
+		Arguments: map[string]any{"command": body},
+	})
+	if err != nil {
+		t.Fatalf("JobStart: %v", err)
+	}
+	var view jobToolView
+	if err := json.Unmarshal([]byte(started.Output), &view); err != nil {
+		t.Fatalf("decode JobStart output %q: %v", started.Output, err)
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{
+		Name:      "JobOutput",
+		Arguments: map[string]any{"job_id": view.ID, "wait": true, "timeout_ms": 3000},
+	})
+	if err != nil || !strings.Contains(result.Output, "CLEAN_HARNESS_ENV") || !strings.Contains(result.Output, `"status":"completed"`) {
+		t.Fatalf("Harness/provider control environment reached background job: result=%+v err=%v", result, err)
+	}
+}

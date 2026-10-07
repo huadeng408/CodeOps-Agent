@@ -187,6 +187,25 @@ class RaisingConversationRunner:
         yield  # keep this a generator function
 
 
+class RaisingRpcErrorRunner:
+    def __init__(self, status: grpc.StatusCode) -> None:
+        self.status = status
+
+    def run(self, *args, **kwargs):
+        class _RpcError(grpc.RpcError):
+            def __init__(self, status: grpc.StatusCode) -> None:
+                self._status = status
+
+            def code(self):
+                return self._status
+
+            def details(self):
+                return "SENSITIVE_RPC_DETAILS"
+
+        raise _RpcError(self.status)
+        yield  # keep this a generator function
+
+
 def test_converse_emits_retryable_terminal_done_on_runner_exception(monkeypatch, tmp_path, caplog) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
@@ -228,6 +247,52 @@ def test_converse_emits_retryable_terminal_done_on_runner_exception(monkeypatch,
         assert "retry" in terminal.message
         assert "provider_runtime_error" in caplog.text
         assert "PRIVATE_EXCEPTION_BODY_MUST_NOT_BE_LOGGED" not in caplog.text
+    finally:
+        server.stop(grace=0)
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [
+        (grpc.StatusCode.CANCELLED, "rpc_cancelled"),
+        (grpc.StatusCode.UNAVAILABLE, "rpc_unavailable"),
+        (grpc.StatusCode.DEADLINE_EXCEEDED, "rpc_deadline_exceeded"),
+    ],
+)
+def test_converse_classifies_rpc_transport_status_without_details(
+    monkeypatch, tmp_path, caplog, status, error_code
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
+    service = OrchestratorService(app)
+    runner = RaisingRpcErrorRunner(status)
+    service._new_runner = lambda *args, **kwargs: runner
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = f"session-rpc-{status.name.lower()}"
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            responses = list(
+                stub.Converse(
+                    iter(
+                        [
+                            orchestrator_pb2.HarnessMessage(
+                                user_input=orchestrator_pb2.UserInput(
+                                    text="continue", session_id=session_id, actor=_session_actor(session_id)
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        terminal = responses[-1].done
+        assert terminal.error_code == error_code
+        assert terminal.retryable is True
+        assert f"rpc_status={status.name}" in caplog.text
+        assert "SENSITIVE_RPC_DETAILS" not in caplog.text
     finally:
         server.stop(grace=0)
 
@@ -424,7 +489,7 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
         )
         assert "P0 directory summary" in system_prompt
         assert "P1 node summaries" in system_prompt
-        assert "P3 candidates (raw content not injected)" in system_prompt
+        assert "P2 candidates (raw content not injected)" in system_prompt
         assert "src/app.py" in system_prompt
         assert raw_marker not in system_prompt
         assert project_instruction_marker not in system_prompt
