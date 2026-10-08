@@ -29,8 +29,9 @@ Windows 绝对路径，导致现有安全回归失败。Frontend job 已通过�
 保留 push/PR 的 Go、Python、Frontend 三个检查：Go job 准备 Python 3.12、
 `.[trace-e2e]` 并显式绑定 `PYTHON_EXECUTABLE`；Python job 安装测试实际使用的
 `.[test,rag,eval]`，并准备跨语言测试需要的 Go 与 Node 22。各 job 有 20/20/10
-分钟上限，同一 ref 的旧运行被新运行
-取消；可以手动触发普通 CI。没有删除失败测试、增加 `continue-on-error`、
+分钟上限，同一 ref 的旧运行被新运行取消；可以手动触发普通 CI。
+Runner 固定为 Ubuntu 24.04，避免 `ubuntu-latest` 的平台迁移；四个官方 action
+已核验 v6 的 Node 24 runtime 并固定到完整 commit SHA。没有删除失败测试、增加 `continue-on-error`、
 注入 provider 凭据或将普通 CI 改成发布成功。
 
 修改收据现在用 `fs.ValidPath` 和显式非法字符检查要求可移植的工作区相对路径。
@@ -49,6 +50,13 @@ NUL/换行；执行侧原有文件、symlink/reparse 和工作区检查继续保
 Linux 路径的 Windows PowerShell。它是环境诊断失败，不能冒充 hosted runner
 的验证；激活 PATH 后失败的 redaction 子进程回归已通过，最终以真实 Actions
 全量结果验收，不通过排除这些测试来制造绿色。
+
+首次修正后的 Actions run `37782683837`（源码 `a3ff0eca0eb9b3a864e9ab741642859181d18ddf`）
+Go/Frontend 通过，Python 为 1 failed、2425 passed、2 skipped / 2428，退出 1。
+唯一失败是 Go Skill matrix 的冷缓存下载：评测已开启 dead-proxy 网络隔离，
+`go.yaml.in/yaml/v3` 无法获取。Python job 现在先执行 `go mod download`，再进入
+离线测试；不放宽 benchmark allowlist，不跳过跨语言验证。失败日志仍保留，
+最终绿色结果必须由后续新提交的真实 hosted run 提供。
 
 `release-gate.yml` 原有手动触发与禁用 hosted job 保持不变；本地发布门禁继续
 fail-closed，缺官方 scorer、provider 或当前源码收据时仍为 `BLOCKED`。

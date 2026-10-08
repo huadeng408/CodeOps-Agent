@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -22,6 +23,12 @@ def test_ci_provisions_dependencies_for_go_subprocesses_and_python_collection() 
     python_commands = "\n".join(step.get("run", "") for step in python_steps)
     assert 'pip install -e ".[test,rag,eval]"' in python_commands
     assert python_commands.index("pip install") < python_commands.index("python -m pytest -q")
+    assert python_commands.index("go mod download") < python_commands.index("python -m pytest -q")
+    for job in workflow["jobs"].values():
+        assert job["runs-on"] == "ubuntu-24.04"
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", step["uses"])
     assert "push" in workflow["on"] and "pull_request" in workflow["on"]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"]["cancel-in-progress"] == "true"
