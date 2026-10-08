@@ -828,6 +828,90 @@ def test_new_user_turn_can_follow_an_unfinished_foreign_checkpoint(tmp_path):
         app.close()
 
 
+def test_normal_turn_accepts_advanced_ledger_after_completed_turn(tmp_path: Path) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    llm = CountingNoToolLLM()
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=llm,
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    try:
+        first = list(runner.run(
+            "first task", iter(()), session_id="normal-turn-ledger",
+            ledger_seq=4, ledger_checksum="a" * 64,
+        ))
+        assert first[-1].done.success
+        second = list(runner.run(
+            "next task", iter(()), session_id="normal-turn-ledger",
+            history=[{"role": "user", "content": "first task"},
+                     {"role": "assistant", "content": "done"}],
+            ledger_seq=5, ledger_checksum="b" * 64,
+        ))
+        assert second[-1].done.success
+        assert llm.requests == 2
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("new_turn", [False, True])
+@pytest.mark.parametrize("ledger_seq,ledger_checksum", [(5, "a" * 64), (4, "b" * 64)])
+def test_continuation_rejects_changed_checkpoint_ledger_identity(
+    tmp_path: Path, new_turn: bool, ledger_seq: int, ledger_checksum: str
+) -> None:
+    app = OrchestratorServer(
+        ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
+    )
+    app.graph.write_checkpoint(
+        GraphState(
+            metadata={
+                "session_id": "continuation-ledger",
+                "run_id": "run:continuation",
+                "phase": "tool_after",
+                "turn": 1,
+                "surface_sha256": "surface:continuation",
+                "ledger_seq": 4,
+                "ledger_checksum": "a" * 64,
+            },
+            done=False,
+            next_node="route",
+        ),
+        thread_id="continuation-ledger",
+    )
+    runner = ConversationRunner(
+        graph=app.graph,
+        llm=NoToolLLM(),
+        tool_registry=app.tools,
+        todo_manager=app.todos,
+        memory_manager=app.memory,
+        skills=app.skills,
+        project_root=app.project_root,
+        working_dir=app.working_dir,
+        token_budget=app.token_budget,
+        layered_context=app.layered_context,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="checkpoint ledger identity does not match request"):
+            runner.load_checkpoint(
+                "continuation-ledger", run_id="run:continuation", resume=True,
+                surface_sha256="surface:continuation", new_turn=new_turn,
+                ledger_seq=ledger_seq, ledger_checksum=ledger_checksum,
+            )
+    finally:
+        app.close()
+
+
 def test_resume_allows_explicit_retry_of_failed_checkpoint(tmp_path: Path) -> None:
     app = OrchestratorServer(
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))

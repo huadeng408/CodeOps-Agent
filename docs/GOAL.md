@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-10-07）。
+执行状态：`ACTIVE`；验收状态：`BLOCKED`（2026-10-08）。
 
 历史进展、面试收据和根目录评测 JSON 已归档到 [`docs/archive/`](archive/INDEX.md)。新对话默认只读本文和 [`AGENT.md`](../AGENT.md)，不要把归档当执行指令。完整日更日志见 [`docs/archive/receipts/GOAL-log-2026-09.md`](archive/receipts/GOAL-log-2026-09.md)。
 
@@ -10,12 +10,84 @@
 
 - 新鲜的 200 assistant-turn 浏览器长对话（含 event-count 与 compaction 证据）
 - 完整的浏览器 ticket / live / reconnect 矩阵
-- 进程重启后 durable managed-worktree / Git restore
+- 生产 CLI/HTTP 入口完整故障矩阵下的 durable managed-worktree / Git restore；本轮两个 Go 管理器进程已验证子提交恢复和回收落盘，仍不替代生产入口矩阵
 - 发布门槛表中的官方 scorer 指标（见下文）
-- 最新 Go 全量中的 Windows SQLite 临时目录清理占用；关闭连接断言通过仍不能证明文件句柄已释放
 - 真实代码会话的反思摘要写回；最新轨迹已提交，但反思仍追加 `memory/commit-blocked`
-- 前端发送使用过期 eventCount 导致的 HTTP 409；现有“重试发送”可恢复，但根因尚未修复
-- Phoenix trace 服务不可用，当前浏览器代码任务没有可核验的 trace ID
+- 前端发送前读取 canonical eventCount 已实现，Chromium 接口替身回归通过；仍缺真实 Go/Python/provider 浏览器会话的新鲜验收
+- Phoenix 已恢复且 `/healthz` 返回 200；当前真实浏览器代码任务仍缺可核验的完整 trace 树
+
+## 阻塞修复与当前限制（2026-10-08）
+
+状态：`IMPLEMENTED`；本机源码/集成回归通过；整体验收：`BLOCKED`。
+
+本轮修复三个已复现问题，没有改变 Go 权限、工作区边界、沙箱或 Ledger CAS：
+
+- **正常新轮次被旧 checkpoint 拒绝**：CLI 普通调用使用当前 Go Ledger 头，而旧
+  Python checkpoint 仍记录第一轮的头。`load_checkpoint()` 现在只在 `resume=True`
+  时严格比较 Ledger identity；正常新轮次继续检查历史并使用当前 Go 历史。
+  同一 run 的 `new_turn=True` 恢复请求仍校验 seq/checksum，异 Session、run、surface
+  和非法 retry lineage 仍拒绝。回归先复现 `checkpoint ledger identity does not match request`，
+  再运行 `tests/test_context_runner_events.py` 和 `tests/test_server.py`，99/99 通过。
+- **Windows SQLite 文件句柄泄漏**：最小回归执行 1,000 次可取消账本读取，关闭数据库
+  后立即 `os.Remove`；旧驱动即使 `OpenConnections=0` 仍失败。更新现有
+  `modernc.org/sqlite` 到 `v1.40.1`、对应 libc 到 `v1.66.10`，复用
+  [上游 Rows 取消清理修复](https://gitlab.com/cznic/sqlite/-/merge_requests/81)，没有增加
+  sleep、跳过 Windows 测试或取消 Harness 的 context cancellation。最小测试与原
+  Agent resource/concurrent recovery 两组测试合计重复 20 次均通过。
+- **前端首次发送拿过期 eventCount**：会话完成后轮询停止，后台 memory 事件仍可
+  推进账本。发送前现在读取 canonical Session 的 eventCount；真正的读写间竞态
+  仍由 Go CAS 拒绝，并保留现有一次幂等重试，不能声称所有 409 都会消失。
+  Chromium 回归十轮首发均无需 409 重试，刷新仍见第 1/10 轮；额外模拟一次并发
+  409 和一次 503，确认 requestId 不变、草稿保留且可恢复。此测试明确是
+  `fixture-browser-ui-regression`，没有 Go/Python/provider，不计入真实代码任务或
+  200-turn 门禁。可运行：在 `frontend/` 启动 `npm run dev`，另运行
+  `node tests/sendMessage.browser.mjs --headed`；每次截图/结果保存到独立的
+  `output/playwright/send-message-*/` 目录，包含失败分母。
+
+`TestManagedWorktreeRestoresAcrossProcessRestart` 以两个独立 Go 进程创建、落盘、重开
+SQLite 并恢复子工作树的 Git 提交；过期后通过 `ApplyWorktreeTransition` 将 reaped
+终态写回 Ledger，重新加载确认活动 lease 清空。父仓库 HEAD/跟踪文件保持不变。
+收据 `.runtime/e2e/managed-worktree-process-restart.json` 记录两个 PID、退出码、5 项
+分母、数据库/日志 SHA-256；失败也保存独立运行目录和收据。它标为
+`go-manager-process-integration` / `IMPLEMENTED`、trace 为 null，不冒充生产入口验证。
+
+| 本轮验证 | 退出码 | 完整结果 |
+| --- | ---: | --- |
+| 首次 `go test ./... -count=1 -json` | 1 | 1226 passed、3 failed、43 skipped / 1272（含子测试）；两个案例均为 SQLite 清理占用，原始失败保留 |
+| 驱动修复后同一 Go 全量 | 0 | 1230 passed、0 failed、43 skipped / 1273（含新增 Windows 回归和子测试） |
+| `go vet ./...` | 0 | 驱动修复后的新鲜运行 |
+| SQLite/Agent release/concurrent recovery 定向 `-race -count=3` | 0 | 三组测试与取消读取真实文件删除均通过 |
+| `python -m pytest -q` | 0 | 2410 passed、17 skipped、31 warnings / 2427；Python 修复后的源码未再变化 |
+| 前端 `npm test` / `npm run build` | 0 / 0 | 12/12 单元测试；TypeScript/Vite 构建通过 |
+| Chromium UI 接口替身回归 | 0 | 10 轮首发 + 1 轮竞态恢复 + 1 轮服务故障恢复；12 轮完成、14 次 POST，0 page errors |
+| 独立 Agent/memory 双 Go/Python 进程集成 | 0 | 13/13 检查通过；`fixture-backed-production-cli-grpc`、`provider_backed=false` |
+| `go mod verify` / design-map 检查 | 0 / 0 | 依赖校验通过；2 个 task、4 个 workstream |
+| `python -m eval.release_gate --json --skip-tests` | 3 | 仅审计发布证据，测试结果见上列；7 条发布 lane 缺失或无当前 source-bound 收据 |
+
+本轮完整输出保留在 `.runtime/e2e/blocked-remediation-20261008/`；初始 Go 失败与
+`sqlite-repro.log` 未删除，成功运行另存为 `go-full-final.jsonl` / `sqlite-fixed.log`。
+运行收据区分 dirty source 与提交后复跑的 source pin，不用成功子集替换失败分母。
+
+当前进程没有 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，也没有
+批准的 provider-backed sandbox 配置。没有读取本地 secret 文件来补齐。Phoenix
+复用了现有容器与数据，启动后 `/healthz` 返回 200；服务就绪不能代替真实模型
+推理的 trace/backend readback。
+
+接下来需要完善的功能/验收，按优先级为：
+
+1. 通过进程环境或批准的 secret manager 恢复 provider、沙箱和真实后端运行条件；
+   完成真实代码任务的反思摘要写回、重启召回和 Go/Python trace join。
+2. 对当前构建重跑真实浏览器代码任务、ticket/live/reconnect、故障重启和 Git restore
+   矩阵；随后完成 200 assistant-turn、compaction 和 event-count 验收。
+3. 验证记忆检索的语义质量与来源，补向量检索后端和同任务 token 对照；在真实
+   8 Worker/200 长任务/30 故障分母下验证 Workflow，再完善 40 Skills 的运行矩阵。
+4. 生成当前 source-bound 的官方 Terminal-Bench/SWE-bench scorer 及其他发布门槛
+   收据；全部门槛通过后才晋升发布证据或删除兼容 Adapter。
+
+鉴权/owner/session 校验、危险工具授权、沙箱、工作区及 symlink/reparse 边界、追加式
+Ledger/CAS、未知副作用 fail-closed、秘密扫描、relay 聚合并发 1–10、有界 429 退避
+均继续保留。这些是执行约束；缺凭据、trust root、pin、外部服务或真实收据时的
+发布 `BLOCKED` 也继续保留。
 
 ## 快速对齐改造状态（2026-10-06）
 

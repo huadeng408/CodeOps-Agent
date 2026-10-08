@@ -27,12 +27,12 @@ require (
 	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.0
-	modernc.org/sqlite v1.38.2
+	modernc.org/sqlite v1.40.1
 )
 
 replace (
 	golang.org/x/sys => golang.org/x/sys v0.35.0
-	modernc.org/libc => modernc.org/libc v1.66.3
+	modernc.org/libc => modernc.org/libc v1.66.10
 )
 
 require (

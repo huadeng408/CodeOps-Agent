@@ -505,7 +505,7 @@ class ConversationRunner:
                 raise ValueError("checkpoint surface sha256 is missing")
             if expected_surface_sha256 != requested_surface_sha256:
                 raise ValueError("checkpoint surface sha256 does not match request")
-        if requested_ledger_checksum:
+        if resume and requested_ledger_checksum:
             if expected_ledger_seq != requested_ledger_seq or expected_ledger_checksum != requested_ledger_checksum:
                 raise ValueError("checkpoint ledger identity does not match request")
         elif (

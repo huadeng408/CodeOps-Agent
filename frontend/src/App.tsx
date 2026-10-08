@@ -459,7 +459,8 @@ function App() {
     setError('');
     const requestId = messageRequestId(selectedSession.id, content);
     try {
-      await api.submitMessage(selectedSession.id, content, selectedSession.eventCount, requestId);
+      const fresh = await api.getSession(selectedSession.id);
+      await api.submitMessage(selectedSession.id, content, fresh.eventCount, requestId);
       setPendingRetry(null);
       setMessage('');
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
