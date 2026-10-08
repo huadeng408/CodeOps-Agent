@@ -16,6 +16,43 @@
 - 前端发送前读取 canonical eventCount 已实现，Chromium 接口替身回归通过；仍缺真实 Go/Python/provider 浏览器会话的新鲜验收
 - Phoenix 已恢复且 `/healthz` 返回 200；当前真实浏览器代码任务仍缺可核验的完整 trace 树
 
+## GitHub CI 修正（2026-10-08）
+
+状态：`IMPLEMENTED`；源码回归与发布证据门禁仍分开。
+
+Actions run `37779853030`（源码 `69349d01709178f2386dbc96f377cd21168f966e`）
+和上一次 run `37625998359` 均暴露相同配置/平台问题：Python 收集阶段缺
+`langchain_openai`、`docx`、`openpyxl`，共 8 个收集错误；Go job 没有安装
+跨进程测试依赖，MCP 返回 EOF、Plan/Todo 无可用 Python；Linux 还接受了
+Windows 绝对路径，导致现有安全回归失败。Frontend job 已通过。
+
+保留 push/PR 的 Go、Python、Frontend 三个检查：Go job 准备 Python 3.12、
+`.[trace-e2e]` 并显式绑定 `PYTHON_EXECUTABLE`；Python job 安装测试实际使用的
+`.[test,rag,eval]`，并准备跨语言测试需要的 Go 与 Node 22。各 job 有 20/20/10
+分钟上限，同一 ref 的旧运行被新运行
+取消；可以手动触发普通 CI。没有删除失败测试、增加 `continue-on-error`、
+注入 provider 凭据或将普通 CI 改成发布成功。
+
+修改收据现在用 `fs.ValidPath` 和显式非法字符检查要求可移植的工作区相对路径。
+创建、读取及恢复收据复用同一校验，拒绝盘符/UNC/ADS、反斜杠、父目录、
+NUL/换行；执行侧原有文件、symlink/reparse 和工作区检查继续保留。新增边界
+先复现 `C:outside.txt` 被接受，再验证修复。
+
+本轮 Windows 全量 `go test ./... -count=1 -json` 退出 0：1230 passed、43 skipped；
+`go vet ./...` 退出 0。Linux 真实运行 Session 包测试二进制，123 个顶层测试全部
+通过、退出 0；workflow/共享运行脚本的 Python 回归 24/24、退出 0。
+原始失败及本轮输出保留在 `.runtime/ci-remediation-20261008/`；推送后的 hosted
+结果以绑定新提交 SHA 的 Actions run 为准。
+
+干净 Python 3.12 的首次 WSL 全量保留 9 failed、2405 passed、14 skipped / 2428，
+退出 1：该临时环境未激活 venv PATH、缺 Linux Go/可用 Node，且调用了无法读取
+Linux 路径的 Windows PowerShell。它是环境诊断失败，不能冒充 hosted runner
+的验证；激活 PATH 后失败的 redaction 子进程回归已通过，最终以真实 Actions
+全量结果验收，不通过排除这些测试来制造绿色。
+
+`release-gate.yml` 原有手动触发与禁用 hosted job 保持不变；本地发布门禁继续
+fail-closed，缺官方 scorer、provider 或当前源码收据时仍为 `BLOCKED`。
+
 ## 阻塞修复与当前限制（2026-10-08）
 
 状态：`IMPLEMENTED`；本机源码/集成回归通过；整体验收：`BLOCKED`。

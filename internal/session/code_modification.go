@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
@@ -48,16 +49,16 @@ func codeModificationPayloads(result orchestrator.ToolResult, runID string) []co
 	out := make([]codeModificationPayload, 0, len(result.Changes))
 	for _, change := range result.Changes {
 		path := filepath.ToSlash(strings.TrimSpace(change.Path))
-		if path == "" || filepath.IsAbs(filepath.FromSlash(path)) || strings.HasPrefix(path, "../") || path == ".." {
-			continue
-		}
-		out = append(out, codeModificationPayload{
+		payload := codeModificationPayload{
 			RunID: runID, ToolCallID: result.ToolCallID, ToolName: result.ToolName,
 			Path: path, Operation: result.ToolName, Summary: result.ToolName + " modified " + path,
 			BeforeSHA256: hashCodeState(change.Before), AfterSHA256: hashCodeState(change.After),
 			DiffSHA256: hashCodeTransition(change.Before, change.After),
-			Before: change.Before, After: change.After,
-		})
+			Before:     change.Before, After: change.After,
+		}
+		if validateCodeModificationPayload(payload) == nil {
+			out = append(out, payload)
+		}
 	}
 	return out
 }
@@ -81,8 +82,8 @@ func validateCodeModificationPayload(payload codeModificationPayload) error {
 	if payload.Operation != payload.ToolName || strings.TrimSpace(payload.Summary) == "" {
 		return fmt.Errorf("code modification operation is invalid")
 	}
-	path := filepath.Clean(filepath.FromSlash(payload.Path))
-	if filepath.IsAbs(path) || strings.HasPrefix(payload.Path, "/") || path == "." || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+	// Ledger paths use portable slash-separated names, independent of the host OS.
+	if !fs.ValidPath(payload.Path) || payload.Path == "." || strings.ContainsAny(payload.Path, "\\\x00\r\n:") {
 		return fmt.Errorf("code modification path must stay within workspace")
 	}
 	for _, digest := range []string{payload.BeforeSHA256, payload.AfterSHA256, payload.DiffSHA256} {

@@ -2,6 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
+
+def test_ci_provisions_dependencies_for_go_subprocesses_and_python_collection() -> None:
+    workflow = yaml.load(
+        (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    go_steps = workflow["jobs"]["go"]["steps"]
+    assert any(step.get("uses", "").startswith("actions/setup-python@") for step in go_steps)
+    go_commands = "\n".join(step.get("run", "") for step in go_steps)
+    assert 'pip install -e ".[trace-e2e]"' in go_commands
+    assert 'PYTHON_EXECUTABLE=${pythonLocation}/bin/python' in go_commands
+    assert go_commands.index("pip install") < go_commands.index("go test ./...")
+    python_steps = workflow["jobs"]["python"]["steps"]
+    for action in ("actions/setup-go@", "actions/setup-node@"):
+        assert any(step.get("uses", "").startswith(action) for step in python_steps)
+    python_commands = "\n".join(step.get("run", "") for step in python_steps)
+    assert 'pip install -e ".[test,rag,eval]"' in python_commands
+    assert python_commands.index("pip install") < python_commands.index("python -m pytest -q")
+    assert "push" in workflow["on"] and "pull_request" in workflow["on"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] == "true"
+
 
 def test_release_gate_is_manual_only() -> None:
     """Release evidence is audited on demand, not for every source push."""
