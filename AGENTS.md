@@ -13,6 +13,11 @@
 
 开始前执行 `git status --short`，确认工作树中的既有改动并保留它们。多文件改动先写一个短计划；每个步骤都要有可检查的完成条件。结束时报告修改路径、验证命令及退出码、artifact/receipt、当前状态（`DESIGNED`/`IMPLEMENTED`/`VERIFIED`/`BLOCKED`）和未解决 blocker。
 
+## 工程技能入口
+
+使用 Matt Pocock 的规格、拆票、分流或设计技能时，先读取
+[`CLAUDE.md`](CLAUDE.md) 中的 `Agent skills`，再按对应分支加载配置。
+
 ## 事实源与归档
 
 - `AGENT.md` 是架构、安全、验证和交付的主指令；当前对话目标与 `docs/GOAL.md` 是验收权威，不能用旧日志覆盖它们。
