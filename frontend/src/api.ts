@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ContinuationRuntimeStatus, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ContinuationRuntimeStatus, RuntimeCapabilities, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -60,6 +60,11 @@ class ApiClient {
 
   async currentUser(): Promise<unknown> {
     const result = await this.request<unknown>('GET', '/users/me');
+    return result.data;
+  }
+
+  async capabilities(signal?: AbortSignal): Promise<RuntimeCapabilities> {
+    const result = await this.request<RuntimeCapabilities>('GET', '/capabilities', { signal });
     return result.data;
   }
 

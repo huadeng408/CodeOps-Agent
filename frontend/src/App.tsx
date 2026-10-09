@@ -1,9 +1,10 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { ContinuationRuntimeStatus, Session, SessionEvent } from './types';
+import type { CapabilityStatus, RuntimeCapabilities, ContinuationRuntimeStatus, Session, SessionEvent } from './types';
 import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
+import { CapabilityPanel } from './CapabilityPanel';
 import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
 import { retryPendingMessage, sendFailureMessage } from './sendRetry';
@@ -203,6 +204,7 @@ function App() {
   const [showDetails, setShowDetails] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1101px)').matches);
   const [continuationHealth, setContinuationHealth] = useState<ContinuationRuntimeStatus | null>(null);
   const [continuationHealthKnown, setContinuationHealthKnown] = useState(false);
+  const [capabilities, setCapabilities] = useState<RuntimeCapabilities | null>(null);
   const selectionGenerationRef = useRef(0);
   const canonicalSelectionRef = useRef('');
   const continuationInFlightRef = useRef(false);
@@ -572,7 +574,9 @@ function App() {
     (groups[session.projectName] ||= []).push(session);
     return groups;
   }, {} as Record<string, Session[]>), [sessions]);
-  const harnessLabel = !continuationHealthKnown
+  const harnessLabel = capabilities?.execution?.state === 'blocked'
+    ? '执行已阻断 · 历史可用'
+    : !continuationHealthKnown
     ? 'Harness 检查中'
     : continuationHealth?.attached === false
       ? 'Harness 恢复中'
@@ -658,7 +662,7 @@ function App() {
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
           <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <div className="composer-footer"><div className="composer-meta"><span>＋ 附加文件</span><span><strong>权限</strong> 工具调用按需审批</span><span><strong>模型</strong> 已配置模型</span></div><div className="composer-hint">Enter 发送 · Shift+Enter 换行</div><button className="send-btn" type="submit" aria-label="发送" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '…' : '↑'}</button></div>
+          <div className="composer-footer"><div className="composer-meta"><span>＋ 附加文件</span><span><strong>权限</strong> 工具调用按需审批</span><span><strong>执行</strong> {capabilities?.execution?.state === 'ready' ? '运行条件可用' : capabilities?.execution?.state === 'blocked' ? '前提未满足' : '状态待确认'}</span></div><div className="composer-hint">Enter 发送 · Shift+Enter 换行</div><button className="send-btn" type="submit" aria-label="发送" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '…' : '↑'}</button></div>
         </form>
       </main>
 
@@ -668,7 +672,8 @@ function App() {
           <button className="icon-btn" type="button" title="关闭会话详情" aria-label="关闭会话详情" onClick={() => setShowDetails(false)}>×</button>
         </div>
         <div className="task-list">
-          {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} /> : <div className="empty-panel">未选择</div>}
+          <CapabilityPanel capabilities={capabilities} onChange={setCapabilities} />
+          {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} executionCapability={capabilities?.execution} /> : <div className="empty-panel">未选择</div>}
         </div>
         {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} onRunChanged={(run) => {
           setSelectedSession((current) => current && current.id === run.sessionId ? { ...current, run } : current);
@@ -694,7 +699,7 @@ function ProjectFolder({ projectName, sessions, selectedSessionId, onSelectSessi
   </div>;
 }
 
-function SessionStatus({ session, onContinue, busy, continuationHealth, continuationHealthKnown }: { session: Session; onContinue: () => void; busy: boolean; continuationHealth: ContinuationRuntimeStatus | null; continuationHealthKnown: boolean }) {
+function SessionStatus({ session, onContinue, busy, continuationHealth, continuationHealthKnown, executionCapability }: { session: Session; onContinue: () => void; busy: boolean; continuationHealth: ContinuationRuntimeStatus | null; continuationHealthKnown: boolean; executionCapability?: CapabilityStatus }) {
   const runLabel = session.run?.status === 'queued' ? '排队中'
     : session.run?.status === 'running' ? '运行中'
       : session.run?.status === 'completed' ? '已完成'
@@ -712,7 +717,7 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
     {runLabel && <div className="status-row"><span>断点运行</span><strong className={`run-status ${session.run?.status}`}>{runLabel}</strong></div>}
     <div className="status-row"><span>执行 worker</span><strong>{session.run?.workerId || '待分配'}</strong></div>
     {session.run && <div className="lineage-block" aria-label="运行 lineage"><div className="status-row"><span>运行 lineage</span><strong className="mono-value">{session.run.runId.slice(0, 12)}…</strong></div><div className="status-row"><span>重试次数</span><strong>第 {session.run.attempt} 次</strong></div><div className="status-row"><span>请求标识</span><strong className="mono-value">{session.run.requestId.slice(0, 12)}…</strong></div>{session.run.retryOfRunId && <div className="status-row"><span>承接运行</span><strong className="mono-value">{session.run.retryOfRunId.slice(0, 12)}…</strong></div>}{session.run.retryOfRunIds && session.run.retryOfRunIds.length > 1 && <div className="status-row"><span>历史失败</span><strong>{session.run.retryOfRunIds.length} 个</strong></div>}</div>}
-    {continuationHealthKnown && continuationHealth && (continuationHealth.attached === false || continuationHealth.last_health_error) && <div className="continuation-runtime-card" role="status"><div className="status-row"><span>编排器</span><strong className={`run-status ${continuationHealth.attached ? 'running' : 'queued'}`}>{continuationHealth.attached ? '已连接（有恢复告警）' : '恢复中'}</strong></div>{continuationHealth.consecutive_failures > 0 && <div className="status-row"><span>连续失败</span><strong>{continuationHealth.consecutive_failures} 次</strong></div>}{continuationHealth.next_retry_at && <div className="status-row"><span>下次重试</span><strong>{new Date(continuationHealth.next_retry_at).toLocaleTimeString()}</strong></div>}{continuationHealth.last_health_error && <div className="recovery-summary-meta">{continuationHealth.last_health_error}</div>}</div>}
+    {executionCapability?.state !== 'blocked' && continuationHealthKnown && continuationHealth && (continuationHealth.attached === false || continuationHealth.last_health_error) && <div className="continuation-runtime-card" role="status"><div className="status-row"><span>编排器</span><strong className={`run-status ${continuationHealth.attached ? 'running' : 'queued'}`}>{continuationHealth.attached ? '已连接（有恢复告警）' : '恢复中'}</strong></div>{continuationHealth.consecutive_failures > 0 && <div className="status-row"><span>连续失败</span><strong>{continuationHealth.consecutive_failures} 次</strong></div>}{continuationHealth.next_retry_at && <div className="status-row"><span>下次重试</span><strong>{new Date(continuationHealth.next_retry_at).toLocaleTimeString()}</strong></div>}{continuationHealth.last_health_error && <div className="recovery-summary-meta">{continuationHealth.last_health_error}</div>}</div>}
     {session.status === 'paused' && session.run?.checkpointHash && <button className="primary-btn continue-session-btn" type="button" onClick={onContinue} disabled={busy || !continuationHealthKnown || continuationHealth?.attached !== true}>{busy ? '继续中...' : !continuationHealthKnown ? '检查编排器...' : continuationHealth?.attached !== true ? '编排器恢复中...' : '继续历史任务'}</button>}
     <div className="status-row"><span>记忆事件</span><strong>{session.eventCount} 条（ledger）</strong></div>
     {session.run?.checkpointHash && <div className="status-row"><span>恢复锚点</span><strong className="mono-value">{session.run.checkpointHash.slice(0, 12)}…</strong></div>}

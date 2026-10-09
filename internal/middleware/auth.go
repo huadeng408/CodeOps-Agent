@@ -42,7 +42,7 @@ func AuthMiddleware(jwtManager *token.JWTManager, userService service.UserServic
 
 		// 使用 claims 中的用户名从数据库获取完整的用户信息
 		user, err := userService.GetProfile(claims.Username)
-		if err != nil {
+		if err != nil || user == nil || user.ID != claims.UserID {
 			// 如果根据 token 中的用户信息无法找到用户，说明该用户可能已被删除
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "用户不存在"})
 			return

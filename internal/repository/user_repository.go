@@ -2,15 +2,19 @@
 package repository
 
 import (
-	"gorm.io/gorm"
 	"code-agent/internal/model"
+	"gorm.io/gorm"
 )
 
 // UserRepository 接口定义了用户数据的持久化操作。
-type UserRepository interface {
+type IdentityRepository interface {
 	Create(user *model.User) error
 	FindByUsername(username string) (*model.User, error)
 	Update(user *model.User) error
+}
+
+type UserRepository interface {
+	IdentityRepository
 	FindAll() ([]model.User, error)
 	FindWithPagination(offset, limit int) ([]model.User, int64, error)
 	FindByID(userID uint) (*model.User, error)

@@ -2,15 +2,15 @@
 package service
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"code-agent/internal/model"
 	"code-agent/internal/repository"
 	"code-agent/pkg/database"
 	"code-agent/pkg/hash"
 	"code-agent/pkg/log"
 	"code-agent/pkg/token"
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -32,9 +32,21 @@ type UserService interface {
 
 // userService 是 UserService 接口的实现。
 type userService struct {
-	userRepo   repository.UserRepository
-	orgTagRepo repository.OrgTagRepository
-	jwtManager *token.JWTManager
+	userRepo      repository.IdentityRepository
+	orgTagRepo    repository.OrgTagRepository
+	jwtManager    *token.JWTManager
+	revocations   TokenRevocationStore
+	localIdentity bool
+}
+
+type TokenRevocationStore interface {
+	Revoke(string, time.Time) error
+	IsRevoked(string) (bool, error)
+}
+
+// NewLocalUserService uses the same login/refresh contract with local identity facts.
+func NewLocalUserService(users repository.IdentityRepository, jwtManager *token.JWTManager, revocations TokenRevocationStore) UserService {
+	return &userService{userRepo: users, jwtManager: jwtManager, revocations: revocations, localIdentity: true}
 }
 
 // NewUserService 创建一个新的 UserService 实例。
@@ -79,6 +91,9 @@ func (s *userService) Register(username, password string) (*model.User, error) {
 	err = s.userRepo.Create(newUser)
 	if err != nil {
 		return nil, err
+	}
+	if s.localIdentity {
+		return newUser, nil
 	}
 
 	// 5. 创建用户的私人组织标签 (与Java逻辑对齐)
@@ -166,6 +181,9 @@ func (s *userService) Logout(accessTokenString, refreshTokenString string) error
 	refreshTokenString = strings.TrimSpace(refreshTokenString)
 	if refreshTokenString != "" {
 		if err := s.blacklistToken(refreshTokenString); err != nil {
+			if s.localIdentity {
+				return err
+			}
 			// 登出流程以 access token 吊销为主，refresh 吊销失败时仅记录日志，不阻断登出。
 			log.Warnf("[UserService] refresh token 吊销失败: %v", err)
 		}
@@ -180,6 +198,9 @@ func (s *userService) blacklistToken(tokenString string) error {
 	if err != nil {
 		return err
 	}
+	if s.revocations != nil {
+		return s.revocations.Revoke(tokenString, claims.ExpiresAt.Time)
+	}
 	// 使用 Redis 实现一个简单的 token 黑名单。
 	// token 的剩余有效期将作为 Redis key 的过期时间。
 	expiration := time.Until(claims.ExpiresAt.Time)
@@ -193,6 +214,9 @@ func (s *userService) blacklistToken(tokenString string) error {
 // IsTokenBlacklisted reports whether token blacklisted.
 func (s *userService) IsTokenBlacklisted(tokenString string) (bool, error) {
 	tokenString = strings.TrimSpace(tokenString)
+	if s.revocations != nil {
+		return s.revocations.IsRevoked(tokenString)
+	}
 	exists, err := database.RDB.Exists(context.Background(), "blacklist:"+tokenString).Result()
 	if err != nil {
 		return false, err
@@ -337,7 +361,7 @@ func (s *userService) RefreshToken(refreshTokenString string) (newAccessToken, n
 
 	// 2. 检查用户是否存在
 	user, err := s.userRepo.FindByUsername(claims.Username)
-	if err != nil {
+	if err != nil || user == nil || user.ID != claims.UserID {
 		return "", "", errors.New("user not found")
 	}
 

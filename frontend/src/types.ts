@@ -168,3 +168,10 @@ export interface ContinuationRuntimeStatus {
   consecutive_failures: number;
   next_retry_at?: string;
 }
+
+export interface CapabilityStatus {
+  state: 'ready' | 'blocked' | 'degraded' | 'unknown';
+  reason?: string;
+}
+
+export type RuntimeCapabilities = Partial<Record<'identity' | 'history' | 'execution' | 'rag' | 'trace', CapabilityStatus>>;

@@ -45,6 +45,7 @@ logs/
 
 # Local agent state
 .worktrees/
+/.agent/local/
 .agent/settings.local.json
 .agent/memory/
 .agent/sessions/

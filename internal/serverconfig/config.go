@@ -4,7 +4,9 @@ package serverconfig
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -39,6 +41,7 @@ type Config struct {
 // legacy GORM snapshot tables.
 type HarnessConfig struct {
 	SessionLedgerPath string `mapstructure:"session_ledger_path"`
+	IdentityPath      string `mapstructure:"identity_path"`
 }
 
 func DefaultHarnessConfig() HarnessConfig {
@@ -71,6 +74,9 @@ func DefaultCorpusConfig() CorpusConfig {
 
 // ServerConfig 存储服务器相关的配置。
 type ServerConfig struct {
+	Profile        string `mapstructure:"profile"`
+	Host           string `mapstructure:"host"`
+	FrontendDir    string `mapstructure:"frontend_dir"`
 	Port           string `mapstructure:"port"`
 	Mode           string `mapstructure:"mode"`
 	AllowedOrigins string `mapstructure:"allowed_origins"`
@@ -117,11 +123,30 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Harness.SessionLedgerPath) == "" {
 		invalid = append(invalid, "harness.session_ledger_path")
 	}
-	if strings.TrimSpace(c.Database.MySQL.DSN) == "" {
-		invalid = append(invalid, "database.mysql.dsn")
-	}
-	if strings.TrimSpace(c.Database.Redis.Addr) == "" {
-		invalid = append(invalid, "database.redis.addr")
+	if c.Server.Profile == "local-core" {
+		if host := c.Server.Host; host != "" {
+			if address := net.ParseIP(host); address == nil || !address.IsLoopback() {
+				invalid = append(invalid, "server.host (local core requires loopback)")
+			}
+		}
+		if strings.TrimSpace(c.Harness.IdentityPath) == "" {
+			invalid = append(invalid, "harness.identity_path")
+		}
+		identity, identityErr := filepath.Abs(c.Harness.IdentityPath)
+		ledger, ledgerErr := filepath.Abs(c.Harness.SessionLedgerPath)
+		if identityErr != nil || ledgerErr != nil || strings.EqualFold(identity, ledger) {
+			invalid = append(invalid, "identity and Session Ledger paths must be distinct")
+		}
+	} else {
+		if c.Server.Profile != "" && c.Server.Profile != "full-stack" {
+			invalid = append(invalid, "server.profile")
+		}
+		if strings.TrimSpace(c.Database.MySQL.DSN) == "" {
+			invalid = append(invalid, "database.mysql.dsn")
+		}
+		if strings.TrimSpace(c.Database.Redis.Addr) == "" {
+			invalid = append(invalid, "database.redis.addr")
+		}
 	}
 	secret := strings.TrimSpace(c.JWT.Secret)
 	if secret == "" {
@@ -150,7 +175,7 @@ type LogConfig struct {
 
 // KafkaConfig 存储 Kafka 相关的配置。
 type KafkaConfig struct {
-	Brokers             string            `mapstructure:"brokers"`
+	Brokers string `mapstructure:"brokers"`
 	// ConsumersEnabled controls the optional corpus ingestion consumers. The
 	// interactive Agent Harness does not require Kafka, so this is fail-closed
 	// by default and must be enabled explicitly for ingestion deployments.

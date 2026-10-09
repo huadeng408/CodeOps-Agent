@@ -10,10 +10,8 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	codeagentpb "code-agent/gen/codeagentpb"
@@ -129,11 +127,17 @@ func main() {
 	cfg := serverconfig.Conf
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "server configuration rejected: %v; provide secrets through the process environment (for example MYSQL_DSN and JWT_SECRET) or run scripts/start-interview.ps1 with a provider config; credentials are never read from tracked files\n", err)
-		return
+		os.Exit(2)
 	}
 
 	log.Init(cfg.Log.Level, cfg.Log.Format, cfg.Log.OutputPath)
 	defer log.Sync()
+	if cfg.Server.Profile == "local-core" {
+		if err := runLocalCore(cfg); err != nil {
+			log.Fatalf("local core startup failed: %v", err)
+		}
+		return
+	}
 
 	// The LangGraph orchestrator (chat/memory/ingestion) is optional in
 	// localcode: the KB CRUD/search/upload APIs work without it. When it is
@@ -443,7 +447,14 @@ func main() {
 		c.Next()
 	})
 	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
-	r.Use(middleware.RequestLogger(), gin.Recovery())
+	r.Use(middleware.RequestLogger(), middleware.RedactedRecovery())
+	if cfg.Server.FrontendDir != "" {
+		assets, err := mountBrowserAssets(r, cfg.Server.FrontendDir)
+		if err != nil {
+			log.Fatal("configured browser assets are unavailable", err)
+		}
+		defer assets.Close()
+	}
 	r.GET("/healthz", healthzHandlerWithContinuation(func() string { return embeddingPreflightStatus }, continuationSupervisor.Status))
 	r.GET("/readyz", readinessHandler(func() string { return embeddingPreflightStatus }, continuationSupervisor.Status, func() map[string]CapabilityStatus {
 		provider := CapabilityStatus{State: "degraded", Reason: "LangGraph orchestrator is disabled; knowledge-base APIs remain available"}
@@ -463,26 +474,26 @@ func main() {
 
 	apiV1 := r.Group("/api/v1")
 	{
-		auth := apiV1.Group("/auth")
-		{
-			auth.POST("/refreshToken", handler.NewAuthHandler(userService).RefreshToken)
-		}
-
-		users := apiV1.Group("/users")
-		{
-			users.POST("/register", handler.NewUserHandler(userService).Register)
-			users.POST("/login", handler.NewUserHandler(userService).Login)
-
-			authed := users.Group("/")
-			authed.Use(middleware.AuthMiddleware(jwtManager, userService))
-			{
-				authed.GET("/me", handler.NewUserHandler(userService).GetProfile)
-				authed.POST("/logout", handler.NewUserHandler(userService).Logout)
-				authed.PUT("/primary-org", handler.NewUserHandler(userService).SetPrimaryOrg)
-				authed.GET("/org-tags", handler.NewUserHandler(userService).GetUserOrgTags)
+		registerUserRoutes(apiV1, userService, jwtManager)
+		apiV1.GET("/capabilities", middleware.AuthMiddleware(jwtManager, userService), func(c *gin.Context) {
+			execution := CapabilityStatus{State: "blocked", Reason: "execution runtime is not attached"}
+			sandboxState, sandboxReason := continuationExecutors.sandbox.Capability()
+			if continuationSupervisor.Status().Attached && (sandboxState == "ok" || sandboxState == "ready") {
+				execution = CapabilityStatus{State: "unknown", Reason: "execution provider and admission have not been verified"}
+			} else if sandboxState == "blocked" {
+				execution.Reason = sandboxReason
 			}
-		}
-
+			rag := CapabilityStatus{State: "degraded", Reason: "retrieval dependencies are unavailable"}
+			if es.ESClient != nil && embeddingPreflightStatus == "ok" && strings.TrimSpace(cfg.Embedding.BaseURL) != "" && traceIndex != "" {
+				rag = CapabilityStatus{State: "unknown", Reason: "retrieval is configured; live availability has not been verified"}
+			}
+			c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": map[string]CapabilityStatus{
+				"identity":  {State: "ready", Reason: "service authentication is available"},
+				"history":   {State: "ready", Reason: "canonical Session Ledger"},
+				"execution": execution, "rag": rag,
+				"trace": {State: "unknown", Reason: "trace backend has not been verified"},
+			}})
+		})
 		upload := apiV1.Group("/upload")
 		upload.Use(middleware.AuthMiddleware(jwtManager, userService))
 		{
@@ -520,38 +531,7 @@ func main() {
 			conversation.GET("", handler.NewConversationHandler(conversationService).GetConversations)
 		}
 
-		sessions := apiV1.Group("/sessions")
-		sessions.Use(middleware.TraceContextMiddleware(), middleware.AuthMiddleware(jwtManager, userService))
-		{
-			sessionHandler := handler.NewSessionHandlerWithWorktree(workbench, wsTickets, workspaceManager)
-			sessions.POST("", sessionHandler.Create)
-			sessions.GET("", sessionHandler.List)
-			sessions.GET("/:id", sessionHandler.Get)
-			sessions.GET("/:id/runs", sessionHandler.RunHistory)
-			sessions.GET("/:id/runs/:runId", sessionHandler.RunDetail)
-			sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
-			sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
-			sessions.POST("/:id/workspace/restore", sessionHandler.RestoreWorkspace)
-			sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
-			sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
-			sessions.DELETE("/:id", sessionHandler.Delete)
-			sessions.POST("/:id/ws-ticket", sessionHandler.IssueWebSocketTicket)
-
-			eventHandler := handler.NewEventHandlerWithContinuationSlot(workbench, continuationSlot)
-			sessions.GET("/:id/events", eventHandler.ListEvents)
-			sessions.POST("/:id/events", eventHandler.CreateEvent)
-			sessions.POST("/:id/messages", eventHandler.SubmitMessage)
-			sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
-			sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
-			sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)
-			sessions.POST("/:id/continue", eventHandler.ContinueSession)
-			sessions.POST("/:id/approvals/:runId/:toolCallId", eventHandler.DecideToolApproval)
-
-		}
-		// WebSocket uses an opaque one-time ticket, not an access JWT in the URL.
-		wsHandler := handler.NewWebSocketHandlerWithWorkbench(wsHub, workbench, wsTickets)
-		r.GET("/api/v1/sessions/:id/ws", wsHandler.HandleWebSocket)
-
+		(sessionHTTP{workbench: workbench, hub: wsHub, tickets: wsTickets, worktree: workspaceManager, continuation: continuationSlot}).register(r, apiV1, userService, jwtManager)
 		// Legacy /chat/:token and its token-in-URL ticket endpoint were removed.
 		// Session WebSocket tickets above are the only supported browser transport.
 
@@ -602,25 +582,9 @@ func main() {
 	}
 
 	srv := &http.Server{Addr: fmt.Sprintf(":%s", cfg.Server.Port), Handler: r}
-
-	go func() {
-		log.Infof("server started on %s", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server failed: %v", err)
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Info("shutdown signal received")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("failed to shutdown server: %v", err)
+	if err := serveHTTPServer(srv); err != nil {
+		log.Fatalf("HTTP server stopped: %v", err)
 	}
-	log.Info("server stopped")
 }
 
 func continuationPermissionController() *permission.Controller {

@@ -1279,6 +1279,19 @@ body[data-ds-dark-theme] {
 .harness-chip span { width: 5px; height: 5px; border-radius: 50%; background: var(--workbench-green); }
 .harness-chip.recovering { border-color: rgb(241 193 110 / 35%); color: var(--workbench-amber); }
 .harness-chip.recovering span { background: var(--workbench-amber); }
+
+.capability-panel { margin-bottom: 20px; padding: 16px; border: 1px solid var(--workbench-line); border-radius: 10px; background: var(--workbench-surface-2); }
+.capability-panel h2 { margin: 0 0 6px; font-size: 14px; }
+.capability-intro { margin: 0 0 10px; color: var(--workbench-quiet); font-size: 11px; }
+.capability-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--workbench-line); }
+.capability-row strong { font-size: 12px; font-weight: 500; }
+.capability-row p { margin: 5px 0 0; color: var(--workbench-quiet); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.capability-state { flex-shrink: 0; padding: 4px 6px; border-radius: 4px; font-size: 9px; letter-spacing: .3px; color: var(--workbench-quiet); background: rgb(145 160 182 / 12%); }
+.capability-state.ready { color: var(--workbench-green); background: rgb(104 187 150 / 12%); }
+.capability-state.blocked { color: var(--workbench-amber); background: rgb(241 193 110 / 12%); }
+.capability-state.degraded { color: #c7bafb; background: rgb(143 120 206 / 12%); }
+.capability-error { color: var(--workbench-amber); font-size: 11px; line-height: 1.6; }
+.capability-refresh { width: 100%; margin-top: 14px; font-size: 12px; }
 .mode-switch { display: inline-flex; padding: 2px; border: 1px solid var(--workbench-line); border-radius: 6px; background: var(--workbench-surface); }
 .mode-switch button { padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--workbench-quiet); font-size: 10px; }
 .mode-switch button.active { background: var(--workbench-surface-2); color: var(--dsw-alias-text-primary); }
