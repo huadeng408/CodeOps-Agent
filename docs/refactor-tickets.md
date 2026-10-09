@@ -34,4 +34,3 @@
 
 本地每张任务的投影位于 `.scratch/matt-refactor/issues/`，保留实际 Issue 链接和工作笔记，
 不另立任务权威。完整长期门槛继续独立推进，发布任务卡不构成产品完成或 runtime 验证。
-
