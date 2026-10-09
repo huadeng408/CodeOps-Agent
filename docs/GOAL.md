@@ -55,6 +55,15 @@
   命令、退出码、完整分母、源码绑定、失败与 SHA-256 见[接入证据](evidence/token-gateway-2026-10-10.md)。
   原计量模块 `db11083b` 的[历史证据](evidence/token-budget-2026-10-09.md)保留。
 
+- **Issue #4 工作副本基线**：只读基线检查及公开 CLI `/worktree baseline`
+  切片为 `IMPLEMENTED`，源码 `612daf54`。纳入允许的 dirty/new/empty/deleted
+  状态，保留原 index，排除已知凭据/生成路径，限制库存输出并拒绝未批准的
+  Git metadata、include 和 aliases。实际构建的 CLI 两进程检查 7/7、退出 0，
+  使用隔离 fixture 仓库且不调用模型。复制、独立存储、lease/Ledger、产品准备
+  入口、浏览器和完整 Trace 仍 `BLOCKED`；三 UI 预览等用户选择后才改前端。
+  [基线说明](workspace-baseline.md)与[本项证据](evidence/workspace-baseline-2026-10-10.md)
+  保存完整范围、分母、源码绑定、失败与 SHA-256，不能据此关闭 #4。
+
 | 范围 | 状态及完成条件 |
 | --- | --- |
 | 首批 Windows 产品 | `DESIGNED`：以正式规格的 AC01–AC09 和批准后的任务拆解交付 |
