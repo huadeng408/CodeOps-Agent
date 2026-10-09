@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	codeagentpb "code-agent/gen/codeagentpb"
+	"code-agent/internal/config"
 	"code-agent/internal/session"
 	"code-agent/internal/worktree"
 )
@@ -20,6 +21,49 @@ type failOnceSessionStore struct {
 	*session.MemoryStore
 	mu       sync.Mutex
 	failNext bool
+}
+
+func TestCLICanInspectDirtyBaselineWithoutModelOrSourceWrites(t *testing.T) {
+	t.Setenv("CODE_AGENT_MODEL_ADMISSION", "")
+	repo := t.TempDir()
+	seedAppWorktreeRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".agent/\n.runtime/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runAppGit(t, repo, "add", ".gitignore")
+	runAppGit(t, repo, "commit", "-m", "ignore runtime")
+	for name, contents := range map[string]string{"tracked.txt": "dirty contents", "new_test.go": "new source", "empty.py": "", ".env": "fixture-private-value"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(repo)
+	cfg.Sandbox.Enabled = false
+	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.OrchestratorStartupTimeout = "127.0.0.1:1", false, 1
+	output := &strings.Builder{}
+	app := NewApp(cfg, strings.NewReader("/worktree baseline\n/exit\n"), output, &strings.Builder{})
+	defer cleanupIntegrationApp(t, app)
+	if err := app.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "baseline inspection") || !strings.Contains(output.String(), "files: 4") || !strings.Contains(output.String(), "excluded: 1") {
+		t.Fatal("public CLI did not report the working-copy baseline")
+	}
+	if strings.Contains(output.String(), "fixture-private-value") || strings.Contains(output.String(), "dirty contents") || strings.Contains(output.String(), "created worktree:") {
+		t.Fatal("inspection exposed contents or claimed a prepared workspace")
+	}
+	after, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+	if err != nil || string(before) != string(after) {
+		t.Fatal("inspection changed the source index")
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "tracked.txt"))
+	if err != nil || string(contents) != "dirty contents" || len(app.worktree.List()) != 0 {
+		t.Fatal("inspection changed source files or created a worktree")
+	}
 }
 
 func (s *failOnceSessionStore) Save(ctx context.Context, value session.Session) error {

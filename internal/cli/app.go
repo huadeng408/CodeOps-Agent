@@ -1310,7 +1310,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 			"/agents list or approve/deny a child agent's pending tool",
 			"/undo revert the last recorded change set",
 			"/diff show the current session diff summary",
-			"/worktree manage worktree state (list/create/switch/cleanup)",
+			"/worktree manage worktree state (list/baseline/create/switch/cleanup)",
 			"/resume [session-id] resume a saved session",
 			"/fork <session-id> <event-seq> fork the current session history",
 			"/rewind <event-seq> rewind the current session to an event",
@@ -1430,7 +1430,7 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		}
 		a.renderer.PrintDiff(summary)
 	case "/worktree":
-		a.handleWorktreeCommand(fields)
+		a.handleWorktreeCommand(ctx, fields)
 	case "/resume":
 		if len(fields) > 1 {
 			resumed, err := a.session.Resume(ctx, fields[1])
@@ -2046,13 +2046,27 @@ func (a *App) handleSessionsCommand(ctx context.Context, fields []string) {
 	a.renderer.PrintBlock("sessions", lines)
 }
 
-func (a *App) handleWorktreeCommand(fields []string) {
+func (a *App) handleWorktreeCommand(ctx context.Context, fields []string) {
+	if len(fields) == 2 && fields[1] == "baseline" {
+		baseline, err := a.worktree.CaptureBaseline(ctx)
+		if err != nil {
+			a.renderer.PrintLine("baseline inspection failed: " + err.Error())
+			return
+		}
+		a.renderer.PrintBlock("baseline inspection", []string{
+			"repository: " + baseline.RepositoryID,
+			"HEAD: " + baseline.HeadCommit,
+			"baseline: " + baseline.Checksum,
+			fmt.Sprintf("files: %d | excluded: %d", len(baseline.Files), len(baseline.Excluded)),
+		})
+		return
+	}
 	if len(fields) == 1 || fields[1] == "list" {
 		a.renderer.PrintBlock("worktrees", formatWorktrees(a.worktree.List()))
 		return
 	}
 	if len(fields) < 3 {
-		a.renderer.PrintLine("usage: /worktree <create|switch|cleanup> <name> [--discard]")
+		a.renderer.PrintLine("usage: /worktree baseline | <create|switch|cleanup> <name> [--discard]")
 		return
 	}
 	name := fields[2]
@@ -2088,7 +2102,7 @@ func (a *App) handleWorktreeCommand(fields []string) {
 		a.persistCurrentWorktrees()
 		a.renderer.PrintLine("cleaned worktree: " + name)
 	default:
-		a.renderer.PrintLine("usage: /worktree <list|create|switch|cleanup> [name] [--discard]")
+		a.renderer.PrintLine("usage: /worktree <list|baseline|create|switch|cleanup> [name] [--discard]")
 	}
 }
 
