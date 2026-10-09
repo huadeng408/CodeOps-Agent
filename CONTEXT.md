@@ -57,6 +57,16 @@ A durable recovery anchor for a known Session state. Restoring a Checkpoint
 changes the active Surface without deleting later Session Ledger facts.
 _Avoid_: backup, destructive rollback
 
+**Task Workspace**:
+An isolated working copy used for a repository coding task, separate from the
+user's working copy and representing the task's starting state and changes.
+_Avoid_: scratch folder, Session
+
+**Code Change Proposal**:
+A reviewable set of repository changes produced by a coding task relative to
+its starting state, awaiting a decision about application to the user's workspace.
+_Avoid_: applied change, completed task
+
 **Continuation**:
 The act of resuming an interrupted or paused Session from a verified Checkpoint
 while preserving every prior Session Ledger fact for recovery and audit.
