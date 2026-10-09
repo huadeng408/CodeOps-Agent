@@ -46,7 +46,8 @@
   正式规格和任务已同步。Go Ledger 计量模块为 `IMPLEMENTED`，支持共享批次、
   CAS 预留/结算、单任务、十个未结算调用、未知用量及重启；完整调用接入与真实
   runtime 验收仍为 `BLOCKED`，不能把模块测试当成前台/反思/Worker 已受约束。
-  接口、已实现范围和剩余接入见[token 批次说明](token-budget.md)。
+  源码 `db11083b`；接口与剩余接入见[token 批次说明](token-budget.md)，
+  命令、退出码、完整分母、源码绑定及 SHA-256 见[本项证据](evidence/token-budget-2026-10-09.md)。
 
 | 范围 | 状态及完成条件 |
 | --- | --- |
