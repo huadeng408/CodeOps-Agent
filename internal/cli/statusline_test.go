@@ -32,3 +32,12 @@ func TestStatusLineFormatWidthHasReadableMinimum(t *testing.T) {
 		t.Fatalf("minimal status = %q", got)
 	}
 }
+
+func TestStatusLineDoesNotReportUnknownPriceAsZero(t *testing.T) {
+	line := NewStatusLine()
+	line.CostUnknown = true
+	got := line.FormatWidth(metrics.SessionMetrics{TotalTokensIn: 3}, "status", 120)
+	if !strings.Contains(got, "cost unknown") || strings.Contains(got, "$0") {
+		t.Fatalf("unknown price was rendered as an amount: %s", got)
+	}
+}

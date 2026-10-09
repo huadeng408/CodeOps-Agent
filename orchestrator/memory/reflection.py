@@ -7,6 +7,7 @@ import threading
 
 from codeagent import orchestrator_pb2 as pb
 from orchestrator.llm.client import ChatMessage, ChatRequest
+from orchestrator.llm.gateway import ModelGatewayError
 from orchestrator.security.credentials import redact_credential_shapes
 
 KINDS = frozenset({"profile", "preferences", "entities", "events", "cases", "patterns"})
@@ -80,6 +81,9 @@ def reflect_memory(client, request: pb.MemoryReflectionRequest, cancel: threadin
                 raise ValueError("invalid memory provenance")
             result.candidates.add(**item)
         result.model = str(getattr(response, "model_identity", {}).get("reported_model", ""))
+    except ModelGatewayError as error:
+        result.ClearField("candidates")
+        result.error_code = error.code
     except Exception:
         result.ClearField("candidates")
         result.error_code = "reflection_invalid_or_unavailable"

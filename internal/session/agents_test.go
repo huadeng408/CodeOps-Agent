@@ -229,6 +229,37 @@ func TestIndependentAgentTaskContextIdentityAndArtifacts(t *testing.T) {
 	}
 }
 
+func TestModelTaskRootUsesVerifiedAgentAncestry(t *testing.T) {
+	fixture := &independentAgentFixture{}
+	runner, view, actor := agentTestRunner(t, fixture)
+	child := agentTestCall(t, runner, actor, "model-child", "SpawnAgent", `{"kind":"explore","title":"inspect","objective":"inspect explicit sources","context":{"material":"explicit sources"}}`)
+	childActor := actor
+	childActor.SessionID = ""
+	childActor, err := childActor.BindSession(child.ChildSessionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchild := agentTestCall(t, runner, childActor, "model-grandchild", "SpawnAgent", `{"kind":"explore","title":"inspect","objective":"inspect explicit sources","context":{"material":"explicit sources"}}`)
+	grandchildActor := childActor
+	grandchildActor.SessionID = ""
+	grandchildActor, err = grandchildActor.BindSession(grandchild.ChildSessionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := ModelTaskRoot(context.Background(), runner.workbench.ledger, grandchildActor)
+	if err != nil || root != view.ID {
+		t.Fatalf("nested agents did not share their root task: %s / %v", root, err)
+	}
+	other := grandchildActor
+	other.Subject = "other-owner"
+	if _, err := ModelTaskRoot(context.Background(), runner.workbench.ledger, other); err == nil {
+		t.Fatal("another actor reused the child's model task")
+	}
+	if err := ModelTaskIdle(context.Background(), runner.workbench.ledger, actor); err != nil {
+		t.Fatal("completed agents prevented task completion")
+	}
+}
+
 func TestIndependentAgentArtifactReplayAtCapacity(t *testing.T) {
 	runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
 	task := agentTestCall(t, runner, actor, "spawn", "SpawnAgent", `{"kind":"explore","title":"inspect","objective":"inspect"}`)
@@ -343,6 +374,9 @@ func TestIndependentAgentInputMessageAndFailureStates(t *testing.T) {
 		t.Fatalf("input state = %s", task)
 	}
 	_ = agentTestCall(t, runner, actor, "supplement", "AgentTask", `{"action":"message","task_id":"`+task.Id+`","message":{"parts":[{"text":"Use branch main"},{"data_json":"{\"scope\":\"tests\"}"}]}}`)
+	if err := ModelTaskIdle(context.Background(), runner.workbench.ledger, actor); err == nil {
+		t.Fatal("an input-waiting agent allowed task completion")
+	}
 	close(fixture.inputRelease)
 	task = agentTestCall(t, runner, actor, "wait", "AgentTask", `{"action":"wait","task_id":"`+task.Id+`"}`)
 	if task.Status != "completed" {

@@ -41,6 +41,7 @@ class ProviderWorkerExecutor:
             ChatRequest(
                 model=route.model if route is not None else str(getattr(client, "model", "")),
                 messages=[ChatMessage(role="user", content=prompt)],
+                purpose="workflow_worker",
             )
         )
         if not response.text.strip():

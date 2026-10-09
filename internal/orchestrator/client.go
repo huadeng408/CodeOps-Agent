@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type ConversationMessage struct {
@@ -131,6 +132,8 @@ type AskUserHandler func(context.Context, *codeagentpb.AskUserRequest) (ToolResu
 type AgentSpawnHandler func(context.Context, *codeagentpb.AgentSpawn) error
 type AgentLifecycleHandler func(context.Context, *codeagentpb.AgentLifecycle) error
 
+type ModelScopeFactory func(ActorIdentity, string) (*codeagentpb.ModelGatewayBinding, func(), error)
+
 // ConversationRequest is the complete request-scoped input for one durable
 // orchestrator turn. Actor is intentionally explicit so a shared Client
 // connection can safely serve concurrent authenticated Sessions.
@@ -203,6 +206,7 @@ type Client struct {
 	conversationTimeout time.Duration
 	askUserTimeout      time.Duration
 	actor               identity.Actor
+	modelScope          ModelScopeFactory
 	// OnTextDelta is called for each streaming text chunk from the
 	// orchestrator. When nil (default) text deltas are silently
 	// accumulated into the final return value.
@@ -266,6 +270,16 @@ func NewClient(target string) (*Client, error) {
 		askUserTimeout:      defaultAskUserTimeout,
 		actor:               identity.Default(),
 	}, nil
+}
+
+// SetModelScopeFactory is configured once by the owning Harness before use.
+func (c *Client) SetModelScopeFactory(factory ModelScopeFactory) { c.modelScope = factory }
+
+func (c *Client) bindModelScope(actor ActorIdentity, taskID string) (*codeagentpb.ModelGatewayBinding, func(), error) {
+	if c.modelScope == nil {
+		return nil, func() {}, nil
+	}
+	return c.modelScope(actor, taskID)
 }
 
 // SetActor configures the authenticated actor used for subsequent requests.
@@ -425,7 +439,16 @@ func (c *Client) ReflectMemory(ctx context.Context, request *codeagentpb.MemoryR
 	if c == nil || c.client == nil || request == nil {
 		return nil, errors.New("reflection orchestrator unavailable")
 	}
-	return c.client.ReflectMemory(c.injectTraceMetadata(ctx), request)
+	actor := identity.Actor{SchemaVersion: request.GetActor().GetSchemaVersion(), ActorID: request.GetActor().GetActorId(),
+		Subject: request.GetActor().GetSubject(), TenantID: request.GetActor().GetTenantId(), Roles: request.GetActor().GetRoles(), SessionID: request.SessionId}
+	binding, release, err := c.bindModelScope(actor, request.SessionId)
+	if err != nil {
+		return nil, errors.New("reflection model admission unavailable")
+	}
+	defer release()
+	copy := proto.Clone(request).(*codeagentpb.MemoryReflectionRequest)
+	copy.ModelGateway = binding
+	return c.client.ReflectMemory(c.injectTraceMetadata(ctx), copy)
 }
 
 // ErrCompactionPersistence distinguishes ledger failures from RPC transport failures.
@@ -518,6 +541,11 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	if err != nil {
 		return nil, fmt.Errorf("bind actor to session: %w", err)
 	}
+	binding, release, err := c.bindModelScope(actor, sessionID)
+	if err != nil {
+		return nil, errors.New("compaction model admission unavailable")
+	}
+	defer release()
 
 	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
 	for _, item := range trimConversationHistory(history) {
@@ -529,9 +557,10 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 		})
 	}
 	update, err := c.client.Compact(ctx, &codeagentpb.CompactRequest{
-		SessionId: sessionID,
-		History:   historyPayload,
-		Actor:     actorProto(actor),
+		SessionId:    sessionID,
+		History:      historyPayload,
+		Actor:        actorProto(actor),
+		ModelGateway: binding,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compact orchestrator history: %w", err)
@@ -639,6 +668,15 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 	if err != nil {
 		return "", fmt.Errorf("bind actor to session: %w", err)
 	}
+	taskID := sessionID
+	if request.AgentTask != nil && request.AgentTask.ParentSessionId != "" {
+		taskID = request.AgentTask.ParentSessionId
+	}
+	binding, release, err := c.bindModelScope(actor, taskID)
+	if err != nil {
+		return "", errors.New("conversation model admission unavailable")
+	}
+	defer release()
 
 	stream, err := c.client.Converse(ctx)
 	if err != nil {
@@ -669,6 +707,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				ContextEnvelope:   request.ContextEnvelope,
 				AgentTask:         request.AgentTask,
 				AllowedTools:      request.AllowedTools,
+				ModelGateway:      binding,
 			},
 		},
 	}); err != nil {

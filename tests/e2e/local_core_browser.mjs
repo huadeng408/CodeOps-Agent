@@ -46,6 +46,7 @@ const username = 'browser-operator@example.test';
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/^(MYSQL_|REDIS_|MINIO_|JWT_SECRET$|CODEAGENT_|CODE_AGENT_|OPENAI_|ANTHROPIC_|LLM_|OTEL_)/.test(key)));
 const configPath = path.join(artifacts, 'local.yaml');
+const ledgerPath = process.env.CODE_AGENT_E2E_LEDGER || path.join(artifacts, 'sessions.sqlite');
 const yamlPath = value => JSON.stringify(value.replaceAll('\\', '/'));
 await writeFile(configPath, `server:
   profile: ${profile}
@@ -54,7 +55,7 @@ await writeFile(configPath, `server:
   allowed_origins: ${base}
   frontend_dir: ${yamlPath(path.join(root, 'frontend', 'dist'))}
 harness:
-  session_ledger_path: ${yamlPath(path.join(artifacts, 'sessions.sqlite'))}
+  session_ledger_path: ${yamlPath(ledgerPath)}
   identity_path: ${yamlPath(path.join(artifacts, 'identity', 'identity.sqlite'))}
 jwt:
   secret: \${JWT_SECRET:}
@@ -158,7 +159,20 @@ try {
     assert.equal(data.execution.state, 'blocked');
     assert.equal(data.rag.state, 'degraded');
     assert.equal(data.trace.state, 'unknown');
+    assert.equal(data.provider.state, 'blocked');
+    assert.equal(data.sandbox.state, 'blocked');
+    assert.equal(data.budget.tokens.limit, 100_000_000);
+    assert.equal(data.budget.tokens.cost_status, 'unknown');
     await page.locator('.composer-meta').getByText('前提未满足', { exact: false }).waitFor();
+  });
+  await check('browser shows actual persisted token amounts and unknown price', async () => {
+    const response = await context.request.get(`${base}/api/v1/capabilities`);
+    const { data } = await response.json();
+    const row = page.locator('.capability-row').filter({ hasText: 'token 批次' });
+    const summary = row.getByText(`已用 ${data.budget.tokens.used.toLocaleString()} / ${data.budget.tokens.limit.toLocaleString()} tokens`, { exact: false });
+    await summary.waitFor();
+    assert.ok((await summary.innerText()).includes('费用未知'));
+    await page.screenshot({ path: path.join(artifacts, '02-token-budget.png') });
   });
   await check('browser refuses execution while prerequisites are absent', async () => {
     await page.locator('textarea.input-box').fill('Inspect this repository');
@@ -179,7 +193,7 @@ try {
       await page.getByRole('button', { name: '重新检查能力', exact: true }).click();
       await page.getByText('无法确认能力状态，请检查服务连接后重试。', { exact: true }).waitFor();
       const states = await page.locator('.capability-state').allTextContents();
-      assert.equal(states.length, 5);
+      assert.equal(states.length, 8);
       assert.ok(states.every(state => state === 'UNKNOWN'));
       await page.screenshot({ path: path.join(artifacts, '04-capability-unknown.png') });
     } finally {
@@ -194,7 +208,7 @@ try {
     await page.locator('.session-list').getByText('Persistent browser task', { exact: true }).waitFor();
     await page.locator('.session-list').getByText('Persistent browser task', { exact: true }).click();
     await page.locator('.title-button').filter({ hasText: 'Persistent browser task' }).waitFor();
-    await page.locator('.capability-panel').getByText('BLOCKED', { exact: true }).waitFor();
+    await page.locator('.capability-panel').getByText('BLOCKED', { exact: true }).first().waitFor();
     await page.screenshot({ path: path.join(artifacts, '05-restarted-history.png') });
   });
   await check('browser logout removes access to history', async () => {
@@ -216,7 +230,7 @@ try {
   const assetsChangedWhileRunning = JSON.stringify(assetHashes) !== JSON.stringify(await captureAssets());
   if (sourceChangedWhileRunning || assetsChangedWhileRunning) exitCode = 1;
   const artifactsHashes = Object.fromEntries(await Promise.all((await readdir(artifacts)).filter(name => /\.(png|log)$/.test(name)).map(async name => [name, await hash(path.join(artifacts, name))])));
-  const denominator = 8;
+  const denominator = 9;
   const receipt = { runId, scope: `production ${profile} browser authentication/history, no model execution`,
     gitSha, sourceHashes, sourceChangedWhileRunning, assetHashes, assetsChangedWhileRunning, binarySha256: await hash(binary), buildExitCode: build.status, processIds, processOutcomes,
     command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 node tests/e2e/local_core_browser.mjs', exitCode,

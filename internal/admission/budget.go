@@ -31,6 +31,7 @@ type Batch struct {
 	TaskID         string
 	TaskOwnerID    uint
 	UnknownUsage   bool
+	CostStatus     string
 }
 
 type Budget struct{ ledger session.EventLog }
@@ -38,11 +39,17 @@ type Budget struct{ ledger session.EventLog }
 func NewBudget(ledger session.EventLog) *Budget { return &Budget{ledger: ledger} }
 
 type budgetFact struct {
-	OwnerID uint   `json:"owner_id,omitempty"`
-	Limit   int64  `json:"limit_tokens,omitempty"`
-	TaskID  string `json:"task_id,omitempty"`
-	CallID  string `json:"call_id,omitempty"`
-	Tokens  int64  `json:"tokens,omitempty"`
+	OwnerID       uint   `json:"owner_id,omitempty"`
+	Limit         int64  `json:"limit_tokens,omitempty"`
+	TaskID        string `json:"task_id,omitempty"`
+	CallID        string `json:"call_id,omitempty"`
+	Tokens        int64  `json:"tokens,omitempty"`
+	Purpose       string `json:"purpose,omitempty"`
+	InputTokens   int64  `json:"input_tokens,omitempty"`
+	OutputTokens  int64  `json:"output_tokens,omitempty"`
+	CachedTokens  int64  `json:"cached_tokens,omitempty"`
+	CostStatus    string `json:"cost_status,omitempty"`
+	BoundViolated bool   `json:"bound_violated,omitempty"`
 }
 
 type call struct {
@@ -91,7 +98,7 @@ func validID(value string) bool {
 }
 
 func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) {
-	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit}, calls: map[string]call{}, closedTasks: map[string]bool{}}
+	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}}
 	if owner == 0 || budget.ledger == nil {
 		return state, ErrInvalidAdmission
 	}
@@ -125,17 +132,20 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if !exists || fact.OwnerID != request.owner || request.settled || request.boundViolated || fact.Tokens < 0 || fact.Tokens > request.reserved {
 				return state, session.ErrEventIntegrity
 			}
+			if fact.CostStatus != "" && (fact.CostStatus != "unknown" || fact.InputTokens < 0 || fact.OutputTokens < 0 || fact.InputTokens > fact.Tokens || fact.OutputTokens != fact.Tokens-fact.InputTokens || fact.CachedTokens < 0 || fact.CachedTokens > fact.InputTokens) {
+				return state, session.ErrEventIntegrity
+			}
 			state.ReservedTokens -= request.reserved
 			state.UsedTokens += fact.Tokens
 			request.settled, request.used = true, fact.Tokens
 			state.calls[fact.CallID] = request
 		case "admission/call_unknown":
 			request, exists := state.calls[fact.CallID]
-			if !exists || fact.OwnerID != request.owner || request.settled || fact.Tokens < 0 || (request.unknown && (fact.Tokens <= request.reserved || request.boundViolated)) {
+			if !exists || fact.OwnerID != request.owner || request.settled || fact.Tokens < 0 || (request.unknown && ((!fact.BoundViolated && fact.Tokens <= request.reserved) || request.boundViolated)) {
 				return state, session.ErrEventIntegrity
 			}
 			request.unknown = true
-			request.boundViolated = request.boundViolated || fact.Tokens > request.reserved
+			request.boundViolated = request.boundViolated || fact.BoundViolated || fact.Tokens > request.reserved
 			state.calls[fact.CallID] = request
 		case "admission/task_finished":
 			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || state.outstanding() != 0 {
@@ -171,7 +181,17 @@ func (budget *Budget) Open(ctx context.Context, owner uint) (Batch, error) {
 	return Batch{}, session.ErrSequenceConflict
 }
 
+// Inspect is a read-only projection for authenticated operator surfaces.
+func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
+	state, err := budget.read(ctx, owner)
+	return state.Batch, err
+}
+
 func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64) (Batch, error) {
+	return budget.reserve(ctx, owner, taskID, callID, tokens, RelayConcurrencyLimit, "")
+}
+
+func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64, concurrency int, purpose string) (Batch, error) {
 	if !validID(taskID) || !validID(callID) || tokens <= 0 || tokens > VerificationTokenLimit {
 		return Batch{}, ErrInvalidAdmission
 	}
@@ -198,13 +218,13 @@ func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID st
 		if state.TaskID != "" && (state.TaskID != taskID || state.TaskOwnerID != owner) {
 			return state.Batch, ErrTaskBusy
 		}
-		if state.outstanding() >= RelayConcurrencyLimit {
+		if state.outstanding() >= concurrency {
 			return state.Batch, ErrRelayBusy
 		}
 		if tokens > state.LimitTokens-state.UsedTokens-state.ReservedTokens {
 			return state.Batch, ErrBudgetExhausted
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens, Purpose: purpose})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}
@@ -218,6 +238,10 @@ func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID st
 }
 
 func (budget *Budget) Settle(ctx context.Context, owner uint, callID string, tokens int64) (Batch, error) {
+	return budget.settle(ctx, owner, callID, tokens, budgetFact{})
+}
+
+func (budget *Budget) settle(ctx context.Context, owner uint, callID string, tokens int64, fact budgetFact) (Batch, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {
@@ -226,7 +250,7 @@ func (budget *Budget) Settle(ctx context.Context, owner uint, callID string, tok
 		previous, exists := state.calls[callID]
 		if !exists || previous.owner != owner || tokens < 0 || tokens > previous.reserved || (previous.settled && previous.used != tokens) {
 			if exists && previous.owner == owner && !previous.settled && tokens > previous.reserved {
-				batch, err := budget.markUnknown(ctx, owner, callID, tokens)
+				batch, err := budget.markUnknown(ctx, owner, callID, tokens, true)
 				return batch, errors.Join(ErrUsageUnknown, err)
 			}
 			return state.Batch, ErrInvalidAdmission
@@ -237,7 +261,8 @@ func (budget *Budget) Settle(ctx context.Context, owner uint, callID string, tok
 		if previous.settled {
 			return state.Batch, nil
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_settled", budgetFact{OwnerID: owner, CallID: callID, Tokens: tokens})
+		fact.OwnerID, fact.CallID, fact.Tokens = owner, callID, tokens
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_settled", fact)
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}
@@ -251,10 +276,10 @@ func (budget *Budget) Settle(ctx context.Context, owner uint, callID string, tok
 }
 
 func (budget *Budget) MarkUnknown(ctx context.Context, owner uint, callID string) (Batch, error) {
-	return budget.markUnknown(ctx, owner, callID, 0)
+	return budget.markUnknown(ctx, owner, callID, 0, false)
 }
 
-func (budget *Budget) markUnknown(ctx context.Context, owner uint, callID string, observedTokens int64) (Batch, error) {
+func (budget *Budget) markUnknown(ctx context.Context, owner uint, callID string, observedTokens int64, boundViolated bool) (Batch, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {
@@ -264,10 +289,10 @@ func (budget *Budget) markUnknown(ctx context.Context, owner uint, callID string
 		if !exists || previous.owner != owner || previous.settled {
 			return state.Batch, ErrInvalidAdmission
 		}
-		if previous.unknown && (observedTokens <= previous.reserved || previous.boundViolated) {
+		if previous.unknown && ((!boundViolated && observedTokens <= previous.reserved) || previous.boundViolated) {
 			return state.Batch, nil
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_unknown", budgetFact{OwnerID: owner, CallID: callID, Tokens: observedTokens})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_unknown", budgetFact{OwnerID: owner, CallID: callID, Tokens: observedTokens, BoundViolated: boundViolated})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}

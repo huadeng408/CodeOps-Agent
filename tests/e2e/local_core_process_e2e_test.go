@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"code-agent/internal/admission"
 	"code-agent/internal/session"
 	"code-agent/pkg/token"
 
@@ -36,6 +37,71 @@ func TestProductionLocalCoreStartsWithoutOptionalServices(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("health status = %d", response.StatusCode)
+	}
+}
+
+func TestProductionLocalCoreTokenAdmissionProjection(t *testing.T) {
+	fixture := startProductionLocalCore(t)
+	fixture.authenticate(t)
+	path := filepath.Join(fixture.dir, "sessions.sqlite")
+	ledger, err := session.OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	before, _ := ledger.SessionIDs(context.Background())
+	read := func() (string, string, string, int64, int64) {
+		t.Helper()
+		response, err := fixture.client.Get(fixture.base + "/api/v1/capabilities")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var result struct {
+			Data map[string]struct {
+				State  string
+				Tokens struct {
+					BatchID    string `json:"batch_id"`
+					Limit      int64
+					Used       int64
+					Reserved   int64
+					CostStatus string `json:"cost_status"`
+				}
+			}
+		}
+		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&result) != nil {
+			t.Fatal("authenticated capabilities unavailable")
+		}
+		budget := result.Data["budget"]
+		if budget.Tokens.Limit != 100_000_000 || budget.Tokens.CostStatus != "unknown" || result.Data["execution"].State != "blocked" {
+			t.Fatal("token projection invented money or admitted execution")
+		}
+		return result.Data["provider"].State, budget.State, budget.Tokens.BatchID, budget.Tokens.Used, budget.Tokens.Reserved
+	}
+	provider, state, id, _, _ := read()
+	if provider != "blocked" || state != "unknown" || id != "" {
+		t.Fatal("missing model or batch was reported ready")
+	}
+	after, _ := ledger.SessionIDs(context.Background())
+	if len(after) != len(before) {
+		t.Fatal("capability reads created a competing or mutable budget")
+	}
+	batch, err := admission.NewBudget(ledger).Reserve(context.Background(), 7, "task-a", "call-a", 103)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admission.NewBudget(ledger).MarkUnknown(context.Background(), 7, "call-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, state, id, used, reserved := read()
+	if state != "blocked" || id != batch.ID || used != 0 || reserved != 103 {
+		t.Fatal("unconfirmed reservation was hidden from the product")
+	}
+	fixture.stop(t)
+	fixture.start(t)
+	_, state, id, used, reserved = read()
+	if state != "blocked" || id != batch.ID || used != 0 || reserved != 103 {
+		t.Fatal("product restart reset the held reservation")
 	}
 }
 

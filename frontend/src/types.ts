@@ -172,6 +172,7 @@ export interface ContinuationRuntimeStatus {
 export interface CapabilityStatus {
   state: 'ready' | 'blocked' | 'degraded' | 'unknown';
   reason?: string;
+  tokens?: { batch_id?: string; limit: number; used: number; reserved: number; cost_status: string };
 }
 
-export type RuntimeCapabilities = Partial<Record<'identity' | 'history' | 'execution' | 'rag' | 'trace', CapabilityStatus>>;
+export type RuntimeCapabilities = Partial<Record<'identity' | 'history' | 'provider' | 'sandbox' | 'budget' | 'execution' | 'rag' | 'trace', CapabilityStatus>>;

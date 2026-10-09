@@ -97,6 +97,9 @@ def _provider_failure_details(exc: Exception) -> tuple[str, str, bool]:
     failed continuation can be retried against the same checkpoint.
     """
 
+    from orchestrator.llm.gateway import ModelGatewayError
+    if isinstance(exc, ModelGatewayError):
+        return exc.code, "model call blocked; restore prerequisites or reconcile retained usage", False
     message = str(exc).lower()
     if is_context_window_exceeded(exc):
         return "context_window_exceeded", "context window exceeded; retry this task", True
@@ -360,6 +363,9 @@ class ConversationRunner:
     def __post_init__(self) -> None:
         if self.token_budget is None:
             self.token_budget = TokenBudget()
+        if getattr(self.llm, "harness_admitted", False):
+            # The durable Go batch replaces the legacy per-session money cap.
+            self.token_budget = None
         if self.compactor is None:
             self.compactor = Compactor(max_chars=32_000, max_messages=24)
         if self.injection_detector is None:
@@ -3005,6 +3011,7 @@ class ConversationRunner:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost=cost,
+                cost_status=getattr(self.llm, "cost_status", ""),
                 model=model,
                 cached_tokens=cached_tokens,
             )
@@ -3841,8 +3848,9 @@ class ConversationRunner:
             rendered += "\n" + line
         return rendered
 
-    @staticmethod
-    def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    def _estimate_cost(self, model: str, tokens_in: int, tokens_out: int) -> float:
+        if getattr(self.llm, "cost_status", "") == "unknown":
+            return 0.0  # No estimate is emitted; SessionMeta marks this value unknown.
         pricing = MODEL_PRICING.get(model)
         if pricing is None:
             return 0.0
@@ -3865,6 +3873,8 @@ class ConversationRunner:
 
     def _budget_summary(self) -> str:
         if self.token_budget is None:
+            if getattr(self.llm, "harness_admitted", False):
+                return "Go Ledger batch: cumulative 100,000,000 input+output tokens; price unknown"
             return "unlimited"
         status = self.token_budget.check().value
         return (

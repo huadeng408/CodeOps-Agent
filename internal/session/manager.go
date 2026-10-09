@@ -190,6 +190,7 @@ type Summary struct {
 	MessageCount      int
 	LastMessage       string
 	Metrics           SessionMetrics
+	CostStatus        string
 	TodoCount         int
 	PlanSteps         int
 	Mode              string
@@ -1164,6 +1165,7 @@ func (m *Manager) ListRecent(ctx context.Context, limit int) ([]Summary, error) 
 			MessageCount:      len(session.Messages),
 			LastMessage:       lastMessagePreview(session.Messages),
 			Metrics:           cloneMetrics(session.Metrics),
+			CostStatus:        session.Metadata["cost_status"],
 			TodoCount:         len(session.Todos),
 			PlanSteps:         len(session.Plan.Steps),
 			Mode:              sessionMode(session),

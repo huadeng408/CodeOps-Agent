@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,38 @@ import (
 	"code-agent/internal/worktree"
 	_ "modernc.org/sqlite"
 )
+
+type clearFaultInput func([]byte) (int, error)
+
+func (read clearFaultInput) Read(p []byte) (int, error) { return read(p) }
+
+func TestCLIReportsClearPersistenceFailureAndKeepsHistory(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default(root)
+	cfg.Sandbox.Enabled = false
+	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.OrchestratorStartupTimeout = "127.0.0.1:1", false, 1
+	backend := &failOnceSessionStore{MemoryStore: session.NewMemoryStore()}
+	output := &strings.Builder{}
+	var app *App
+	previous := ""
+	input := clearFaultInput(func(p []byte) (int, error) {
+		if previous != "" {
+			return 0, io.EOF
+		}
+		previous = app.session.Current().ID
+		backend.fail()
+		return copy(p, "/clear\n"), nil
+	})
+	app = NewApp(cfg, input, output, &strings.Builder{})
+	defer cleanupIntegrationApp(t, app)
+	app.session = session.NewManager(backend)
+	if err := app.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if app.session.Current().ID != previous || strings.Contains(output.String(), "session cleared") || !strings.Contains(output.String(), "retry /clear") {
+		t.Fatal("failed clear was reported as success or discarded the previous history")
+	}
+}
 
 func TestOrchestratorHistoryKeepsEmptyAssistantToolCall(t *testing.T) {
 	history := orchestratorHistory([]session.Message{

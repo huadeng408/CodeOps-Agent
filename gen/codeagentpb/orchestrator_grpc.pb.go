@@ -228,3 +228,111 @@ var Orchestrator_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "proto/codeagent/orchestrator.proto",
 }
+
+const (
+	ModelGateway_Invoke_FullMethodName = "/codeagent.v1.ModelGateway/Invoke"
+)
+
+// ModelGatewayClient is the client API for ModelGateway service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Harness-issued capabilities are transient; they never enter model Context,
+// checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+type ModelGatewayClient interface {
+	Invoke(ctx context.Context, in *ModelCallRequest, opts ...grpc.CallOption) (*ModelCallResponse, error)
+}
+
+type modelGatewayClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewModelGatewayClient(cc grpc.ClientConnInterface) ModelGatewayClient {
+	return &modelGatewayClient{cc}
+}
+
+func (c *modelGatewayClient) Invoke(ctx context.Context, in *ModelCallRequest, opts ...grpc.CallOption) (*ModelCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ModelCallResponse)
+	err := c.cc.Invoke(ctx, ModelGateway_Invoke_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ModelGatewayServer is the server API for ModelGateway service.
+// All implementations must embed UnimplementedModelGatewayServer
+// for forward compatibility.
+//
+// Harness-issued capabilities are transient; they never enter model Context,
+// checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+type ModelGatewayServer interface {
+	Invoke(context.Context, *ModelCallRequest) (*ModelCallResponse, error)
+	mustEmbedUnimplementedModelGatewayServer()
+}
+
+// UnimplementedModelGatewayServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedModelGatewayServer struct{}
+
+func (UnimplementedModelGatewayServer) Invoke(context.Context, *ModelCallRequest) (*ModelCallResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Invoke not implemented")
+}
+func (UnimplementedModelGatewayServer) mustEmbedUnimplementedModelGatewayServer() {}
+func (UnimplementedModelGatewayServer) testEmbeddedByValue()                      {}
+
+// UnsafeModelGatewayServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ModelGatewayServer will
+// result in compilation errors.
+type UnsafeModelGatewayServer interface {
+	mustEmbedUnimplementedModelGatewayServer()
+}
+
+func RegisterModelGatewayServer(s grpc.ServiceRegistrar, srv ModelGatewayServer) {
+	// If the following call pancis, it indicates UnimplementedModelGatewayServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ModelGateway_ServiceDesc, srv)
+}
+
+func _ModelGateway_Invoke_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ModelCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModelGatewayServer).Invoke(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModelGateway_Invoke_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModelGatewayServer).Invoke(ctx, req.(*ModelCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ModelGateway_ServiceDesc is the grpc.ServiceDesc for ModelGateway service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ModelGateway_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "codeagent.v1.ModelGateway",
+	HandlerType: (*ModelGatewayServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Invoke",
+			Handler:    _ModelGateway_Invoke_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/codeagent/orchestrator.proto",
+}

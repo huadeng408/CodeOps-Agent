@@ -224,3 +224,81 @@ class Orchestrator(object):
             timeout,
             metadata,
             _registered_method=True)
+
+
+class ModelGatewayStub(object):
+    """Harness-issued capabilities are transient; they never enter model Context,
+    checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Invoke = channel.unary_unary(
+                '/codeagent.v1.ModelGateway/Invoke',
+                request_serializer=codeagent_dot_orchestrator__pb2.ModelCallRequest.SerializeToString,
+                response_deserializer=codeagent_dot_orchestrator__pb2.ModelCallResponse.FromString,
+                _registered_method=True)
+
+
+class ModelGatewayServicer(object):
+    """Harness-issued capabilities are transient; they never enter model Context,
+    checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+    """
+
+    def Invoke(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_ModelGatewayServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Invoke': grpc.unary_unary_rpc_method_handler(
+                    servicer.Invoke,
+                    request_deserializer=codeagent_dot_orchestrator__pb2.ModelCallRequest.FromString,
+                    response_serializer=codeagent_dot_orchestrator__pb2.ModelCallResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'codeagent.v1.ModelGateway', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('codeagent.v1.ModelGateway', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class ModelGateway(object):
+    """Harness-issued capabilities are transient; they never enter model Context,
+    checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+    """
+
+    @staticmethod
+    def Invoke(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/codeagent.v1.ModelGateway/Invoke',
+            codeagent_dot_orchestrator__pb2.ModelCallRequest.SerializeToString,
+            codeagent_dot_orchestrator__pb2.ModelCallResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

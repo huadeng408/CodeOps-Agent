@@ -18,6 +18,7 @@ import (
 	"time"
 
 	codeagentpb "code-agent/gen/codeagentpb"
+	"code-agent/internal/admission"
 	"code-agent/internal/config"
 	"code-agent/internal/hooks"
 	"code-agent/internal/identity"
@@ -66,6 +67,9 @@ type App struct {
 	actor          identity.Actor
 	orchestrator   *orchestrator.Client
 	orchestratorPM *orchestrator.ProcessManager
+	modelGateway   *admission.Gateway
+	tokenBudget    *admission.Budget
+	admissionErr   error
 	hooks          *hooks.Engine
 	executor       *tools.Executor
 	ragClient      *rag.Client
@@ -242,6 +246,19 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		instructions:   instructions,
 		telemetry:      telemetry,
 	}
+	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
+		ledger, err := sessionStore.Ledger()
+		if err == nil {
+			app.tokenBudget = admission.NewBudget(ledger)
+			app.modelGateway = admission.NewGateway(app.tokenBudget, admission.ProviderFromEnv())
+			app.status.CostUnknown = true
+			err = app.modelGateway.Start()
+		}
+		app.admissionErr = err
+		if err == nil {
+			orchestratorManager.SetModelScopeFactory(app.modelGateway.BindActor)
+		}
+	}
 	app.memory = memory.NewLazyLedgerCLI(func() (*memory.LedgerMemory, error) {
 		ledger, err := sessionStore.Ledger()
 		if err != nil {
@@ -296,6 +313,9 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 func (a *App) Run(ctx context.Context) error {
 	defer func() {
+		if a.modelGateway != nil {
+			a.modelGateway.Close()
+		}
 		if a.agentRunner != nil {
 			_ = a.agentRunner.Close()
 		}
@@ -303,6 +323,9 @@ func (a *App) Run(ctx context.Context) error {
 			_ = a.agentTools.Close()
 		}
 	}()
+	if a.admissionErr != nil {
+		return errors.New("model admission initialization unavailable")
+	}
 	defer func() { _ = a.session.Close() }()
 	defer func() {
 		if a.executor != nil {
@@ -1189,11 +1212,21 @@ func (a *App) handleOrchestratorEvent(ctx context.Context, event orchestrator.Ev
 			event.SessionMeta.GetCost(),
 		)
 		a.session.AddCachedTokens(cachedTokens)
+		cost := fmt.Sprintf("%.6f", event.SessionMeta.GetCost())
+		if event.SessionMeta.GetCostStatus() == "unknown" {
+			cost = "unknown"
+			a.status.CostUnknown = true
+		}
+		costStatus := event.SessionMeta.GetCostStatus()
+		if a.session.Current().Metadata["cost_status"] == "unknown" {
+			costStatus = "unknown"
+		}
 		a.session.MergeMetadata(map[string]string{
 			"last_turn":          fmt.Sprint(event.SessionMeta.GetTurn()),
 			"last_tokens_in":     fmt.Sprint(event.SessionMeta.GetTokensIn()),
 			"last_tokens_out":    fmt.Sprint(event.SessionMeta.GetTokensOut()),
-			"last_cost":          fmt.Sprintf("%.6f", event.SessionMeta.GetCost()),
+			"last_cost":          cost,
+			"cost_status":        costStatus,
 			"last_model":         event.SessionMeta.GetModel(),
 			"last_cached_tokens": fmt.Sprint(event.SessionMeta.GetCachedTokens()),
 		})
@@ -1323,18 +1356,34 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 		))
 		a.renderer.PrintBlock("summary", strings.Split(update.GetSummary(), "\n"))
 	case "/clear":
+		if a.modelGateway != nil {
+			if err := a.modelGateway.FinishTask(ctx, a.session.Current().Actor); err != nil {
+				a.renderer.PrintLine("task cannot finish: wait for agents or reconcile retained model usage")
+				return true
+			}
+		}
 		cleared := a.session.Reset()
+		if cleared.ID == "" {
+			a.renderer.PrintLine("new session creation failed; previous history preserved; retry /clear")
+			return true
+		}
 		if err := a.bindSessionActor(cleared); err != nil {
 			a.renderer.PrintLine("clear actor failed: " + err.Error())
+			return true
 		}
 		a.renderer.PrintLine("session cleared")
 	case "/config":
+		tokens := "max tokens per session: " + fmt.Sprint(a.cfg.MaxTokensPerSession)
+		money := "max cost per session: $" + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession)
+		if a.modelGateway != nil {
+			tokens, money = "shared batch: 100000000 input+output tokens", "price unknown; no monetary cap"
+		}
 		a.renderer.PrintBlock("config", []string{
 			"model: " + a.cfg.Model,
 			"fast model: " + a.cfg.ModelFast,
 			"context window: " + fmt.Sprint(a.cfg.ContextWindow),
-			"max tokens per session: " + fmt.Sprint(a.cfg.MaxTokensPerSession),
-			"max cost per session: $" + fmt.Sprintf("%.2f", a.cfg.MaxCostPerSession),
+			tokens,
+			money,
 			"orchestrator: " + a.cfg.OrchestratorAddr,
 			"orchestrator auto-start: " + fmt.Sprint(a.cfg.OrchestratorAutoStart),
 			"orchestrator command: " + strings.Join(append([]string{a.cfg.OrchestratorCommand}, a.cfg.OrchestratorArgs...), " "),
@@ -1893,6 +1942,16 @@ func (a *App) recordToolWorkingDir(call orchestrator.ToolCall, result tools.Tool
 }
 
 func (a *App) budgetLines() []string {
+	if a.tokenBudget != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		batch, err := a.tokenBudget.Inspect(ctx, 1)
+		if err != nil {
+			return []string{"token batch unavailable; restore the Ledger before calling a model", "cost: unknown"}
+		}
+		return []string{fmt.Sprintf("batch: %s | tokens: %d used / %d reserved / %d limit", batch.ID, batch.UsedTokens, batch.ReservedTokens, batch.LimitTokens),
+			"active task session: " + batch.TaskID, "cost: unknown | no monetary cap", fmt.Sprintf("usage unknown: %t", batch.UnknownUsage)}
+	}
 	snapshot := a.metrics.Snapshot()
 	usedTokens := snapshot.TotalTokensIn + snapshot.TotalTokensOut
 	maxTokens := a.cfg.MaxTokensPerSession
@@ -1945,13 +2004,17 @@ func (a *App) handleSessionsCommand(ctx context.Context, fields []string) {
 
 	lines := make([]string, 0, len(sessions))
 	for _, item := range sessions {
-		line := fmt.Sprintf("%s | %s | mode: %s | messages: %d | tools: %d | cost: $%.6f | %s",
+		cost := fmt.Sprintf("$%.6f", item.Metrics.TotalCost)
+		if item.CostStatus == "unknown" {
+			cost = "unknown"
+		}
+		line := fmt.Sprintf("%s | %s | mode: %s | messages: %d | tools: %d | cost: %s | %s",
 			item.ID,
 			item.UpdatedAt.Format("2006-01-02 15:04:05"),
 			item.Mode,
 			item.MessageCount,
 			item.Metrics.ToolCalls,
-			item.Metrics.TotalCost,
+			cost,
 			item.WorkingDir,
 		)
 		if strings.TrimSpace(item.LastMessage) != "" {
@@ -2061,6 +2124,10 @@ func (a *App) restoreWorkingDir(restored session.Session) {
 }
 
 func (a *App) restoreMetrics(restored session.Session) {
+	if a.status == nil {
+		a.status = NewStatusLine()
+	}
+	a.status.CostUnknown = a.modelGateway != nil || restored.Metadata["cost_status"] == "unknown"
 	a.metrics.Hydrate(metrics.SessionMetrics{
 		StartTime:         restored.CreatedAt,
 		TotalTokensIn:     restored.Metrics.TotalTokensIn,

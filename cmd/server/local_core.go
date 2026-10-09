@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"code-agent/internal/admission"
 	"code-agent/internal/handler"
 	"code-agent/internal/localidentity"
 	"code-agent/internal/middleware"
@@ -70,15 +71,58 @@ func runLocalCore(cfg serverconfig.Config) error {
 	}
 	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, continuation: session.NewContinuationSlot()}).register(router, api, users, jwtManager)
 	api.GET("/capabilities", middleware.AuthMiddleware(jwtManager, users), func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": map[string]CapabilityStatus{
+		capabilities := map[string]CapabilityStatus{
 			"identity":  {State: "ready", Reason: "local persistent authentication"},
 			"history":   {State: "ready", Reason: "canonical Session Ledger"},
 			"execution": {State: "blocked", Reason: "provider, sandbox and budget admission are required"},
 			"rag":       {State: "degraded", Reason: "optional services are disabled in the local profile"},
 			"trace":     {State: "unknown", Reason: "trace backend has not been verified"},
-		}})
+		}
+		addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities)
+		capabilities["sandbox"] = CapabilityStatus{State: "blocked", Reason: "local task runtime is not attached"}
+		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": capabilities})
 	})
 	return serveHTTPServer(&http.Server{Addr: net.JoinHostPort(host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 5 * time.Second})
+}
+
+func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog, capabilities map[string]CapabilityStatus) {
+	provider := admission.ProviderFromEnv()
+	reason := "model admission is not enabled"
+	state := "blocked"
+	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
+		switch {
+		case provider.APIKey == "":
+			reason = "model credentials are missing"
+		case provider.Model == "" || provider.BaseURL == "":
+			reason = "model and endpoint are missing"
+		case provider.InputLimit <= 0 || provider.OutputLimit <= 0:
+			reason = "model token bounds are missing"
+		case provider.Validate() != nil:
+			reason = "model profile is invalid"
+		default:
+			state, reason = "unknown", "model profile configured; live validity is not confirmed"
+		}
+	}
+	capabilities["provider"] = CapabilityStatus{State: state, Reason: reason}
+	batch, err := admission.NewBudget(ledger).Inspect(ctx, 1)
+	if err != nil {
+		capabilities["budget"] = CapabilityStatus{State: "unknown", Reason: "token Ledger is unavailable; restore it before calling a model"}
+		return
+	}
+	budget := CapabilityStatus{State: "ready", Reason: "persistent token admission; price unknown", Tokens: &TokenBatchStatus{
+		BatchID: batch.ID, Limit: batch.LimitTokens, Used: batch.UsedTokens, Reserved: batch.ReservedTokens, CostStatus: batch.CostStatus,
+	}}
+	switch {
+	case batch.UnknownUsage:
+		budget.State, budget.Reason = "blocked", "token usage is unknown; reconcile retained reservations"
+	case batch.ReservedTokens > 0:
+		budget.State, budget.Reason = "blocked", "a model attempt is unresolved; wait or reconcile after restart"
+	case batch.UsedTokens >= batch.LimitTokens:
+		budget.State, budget.Reason = "blocked", "token batch is exhausted"
+	case batch.ID == "":
+		budget.State, budget.Reason = "unknown", "token batch initializes on the first admitted call"
+	}
+	capabilities["budget"] = budget
 }
 
 func localOriginBoundary(rawOrigins string) gin.HandlerFunc {

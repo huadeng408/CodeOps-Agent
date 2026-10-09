@@ -14,7 +14,8 @@ import (
 
 type actorCaptureServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
-	actor *codeagentpb.ActorContext
+	actor        *codeagentpb.ActorContext
+	modelGateway *codeagentpb.ModelGatewayBinding
 }
 
 func (s *actorCaptureServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
@@ -27,11 +28,42 @@ func (s *actorCaptureServer) Converse(stream codeagentpb.Orchestrator_ConverseSe
 		return io.ErrUnexpectedEOF
 	}
 	s.actor = input.GetActor()
+	s.modelGateway = input.GetModelGateway()
 	return stream.Send(&codeagentpb.OrchestratorMessage{
 		Payload: &codeagentpb.OrchestratorMessage_Done{
 			Done: &codeagentpb.Done{Success: true, Message: "authorized"},
 		},
 	})
+}
+
+func TestOrchestratorClientSendsTransientModelScope(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	capture := &actorCaptureServer{}
+	codeagentpb.RegisterOrchestratorServer(server, capture)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	client, err := orchestrator.NewClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	released := false
+	client.SetModelScopeFactory(func(actor orchestrator.ActorIdentity, taskID string) (*codeagentpb.ModelGatewayBinding, func(), error) {
+		if actor.SessionID != "session-1" || taskID != "session-1" {
+			t.Fatal("scope not bound to the authenticated session")
+		}
+		return &codeagentpb.ModelGatewayBinding{SchemaVersion: 1, Address: "127.0.0.1:1234", Capability: make([]byte, 32), Protocol: "openai", Model: "fixture-model"}, func() { released = true }, nil
+	})
+	if _, err := client.ConverseWithHistory(context.Background(), "hello", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if capture.modelGateway == nil || capture.modelGateway.Model != "fixture-model" || !released {
+		t.Fatal("model scope was omitted or not released")
+	}
 }
 
 func TestOrchestratorClientPropagatesVersionedActorContext(t *testing.T) {

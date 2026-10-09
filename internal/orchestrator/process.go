@@ -32,6 +32,7 @@ type ProcessConfig struct {
 	RequireHarnessWorktree bool
 	StartupTimeout         time.Duration
 	ConversationTimeout    time.Duration
+	ModelScopeFactory      ModelScopeFactory
 }
 
 // ManagedProcess abstracts the orchestrator subprocess so the supervisor can
@@ -105,6 +106,15 @@ func (m *ProcessManager) SetProcessStarter(starter ProcessStarter) {
 	}
 }
 
+func (m *ProcessManager) SetModelScopeFactory(factory ModelScopeFactory) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.ModelScopeFactory = factory
+	if m.client != nil {
+		m.client.SetModelScopeFactory(factory)
+	}
+}
+
 // Client returns a healthy orchestrator client, reusing the cached connection
 // when it is still live. A connection left stale by a crashed orchestrator is
 // detected (via a health probe) and transparently re-dialed, relaunching the
@@ -137,6 +147,7 @@ func (m *ProcessManager) acquireLocked(ctx context.Context) (*Client, error) {
 		return nil, err
 	}
 	client.SetConversationTimeout(m.cfg.ConversationTimeout)
+	client.SetModelScopeFactory(m.cfg.ModelScopeFactory)
 	if healthy(ctx, client) {
 		m.client = client
 		return client, nil
@@ -163,6 +174,7 @@ func (m *ProcessManager) ensureStartedLocked(ctx context.Context) (*Client, erro
 		return nil, err
 	}
 	client.SetConversationTimeout(m.cfg.ConversationTimeout)
+	client.SetModelScopeFactory(m.cfg.ModelScopeFactory)
 	if err := m.waitUntilHealthy(ctx, client); err != nil {
 		_ = client.Close()
 		m.reapProcessLocked(proc, exit)
@@ -427,6 +439,18 @@ func buildOrchestratorCmd(cfg ProcessConfig) *exec.Cmd {
 	cmd := exec.CommandContext(context.Background(), cfg.Command, args...)
 	cmd.Dir = cfg.ProjectRoot
 	cmd.Env = os.Environ()
+	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
+		filtered := cmd.Env[:0]
+		for _, item := range cmd.Env {
+			name, _, _ := strings.Cut(item, "=")
+			name = strings.ToUpper(name)
+			if name == "OPENAI_API_KEY" || name == "ANTHROPIC_API_KEY" || name == "ANTHROPIC_AUTH_TOKEN" || name == "CODE_AGENT_PROVIDER_CONFIG" {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		cmd.Env = filtered
+	}
 	if cfg.RequireHarnessWorktree {
 		cmd.Env = append(cmd.Env, "CODE_AGENT_REQUIRE_HARNESS_WORKTREE=1")
 	}

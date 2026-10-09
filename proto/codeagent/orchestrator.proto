@@ -11,6 +11,39 @@ service Orchestrator {
   rpc ReflectMemory(MemoryReflectionRequest) returns (MemoryReflectionResponse);
 }
 
+// Harness-issued capabilities are transient; they never enter model Context,
+// checkpoint persistence or user-visible events. Provider credentials stay Go-owned.
+service ModelGateway {
+  rpc Invoke(ModelCallRequest) returns (ModelCallResponse);
+}
+
+message ModelGatewayBinding {
+  uint32 schema_version = 1;
+  string address = 2;
+  bytes capability = 3;
+  string protocol = 4;
+  string model = 5;
+  int64 output_limit = 6;
+}
+
+message ModelCallRequest {
+  bytes capability = 1;
+  string call_id = 2;
+  bytes payload_json = 3;
+  string purpose = 4;
+}
+
+message ModelCallResponse {
+  bytes payload_json = 1;
+  string error_code = 2;
+  int64 input_tokens = 3;
+  int64 output_tokens = 4;
+  int64 cached_input_tokens = 5;
+  int32 http_status = 6;
+  // Unknown price is explicit, not a zero-cost assertion.
+  string cost_status = 7;
+}
+
 message Empty {}
 
 message HealthResponse {
@@ -72,6 +105,7 @@ message UserInput {
   AgentTask agent_task = 9;
   repeated string allowed_tools = 10;
   ContextEnvelope context_envelope = 11;
+  ModelGatewayBinding model_gateway = 12;
 }
 
 // ContextEnvelope is a bounded, read-only projection produced by the Go
@@ -191,6 +225,7 @@ message MemoryReflectionRequest {
   ActorContext actor = 2;
   string source_checksum = 3;
   repeated MemorySource sources = 4;
+  ModelGatewayBinding model_gateway = 5;
 }
 
 message MemoryReflectionResponse {
@@ -241,6 +276,7 @@ message CompactRequest {
   string session_id = 1;
   repeated ConversationMessage history = 2;
   ActorContext actor = 3;
+  ModelGatewayBinding model_gateway = 4;
 }
 
 message ToolResult {
@@ -326,6 +362,8 @@ message SessionMeta {
   double cost = 4;
   string model = 5;
   int64 cached_tokens = 6;  // prompt-cache hit tokens (Anthropic cache_read / OpenAI cached_tokens)
+  // Empty means the legacy estimate; unknown means cost is not an amount.
+  string cost_status = 7;
 }
 
 message Done {

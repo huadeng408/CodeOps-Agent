@@ -15,6 +15,7 @@ import (
 	"time"
 
 	codeagentpb "code-agent/gen/codeagentpb"
+	"code-agent/internal/admission"
 	"code-agent/internal/handler"
 	"code-agent/internal/mcp"
 	"code-agent/internal/memory"
@@ -284,6 +285,15 @@ func main() {
 		return
 	}
 	defer ledger.Close()
+	var modelGateway *admission.Gateway
+	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
+		modelGateway = admission.NewGateway(admission.NewBudget(ledger), admission.ProviderFromEnv())
+		if err := modelGateway.Start(); err != nil {
+			log.Error("model admission initialization unavailable", err)
+			return
+		}
+		defer modelGateway.Close()
+	}
 	workbench := session.NewWorkbench(ledger, wsHub)
 	workspaceRoot, rootErr := os.Getwd()
 	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
@@ -358,6 +368,9 @@ func main() {
 			return nil, err
 		}
 		client.SetTracer(telemetry)
+		if modelGateway != nil {
+			client.SetModelScopeFactory(modelGateway.BindActor)
+		}
 		sessionMemory := memory.NewLedgerMemory(ledger, client.ReflectMemory)
 		sessionMemory.SetTracer(telemetry)
 		client.OnAgentSpawn = func(spawnCtx context.Context, spawn *codeagentpb.AgentSpawn) error {
@@ -487,12 +500,18 @@ func main() {
 			if es.ESClient != nil && embeddingPreflightStatus == "ok" && strings.TrimSpace(cfg.Embedding.BaseURL) != "" && traceIndex != "" {
 				rag = CapabilityStatus{State: "unknown", Reason: "retrieval is configured; live availability has not been verified"}
 			}
-			c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": map[string]CapabilityStatus{
+			capabilities := map[string]CapabilityStatus{
 				"identity":  {State: "ready", Reason: "service authentication is available"},
 				"history":   {State: "ready", Reason: "canonical Session Ledger"},
 				"execution": execution, "rag": rag,
 				"trace": {State: "unknown", Reason: "trace backend has not been verified"},
-			}})
+			}
+			addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities)
+			if sandboxState == "ok" {
+				sandboxState = "ready"
+			}
+			capabilities["sandbox"] = CapabilityStatus{State: sandboxState, Reason: sandboxReason}
+			c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": capabilities})
 		})
 		upload := apiV1.Group("/upload")
 		upload.Use(middleware.AuthMiddleware(jwtManager, userService))
@@ -645,8 +664,17 @@ func healthzHandler(statusFn func() string) gin.HandlerFunc {
 }
 
 type CapabilityStatus struct {
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
+	State  string            `json:"state"`
+	Reason string            `json:"reason,omitempty"`
+	Tokens *TokenBatchStatus `json:"tokens,omitempty"`
+}
+
+type TokenBatchStatus struct {
+	BatchID    string `json:"batch_id,omitempty"`
+	Limit      int64  `json:"limit"`
+	Used       int64  `json:"used"`
+	Reserved   int64  `json:"reserved"`
+	CostStatus string `json:"cost_status"`
 }
 
 func capabilityFromStatus(status string) CapabilityStatus {

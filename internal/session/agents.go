@@ -420,7 +420,11 @@ func (r *SessionRunner) admitInitialAgentTurn(ctx context.Context, owner uint, a
 }
 
 func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, taskID)
+	return readAgentTask(ctx, r.workbench.ledger, owner, taskID, callerSessionID)
+}
+
+func readAgentTask(ctx context.Context, ledger EventLog, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
+	snapshot, err := ReadVerifiedSnapshot(ctx, ledger, taskID)
 	if err != nil {
 		return nil, agentTaskCreated{}, err
 	}
@@ -442,7 +446,7 @@ func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, c
 	if callerSessionID != task.ParentSessionId && callerSessionID != task.ChildSessionId {
 		return nil, created, ErrSessionNotFound
 	}
-	parent, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ParentSessionId)
+	parent, err := ReadVerifiedSnapshot(ctx, ledger, task.ParentSessionId)
 	if err != nil {
 		return nil, created, err
 	}
@@ -465,6 +469,97 @@ func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, c
 		return nil, created, err
 	}
 	return task, created, nil
+}
+
+// ModelTaskRoot restores the authenticated task scope from existing Ledger
+// links, including auxiliary calls that carry no AgentTask protobuf.
+func ModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (string, error) {
+	if actor.Validate() != nil {
+		return "", ErrSessionNotFound
+	}
+	seen := make(map[string]bool)
+	var rootOwner uint
+	for len(seen) < 128 && !seen[actor.SessionID] {
+		seen[actor.SessionID] = true
+		snapshot, err := ReadVerifiedSnapshot(ctx, ledger, actor.SessionID)
+		if err != nil {
+			return "", err
+		}
+		owner, _, err := agentParent(snapshot.Events, actor)
+		if err != nil || (rootOwner != 0 && owner != rootOwner) {
+			return "", ErrSessionNotFound
+		}
+		rootOwner = owner
+		task, _, err := projectAgentTask(snapshot.Events)
+		if err != nil {
+			return "", err
+		}
+		if task == nil {
+			return actor.SessionID, nil
+		}
+		task, created, err := readAgentTask(ctx, ledger, owner, task.Id, actor.SessionID)
+		if err != nil || created.Actor.ScopeKey() != actor.ScopeKey() {
+			return "", ErrSessionNotFound
+		}
+		actor.SessionID = task.ParentSessionId
+	}
+	return "", ErrEventIntegrity
+}
+
+// ModelTaskIdle refuses completion while a linked agent can still produce work.
+func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) error {
+	root, err := ModelTaskRoot(ctx, ledger, actor)
+	if err != nil {
+		return err
+	}
+	actor.SessionID = root
+	var inspect func(string) error
+	seen := make(map[string]bool)
+	inspect = func(id string) error {
+		if seen[id] || len(seen) >= 128 {
+			return ErrEventIntegrity
+		}
+		seen[id] = true
+		snapshot, err := ReadVerifiedSnapshot(ctx, ledger, id)
+		if err != nil {
+			return err
+		}
+		current := actor
+		current.SessionID = id
+		owner, _, err := agentParent(snapshot.Events, current)
+		if err != nil {
+			return err
+		}
+		if snapshot.Events[0].Type == sessionCreatedEventType {
+			runs, err := projectRuns(snapshot.Events)
+			if err != nil {
+				return ErrSessionStateConflict
+			}
+			for _, run := range runs {
+				if !run.terminal {
+					return ErrSessionStateConflict
+				}
+			}
+		}
+		for _, event := range snapshot.Events {
+			if event.Type != "agent/task-linked" {
+				continue
+			}
+			var link agentTaskLink
+			if json.Unmarshal(event.Payload, &link) != nil {
+				return ErrEventIntegrity
+			}
+			task, _, err := readAgentTask(ctx, ledger, owner, link.TaskID, id)
+			if err != nil || !taskTerminal(task.Status) {
+				return ErrSessionStateConflict
+			}
+			if err := inspect(task.ChildSessionId); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return inspect(root)
 }
 
 func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {

@@ -7,7 +7,7 @@ import (
 	"code-agent/internal/metrics"
 )
 
-type StatusLine struct{}
+type StatusLine struct{ CostUnknown bool }
 
 func NewStatusLine() *StatusLine {
 	return &StatusLine{}
@@ -18,6 +18,10 @@ func (s *StatusLine) Format(snapshot metrics.SessionMetrics) string {
 }
 
 func (s *StatusLine) FormatWidth(snapshot metrics.SessionMetrics, mode string, width int) string {
+	cost := fmt.Sprintf("cost $%.4f", snapshot.TotalCost)
+	if s.CostUnknown {
+		cost = "cost unknown"
+	}
 	cachePart := ""
 	if snapshot.TotalCachedTokens > 0 {
 		ratio := 0.0
@@ -30,7 +34,7 @@ func (s *StatusLine) FormatWidth(snapshot metrics.SessionMetrics, mode string, w
 		strings.TrimSpace(mode),
 		fmt.Sprintf("errors %d", snapshot.Errors),
 		fmt.Sprintf("tokens %d in / %d out%s", snapshot.TotalTokensIn, snapshot.TotalTokensOut, cachePart),
-		fmt.Sprintf("cost $%.4f", snapshot.TotalCost),
+		cost,
 		fmt.Sprintf("tools %d", snapshot.ToolCalls),
 		fmt.Sprintf("turns %d", snapshot.Turns),
 		"/help",

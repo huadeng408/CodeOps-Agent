@@ -46,6 +46,25 @@ func TestSessionPersistsActorIdentity(t *testing.T) {
 	}
 }
 
+func TestSessionSummaryKeepsUnknownCostAfterReload(t *testing.T) {
+	store := session.NewSQLiteEventStore(filepath.Join(t.TempDir(), "cost.sqlite"))
+	defer store.Close()
+	manager := session.NewManager(store)
+	created := manager.NewSession(t.TempDir())
+	manager.MergeMetadata(map[string]string{"cost_status": "unknown"})
+	if err := manager.AutoSave(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := session.NewManager(store)
+	if _, err := reloaded.Resume(context.Background(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := reloaded.ListRecent(context.Background(), 10)
+	if err != nil || len(summaries) != 1 || summaries[0].CostStatus != "unknown" {
+		t.Fatal("unknown cumulative cost became an amount in saved history")
+	}
+}
+
 func TestSQLiteStoreRejectsLegacySnapshotWrites(t *testing.T) {
 	store := session.NewSQLiteStore(filepath.Join(t.TempDir(), "sessions.sqlite"))
 	t.Cleanup(func() { _ = store.Close() })

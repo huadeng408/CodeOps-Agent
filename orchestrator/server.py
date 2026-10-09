@@ -30,6 +30,7 @@ from .llm.providers import (
     build_fast_client,
     build_provider_router,
 )
+from .llm.gateway import HarnessModelClient, ModelGatewayError
 from .memory.manager import MemoryManager
 from .memory.reflection import reflect_memory
 from .runtime import (
@@ -67,6 +68,8 @@ def _safe_rpc_status(exc: BaseException) -> str:
 
 def _rpc_failure_details(exc: BaseException) -> tuple[str, str, bool, str]:
     """Classify transport cancellation without exposing RpcError details."""
+    if isinstance(exc, ModelGatewayError):
+        return exc.code, "model call blocked; restore prerequisites or reconcile retained usage", False, ""
     status = _safe_rpc_status(exc)
     details = {
         "CANCELLED": (
@@ -245,23 +248,25 @@ class ServerConfig:
 
 class OrchestratorServer:
     def __init__(self, config: ServerConfig | None = None) -> None:
-        load_dotenv()
-        from .config.provider_file import apply_provider_file
-        if read_env('CODE_AGENT_PROVIDER_CONFIG'):
-            apply_provider_file(read_env('CODE_AGENT_PROVIDER_CONFIG'), read_env('CODE_AGENT_PROVIDER_PROFILE'))
+        admitted = os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required"
+        if not admitted:
+            load_dotenv()
+            from .config.provider_file import apply_provider_file
+            if read_env('CODE_AGENT_PROVIDER_CONFIG'):
+                apply_provider_file(read_env('CODE_AGENT_PROVIDER_CONFIG'), read_env('CODE_AGENT_PROVIDER_PROFILE'))
         self.config = config or ServerConfig()
         self._otel_shutdown = configure_otel()
         self.project_root = str(Path(self.config.project_root).resolve())
         self.working_dir = str(Path(self.config.working_dir).resolve())
         checkpoint_path = Path(self.project_root) / ".agent" / "checkpoints.sqlite"
         self.graph = build_graph(checkpoint_path=checkpoint_path)
-        self.llm = build_default_client()
-        self.provider_clients = _build_provider_clients(self.llm)
+        self.llm = None if admitted else build_default_client()
+        self.provider_clients = {} if admitted else _build_provider_clients(self.llm)
         self.provider_router = build_provider_router(self.provider_clients)
         self.loop_plugins = AgentLoopPluginRegistry()
         self.hooks = HookRegistry()
         self.commands = CommandRegistry()
-        self.fast_llm = build_fast_client()
+        self.fast_llm = None if admitted else build_fast_client()
         self.tools = ToolRegistry(self.project_root)
         self.todos = TodoManager()
         self.memory = MemoryManager(self.config.memory_dir)
@@ -361,7 +366,15 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         )
         cancel = threading.Event()
         context.add_callback(cancel.set)
-        return reflect_memory(self.app.llm, request, cancel)
+
+        if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and not request.HasField("model_gateway"):
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "model admission binding required")
+        client = HarnessModelClient(request.model_gateway) if request.HasField("model_gateway") else self.app.llm
+        try:
+            return reflect_memory(client, request, cancel)
+        finally:
+            if isinstance(client, HarnessModelClient):
+                client.close()
 
     def _authorize_actor(self, actor_wire, session_id: str, context) -> ActorIdentity | None:
         # Keep the pre-Actor API usable for ephemeral, session-less callers.
@@ -444,16 +457,21 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         working_dir: str | None = None,
         *,
         project_root: str | None = None,
+        model_gateway=None,
     ) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
         # executable tools. This keeps compaction on the same model boundary
         # as normal turns while making the path explicit in production.
+        if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and model_gateway is None:
+            raise ModelGatewayError("model_prerequisites_missing")
+        client = HarnessModelClient(model_gateway) if model_gateway is not None else self.app.llm
+        provider_clients = ({"default": client, model_gateway.protocol: client} if model_gateway is not None else self._provider_clients_for_request())
         compaction_summarizer = None
-        if self.app.llm is not None:
+        if client is not None:
             compaction_summarizer = LLMCompactionSummarizer(
-                client=self.app.llm,
+                client=client,
                 provider="default",
-                model=str(getattr(self.app.llm, "model", "")),
+                model=str(getattr(client, "model", "")),
             )
         runner_root = str(Path(project_root or self.app.project_root).resolve())
         runner_working_dir = (
@@ -463,7 +481,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         skills = self.app.session_skills(skill_root)
         return ConversationRunner(
             graph=self.app.graph,
-            llm=self.app.llm,
+            llm=client,
             tool_registry=ToolRegistry(runner_root, skills=skills),
             todo_manager=self.app.todos,
             memory_manager=self.app.memory,
@@ -471,13 +489,13 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             project_root=runner_root,
             working_dir=runner_working_dir,
             token_budget=self.app.token_budget,
-            fast_llm=self.app.fast_llm,
-            main_llm=self.app.llm,
-            provider_clients=self._provider_clients_for_request(),
+            fast_llm=client if model_gateway is not None else self.app.fast_llm,
+            main_llm=client,
+            provider_clients=provider_clients,
             layered_context=self.app.layered_context,
             context_window=self.app.config.context_window,
             loop_plugins=self.app.loop_plugins,
-            provider_router=self._provider_router_for_request(),
+            provider_router=build_provider_router(provider_clients) if model_gateway is not None else self._provider_router_for_request(),
             hooks=self.app.hooks,
             commands=self.app.commands,
             extensions=self.app.session_extensions(runner_root),
@@ -518,8 +536,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             lease = self.app.session_operations.try_acquire_compact(request.session_id)
         except SessionOperationBusy:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "session is busy")
+        runner = None
         try:
-            runner = self._new_runner()
+            runner = self._new_runner(**({"model_gateway": request.model_gateway} if request.HasField("model_gateway") else {}))
             update = runner.compact_now(
                 session_id=request.session_id,
                 history=history,
@@ -532,6 +551,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             )
         finally:
             lease.release()
+            if request.HasField("model_gateway") and runner is not None and isinstance(runner.llm, HarnessModelClient):
+                runner.llm.close()
         return update or orchestrator_pb2.CompactionUpdate()
 
     def Converse(self, request_iterator, context):
@@ -549,10 +570,12 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         ledger_checksum = ""
         agent_task = None
         allowed_tools = ()
+        model_gateway = None
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "user_input":
                 user_input = message.user_input
+                model_gateway = user_input.model_gateway if user_input.HasField("model_gateway") else None
                 user_text = user_input.text
                 session_id = user_input.session_id
                 working_dir = self._validate_working_dir(user_input.working_dir, session_id, context)
@@ -630,6 +653,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         except Exception:
             pass
 
+        runner = None
         try:
             if agent_task is not None:
                 # An independent child receives a separate project boundary.
@@ -639,18 +663,20 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 runner = self._new_runner(
                     working_dir=working_dir or None,
                     project_root=child_root,
+                    **({"model_gateway": model_gateway} if model_gateway is not None else {}),
                 )
             elif working_dir:
-                runner = self._new_runner(working_dir=working_dir)
+                runner = self._new_runner(working_dir=working_dir, **({"model_gateway": model_gateway} if model_gateway is not None else {}))
             else:
-                runner = self._new_runner()
+                runner = self._new_runner(**({"model_gateway": model_gateway} if model_gateway is not None else {}))
             if harness_managed:
                 runner.harness_managed = True
                 runner.harness_memory_context = memory_context
                 runner.harness_context = harness_context
                 runner.layered_context = None
                 runner.todo_manager = TodoManager()
-                runner.token_budget = TokenBudget(max_tokens=self.app.config.max_tokens,max_cost=self.app.config.max_cost)
+                runner.token_budget = (None if model_gateway is not None else
+                                       TokenBudget(max_tokens=self.app.config.max_tokens, max_cost=self.app.config.max_cost))
                 if agent_task is not None:
                     task_identity = orchestrator_pb2.AgentTask()
                     task_identity.CopyFrom(agent_task)
@@ -730,6 +756,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             )
         finally:
             lease.release()
+            if model_gateway is not None and runner is not None and isinstance(runner.llm, HarnessModelClient):
+                runner.llm.close()
             # Detach the TraceContext parent so following calls on this
             # thread do not inherit it.
             if otel_token is not None:
