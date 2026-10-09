@@ -20,7 +20,7 @@
 | D03 | GitHub 保存正式规格与任务，本地 Markdown 保存草稿与工作笔记 | [任务配置](agents/issue-tracker.md) |
 | D04 | 基础代码 Agent 独立启动，RAG、对象存储、索引按需启用 | [ADR-0003](adr/0003-start-coding-without-optional-rag-services.md) |
 | D05 | 隔离工作树修改与测试，预览后由 Go 应用结果 | [ADR-0004](adr/0004-review-managed-worktree-results-before-application.md) |
-| D06 | 首批真实 API 验收单批最多 100 元，同时执行 1 个代码任务 | 本文预算 |
+| D06 | 首批真实 API 验收单批最多 100,000,000 输入＋输出 tokens，同时执行 1 个代码任务 | 本文预算（2026-10-09 用户修订） |
 | D07 | 任务继承权限允许的当前工作副本，保留未提交改动 | [ADR-0004](adr/0004-review-managed-worktree-results-before-application.md) |
 | D08 | 固定任务镜像，受控准备依赖，执行阶段默认离线 | 本文执行环境 |
 | D09 | Go 修复任务、Python 功能任务各 1 个，每个至少 10 轮浏览器对话 | 本文验收 |
@@ -92,9 +92,10 @@ HTTP、CLI、continuation、child/workflow 与 Hook/MCP；仅按本片涉及范�
   路径和相关仓库状态。冲突保留结果；部分应用的 intent/outcome 与 unknown 由 Ledger 记录。
 - 凭据、生成目录和未授权路径不进入任务副本。依赖获取在批准的准备阶段执行，
   固定来源与版本，任务执行默认网络关闭；Docker 操作使用现有 readiness helper。
-- 首批真实 API 验收单批上限为人民币 100 元、同时执行 1 个代码任务。
-  先核对 provider 价目与实际 usage 计量，包含重试、反思和子 Agent；无法可靠计量时
-  保持 unknown/BLOCKED。该上限是资源约束，不是完成测试的报价。
+- 首批真实 API 验收单批上限为 100,000,000 tokens（累计输入＋输出），同时执行 1 个代码任务；按 2026-10-09 用户要求替代原人民币 100 元限额。
+  先确认调用用量上界并预留，再按实际 usage 结算，包含重试、反思和子 Agent；
+  usage 无法可靠确认时保留预留并进入 unknown/BLOCKED。价格独立记录，未知费用
+  不写为零；该 token 限额不代表人民币费用上限。
 - BeeAPI/OpenAI relay 的跨进程/shard 合计并发继续保持 1–10，429 使用有界退避。
   达到预算或无法恢复时保存完整结果，不以已通过子集替代分母。
 - 本机身份、owner/session/ticket 与旧用户映射保持 Go 强制。旧快照只读导入，

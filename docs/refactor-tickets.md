@@ -10,7 +10,7 @@
 | 草案编号 | 正式任务 | 发布时 Blocked by |
 | --- | --- | --- |
 | 01 | [#2：无外部服务的安全本机启动与历史查看](https://github.com/huadeng408/CodeOps-Agent/issues/2) | 无 |
-| 02 | [#3：真实调用前置检查与持久化 100 元批次上限](https://github.com/huadeng408/CodeOps-Agent/issues/3) | [#2](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
+| 02 | [#3：真实调用前置检查与持久化 1 亿 token 批次上限](https://github.com/huadeng408/CodeOps-Agent/issues/3) | [#2](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
 | 03 | [#4：从当前工作副本准备隔离任务并查看基线](https://github.com/huadeng408/CodeOps-Agent/issues/4) | [#2](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
 | 04 | [#5：真实仓库问答贯通 provider 扩展点与 P0/P1/P2](https://github.com/huadeng408/CodeOps-Agent/issues/5) | [#3](https://github.com/huadeng408/CodeOps-Agent/issues/3)、[#4](https://github.com/huadeng408/CodeOps-Agent/issues/4) |
 | 05 | [#6：在批准环境准备依赖并运行 Go/Python 基线测试](https://github.com/huadeng408/CodeOps-Agent/issues/6) | [#4](https://github.com/huadeng408/CodeOps-Agent/issues/4) |
