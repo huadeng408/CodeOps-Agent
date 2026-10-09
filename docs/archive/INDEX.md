@@ -4,6 +4,29 @@ This tree is historical context, not an execution entry. New conversations read 
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
 
+## Cleanup snapshot — 2026-10-09
+
+The audit is [repository-cleanup-2026-10-09.md](../repository-cleanup-2026-10-09.md).
+Thirty artifacts were retained byte-for-byte locally: 24 individual moves and
+6 snapshots, with matching before/after SHA-256. No run data or published
+receipt was deleted. These additions remain gitignored and are local references,
+not files a fresh clone is required to have.
+
+| Local archive | Contents |
+| --- | --- |
+| `receipts/GOAL-log-2026-10-09.md` | Original 626-line Goal, including all old runs and failures |
+| `design-map/cleanup-2026-10-09/` | Five original navigation/state/workplan/decision/workstream files |
+| `plans/codeops-fast-alignment-2026-10-09/` | Five old task cards and one historical browser plan |
+| `receipts/cleanup-2026-10-09/root-pointers/` | Two retired interview redirect pages; canonical interview receipts are unchanged |
+| `run-artifacts/legacy-eval-scripts-2026-10-09/` | Sixteen unreferenced local experiment scripts (1,594 lines), kept as historical source |
+
+The original tracked Goal is also available at [source 1c82efd](https://github.com/huadeng408/CodeOps-Agent/blob/1c82efd982842187c0b3ec8333cf817514f2dc91/docs/GOAL.md).
+Its archived byte checksum is
+`59f15d7bae3c8b1aa821914f12c3d20b9beed7218e62004684da63806bbb846c`.
+The per-file action/checksum manifest is local at
+`.scratch/repository-cleanup/archive-manifest.json`; open it only for restoring
+this cleanup. Historical source is not an approved execution entry.
+
 ## Layout
 
 | Path | What it holds | Default read? |

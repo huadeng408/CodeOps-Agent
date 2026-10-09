@@ -44,6 +44,10 @@ def test_release_gate_is_manual_only() -> None:
     assert "workflow_dispatch:" in workflow
     assert "  push:" not in workflow
     assert "  pull_request:" not in workflow
+    parsed = yaml.load(workflow, Loader=yaml.BaseLoader)
+    job = parsed["jobs"]["release-gate"]
+    assert "if" not in job, "A manual release audit must actually execute"
+    assert any(step.get("run") == "python -m eval.release_gate --json" for step in job["steps"])
 
 
 def test_release_gate_checkout_fetches_history_for_parent_bound_receipts() -> None:

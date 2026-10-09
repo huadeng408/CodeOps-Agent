@@ -246,6 +246,7 @@ internal/cli/.agent/
 /docs/archive/run-artifacts/
 /docs/archive/receipts/HANDOFF-*.md
 /docs/archive/receipts/GOAL-log-*.md
+/docs/archive/receipts/cleanup-*/
 /docs/archive/research/interview-stories-2026.md
 /docs/archive/research/interview-research-sources.md
 /docs/archive/research/RESEARCH-*.md

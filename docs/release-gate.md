@@ -4,6 +4,12 @@
 CodeOps-Agent. It is read-only and emits a machine-readable report with
 `--json`.
 
+The GitHub Actions release workflow runs this same check only when manually
+dispatched. It performs the Go/Python regressions and audits curated evidence;
+it does not provision provider credentials or generate missing runtime/scorer
+receipts. Missing evidence returns `BLOCKED` (exit 3) and fails the manual run.
+Ordinary push/PR CI remains the separate Go, Python and frontend workflow.
+
 The gate requires all of the following:
 
 - a resolvable Git `HEAD` and a clean worktree;

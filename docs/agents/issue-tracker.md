@@ -25,7 +25,7 @@ PRs as a request surface: no.
 - Triage: 保存分流标签；Status: 保存实现或验收状态。
 - 工作笔记追加到 ## Comments，不覆盖原始需求和失败证据。
 - .scratch/ 保持忽略；需要团队共享的内容发布到对应 Issue。
-- 保留现有五张任务卡，按需要逐张关联，不自动迁移或重复发布。
+- 旧五张对齐任务卡保留在 docs/archive/plans/codeops-fast-alignment-2026-10-09/；只追溯历史时读取。当前任务从正式规格和批准后的拆解开始，避免重复发布。
 
 ## Dependencies and wayfinding
 
