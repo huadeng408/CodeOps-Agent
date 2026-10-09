@@ -7,6 +7,7 @@
 
 正式规格：[Windows 真实代码任务闭环，milestone 1](https://github.com/huadeng408/CodeOps-Agent/issues/1)，
 设计状态：`DESIGNED`。先完成本机单用户 Windows 产品，Linux 源码 CI 和官方评测保留。
+18 张实施任务已发布，执行入口见[正式任务导航](refactor-tickets.md)；发布任务不代表实现完成。
 
 - 一键启动基础代码 Agent，无 MySQL/Redis/MinIO 时仍能鉴权、查看历史和能力状态；
   RAG、对象存储、远程索引按能力启用。缺执行前提时副作用保持 `BLOCKED`。

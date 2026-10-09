@@ -3,6 +3,8 @@
 日期：2026-10-09。状态：`DESIGNED`。
 正式规格已发布为 [GitHub Issue #1](https://github.com/huadeng408/CodeOps-Agent/issues/1)，
 分流标签为 `ready-for-agent`；本路径保留设计依据与实施顺序。
+用户批准的 18 张纵向任务已发布为 #2–#19，32 条原生阻塞关系及本地投影已建立，
+见[正式任务导航](refactor-tickets.md)。任务实现状态仍为 `DESIGNED`。
 
 本路径承接 [125 项复用清单](reuse-landscape.md) 与
 [可筛选清单](reuse-landscape.csv)。第一里程碑是 Windows 本机代码产品的真实任务闭环；
@@ -48,7 +50,7 @@
 ## 第一里程碑的执行切片
 
 下表按改造领域说明接缝与回退，不是最终工单边界。正式工单按 `to-tickets` 拆成
-可独立演示的纵向闭环，审定后发布到 GitHub。调用方范围包括
+可独立演示的纵向闭环，批准后的工单以 GitHub 为准。调用方范围包括
 HTTP、CLI、continuation、child/workflow 与 Hook/MCP；仅按本片涉及范围迁移和测试。
 
 | 顺序 | 改造与复用 | 完成条件 | 回退方式 |
