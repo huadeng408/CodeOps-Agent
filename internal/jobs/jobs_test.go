@@ -110,8 +110,9 @@ func TestRegistryWaitTimeoutReturnsLiveStateAndKillIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kill: %v", err)
 	}
-	if killed.Status != jobs.StatusStopping {
-		t.Fatalf("kill status = %s, want stopping", killed.Status)
+	// The waiter may publish the terminal state before Kill returns.
+	if killed.Status != jobs.StatusStopping && killed.Status != jobs.StatusKilled {
+		t.Fatalf("kill status = %s, want stopping or killed", killed.Status)
 	}
 	again, err := registry.Kill(snapshot.ID, "", "duplicate request")
 	if err != nil {

@@ -904,6 +904,9 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		if len(events) == 0 {
 			continue
 		}
+		if isVerificationAdmissionStream(events) {
+			continue
+		}
 		// The older event-store module shares the physical ledger but owns a
 		// different projection and lifecycle. Its streams are not runner work;
 		// unknown non-Workbench streams still fail below instead of being hidden.

@@ -124,7 +124,7 @@ func (s *SQLiteEventStore) List(ctx context.Context) ([]Session, error) {
 		if readErr != nil {
 			return nil, readErr
 		}
-		if len(events) > 0 && (events[0].Type == sessionCreatedEventType || events[0].Type == "memory/catalog-created") {
+		if isVerificationAdmissionStream(events) || (len(events) > 0 && (events[0].Type == sessionCreatedEventType || events[0].Type == "memory/catalog-created")) {
 			continue
 		}
 		loaded, loadErr := s.Load(ctx, id)

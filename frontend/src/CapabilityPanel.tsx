@@ -6,7 +6,7 @@ const labels = { identity: '本机身份', history: '会话历史', execution: '
 const reasons: Record<string, string> = {
   'local persistent authentication': '本机身份已启用。',
   'canonical Session Ledger': '会话持久化已启用，重启后仍可查看。',
-  'provider, sandbox and budget admission are required': '配置模型、批准执行环境和确认费用预算后才能开始任务。',
+  'provider, sandbox and budget admission are required': '配置模型、批准执行环境和确认 token 额度后才能开始任务。',
   'optional services are disabled in the local profile': '可选服务未启用，基础会话仍可使用。',
   'trace backend has not been verified': '尚未验证追踪后端，不能确认记录完整。',
 };
