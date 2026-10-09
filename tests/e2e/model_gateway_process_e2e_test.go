@@ -206,10 +206,19 @@ func TestProductionModelGatewayAcrossProcesses(t *testing.T) {
 	}
 }
 
+func TestModelGatewaySourceManifestIncludesCommittedCode(t *testing.T) {
+	hashes := modelGatewaySourceHashes(t, e2ERepositoryRoot(t))
+	for _, path := range []string{"internal/admission/gateway.go", "orchestrator/llm/gateway.py", "proto/codeagent/orchestrator.proto"} {
+		if len(hashes[path]) != sha256.Size*2 {
+			t.Errorf("committed source missing from manifest: %s", path)
+		}
+	}
+}
+
 func modelGatewaySourceHashes(t *testing.T, repo string) map[string]string {
 	t.Helper()
 	hashes := map[string]string{}
-	for _, args := range [][]string{{"diff", "--name-only", "HEAD"}, {"ls-files", "--others", "--exclude-standard"}} {
+	for _, args := range [][]string{{"ls-files"}, {"ls-files", "--others", "--exclude-standard"}} {
 		command := exec.Command("git", args...)
 		command.Dir = repo
 		paths, err := command.Output()
