@@ -67,7 +67,7 @@ must regenerate both language bindings.
 
 ### Requirements
 
-- Go 1.25+
+- Go 1.26+
 - Python 3.11+ (Python 3.12 is recommended for the full test extras)
 - Node.js 22+ and npm for the workbench
 - Docker or WSL2 Docker when sandboxed execution is enabled

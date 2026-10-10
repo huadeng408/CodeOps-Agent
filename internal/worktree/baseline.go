@@ -1,7 +1,6 @@
 package worktree
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,15 +9,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"code-agent/internal/safety"
 )
 
 const (
@@ -108,19 +104,20 @@ func (m *Manager) CaptureBaseline(ctx context.Context) (Baseline, error) {
 			return Baseline{}, err
 		}
 	}
-	top, err := baselineGitOutput(ctx, abs, "rev-parse", "--show-toplevel")
-	if err != nil || !sameBaselinePath(abs, strings.TrimSpace(top)) {
-		return Baseline{}, errors.New("baseline requires the repository root")
+	reader, err := openGitReader(ctx, metadata)
+	if err != nil {
+		return Baseline{}, err
 	}
+	defer reader.Close()
 	identityPath := abs
 	if runtime.GOOS == "windows" {
 		identityPath = strings.ToLower(identityPath)
 	}
-	before, err := captureBaseline(ctx, root, metadata, abs, initial, baselineDigest([]byte(identityPath)))
+	before, err := captureBaseline(ctx, root, metadata, reader, abs, initial, baselineDigest([]byte(identityPath)))
 	if err != nil {
 		return Baseline{}, err
 	}
-	after, err := captureBaseline(ctx, root, metadata, abs, initial, before.RepositoryID)
+	after, err := captureBaseline(ctx, root, metadata, reader, abs, initial, before.RepositoryID)
 	if err != nil {
 		return Baseline{}, err
 	}
@@ -130,14 +127,14 @@ func (m *Manager) CaptureBaseline(ctx context.Context) (Baseline, error) {
 	return after, nil
 }
 
-func captureBaseline(ctx context.Context, root, metadata *os.Root, abs string, initial fs.FileInfo, repositoryID string) (Baseline, error) {
+func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitReader, abs string, initial fs.FileInfo, repositoryID string) (Baseline, error) {
 	if err := baselineRootUnchanged(abs, initial); err != nil {
 		return Baseline{}, err
 	}
 	if err := baselineMetadataUnchanged(ctx, root, metadata); err != nil {
 		return Baseline{}, err
 	}
-	head, err := baselineGitOutput(ctx, abs, "rev-parse", "--verify", "HEAD^{commit}")
+	head, headIndex, err := reader.headIndex()
 	if err != nil {
 		return Baseline{}, errors.New("baseline requires a committed HEAD")
 	}
@@ -156,34 +153,46 @@ func captureBaseline(ctx context.Context, root, metadata *os.Root, abs string, i
 	}
 	paths := map[string]bool{}
 	excluded := map[string]BaselineExclusion{}
-	for _, args := range [][]string{{"ls-tree", "-r", "-z", "--name-only", head}, {"ls-files", "-z", "--cached", "--others", "--exclude-standard"}} {
-		output, err := baselineGitOutput(ctx, abs, args...)
+	tracked := map[string]bool{}
+	var inventory []string
+	for _, entry := range headIndex.Entries {
+		tracked[entry.Name] = true
+		inventory = append(inventory, entry.Name)
+	}
+	if indexExists {
+		originalIndex, err := reader.Index()
 		if err != nil {
-			return Baseline{}, errors.New("baseline file inventory is unavailable")
+			return Baseline{}, errors.New("baseline index inventory is unavailable")
 		}
-		for output != "" {
-			name, rest, complete := strings.Cut(output, "\x00")
-			if !complete {
-				return Baseline{}, errors.New("incomplete baseline inventory")
+		for _, entry := range originalIndex.Entries {
+			tracked[entry.Name] = true
+			inventory = append(inventory, entry.Name)
+		}
+	}
+	untracked, err := sourceInventory(ctx, root, metadata, tracked, reader.ignoreCase)
+	if err != nil {
+		return Baseline{}, err
+	}
+	inventory = append(inventory, untracked...)
+	pathBytes := 0
+	for _, name := range inventory {
+		pathBytes += len(name) + 1
+		if pathBytes > 8<<20 {
+			return Baseline{}, errors.New("baseline Git inventory limit exceeded")
+		}
+		if err := validateBaselinePath(name); err != nil {
+			return Baseline{}, err
+		}
+		if prefix, reason := baselineExclusion(name); reason != "" {
+			excluded[strings.ToLower(prefix)] = BaselineExclusion{Path: prefix, Reason: reason}
+			if len(excluded) > maxBaselineFiles {
+				return Baseline{}, errors.New("baseline exclusion metadata limit exceeded")
 			}
-			output = rest
-			if name == "" {
-				continue
-			}
-			if err := validateBaselinePath(name); err != nil {
-				return Baseline{}, err
-			}
-			if prefix, reason := baselineExclusion(name); reason != "" {
-				excluded[strings.ToLower(prefix)] = BaselineExclusion{Path: prefix, Reason: reason}
-				if len(excluded) > maxBaselineFiles {
-					return Baseline{}, errors.New("baseline exclusion metadata limit exceeded")
-				}
-				continue
-			}
-			paths[name] = true
-			if len(paths) > maxBaselineFiles {
-				return Baseline{}, errors.New("baseline file limit exceeded")
-			}
+			continue
+		}
+		paths[name] = true
+		if len(paths) > maxBaselineFiles {
+			return Baseline{}, errors.New("baseline file limit exceeded")
 		}
 	}
 	for _, exclusion := range excluded {
@@ -463,28 +472,3 @@ func baselineExclusion(name string) (string, string) {
 }
 
 func baselineDigest(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
-
-type baselineOutput struct{ buffer bytes.Buffer }
-
-func (buffer *baselineOutput) Write(data []byte) (int, error) {
-	if len(data) > (8<<20)-buffer.buffer.Len() {
-		return 0, errors.New("baseline Git output limit exceeded")
-	}
-	return buffer.buffer.Write(data)
-}
-
-func baselineGitOutput(ctx context.Context, root string, args ...string) (string, error) {
-	return boundedGitOutput(ctx, filepath.Join(root, ".git"), root, args...)
-}
-
-func boundedGitOutput(ctx context.Context, gitDir, root string, args ...string) (string, error) {
-	parameters := append([]string{"--git-dir=" + gitDir, "--work-tree=" + root, "-c", "core.excludesFile=" + os.DevNull}, safety.HardenedGitArgs(root, args[0], args[1:])...)
-	command := exec.CommandContext(ctx, "git", parameters...)
-	command.Env = scrubGitEnvironment()
-	var output baselineOutput
-	command.Stdout = &output
-	if err := command.Run(); err != nil {
-		return "", fmt.Errorf("baseline Git %s failed: %w", args[0], err)
-	}
-	return output.buffer.String(), nil
-}

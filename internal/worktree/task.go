@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	gitindex "github.com/go-git/go-git/v5/plumbing/format/index"
 )
 
 // TaskWorkspace is a retained preparation lease, not an executing Agent. Its
@@ -131,6 +133,15 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 	if err := baselineRootUnchanged(storage, storeInfo); err != nil {
 		return err
 	}
+	reader, err := openGitReader(ctx, metadata)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	head, headIndex, err := reader.headIndex()
+	if err != nil || head != task.Baseline.HeadCommit {
+		return errors.New("task Git baseline changed before registration")
+	}
 	if err := store.Mkdir(task.LeaseID, 0700); err != nil {
 		return errors.New("task storage already exists or is unavailable")
 	}
@@ -142,9 +153,6 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 	defer releaseTarget()
 	if err := safety.ProtectPrivatePath(target); err != nil {
 		return errors.New("private task directory could not be secured")
-	}
-	if _, err := baselineGitOutput(ctx, m.root, "worktree", "add", "--detach", "--no-checkout", "--lock", "--reason", task.LeaseID, target, task.Baseline.HeadCommit); err != nil {
-		return err
 	}
 	destination, err := store.OpenRoot(task.LeaseID)
 	if err != nil {
@@ -158,11 +166,8 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 	if err := validateBaselineMetadata(ctx, metadata); err != nil {
 		return err
 	}
-	gitDir, err := m.taskGitDir(metadata, destination, target, *task)
-	if err != nil {
-		return err
-	}
-	if err := safety.ProtectPrivatePath(gitDir); err != nil {
+	gitDir := filepath.Join(m.root, ".git", "worktrees", task.LeaseID)
+	if err := metadata.Mkdir("worktrees/"+task.LeaseID, 0700); err != nil {
 		return err
 	}
 	releaseGit, err := safety.PinDirectories(gitDir)
@@ -170,23 +175,39 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 		return err
 	}
 	defer releaseGit()
+	if err := safety.ProtectPrivatePath(gitDir); err != nil {
+		return err
+	}
 	admin, err := metadata.OpenRoot("worktrees/" + task.LeaseID)
 	if err != nil {
 		return err
 	}
 	defer admin.Close()
-	releaseAdmin, err := pinTaskMetadata(ctx, admin, gitDir)
-	if err != nil {
+	for _, control := range []struct{ name, value string }{
+		{"commondir", "../..\n"}, {"HEAD", task.Baseline.HeadCommit + "\n"},
+		{"locked", task.LeaseID + "\n"}, {"gitdir", filepath.ToSlash(filepath.Join(target, ".git")) + "\n"},
+	} {
+		if err := writeGitControl(admin, control.name, control.value); err != nil {
+			return err
+		}
+	}
+	if err := writeGitControl(destination, ".git", "gitdir: "+filepath.ToSlash(gitDir)+"\n"); err != nil {
 		return err
 	}
-	defer releaseAdmin()
 	if err := baselineMetadataUnchanged(ctx, source, metadata); err != nil {
 		return err
 	}
 	if err := baselineRootUnchanged(target, destinationInfo); err != nil {
 		return err
 	}
-	if _, err := boundedGitOutput(ctx, gitDir, target, "read-tree", task.Baseline.HeadCommit); err != nil {
+	indexFile, err := admin.OpenFile("index", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	encodeErr := gitindex.NewEncoder(indexFile).Encode(headIndex)
+	syncErr := indexFile.Sync()
+	closeErr := indexFile.Close()
+	if err := errors.Join(encodeErr, syncErr, closeErr); err != nil {
 		return err
 	}
 	index, exists, err := readBaselineFile(admin, "index", 16<<20)
@@ -194,6 +215,14 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 		return errors.New("task Git index was not initialized")
 	}
 	task.IndexSHA256 = baselineDigest(index)
+	releaseAdmin, err := pinTaskMetadata(ctx, admin, gitDir)
+	if err != nil {
+		return err
+	}
+	defer releaseAdmin()
+	if _, err := m.taskGitDir(metadata, destination, target, *task); err != nil {
+		return err
+	}
 	for _, item := range task.Baseline.Files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -384,8 +413,7 @@ func verifyTaskInventory(ctx context.Context, root *os.Root, admitted map[string
 	return nil
 }
 
-// Native Git reads metadata by name; pin its existing directory tree and files
-// so replacement, includes and object aliases cannot race the validated root.
+// Keep the rooted reader's admitted files immutable while reading Git objects.
 func pinTaskMetadata(ctx context.Context, root *os.Root, absoluteRoot string) (func(), error) {
 	directories, pending, files := []string{absoluteRoot}, []string{"."}, []string{}
 	entries, pathBytes := 0, 0
@@ -532,3 +560,13 @@ func matchesTaskFile(item BaselineFile, data []byte, exists bool) bool {
 // shortcut: detects recognizable keys, not every secret format; keep provider
 // credentials outside source and expand this policy for newly supported formats.
 var taskCredentialPattern = regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b`)
+
+func writeGitControl(root *os.Root, name, value string) error {
+	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString(value)
+	syncErr := file.Sync()
+	return errors.Join(writeErr, syncErr, file.Close())
+}

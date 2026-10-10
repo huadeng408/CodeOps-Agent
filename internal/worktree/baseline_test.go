@@ -19,6 +19,147 @@ import (
 	"code-agent/internal/safety"
 )
 
+func TestCapturePackedBaselineWithoutNativeGit(t *testing.T) {
+	root := taskRepository(t)
+	baselineGit(t, root, "gc", "--prune=now")
+	want, err := NewManager(root, "HEAD").CaptureBaseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	got, err := NewManager(root, "HEAD").CaptureBaseline(context.Background())
+	if err != nil {
+		t.Fatal("rooted Git inspection requires no native process:", err)
+	}
+	if got.Checksum != want.Checksum {
+		t.Fatal("packed baseline changed when native Git was unavailable")
+	}
+}
+
+func TestCaptureBaselineRejectsMissingNestedTree(t *testing.T) {
+	root := taskRepository(t)
+	writeBaselineFile(t, root, "nested/child.py", "fixture child")
+	baselineGit(t, root, "add", "nested")
+	baselineGit(t, root, "commit", "-m", "nested tree fixture")
+	hash := strings.TrimSpace(baselineGit(t, root, "rev-parse", "HEAD:nested"))
+	if err := os.Remove(filepath.Join(root, ".git", "objects", hash[:2], hash[2:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(root, "HEAD").CaptureBaseline(context.Background()); err == nil {
+		t.Fatal("missing nested tree produced a successful partial baseline")
+	}
+}
+
+func TestCaptureBaselinePreservesRepositoryIgnoreRules(t *testing.T) {
+	root := taskRepository(t)
+	for name, data := range map[string]string{
+		".gitignore":        "ignored/*\n!ignored/keep.py\n*.scratch\n!keep.scratch\n",
+		".git/info/exclude": "excluded.py\n",
+		"ignored/keep.py":   "kept", "ignored/drop.py": "ignored",
+		"drop.scratch": "ignored", "keep.scratch": "kept", "excluded.py": "ignored",
+		"pkg/.gitignore": "*.tmp\n!keep.tmp\n", "pkg/drop.tmp": "ignored", "pkg/keep.tmp": "kept",
+	} {
+		writeBaselineFile(t, root, name, data)
+	}
+	native := map[string]bool{}
+	for _, name := range strings.Split(baselineGit(t, root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"), "\x00") {
+		if name == "" {
+			continue
+		}
+		if _, reason := baselineExclusion(name); reason == "" {
+			native[name] = true
+		}
+	}
+	got, err := NewManager(root, "HEAD").CaptureBaseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != len(native) {
+		names := []string{}
+		for _, file := range got.Files {
+			names = append(names, file.Path)
+		}
+		t.Fatalf("rooted inventory differs from repository ignore behavior: got %v, native %v", names, native)
+	}
+	for _, file := range got.Files {
+		if !native[file.Path] {
+			t.Fatal("ignored path entered rooted inventory: " + file.Path)
+		}
+	}
+}
+
+func TestCaptureBaselinePreservesGitWildmatchRules(t *testing.T) {
+	for _, test := range []struct {
+		rule, name string
+		fold       bool
+	}{
+		{"Hidden.TMP", "hidden.tmp", true},
+		{`\#ignored.py`, "#ignored.py", false},
+		{"a/**/b/c.py", "a/b/x/b/c.py", false},
+		{`\!ignored.py`, "!ignored.py", false},
+		{`ignored\ file.py`, "ignored file.py", false},
+		{`ignored.py   `, "ignored.py", false},
+		{"/ignored.py", "ignored.py", false},
+		{"ignored/", "ignored/child.py", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := taskRepository(t)
+			if test.fold {
+				baselineGit(t, root, "config", "core.ignorecase", "true")
+			}
+			writeBaselineFile(t, root, ".gitignore", test.rule+"\n")
+			writeBaselineFile(t, root, test.name, "ignored fixture")
+			if _, err := gitOutput(context.Background(), root, "check-ignore", "--quiet", test.name); err != nil {
+				t.Fatal("native fixture is not ignored")
+			}
+			got, err := NewManager(root, "HEAD").CaptureBaseline(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range got.Files {
+				if file.Path == test.name {
+					t.Fatal("native ignored file entered the task baseline")
+				}
+			}
+		})
+	}
+}
+
+func TestCaptureBaselineKeepsPathsOutsideAnchoredAndDirectoryIgnoreRules(t *testing.T) {
+	root := taskRepository(t)
+	writeBaselineFile(t, root, ".gitignore", "/root-only.py\ndirectory-only/\n")
+	writeBaselineFile(t, root, "pkg/root-only.py", "kept nested file")
+	writeBaselineFile(t, root, "directory-only", "kept regular file")
+	got, err := NewManager(root, "HEAD").CaptureBaseline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pkg/root-only.py", "directory-only"} {
+		found := false
+		for _, file := range got.Files {
+			if file.Path == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("non-ignored source dropped: " + name)
+		}
+		if _, err := gitOutput(context.Background(), root, "check-ignore", "--quiet", name); err == nil {
+			t.Fatal("native fixture was unexpectedly ignored")
+		}
+	}
+}
+
+func TestCaptureBaselineRejectsUnsupportedIgnorePatterns(t *testing.T) {
+	for _, pattern := range []string{"[unclosed", strings.Repeat("x", 4097)} {
+		root := taskRepository(t)
+		writeBaselineFile(t, root, ".gitignore", pattern+"\n")
+		if _, err := NewManager(root, "HEAD").CaptureBaseline(context.Background()); err == nil {
+			t.Fatal("unsupported ignore input was admitted")
+		}
+	}
+}
+
 func TestCaptureBaselineNeverFetchesPartialCloneObjects(t *testing.T) {
 	root := taskRepository(t)
 	var requests atomic.Int64

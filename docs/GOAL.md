@@ -70,10 +70,23 @@
   检查 13/13、两 Go 进程、退出 0，覆盖当前 dirty/new/empty/deleted 副本、原
   仓库/index 不变、未授权拒绝、重启恢复同一 lease 和被修改副本的保留/阻断。
   输入是受控 fixture 仓库，零模型调用；不能充当真实代码任务证据。
-  已有 metadata 的目录/文件 pin 和隐式 lazy fetch 防护有公开回归；并发新增
-  optional Git metadata 的完整逃逸边界仍未证明，非 Windows 新准备入口拒绝执行。
+  此初始实现仍依赖 native Git；当时已有目录/文件 pin 和 lazy fetch 回归，但并发
+  新增 optional metadata 的读取边界尚未证明。后续替换见下段；非 Windows
+  新准备入口继续拒绝执行。
   #4 保持 OPEN/`BLOCKED`，生产工具执行和完整 Trace 未接入。新鲜命令、
   源码/产物哈希、失败分母和审查见[准备证据](evidence/workspace-preparation-2026-10-10.md)。
+
+- **Issue #4 Go 读取与注册**：`IMPLEMENTED`。基线与准备路径已改为捕获的
+  metadata 库存及 `os.Root` 只读接口，复用固定版本 go-git/go-billy/gcfg；
+  新增路径不会进入库存，不启动 native Git。Go 经 rooted 独占写建立原有
+  detached/locked 关系和 HEAD index。对象、delta、v4 index 路径在 codec 前
+  限制解码量；忽略规则使用 RE2，并以原生 Git 核对 UTF-8、目录、配置行为。
+  最终浏览器 13/13、两 Go 进程、退出 0，服务端 PATH 为空，源文件和 index
+  保持原样；输入为 fixture，模型调用 0。完整 Go 1,350 passed/54 skipped/0 failed
+  test actions、43 包、退出 0；vet 与依赖校验退出 0。收据包含 831 个源码/依赖
+  文件哈希，提交后核对同一源码。
+  本轮修复、失败分母、资源/兼容限制和收据见[读取证据](evidence/workspace-rooted-git-2026-10-10.md)。
+  #4 仍 OPEN/`BLOCKED`；生产工具执行、完整恢复矩阵及 Go/Python Trace 待接入。
 
 | 范围 | 状态及完成条件 |
 | --- | --- |

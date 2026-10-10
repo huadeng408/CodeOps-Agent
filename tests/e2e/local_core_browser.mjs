@@ -83,6 +83,10 @@ const password = randomBytes(16).toString('hex');
 const username = 'browser-operator@example.test';
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/^(MYSQL_|REDIS_|MINIO_|JWT_SECRET$|CODEAGENT_|CODE_AGENT_|OPENAI_|ANTHROPIC_|LLM_|OTEL_)/.test(key)));
+if (workspaceChecks) {
+  for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
+  env.PATH = '';
+}
 const configPath = path.join(artifacts, 'local.yaml');
 const ledgerPath = process.env.CODE_AGENT_E2E_LEDGER || path.join(artifacts, 'sessions.sqlite');
 const yamlPath = value => JSON.stringify(value.replaceAll('\\', '/'));
@@ -324,7 +328,7 @@ try {
     gitSha, sourceHashes, sourceChangedWhileRunning, assetHashes, assetsChangedWhileRunning, binarySha256: await hash(binary), buildExitCode: build.status, processIds, processOutcomes,
     command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
     denominator, checks, notRun: denominator - checks.length, artifactsHashes, traceBackend: 'unknown', modelCalls: 0,
-    workspaceChecks, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, workspaceInput: workspaceChecks ? 'controlled fixture repository; not a coding task' : undefined };
+    workspaceChecks, nativeGitAvailableToServer: workspaceChecks ? false : undefined, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, workspaceInput: workspaceChecks ? 'controlled fixture repository; not a coding task' : undefined };
   await writeFile(path.join(artifacts, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify({ runId, passed: checks.filter(result => result.status === 'passed').length, denominator, exitCode }));
 }

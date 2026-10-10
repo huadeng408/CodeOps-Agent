@@ -32,6 +32,38 @@ func taskRepository(t *testing.T) string {
 	return root
 }
 
+func TestTaskWorkspacePreparesWithoutNativeGit(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first task preparation")
+	}
+	root, storage := taskRepository(t), t.TempDir()
+	baselineGit(t, root, "gc", "--prune=now")
+	manager := NewManager(root, "HEAD")
+	plan, err := manager.PlanTask(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath := os.Getenv("PATH")
+	t.Setenv("PATH", t.TempDir())
+	if err := manager.PrepareTask(context.Background(), storage, &plan); err != nil {
+		t.Fatal("task preparation requires no native process:", err)
+	}
+	if err := NewManager(root, "HEAD").VerifyTask(context.Background(), storage, plan); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", gitPath)
+	target := filepath.Join(storage, plan.LeaseID)
+	if !strings.Contains(baselineGit(t, root, "worktree", "list", "--porcelain"), filepath.ToSlash(target)) {
+		t.Fatal("Go-created task is not registered with native Git")
+	}
+	if strings.TrimSpace(baselineGit(t, target, "rev-parse", "HEAD")) != plan.Baseline.HeadCommit {
+		t.Fatal("native Git cannot reopen the detached task")
+	}
+	if diff, err := gitOutput(context.Background(), target, "diff", "--cached", "--exit-code", plan.Baseline.HeadCommit, "--"); err != nil || strings.TrimSpace(diff) != "" {
+		t.Fatal("Go-created index does not represent the recorded HEAD")
+	}
+}
+
 func TestTaskWorkspaceCopiesCurrentBaselineAndRecovers(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-first native Git directory pin contract")

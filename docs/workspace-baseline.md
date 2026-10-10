@@ -31,10 +31,11 @@ Ledger or HTTP metadata. Two matching captures are required. Source is
 rechecked while copying and afterwards; the original working files and index
 are not rewritten. Git registration adds its own administration metadata.
 
-Preparation reuses the worktree package's hardened Git arguments, bounded
-output and lease IDs. It creates a locked detached worktree without checkout,
-initializes its index with `read-tree`, then copies current files through rooted
-I/O. Checkout filters do not run. The new private directories reuse the local
+Preparation reads Git through a captured metadata inventory and an `os.Root`
+read-only filesystem. It reuses go-git reference/index/tree/delta codecs and
+Go regexp's linear matching for Git ignore rules; no native Git process, hook, include or network request runs
+on this path. Go creates the locked detached worktree registration and HEAD
+index through rooted exclusive writes, then copies current files. The new private directories reuse the local
 identity ACL policy. Recovery checks the recorded files, modes, absence states,
 inventory, Git link/backlink, commit, lock and prepared index digest.
 
@@ -47,29 +48,44 @@ also enforce metadata and workspace access.
 The baseline refuses unsafe relative paths, Windows devices/ADS/UNC and
 drive-relative roots, symlink/reparse aliases, unapproved linked/common/alternate
 metadata and config includes. External `core.excludesFile` is disabled; repository
-ignore rules remain active. Implicit lazy fetch is disabled in the shared Git
-environment, and baseline inspection rejects partial/promisor metadata before
-native reads. Dependency preparation requires its own approved stage.
+ignore rules remain active, including repository `core.ignorecase`, an enabled
+`config.worktree` override, nested rules, negation, escapes and `**`. UTF-8
+wildcards use Git's byte semantics. Global excludes remain outside this contract.
+Baseline inspection rejects partial/promisor metadata; missing objects fail
+closed. Legacy native Git callers retain the shared environment's lazy-fetch
+refusal. Dependency preparation requires its own approved stage.
 
 Limits remain 8 MiB per admitted file, 256 MiB total, 20,000 source files and
-20,000 exclusions, bounded Git stdout and metadata traversal. Exceeding a limit
-refuses admission rather than silently dropping files. The CLI's read-only
+20,000 exclusions. Git/source inventories each allow at most 100,000 entries
+and 8 MiB of path names. Non-pack metadata files allow 16 MiB; pack indexes
+allow 64 MiB in aggregate. Loose headers allow 128 bytes, required objects and
+delta outputs 8 MiB each, delta depth 64, and aggregate decode reservations
+64 MiB per reader. Required objects are checksum-verified; unrelated historical
+blobs are not inflated. Version 2/3/4 index paths are preflighted before
+decoding, including reconstructed version 4 names, within 8 MiB total.
+Ignore rules allow 4 KiB each, 8 MiB of pattern text and 20,000 rules across
+the capture; immutable scopes share parent rules rather than copy them.
+Unsupported patterns or exceeded limits refuse admission without partial
+results. The current codec accepts SHA-1 repositories; SHA-256 repositories
+are explicitly refused until a compatible bounded codec is added. Go 1.26+
+is required by the pinned go-git version. The CLI's read-only
 `/worktree baseline` command remains available without preparing a copy.
 
 Windows pins named roots, existing metadata directories and read-only files
-through native Git calls, then revalidates after acquiring pins. Public tests
+while capturing metadata and copying, then revalidates after acquiring pins. Public tests
 check directory/file replacement, aliases, filters and forbidden lazy fetch.
-These pins do not freeze the absence of optional metadata: concurrent creation
-of a previously missing alternate/include-related entry remains an unverified
-boundary. Post-operation checks can refuse the result but cannot undo a native
-read. Complete namespace/race admission remains **BLOCKED**; no execution is
-attached to this preparation slice. New product preparation on other platforms
-fails closed until their native Git pin contract is verified. Linux baseline,
+The captured Git namespace excludes entries added afterwards; absolute paths,
+chroot escapes and filesystem writes are refused by the reader. Existing-file
+pins remain necessary, and source/copy races still require revalidation. This
+slice removes the native reader that could see newly inserted optional metadata;
+it does not grant execution. New product preparation on other platforms fails
+closed until their metadata pin contract is verified. Linux baseline,
 legacy callers and source CI are retained.
 
 [Issue #4](https://github.com/huadeng408/CodeOps-Agent/issues/4) stays open.
 The current implementation and browser receipt prove their named preparation
 checks; they do not establish the full race matrix, real coding tasks, complete
 Go/Python Trace or the milestone. See
+[rooted Git evidence](evidence/workspace-rooted-git-2026-10-10.md),
 [preparation evidence](evidence/workspace-preparation-2026-10-10.md) and
 [the original baseline evidence](evidence/workspace-baseline-2026-10-10.md).
