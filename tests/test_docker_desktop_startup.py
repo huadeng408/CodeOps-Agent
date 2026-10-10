@@ -25,10 +25,15 @@ def run_startup(tmp_path: Path, checks: str, *, ready: bool = False) -> subproce
     (runtime_dir / "dockerInference").touch()
     (runtime_dir / "userAnalyticsOtlpHttp.sock").touch()
     script = tmp_path / "startup.ps1"
+    programs_literal = (tmp_path / "programs").as_posix().replace("'", "''")
+    local_literal = (tmp_path / "local").as_posix().replace("'", "''")
     script.write_text(
         "\n".join(
             [
                 "$ErrorActionPreference = 'Stop'",
+                "$env:OS = 'Windows_NT'",
+                f"$env:ProgramFiles = '{programs_literal}'",
+                f"$env:LOCALAPPDATA = '{local_literal}'",
                 f". '{RUNTIME.as_posix()}'",
                 "$script:started = $false",
                 "function Get-Process { param([string[]]$Name) }",
@@ -84,6 +89,12 @@ foreach ($name in @('dockerInference','userAnalyticsOtlpHttp.sock')) {
     )
     assert result.returncode == 0, result.stderr
     assert "ready: Docker daemon" in result.stdout
+
+
+def test_contract_fixture_does_not_depend_on_inherited_os_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OS", raising=False)
+    result = run_startup(tmp_path, "Wait-DockerDaemonReady -TimeoutSeconds 5")
+    assert result.returncode == 0, result.stderr
 
 
 def test_healthy_engine_is_reused_without_launching_or_archiving(tmp_path: Path) -> None:

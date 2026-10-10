@@ -121,3 +121,22 @@ Post-commit source binding checked all **4/883** raw hashes and committed blobs
 Binding: `output/playwright/docker-startup-e69d9758cbcc4f37b0b6f818ca5d9ea7/source-binding.json`,
 SHA-256 `3cc37dbdac9e47996c80e46df451754824db15f6a9f882b729cac05264511217`.
 The following evidence-only commit changes no tested source/configuration.
+
+## Windows CI fixture follow-up
+
+CI [38052229863](https://github.com/huadeng408/CodeOps-Agent/actions/runs/38052229863)
+passed the Linux Go, Python and frontend jobs, but the new Windows startup
+contracts returned **6 failed / 3 passed, exit 1**. Log:
+`output/playwright/github-ci-38052229863/windows-startup-job.log`.
+The failed cold-start fixtures timed out before their simulated Desktop launch.
+Removing the inherited `OS` variable locally reproduced that timeout; this
+does not independently establish the hosted runner's exact environment.
+
+The contract fixture now sets its Windows platform and synthetic installation/
+runtime paths inside the child PowerShell script. A missing inherited `OS`
+variable no longer prevents the contract from exercising cold startup.
+After this fixture-only change, the same related commands pass **34 checks,
+exit 0**. Production helper, runtime producer and CI workflow are unchanged;
+the genuine three-restart evidence remains bound to source `1f7cae04`.
+The earlier full Python and four-file producer manifests contain the old
+test hash and are not relabeled as a full regression of this fixture follow-up.
