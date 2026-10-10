@@ -95,6 +95,19 @@ func (m *Manager) CaptureBaseline(ctx context.Context) (Baseline, error) {
 	if err := validateBaselineMetadata(ctx, metadata); err != nil {
 		return Baseline{}, err
 	}
+	if runtime.GOOS == "windows" {
+		release, err := pinTaskMetadata(ctx, metadata, filepath.Join(abs, ".git"))
+		if err != nil {
+			return Baseline{}, err
+		}
+		defer release()
+		if err := baselineMetadataUnchanged(ctx, root, metadata); err != nil {
+			return Baseline{}, err
+		}
+		if err := baselineRootUnchanged(abs, initial); err != nil {
+			return Baseline{}, err
+		}
+	}
 	top, err := baselineGitOutput(ctx, abs, "rev-parse", "--show-toplevel")
 	if err != nil || !sameBaselinePath(abs, strings.TrimSpace(top)) {
 		return Baseline{}, errors.New("baseline requires the repository root")
@@ -308,12 +321,19 @@ func validateBaselineMetadata(ctx context.Context, metadata *os.Root) error {
 						directory.Close()
 						return errors.New("Git metadata configuration is unavailable")
 					}
+					section := ""
 					for _, line := range strings.Split(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
 						line = strings.TrimSpace(line)
 						if !strings.HasPrefix(line, "[") {
+							key, _, _ := strings.Cut(line, "=")
+							key = strings.TrimSpace(key)
+							if strings.EqualFold(section, "extensions") && strings.EqualFold(key, "partialClone") || strings.EqualFold(section, "remote") && strings.EqualFold(key, "promisor") {
+								directory.Close()
+								return errors.New("partial clone metadata requires an approved dependency preparation stage")
+							}
 							continue
 						}
-						section := strings.TrimSpace(strings.TrimPrefix(line, "["))
+						section = strings.TrimSpace(strings.TrimPrefix(line, "["))
 						end := strings.IndexAny(section, ".\" ]\t")
 						if end >= 0 {
 							section = section[:end]
@@ -454,7 +474,11 @@ func (buffer *baselineOutput) Write(data []byte) (int, error) {
 }
 
 func baselineGitOutput(ctx context.Context, root string, args ...string) (string, error) {
-	parameters := append([]string{"--git-dir=" + filepath.Join(root, ".git"), "--work-tree=" + root, "-c", "core.excludesFile=" + os.DevNull}, safety.HardenedGitArgs(root, args[0], args[1:])...)
+	return boundedGitOutput(ctx, filepath.Join(root, ".git"), root, args...)
+}
+
+func boundedGitOutput(ctx context.Context, gitDir, root string, args ...string) (string, error) {
+	parameters := append([]string{"--git-dir=" + gitDir, "--work-tree=" + root, "-c", "core.excludesFile=" + os.DevNull}, safety.HardenedGitArgs(root, args[0], args[1:])...)
 	command := exec.CommandContext(ctx, "git", parameters...)
 	command.Env = scrubGitEnvironment()
 	var output baselineOutput

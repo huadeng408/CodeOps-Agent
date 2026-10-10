@@ -9,6 +9,8 @@ server:
 harness:
   session_ledger_path: "${CODE_AGENT_SESSION_LEDGER_PATH:.agent/local/sessions.sqlite}"
   identity_path: "${CODE_AGENT_LOCAL_IDENTITY_PATH:.agent/local/identity/identity.sqlite}"
+  repository_root: "${CODE_AGENT_REPOSITORY_ROOT:}"
+  task_workspace_root: "${CODE_AGENT_TASK_WORKSPACE_ROOT:}"
 
 jwt:
   secret: "${JWT_SECRET:}"

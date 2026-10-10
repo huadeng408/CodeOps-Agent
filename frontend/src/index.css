@@ -1344,6 +1344,21 @@ body[data-ds-dark-theme] {
 .status-row { font-size: 11px; }
 .status-row strong { font-size: 11px; }
 .lineage-block { display: grid; gap: 9px; padding-top: 12px; border-top: 1px solid var(--workbench-line); }
+.task-workspace-panel { margin-bottom: 16px; padding: 13px; border: 1px solid var(--workbench-line); border-radius: 7px; background: var(--workbench-surface); }
+.task-workspace-heading, .task-workspace-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-workspace-heading h2 { margin: 0; font-size: 12px; }
+.workspace-description { margin: 9px 0; color: var(--workbench-quiet); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-workspace-facts { margin: 10px 0; display: grid; gap: 6px; font-size: 11px; }
+.task-workspace-facts div { display: flex; gap: 12px; justify-content: space-between; }
+.task-workspace-facts dt { color: var(--workbench-quiet); }
+.task-workspace-facts dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.task-workspace-panel summary { padding: 10px 0; font-size: 11px; cursor: pointer; }
+.task-workspace-files { list-style: none; padding: 0; margin: 0; max-height: 220px; overflow: auto; }
+.task-workspace-files li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 10px; }
+.task-workspace-files code { overflow-wrap: anywhere; }
+.task-workspace-files span { white-space: nowrap; color: var(--workbench-quiet); }
+.task-workspace-actions { margin-top: 10px; flex-wrap: wrap; }
+.task-workspace-actions button { font-size: 11px; }
 .goal-block { border-top-color: var(--workbench-line); }
 .checkpoint-panel { max-height: 42vh; padding: 13px 16px; border-top-color: var(--workbench-line); }
 .panel-heading h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }

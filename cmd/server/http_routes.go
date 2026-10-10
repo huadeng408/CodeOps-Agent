@@ -66,6 +66,7 @@ type sessionHTTP struct {
 	hub          *handler.WebSocketHub
 	tickets      *session.WebSocketTickets
 	worktree     *worktree.Manager
+	tasks        session.TaskWorkspaceModule
 	continuation *session.ContinuationSlot
 }
 
@@ -82,6 +83,9 @@ func (routes sessionHTTP) register(r *gin.Engine, apiV1 *gin.RouterGroup, userSe
 		sessions.GET("/:id/recovery-manifest", sessionHandler.RecoveryManifest)
 		sessions.GET("/:id/workspace-manifest", sessionHandler.WorkspaceManifest)
 		sessions.POST("/:id/workspace/restore", sessionHandler.RestoreWorkspace)
+		taskHandler := handler.NewTaskWorkspaceHandler(routes.workbench, routes.tasks)
+		sessions.GET("/:id/task-workspace", taskHandler.Inspect)
+		sessions.POST("/:id/task-workspace/prepare", taskHandler.Prepare)
 		sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 		sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 		sessions.DELETE("/:id", sessionHandler.Delete)

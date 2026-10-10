@@ -491,6 +491,7 @@ func ScrubGitEnvironment(env []string) []string {
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_TERMINAL_PROMPT=0",
+		"GIT_NO_LAZY_FETCH=1",
 	)
 	return result
 }

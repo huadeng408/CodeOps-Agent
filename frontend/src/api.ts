@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, ContinuationRuntimeStatus, RuntimeCapabilities, ApiResponse } from './types';
+import type { Session, SessionEvent, SessionCheckpoint, SessionRun, RecoveryManifest, WorkspaceManifest, TaskWorkspace, ContinuationRuntimeStatus, RuntimeCapabilities, ApiResponse } from './types';
 
 const API_BASE = '/api/v1';
 
@@ -135,6 +135,16 @@ class ApiClient {
     const result = await this.request<WorkspaceManifest>(
       'GET', `/sessions/${encodeURIComponent(sessionId)}/workspace-manifest`,
     );
+    return result.data;
+  }
+
+  async getTaskWorkspace(sessionId: string, signal?: AbortSignal): Promise<TaskWorkspace> {
+    const result = await this.request<TaskWorkspace>('GET', `/sessions/${encodeURIComponent(sessionId)}/task-workspace`, { signal });
+    return result.data;
+  }
+
+  async prepareTaskWorkspace(sessionId: string, expectedSeq: number, requestId: string, signal?: AbortSignal): Promise<TaskWorkspace> {
+    const result = await this.request<TaskWorkspace>('POST', `/sessions/${encodeURIComponent(sessionId)}/task-workspace/prepare`, { body: { expectedSeq, requestId }, signal });
     return result.data;
   }
 

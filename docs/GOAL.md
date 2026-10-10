@@ -60,9 +60,20 @@
   状态，保留原 index，排除已知凭据/生成路径，限制库存输出并拒绝未批准的
   Git metadata、include 和 aliases。实际构建的 CLI 两进程检查 7/7、退出 0，
   使用隔离 fixture 仓库且不调用模型。复制、独立存储、lease/Ledger、产品准备
-  入口、浏览器和完整 Trace 仍 `BLOCKED`；三 UI 预览等用户选择后才改前端。
+  入口、浏览器和完整 Trace 在此初始切片仍 `BLOCKED`，后续进展见下段。
   [基线说明](workspace-baseline.md)与[本项证据](evidence/workspace-baseline-2026-10-10.md)
   保存完整范围、分母、源码绑定、失败与 SHA-256，不能据此关闭 #4。
+
+- **Issue #4 准备入口与 A 布局**：用户已选择 A；Go/HTTP 和前端准备切片为
+  `IMPLEMENTED`。本机持久 owner/批准仓库、外置隔离存储、无 checkout 复制、
+  Ledger CAS intent/outcome、保留 lease 和 index digest 已接入。真实构建浏览器
+  检查 13/13、两 Go 进程、退出 0，覆盖当前 dirty/new/empty/deleted 副本、原
+  仓库/index 不变、未授权拒绝、重启恢复同一 lease 和被修改副本的保留/阻断。
+  输入是受控 fixture 仓库，零模型调用；不能充当真实代码任务证据。
+  已有 metadata 的目录/文件 pin 和隐式 lazy fetch 防护有公开回归；并发新增
+  optional Git metadata 的完整逃逸边界仍未证明，非 Windows 新准备入口拒绝执行。
+  #4 保持 OPEN/`BLOCKED`，生产工具执行和完整 Trace 未接入。新鲜命令、
+  源码/产物哈希、失败分母和审查见[准备证据](evidence/workspace-preparation-2026-10-10.md)。
 
 | 范围 | 状态及完成条件 |
 | --- | --- |

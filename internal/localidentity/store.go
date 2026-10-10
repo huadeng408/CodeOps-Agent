@@ -2,6 +2,7 @@
 package localidentity
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -115,6 +116,15 @@ func rejectRedirectedPath(path string) error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// OwnerID reads the durable local identity, including after first setup.
+func (s *Store) OwnerID(ctx context.Context) (uint, error) {
+	var id uint
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM local_identity WHERE slot=1`).Scan(&id); err != nil {
+		return 0, errors.New("local identity is unavailable")
+	}
+	return id, nil
+}
 
 func (s *Store) Create(user *model.User) error {
 	if s.setupUser == "" || len(s.setupPassword) < 12 || user.Username != s.setupUser || !hash.CheckPasswordHash(s.setupPassword, user.Password) {

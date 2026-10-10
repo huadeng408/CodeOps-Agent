@@ -14,7 +14,7 @@ func TestLocalCoreRejectsUnsafeConfiguration(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	for _, variant := range []string{"network", "same-database", "legacy"} {
+	for _, variant := range []string{"network", "same-database", "legacy", "partial-task-config", "relative-task-config"} {
 		cfg := valid
 		switch variant {
 		case "network":
@@ -23,6 +23,10 @@ func TestLocalCoreRejectsUnsafeConfiguration(t *testing.T) {
 			cfg.Harness.IdentityPath = cfg.Harness.SessionLedgerPath
 		case "legacy":
 			cfg.Server.Profile = "full-stack"
+		case "partial-task-config":
+			cfg.Harness.RepositoryRoot = t.TempDir()
+		case "relative-task-config":
+			cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot = ".", "../tasks"
 		}
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("unsafe %s profile configuration was accepted", variant)

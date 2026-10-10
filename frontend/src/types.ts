@@ -13,6 +13,23 @@ export interface Session {
   planTodo?: PlanTodo;
 }
 
+export interface TaskWorkspace {
+  available: boolean;
+  state: 'unprepared' | 'prepared' | 'blocked' | 'unknown';
+  reason?: string;
+  repository: string;
+  workspaceId?: string;
+  leaseExpiresAt?: string;
+  eventCount: number;
+  baseline?: {
+    repository_id: string;
+    head_commit: string;
+    checksum: string;
+    files: Array<{ path: string; exists: boolean; sha256?: string; size: number; mode: number }>;
+    excluded: Array<{ path: string; reason: string }>;
+  };
+}
+
 export interface PlanTodo {
   revision: number;
   plan: {

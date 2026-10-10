@@ -69,7 +69,11 @@ func runLocalCore(cfg serverconfig.Config) error {
 		api.Any(prefix, middleware.AuthMiddleware(jwtManager, users), optionalUnavailable)
 		api.Any(prefix+"/*path", middleware.AuthMiddleware(jwtManager, users), optionalUnavailable)
 	}
-	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, continuation: session.NewContinuationSlot()}).register(router, api, users, jwtManager)
+	var tasks session.TaskWorkspaceModule
+	if cfg.Harness.RepositoryRoot != "" && cfg.Harness.TaskWorkspaceRoot != "" {
+		tasks = session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
+	}
+	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: session.NewContinuationSlot()}).register(router, api, users, jwtManager)
 	api.GET("/capabilities", middleware.AuthMiddleware(jwtManager, users), func(c *gin.Context) {
 		capabilities := map[string]CapabilityStatus{
 			"identity":  {State: "ready", Reason: "local persistent authentication"},

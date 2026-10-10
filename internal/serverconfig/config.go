@@ -42,6 +42,8 @@ type Config struct {
 type HarnessConfig struct {
 	SessionLedgerPath string `mapstructure:"session_ledger_path"`
 	IdentityPath      string `mapstructure:"identity_path"`
+	RepositoryRoot    string `mapstructure:"repository_root"`
+	TaskWorkspaceRoot string `mapstructure:"task_workspace_root"`
 }
 
 func DefaultHarnessConfig() HarnessConfig {
@@ -124,6 +126,11 @@ func (c Config) Validate() error {
 		invalid = append(invalid, "harness.session_ledger_path")
 	}
 	if c.Server.Profile == "local-core" {
+		if (c.Harness.RepositoryRoot == "") != (c.Harness.TaskWorkspaceRoot == "") {
+			invalid = append(invalid, "harness.repository_root and task_workspace_root must be configured together")
+		} else if c.Harness.RepositoryRoot != "" && (!filepath.IsAbs(c.Harness.RepositoryRoot) || !filepath.IsAbs(c.Harness.TaskWorkspaceRoot)) {
+			invalid = append(invalid, "task repository and storage require absolute paths")
+		}
 		if host := c.Server.Host; host != "" {
 			if address := net.ParseIP(host); address == nil || !address.IsLoopback() {
 				invalid = append(invalid, "server.host (local core requires loopback)")
@@ -350,6 +357,12 @@ func Init(configPath string) {
 	expandEnvBind(&Conf)
 	if value := strings.TrimSpace(os.Getenv("CODE_AGENT_SESSION_LEDGER_PATH")); value != "" {
 		Conf.Harness.SessionLedgerPath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("CODE_AGENT_REPOSITORY_ROOT")); value != "" {
+		Conf.Harness.RepositoryRoot = value
+	}
+	if value := strings.TrimSpace(os.Getenv("CODE_AGENT_TASK_WORKSPACE_ROOT")); value != "" {
+		Conf.Harness.TaskWorkspaceRoot = value
 	}
 }
 

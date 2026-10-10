@@ -5,16 +5,39 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"code-agent/internal/safety"
 )
+
+func TestCaptureBaselineNeverFetchesPartialCloneObjects(t *testing.T) {
+	root := taskRepository(t)
+	var requests atomic.Int64
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(404) }))
+	defer remote.Close()
+	head := strings.TrimSpace(baselineGit(t, root, "rev-parse", "HEAD"))
+	if err := os.Remove(filepath.Join(root, ".git", "objects", head[:2], head[2:])); err != nil {
+		t.Fatal(err)
+	}
+	baselineGit(t, root, "config", "extensions.partialClone", "origin")
+	baselineGit(t, root, "config", "remote.origin.promisor", "true")
+	baselineGit(t, root, "config", "remote.origin.url", remote.URL)
+	if _, err := NewManager(root, "HEAD").CaptureBaseline(context.Background()); err == nil {
+		t.Fatal("partial clone baseline was admitted")
+	}
+	if requests.Load() != 0 {
+		t.Fatal("read-only baseline performed an unapproved fetch")
+	}
+}
 
 func TestCaptureBaselineIncludesWorkingCopyAndPreservesRepository(t *testing.T) {
 	root := t.TempDir()

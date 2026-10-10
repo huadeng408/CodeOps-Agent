@@ -5,6 +5,7 @@ import { ApiError, api } from './api';
 import { useWebSocket } from './useWebSocket';
 import { CheckpointPanel } from './CheckpointPanel';
 import { CapabilityPanel } from './CapabilityPanel';
+import { TaskWorkspacePanel } from './TaskWorkspacePanel';
 import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
 import { retryPendingMessage, sendFailureMessage } from './sendRetry';
@@ -672,6 +673,7 @@ function App() {
           <button className="icon-btn" type="button" title="关闭会话详情" aria-label="关闭会话详情" onClick={() => setShowDetails(false)}>×</button>
         </div>
         <div className="task-list">
+          {selectedSession && <TaskWorkspacePanel key={selectedSession.id} sessionId={selectedSession.id} onChanged={refreshSelected} />}
           <CapabilityPanel capabilities={capabilities} onChange={setCapabilities} />
           {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} executionCapability={capabilities?.execution} /> : <div className="empty-panel">未选择</div>}
         </div>
