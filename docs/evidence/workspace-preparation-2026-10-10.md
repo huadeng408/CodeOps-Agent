@@ -75,6 +75,19 @@ All failures remain; successful cases do not replace their denominators:
 | `local-core-9f5d9ad6-d5a5-4d36-b459-135376e895e9` | 3/13, exit 1 | Product owner was hardcoded to 1; actual local identity uses a random ID; source also changed during this failed run |
 | `local-core-07cce4c2-3e31-4963-8247-cc30184569ff` | 8/13, exit 1 | Old global state-label assertion counted the new workspace label; scoped to the capability panel |
 
+Post-commit `a0d37a29` browser run
+`local-core-28107d9b-a00f-4669-83e7-a6c6987a93e9` passed 13/13, exit 0.
+However `go vet ./...` exited 1 when Go discovered deliberately invalid generated
+fixture code retained under `output`. Full Go run
+`gateway-final-go-69adbd6a-5d77-4fce-95fc-76ce9fbac813` retained 1,301 passed/
+54 skipped test actions but **exit 1**, so it is not a passing full regression.
+No failure directory or receipt was deleted. An ignored local `output/go.mod`
+isolates these generated trees without modifying their contents. New browser
+fixtures use retained OS temporary storage outside the project module, and the
+mutation case remains syntactically valid Go. `go vet ./...` then exits 0;
+the new input-isolated runtime run `local-core-e06acd99-6b49-4fd7-b774-dc637ba23112`
+passes 13/13, exit 0. Final source-bound verification follows this harness fix.
+
 Both `code-review` axes are `AI_REVIEWED`, not `HUMAN_REVIEWED`.
 Confirmed findings fixed: real owner wiring, mandatory Git-file header,
 post-pin metadata revalidation, and partial-clone implicit network access.

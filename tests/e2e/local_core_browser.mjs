@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +21,15 @@ const artifacts = path.join(root, 'output', 'playwright', runId);
 await mkdir(artifacts, { recursive: true });
 const workspaceChecks = process.env.CODE_AGENT_E2E_WORKSPACE === '1';
 assert.ok(!workspaceChecks || profile === 'local-core', 'workspace runtime requires the approved local profile');
-const repository = path.join(artifacts, 'repository');
-const taskStorage = path.join(artifacts, 'task-storage');
+// Keep generated Go source outside the project's module discovery; retain it
+// after the run, with its input/outcome hashes in the receipt.
+const workspaceRoot = workspaceChecks ? await mkdtemp(path.join(tmpdir(), `codeops-${runId}-`)) : artifacts;
+if (workspaceChecks) {
+  const relative = path.relative(root, workspaceRoot);
+  assert.ok(path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`), 'fixture storage must remain outside the project module');
+}
+const repository = path.join(workspaceRoot, 'repository');
+const taskStorage = path.join(workspaceRoot, 'task-storage');
 const repoGit = args => {
   const result = spawnSync('git', ['-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-C', repository, ...args], {
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8', windowsHide: true,
@@ -284,11 +292,11 @@ try {
       await page.screenshot({ path: path.join(artifacts, 'workspace-03-restarted.png') });
     });
     await check('changed isolated content is blocked and retained without touching the source', async () => {
-      await writeFile(path.join(taskStorage, workspaceId, 'main.go'), 'deliberate fixture mutation\n');
+      await writeFile(path.join(taskStorage, workspaceId, 'main.go'), 'package fixture\n// deliberate fixture mutation\n');
       await page.getByRole('button', { name: '重新检查工作区', exact: true }).click();
       await page.locator('.task-workspace-panel').getByText('需处理', { exact: true }).waitFor();
       assert.deepEqual(await captureRepository(), repositoryBefore);
-      assert.equal(await readFile(path.join(taskStorage, workspaceId, 'main.go'), 'utf8'), 'deliberate fixture mutation\n');
+      assert.equal(await readFile(path.join(taskStorage, workspaceId, 'main.go'), 'utf8'), 'package fixture\n// deliberate fixture mutation\n');
       await page.screenshot({ path: path.join(artifacts, 'workspace-04-retained.png') });
     });
   }
@@ -314,9 +322,9 @@ try {
   const denominator = workspaceChecks ? 13 : 9;
   const receipt = { runId, scope: `production ${profile} browser authentication/history, no model execution`,
     gitSha, sourceHashes, sourceChangedWhileRunning, assetHashes, assetsChangedWhileRunning, binarySha256: await hash(binary), buildExitCode: build.status, processIds, processOutcomes,
-    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 node tests/e2e/local_core_browser.mjs', exitCode,
+    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
     denominator, checks, notRun: denominator - checks.length, artifactsHashes, traceBackend: 'unknown', modelCalls: 0,
-    workspaceChecks, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, workspaceInput: workspaceChecks ? 'controlled fixture repository; not a coding task' : undefined };
+    workspaceChecks, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, workspaceInput: workspaceChecks ? 'controlled fixture repository; not a coding task' : undefined };
   await writeFile(path.join(artifacts, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify({ runId, passed: checks.filter(result => result.status === 'passed').length, denominator, exitCode }));
 }
