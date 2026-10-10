@@ -36,9 +36,13 @@ inputs, not a solved code task. No external repository script is executed.
 Original HEAD/status/index and canary hashes are recorded before and after
 the product operations. The server's PATH is empty.
 
-Runs below record the parent HEAD plus exact dirty-source hashes. A subsequent
-commit binding must compare those hashes to the committed source before they
-can be cited for that source. Original receipts are not rewritten.
+Runs below record the parent HEAD plus exact dirty-source hashes. Tested source:
+**`bca338c743d83916d27c07aba4a093135477497c`**. Post-commit binding checked all
+834/834/463 entries against the same working bytes and committed blobs (only
+Git CRLF conversion is normalized for blob comparison). Original receipts are
+not rewritten. Binding: `output/playwright/local-core-preparation-review/source-binding.json`,
+SHA-256 `5e657aaa62c85b936a7fda1caa1c5f7aef198ebc497a6e57179d3b4ca3fa5fe5`.
+The next evidence-only commit changes no tested source or assets.
 
 ## Checks
 

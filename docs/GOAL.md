@@ -90,7 +90,7 @@
   本轮修复、失败分母、资源/兼容限制和收据见[读取证据](evidence/workspace-rooted-git-2026-10-10.md)。
   #4 仍 OPEN/`BLOCKED`；生产工具执行、完整恢复矩阵及 Go/Python Trace 待接入。
 
-- **Issue #4 本机准备与 Trace 导出**：`IMPLEMENTED`。本机入口复用已有 OTel
+- **Issue #4 本机准备与 Trace 导出**：`IMPLEMENTED`，源码 `bca338c7`。本机入口复用已有 OTel
   exporter，关闭最多等待 5 秒；共享日志边界覆盖启动、SDK header 和后台失败响应，
   不输出认证值，Windows 测试环境按大小写无关方式隔离配置。实际 Go HTTP 入口
   9/9、公开 chi 固定源码的浏览器准备 13/13、退出 0；原仓库/index 和资产未变。
