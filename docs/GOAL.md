@@ -90,6 +90,17 @@
   本轮修复、失败分母、资源/兼容限制和收据见[读取证据](evidence/workspace-rooted-git-2026-10-10.md)。
   #4 仍 OPEN/`BLOCKED`；生产工具执行、完整恢复矩阵及 Go/Python Trace 待接入。
 
+- **Issue #4 本机准备与 Trace 导出**：`IMPLEMENTED`。本机入口复用已有 OTel
+  exporter，关闭最多等待 5 秒；共享日志边界覆盖启动、SDK header 和后台失败响应，
+  不输出认证值，Windows 测试环境按大小写无关方式隔离配置。实际 Go HTTP 入口
+  9/9、公开 chi 固定源码的浏览器准备 13/13、退出 0；原仓库/index 和资产未变。
+  冻结源码后的完整 Go 1,356 passed/55 skipped/0 failed、43 包、退出 0；
+  vet 退出 0，834 个源码/依赖文件哈希未变。
+  OTLP 接收是受控集成测试；Docker 就绪 300 秒超时、Phoenix 拒绝连接，真实
+  后端读回仍 `BLOCKED`，不关闭 #4，也不升级为模型代码任务或完整 Trace。
+  模型调用 0，累计 token 批次未重置。命令、失败分母与收据见
+  [本机准备证据](evidence/local-core-preparation-trace-2026-10-10.md)。
+
 | 范围 | 状态及完成条件 |
 | --- | --- |
 | 首批 Windows 产品 | `DESIGNED`：以正式规格的 AC01–AC09 和批准后的任务拆解交付 |

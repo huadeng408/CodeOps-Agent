@@ -20,6 +20,9 @@ const runId = `${profile}-${randomUUID()}`;
 const artifacts = path.join(root, 'output', 'playwright', runId);
 await mkdir(artifacts, { recursive: true });
 const workspaceChecks = process.env.CODE_AGENT_E2E_WORKSPACE === '1';
+const publicInput = process.env.CODE_AGENT_E2E_PUBLIC_INPUT === 'chi-v5.2.3';
+assert.ok(!publicInput || workspaceChecks, 'public input requires workspace checks');
+const publicInputRevision = publicInput ? '9b9fb55def404397748a9fc7e044efe9db1d618e' : undefined;
 assert.ok(!workspaceChecks || profile === 'local-core', 'workspace runtime requires the approved local profile');
 // Keep generated Go source outside the project's module discovery; retain it
 // after the run, with its input/outcome hashes in the receipt.
@@ -39,7 +42,16 @@ const repoGit = args => {
 };
 if (workspaceChecks) {
   await mkdir(repository); await mkdir(taskStorage);
-  repoGit(['init']); repoGit(['config', 'user.name', 'Fixture']); repoGit(['config', 'user.email', 'fixture@example.test']);
+  repoGit(['init']);
+  if (publicInput) {
+    repoGit(['remote', 'add', 'origin', 'https://github.com/go-chi/chi.git']);
+    repoGit(['fetch', '--depth=1', 'origin', publicInputRevision]);
+    repoGit(['checkout', '--detach', publicInputRevision]);
+    assert.equal(repoGit(['rev-parse', 'HEAD']).trim(), publicInputRevision);
+    assert.ok((await readFile(path.join(repository, 'LICENSE'), 'utf8')).includes('MIT License'));
+    assert.ok((await readFile(path.join(repository, 'go.mod'), 'utf8')).includes('github.com/go-chi/chi/v5'));
+  }
+  repoGit(['config', 'user.name', 'Fixture']); repoGit(['config', 'user.email', 'fixture@example.test']);
   await writeFile(path.join(repository, 'main.go'), 'package fixture\n// committed\n');
   await writeFile(path.join(repository, 'gone.py'), '# remove this file\n');
   await writeFile(path.join(repository, '.env'), 'private fixture, never copied\n');
@@ -82,7 +94,7 @@ const secret = randomBytes(32).toString('hex');
 const password = randomBytes(16).toString('hex');
 const username = 'browser-operator@example.test';
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-  !/^(MYSQL_|REDIS_|MINIO_|JWT_SECRET$|CODEAGENT_|CODE_AGENT_|OPENAI_|ANTHROPIC_|LLM_|OTEL_)/.test(key)));
+  !/^(MYSQL_|REDIS_|MINIO_|JWT_SECRET$|CODEAGENT_|CODE_AGENT_|OPENAI_|ANTHROPIC_|LLM_|OTEL_)/i.test(key)));
 if (workspaceChecks) {
   for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
   env.PATH = '';
@@ -326,9 +338,11 @@ try {
   const denominator = workspaceChecks ? 13 : 9;
   const receipt = { runId, scope: `production ${profile} browser authentication/history, no model execution`,
     gitSha, sourceHashes, sourceChangedWhileRunning, assetHashes, assetsChangedWhileRunning, binarySha256: await hash(binary), buildExitCode: build.status, processIds, processOutcomes,
-    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
+    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${publicInput ? 'CODE_AGENT_E2E_PUBLIC_INPUT=chi-v5.2.3 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
     denominator, checks, notRun: denominator - checks.length, artifactsHashes, traceBackend: 'unknown', modelCalls: 0,
-    workspaceChecks, nativeGitAvailableToServer: workspaceChecks ? false : undefined, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, workspaceInput: workspaceChecks ? 'controlled fixture repository; not a coding task' : undefined };
+    workspaceChecks, nativeGitAvailableToServer: workspaceChecks ? false : undefined, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline,
+    publicInputRevision, publicInputRepository: publicInput ? 'https://github.com/go-chi/chi' : undefined,
+    workspaceInput: workspaceChecks ? (publicInput ? 'pinned public checkout with controlled dirty/new/empty/deleted inputs; no code task executed' : 'controlled fixture repository; not a coding task') : undefined };
   await writeFile(path.join(artifacts, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify({ runId, passed: checks.filter(result => result.status === 'passed').length, denominator, exitCode }));
 }

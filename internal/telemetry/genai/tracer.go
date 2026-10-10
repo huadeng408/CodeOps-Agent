@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -82,6 +83,10 @@ func (w *otelSpan) SetStatus(code codes.Code, description string) {
 // If the endpoint is not reachable and no explicit env var was set, it logs a
 // warning and returns a NoopTracer so the harness keeps working.
 func NewTelemetry(ctx context.Context) Tracer {
+	otel.SetLogger(logr.New(telemetryLogSink{}))
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {
+		log.Print("[telemetry] span export failed")
+	}))
 	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	if endpoint == "" {
 		endpoint = "http://localhost:6006"
@@ -89,7 +94,7 @@ func NewTelemetry(ctx context.Context) Tracer {
 
 	host, insecure, err := parseOTLPEndpoint(endpoint)
 	if err != nil {
-		log.Printf("[telemetry] bad OTLP endpoint %q: %v; using noop", endpoint, err)
+		log.Print("[telemetry] invalid OTLP endpoint; using noop")
 		return &NoopTracer{}
 	}
 
@@ -106,7 +111,7 @@ func NewTelemetry(ctx context.Context) Tracer {
 
 	exp, err := otlptracehttp.New(ctx, opts...)
 	if err != nil {
-		log.Printf("[telemetry] OTLP exporter creation failed: %v; using noop", err)
+		log.Print("[telemetry] OTLP exporter creation failed; using noop")
 		return &NoopTracer{}
 	}
 
@@ -117,7 +122,7 @@ func NewTelemetry(ctx context.Context) Tracer {
 		),
 	)
 	if err != nil {
-		log.Printf("[telemetry] resource creation failed: %v; using noop", err)
+		log.Print("[telemetry] resource creation failed; using noop")
 		return &NoopTracer{}
 	}
 
@@ -131,7 +136,7 @@ func NewTelemetry(ctx context.Context) Tracer {
 		provider: provider,
 		tracer:   provider.Tracer("code-agent"),
 	}
-	log.Printf("[telemetry] OTLP exporter ready, sending traces to %s", endpoint)
+	log.Printf("[telemetry] OTLP exporter ready, sending traces to %s", host)
 	return t
 }
 

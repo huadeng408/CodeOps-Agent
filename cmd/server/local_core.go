@@ -18,6 +18,7 @@ import (
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
 	"code-agent/internal/session"
+	"code-agent/internal/telemetry/genai"
 	"code-agent/pkg/log"
 	"code-agent/pkg/token"
 
@@ -32,6 +33,14 @@ func runLocalCore(cfg serverconfig.Config) error {
 	if address := net.ParseIP(host); address == nil || !address.IsLoopback() {
 		return errors.New("local core requires a loopback listen address")
 	}
+	telemetry := genai.NewTelemetry(context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(ctx); err != nil {
+			log.Errorf("local trace exporter shutdown failed")
+		}
+	}()
 	ledger, err := session.OpenSQLiteEventLog(cfg.Harness.SessionLedgerPath)
 	if err != nil {
 		return err

@@ -496,7 +496,8 @@ func startProductionLocalCore(t *testing.T) *localCoreProcess {
 	}
 	fixture := &localCoreProcess{binary: binary, dir: taskDir, config: configPath}
 	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "MYSQL_") || strings.HasPrefix(entry, "REDIS_") || strings.HasPrefix(entry, "MINIO_") || strings.HasPrefix(entry, "JWT_SECRET=") || strings.HasPrefix(entry, "CODEAGENT_") || strings.HasPrefix(entry, "CODE_AGENT_") || strings.HasPrefix(entry, "OPENAI_") || strings.HasPrefix(entry, "ANTHROPIC_") || strings.HasPrefix(entry, "LLM_") {
+		entryName := strings.ToUpper(strings.SplitN(entry, "=", 2)[0])
+		if strings.HasPrefix(entryName, "MYSQL_") || strings.HasPrefix(entryName, "REDIS_") || strings.HasPrefix(entryName, "MINIO_") || entryName == "JWT_SECRET" || strings.HasPrefix(entryName, "CODEAGENT_") || strings.HasPrefix(entryName, "CODE_AGENT_") || strings.HasPrefix(entryName, "OPENAI_") || strings.HasPrefix(entryName, "ANTHROPIC_") || strings.HasPrefix(entryName, "LLM_") || strings.HasPrefix(entryName, "OTEL_") {
 			continue
 		}
 		fixture.environment = append(fixture.environment, entry)
