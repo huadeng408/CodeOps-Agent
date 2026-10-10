@@ -175,9 +175,14 @@ Fresh correction checks, all exit 0:
   fixture input, model calls 0, Trace unknown. Original workspace/index remain
   unchanged. The restarted browser screenshot was also inspected.
 
-These runs recorded the parent HEAD `84d5f31b` plus exact modified-source hashes;
-committed-source binding is recorded after the correction commit. Both review
-axes found no remaining definite issue in the correction (`AI_REVIEWED`).
+These runs recorded the parent HEAD `84d5f31b` plus exact modified-source hashes.
+Correction source: **`db6220a926d4d9880e613dd52e3e51cde45d0cc4`**. Post-commit
+binding checked all 831/460 entries against the same bytes and committed blobs:
+`output/playwright/workspace-rooted-review/source-binding-ci-fix.json`, SHA-256
+`30c9504c071c120fa50d70da2a6958096feac49315d242ae243e35f2a2cf5031`.
+Original run receipts and the earlier binding receipt were preserved. The next
+evidence-only commit changes no tested source or assets. Both review axes found
+no remaining definite issue in the correction (`AI_REVIEWED`).
 The original failed CI remains at `output/playwright/github-ci-38040174277/`:
 `go-failure.log` SHA-256 `282de5ad26fc2dac9c41b59d100872beea11ad13c1a8837e33d78c8350cc4414`,
 `run.json` SHA-256 `72acfcc428f205aa195d74532d983a3ed87b7bf751ad714a1beac5ba9397b299`.
