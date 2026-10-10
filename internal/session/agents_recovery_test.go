@@ -217,11 +217,13 @@ func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *t
 		return t.TempDir(), nil
 	}
 	var lifecycleCalls atomic.Int32
+	var acknowledgeLifecycle atomic.Bool
 	lifecycle := func(_ context.Context, event *pb.AgentLifecycle) error {
 		if event.GetStatus() != "cancelled" {
 			t.Fatalf("lifecycle status = %q", event.GetStatus())
 		}
-		if lifecycleCalls.Add(1) <= 2 {
+		lifecycleCalls.Add(1)
+		if !acknowledgeLifecycle.Load() {
 			return errors.New("fixture lifecycle failure")
 		}
 		return nil
@@ -232,32 +234,36 @@ func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *t
 		ID: "cancel-lifecycle-recovery", Name: "AgentTask",
 		ParametersJSON: `{"action":"cancel","task_id":"` + task.Id + `"}`,
 	})
-	if result.Error == "" || lifecycleCalls.Load() != 1 {
+	if result.Error == "" || lifecycleCalls.Load() < 1 {
 		t.Fatalf("initial lifecycle failure = result=%+v calls=%d", result, lifecycleCalls.Load())
 	}
+	beforeRetry := lifecycleCalls.Load()
 	retry := runner.ExecuteAgentTool(ctx, actor, actor.SessionID, orchestrator.ToolCall{
 		ID: "cancel-lifecycle-recovery-retry", Name: "AgentTask",
 		ParametersJSON: `{"action":"cancel","task_id":"` + task.Id + `"}`,
 	})
-	if retry.Error == "" || lifecycleCalls.Load() != 2 {
+	if retry.Error == "" || lifecycleCalls.Load() <= beforeRetry {
 		t.Fatalf("cancel retry did not retry failed lifecycle: result=%+v calls=%d", retry, lifecycleCalls.Load())
 	}
 	if err := runner.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Terminal observers may also retry cleanup; success starts only at recovery.
+	beforeRecovery := lifecycleCalls.Load()
+	acknowledgeLifecycle.Store(true)
 
 	recovered := NewSessionRunner(NewWorkbench(runner.workbench.ledger, nil), fixture, nil, SessionRunnerOptions{AgentLifecycle: lifecycle})
 	t.Cleanup(func() { _ = recovered.Close() })
 	if err := recovered.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if lifecycleCalls.Load() != 3 {
-		t.Fatalf("recovered lifecycle calls = %d, want 3", lifecycleCalls.Load())
+	if lifecycleCalls.Load() != beforeRecovery+1 {
+		t.Fatalf("recovered lifecycle calls = %d, want %d", lifecycleCalls.Load(), beforeRecovery+1)
 	}
 	if err := recovered.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if lifecycleCalls.Load() != 3 {
+	if lifecycleCalls.Load() != beforeRecovery+1 {
 		t.Fatalf("acknowledged lifecycle was repeated: %d calls", lifecycleCalls.Load())
 	}
 	events, err := recovered.workbench.ledger.Events(ctx, task.ChildSessionId)

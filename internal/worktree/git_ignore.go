@@ -183,9 +183,6 @@ func compileGitIgnore(pattern string, anchored, fold bool) (*regexp.Regexp, erro
 			if strings.HasPrefix(class, "^]") {
 				class = `^\]` + class[2:]
 			}
-			if strings.HasPrefix(class, "^") {
-				class = "^/" + class[1:]
-			}
 			var escaped strings.Builder
 			for k := 0; k < len(class); k++ {
 				if class[k] == '\\' && k+1 < len(class) {

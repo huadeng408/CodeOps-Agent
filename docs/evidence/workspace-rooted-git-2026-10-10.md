@@ -35,10 +35,10 @@ recursive matcher has unbounded backtracking. No new Session facts or Python
 side effects were introduced. Exact compatibility limits are in
 [workspace-baseline.md](../workspace-baseline.md).
 
-## Current checks
+## Source checks at 0b7b3eae (before Linux CI fixes)
 
 The initial fixed point is `f240e7def34882116c28b013bcb0fe937885db9d`.
-Final source: **`0b7b3eae05600ab91eae6f3fe769891aedb4ddbf`**. Pre-commit runs
+Tested source: **`0b7b3eae05600ab91eae6f3fe769891aedb4ddbf`**. Pre-commit runs
 bind exact tracked/unignored source hashes. The post-commit audit checks every
 831/460 source entry against the unchanged working bytes and that commit's blobs;
 Git CRLF conversion is normalized only for the committed-blob comparison. Original
@@ -111,7 +111,7 @@ Failed cases remain; successful subsets do not replace their denominators:
   passed 1,348 / skipped 54, exit 0; browser
   `local-core-abd27ee3-afdb-4709-8273-2727c6bcf1d6` passed 13/13, exit 0.
   Both precede the final positive-character-range correction. Final source
-  removes `/` from all parsed wildcard ranges, including `[!-z]`, using
+  removes `/` from all parsed wildcard ranges using
   `regexp/syntax`. Native separator/non-separator regressions pass. The complete
   Go and browser runs above follow this final source change.
 
@@ -134,6 +134,54 @@ negation, POSIX and UTF-8 check: **5/5, exit 0**. Source review is
 
 The failure log is a tool-output excerpt, not a complete runtime receipt.
 The external review overlay and original logs are retained outside the repo.
+
+## Linux CI failure and correction
+
+[Run 38040174277](https://github.com/huadeng408/CodeOps-Agent/actions/runs/38040174277)
+tested `84d5f31bec27eefe806f1361f47242a20007b879`: Python and Frontend succeeded;
+Go failed with two failing test cases, exit 1, and vet was skipped. The useful
+source checks stay enabled; no workflow gate was removed.
+
+The ignore parser inserted `/` into a negated class before parsing it. This
+changed `[!-z]` (literal leading hyphen and `z`) into a different range. Windows'
+default `core.ignorecase=true` masked the mismatch. Slash exclusion now happens
+only on the parsed AST, preserving Git's original class syntax. Native comparisons
+explicitly set both case modes and also cover the positive range `[ -z]`.
+
+The recovery fixture assumed exactly two failed lifecycle calls, but a background
+terminal observer can also retry. The fixture now keeps failure active until the
+old runner is closed and drained. Recovery must still add exactly one callback
+and one durable acknowledgement; repeated recovery must not call it again.
+Production retry, authorization and Session Ledger logic are unchanged.
+
+Fresh correction checks, all exit 0:
+
+- `go test ./internal/session -run TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged -count=100`:
+  100 successful repetitions.
+- `go test ./internal/worktree ./internal/session -count=1`: both packages pass.
+- `go vet ./...`, `gofmt -l` for the three modified Go files and
+  `git diff --check`: clean.
+- `go test ./... -count=1 -json`: **1,352 passed / 54 skipped / 0 failed test
+  actions**, 43 passing packages. All 831 source/dependency hashes stayed unchanged.
+  Run `workspace-rooted-go-5d6b5167-42bb-469e-8037-f991025595f4`; receipt at
+  `output/playwright/<run>/receipt.json`, SHA-256
+  `f18c92d3af9f7c9608d4f50b23cd62cb19b2b9331481eae070141a48de7da676`;
+  log SHA-256 `766ec95267a2dc40a61a2c1d269f3660c1fee6dbfde93ca42fa9404451f77b1c`.
+- Browser command above: **13/13**, run
+  `local-core-08df07be-dfb4-4d24-aab1-8e310a275690`; receipt at
+  `output/playwright/<run>/receipt.json`, SHA-256
+  `ad2ef7e5b4d3b039df0cd6f9c1701a0f1d37be9f59f92762ec056012fd0966a4`.
+  Go PIDs 27804/32716; 460 source hashes, unchanged assets, empty server PATH,
+  fixture input, model calls 0, Trace unknown. Original workspace/index remain
+  unchanged. The restarted browser screenshot was also inspected.
+
+These runs recorded the parent HEAD `84d5f31b` plus exact modified-source hashes;
+committed-source binding is recorded after the correction commit. Both review
+axes found no remaining definite issue in the correction (`AI_REVIEWED`).
+The original failed CI remains at `output/playwright/github-ci-38040174277/`:
+`go-failure.log` SHA-256 `282de5ad26fc2dac9c41b59d100872beea11ad13c1a8837e33d78c8350cc4414`,
+`run.json` SHA-256 `72acfcc428f205aa195d74532d983a3ed87b7bf751ad714a1beac5ba9397b299`.
+Fresh Linux CI is recorded independently by GitHub against the pushed SHA.
 
 ## Acceptance boundary
 

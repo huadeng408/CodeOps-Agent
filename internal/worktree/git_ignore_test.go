@@ -3,6 +3,7 @@ package worktree
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,12 +47,12 @@ func TestCaptureBaselineMatchesNativeUTF8IgnoreRules(t *testing.T) {
 		{"foo[!a]bar.py", "foo/bar.py", false},
 		{"foo[!-z]bar.py", "foo/bar.py", false},
 		{"foo[!-z]bar.py", "fooZbar.py", false},
+		{"foo[ -z]bar.py", "foo/bar.py", false},
+		{"foo[ -z]bar.py", "fooZbar.py", false},
 	} {
 		t.Run(test.rule+test.name, func(t *testing.T) {
 			root := taskRepository(t)
-			if test.fold {
-				baselineGit(t, root, "config", "core.ignorecase", "true")
-			}
+			baselineGit(t, root, "config", "core.ignorecase", strconv.FormatBool(test.fold))
 			writeBaselineFile(t, root, ".gitignore", test.rule+"\n")
 			writeBaselineFile(t, root, test.name, "fixture source")
 			_, nativeError := gitOutput(context.Background(), root, "check-ignore", "--quiet", test.name)
