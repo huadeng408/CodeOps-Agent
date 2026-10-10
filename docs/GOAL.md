@@ -96,10 +96,20 @@
   9/9、公开 chi 固定源码的浏览器准备 13/13、退出 0；原仓库/index 和资产未变。
   冻结源码后的完整 Go 1,356 passed/55 skipped/0 failed、43 包、退出 0；
   vet 退出 0，834 个源码/依赖文件哈希未变。
-  OTLP 接收是受控集成测试；Docker 就绪 300 秒超时、Phoenix 拒绝连接，真实
+  OTLP 接收是受控集成测试；当轮 Docker 就绪 300 秒超时、Phoenix 拒绝连接，真实
   后端读回仍 `BLOCKED`，不关闭 #4，也不升级为模型代码任务或完整 Trace。
   模型调用 0，累计 token 批次未重置。命令、失败分母与收据见
   [本机准备证据](evidence/local-core-preparation-trace-2026-10-10.md)。
+
+- **Windows Docker 启动恢复**：共享启动入口为 `IMPLEMENTED`。真实启动日志确认
+  Inference 和 Secrets Engine 残留 IPC 的 Windows 1920 错误；仅在 Desktop/backend
+  停止时保留式归档白名单通信目录，拒绝未知内容、非空文件及重定向根/目录。
+  冻结代码的三次冷启动均通过，退出 0，逐次运行离线容器并读回自有测试卷数据；
+  既有 61 个容器的库存/配置、620 个卷的库存及设置哈希保持一致，未读取用户卷内容。
+  首次真实失败和中间结果均保留。相关回归 33 项通过，新增 Windows CI 合同检查；
+  完整 Python 2,426 passed/17 skipped/0 failed、退出 0，883 个源码/配置哈希未变。
+  当前本机 Docker 阻塞已解除，源码绑定及完整回归见[恢复证据](evidence/docker-startup-2026-10-10.md)。
+  此结果不代替真实 Phoenix 读回、完整 Go/Python Trace 或代码任务验收；#4 仍 OPEN。
 
 | 范围 | 状态及完成条件 |
 | --- | --- |

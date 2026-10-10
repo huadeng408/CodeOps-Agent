@@ -24,8 +24,12 @@ def test_ci_provisions_dependencies_for_go_subprocesses_and_python_collection() 
     assert 'pip install -e ".[test,rag,eval]"' in python_commands
     assert python_commands.index("pip install") < python_commands.index("python -m pytest -q")
     assert python_commands.index("go mod download") < python_commands.index("python -m pytest -q")
+    expected_runners = {"go": "ubuntu-24.04", "python": "ubuntu-24.04", "frontend": "ubuntu-24.04", "windows-startup": "windows-2025"}
+    assert {name: job["runs-on"] for name, job in workflow["jobs"].items()} == expected_runners
+    windows_commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["windows-startup"]["steps"])
+    assert "python -m pytest -q tests/test_docker_desktop_startup.py" in windows_commands
+    assert "python -m pip install $pytestRequirement" in windows_commands
     for job in workflow["jobs"].values():
-        assert job["runs-on"] == "ubuntu-24.04"
         for step in job["steps"]:
             if "uses" in step:
                 assert re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", step["uses"])

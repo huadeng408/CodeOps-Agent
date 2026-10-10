@@ -50,6 +50,55 @@ function Resolve-DockerCli {
     throw 'Docker CLI was not found in PATH or a standard Docker Desktop installation path'
 }
 
+function Move-StaleDockerRuntimeSockets {
+    $localRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA)
+    $runtimes = @(
+        @{ Parent = 'Docker'; Name = 'run'; Entries = @('dockerInference', 'userAnalyticsOtlpHttp.sock') },
+        @{ Parent = ''; Name = 'docker-secrets-engine'; Entries = @('engine.sock') }
+    )
+    foreach ($runtime in $runtimes) {
+        $parentDirectory = $localRoot
+        if ($runtime.Parent) { $parentDirectory = Join-Path $localRoot $runtime.Parent }
+        $runtimeDirectory = Join-Path $parentDirectory $runtime.Name
+        if (-not [IO.Directory]::Exists($runtimeDirectory)) { continue }
+        # Move only transient IPC, never Docker settings, WSL disks or workload data.
+        foreach ($directory in @($localRoot, $parentDirectory, $runtimeDirectory)) {
+            $attributes = [IO.File]::GetAttributes($directory)
+            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Refusing to archive a redirected Docker runtime directory'
+            }
+        }
+        $entries = @([IO.Directory]::EnumerateFileSystemEntries($runtimeDirectory))
+        if ($entries.Count -eq 0) { continue }
+        foreach ($entry in $entries) {
+            if ([IO.Path]::GetFileName($entry) -cnotin $runtime.Entries) {
+                throw 'Docker runtime contains an unexpected entry; preserve it for manual diagnosis'
+            }
+            try {
+                $attributes = [IO.File]::GetAttributes($entry)
+                if (($attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+                    [IO.FileInfo]::new($entry).Length -ne 0) {
+                    throw 'Refusing to archive non-socket Docker runtime content'
+                }
+            }
+            catch {
+                # Windows may reject metadata on an abandoned AF_UNIX endpoint (1920).
+                if ($null -eq $_.Exception.InnerException -or
+                    ($_.Exception.InnerException.HResult -band 65535) -ne 1920) {
+                    throw
+                }
+            }
+        }
+        if ($null -ne (Get-Process -Name 'Docker Desktop', 'com.docker.backend' -ErrorAction SilentlyContinue)) {
+            throw 'Docker started during IPC inspection; refusing to move its runtime directory'
+        }
+        $archiveName = $runtime.Name + '.archive-' + [guid]::NewGuid().ToString('N')
+        $archiveDirectory = Join-Path $parentDirectory $archiveName
+        Move-Item -LiteralPath $runtimeDirectory -Destination $archiveDirectory -ErrorAction Stop
+        Write-Host "preserved: stale Docker IPC in $archiveName"
+    }
+}
+
 function Start-DockerDesktopIfNeeded {
     [CmdletBinding()]
     param()
@@ -57,16 +106,28 @@ function Start-DockerDesktopIfNeeded {
     if ($env:OS -ne 'Windows_NT') {
         return
     }
-    $running = Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue
-    if ($null -ne $running) {
-        return
+    $startupLock = [Threading.Mutex]::new($false, 'Local\CodeOpsAgent.DockerDesktopStartup')
+    $ownsLock = $false
+    try {
+        try { $ownsLock = $startupLock.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $ownsLock = $true }
+        if (-not $ownsLock) { return }
+        $running = Get-Process -Name 'Docker Desktop', 'com.docker.backend' -ErrorAction SilentlyContinue
+        if ($null -ne $running) {
+            return
+        }
+        $desktop = Join-Path ${env:ProgramFiles} 'Docker\Docker\Docker Desktop.exe'
+        if (-not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
+            $desktop = Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'
+        }
+        if (Test-Path -LiteralPath $desktop -PathType Leaf) {
+            Move-StaleDockerRuntimeSockets
+            Start-Process -FilePath $desktop -WindowStyle Hidden | Out-Null
+        }
     }
-    $desktop = Join-Path ${env:ProgramFiles} 'Docker\Docker\Docker Desktop.exe'
-    if (-not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
-        $desktop = Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'
-    }
-    if (Test-Path -LiteralPath $desktop -PathType Leaf) {
-        Start-Process -FilePath $desktop -WindowStyle Hidden | Out-Null
+    finally {
+        if ($ownsLock) { $startupLock.ReleaseMutex() }
+        $startupLock.Dispose()
     }
 }
 
@@ -227,8 +288,8 @@ function Wait-DockerDaemonReady {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastFailure = "unknown error"
-    Start-DockerDesktopIfNeeded
     $dockerContext = Use-DockerDesktopLinuxContext -DockerCli $dockerCli
+    $startupAttempted = $false
     do {
         try {
             $probeArguments = @('info', '--format', '{{.ServerVersion}}')
@@ -256,6 +317,10 @@ function Wait-DockerDaemonReady {
         }
         catch {
             $lastFailure = $_.Exception.Message
+        }
+        if (-not $startupAttempted) {
+            Start-DockerDesktopIfNeeded
+            $startupAttempted = $true
         }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
