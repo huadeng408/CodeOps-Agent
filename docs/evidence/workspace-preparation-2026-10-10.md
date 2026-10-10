@@ -10,6 +10,37 @@ It reuses Git hardening, rooted reads, existing lease IDs, identity ACLs,
 Ledger/CAS and the existing browser test entry. No dependency, second mutable
 Session store, automatic cleanup or Python filesystem side effect was added.
 
+## Final committed-source checks
+
+Source: `feb86ce1e62c57d73a4cc3705791796d3533a94f`, following the preparation
+implementation `a0d37a294a47ddd995fc78fd63cba11945c4d6c3`. The later evidence-only
+commit does not change the tested Go, Python, browser harness or frontend.
+
+| Check | Result |
+| --- | --- |
+| `go test ./... -count=1 -json` | 1,301 passed, 54 skipped, 0 failed test actions; 43 passing packages; exit 0 |
+| `go vet ./...` | Exit 0 after generated-fixture isolation |
+| `npm test` in `frontend` | 12 passed, 0 skipped, 0 failed; exit 0 |
+| `npm run build` in `frontend` | Exit 0 |
+| Browser command below | 13/13, exit 0; two actual Go processes, PIDs 51268 and 31644 |
+
+Full Go run: `gateway-final-go-ca2e381f-d9b2-4090-a055-d0f98124d449`.
+Receipt: `output/playwright/gateway-final-go-ca2e381f-d9b2-4090-a055-d0f98124d449/receipt.json`.
+It hashes all 822 tracked/unignored Go, Python and protobuf source files; source
+was unchanged during the run. Receipt SHA-256:
+`ab0b95d51570e841e8b02917a02ff60438c488f84265df93a067d070ea51f002`.
+Log SHA-256: `29f352f21aad52716b7d92ed3b08a6b2a18de75c032c6af8876c01aaed11d74a`.
+
+Final browser run: `local-core-be107650-3c79-476f-9aeb-fde1c605abb1`.
+Receipt: `output/playwright/local-core-be107650-3c79-476f-9aeb-fde1c605abb1/receipt.json`.
+SHA-256: `5ef046dfce3076352796a38b2360f92375724040386594f1fdf2cd6b2ca7199d`.
+The receipt binds the same source SHA, built binary/assets, screenshot hashes,
+all 13 checks, original repository/index hashes and both process outcomes.
+Source and assets were unchanged during the run. Model calls: 0; Trace backend:
+unknown; input: controlled fixture repository. Both final AI review axes reported
+no remaining definite findings within this prepared-copy scope. The unproven
+native Git namespace boundary below still prevents full #4 acceptance.
+
 ## Public checks
 
 Target command:
@@ -81,6 +112,7 @@ However `go vet ./...` exited 1 when Go discovered deliberately invalid generate
 fixture code retained under `output`. Full Go run
 `gateway-final-go-69adbd6a-5d77-4fce-95fc-76ce9fbac813` retained 1,301 passed/
 54 skipped test actions but **exit 1**, so it is not a passing full regression.
+Its receipt SHA-256 is `f92fe03ecd372e709fe46512daa189931e42255221c5b792effe131ed9545b3d`.
 No failure directory or receipt was deleted. An ignored local `output/go.mod`
 isolates these generated trees without modifying their contents. New browser
 fixtures use retained OS temporary storage outside the project module, and the
