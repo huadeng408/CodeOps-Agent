@@ -77,14 +77,14 @@
   源码/产物哈希、失败分母和审查见[准备证据](evidence/workspace-preparation-2026-10-10.md)。
 
 - **Issue #4 Go 读取与注册**：`IMPLEMENTED`。基线与准备路径已改为捕获的
-  metadata 库存及 `os.Root` 只读接口，复用固定版本 go-git/go-billy/gcfg；
+  metadata 库存及 `os.Root` 只读接口，源码 `0b7b3eae`，复用固定版本 go-git/go-billy/gcfg；
   新增路径不会进入库存，不启动 native Git。Go 经 rooted 独占写建立原有
   detached/locked 关系和 HEAD index。对象、delta、v4 index 路径在 codec 前
   限制解码量；忽略规则使用 RE2，并以原生 Git 核对 UTF-8、目录、配置行为。
   最终浏览器 13/13、两 Go 进程、退出 0，服务端 PATH 为空，源文件和 index
   保持原样；输入为 fixture，模型调用 0。完整 Go 1,350 passed/54 skipped/0 failed
   test actions、43 包、退出 0；vet 与依赖校验退出 0。收据包含 831 个源码/依赖
-  文件哈希，提交后核对同一源码。
+  文件哈希，提交后已逐项核对同一源码；浏览器收据另绑定 460 个源码文件。
   本轮修复、失败分母、资源/兼容限制和收据见[读取证据](evidence/workspace-rooted-git-2026-10-10.md)。
   #4 仍 OPEN/`BLOCKED`；生产工具执行、完整恢复矩阵及 Go/Python Trace 待接入。
 

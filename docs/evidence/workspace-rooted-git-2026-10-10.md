@@ -38,8 +38,14 @@ side effects were introduced. Exact compatibility limits are in
 ## Current checks
 
 The initial fixed point is `f240e7def34882116c28b013bcb0fe937885db9d`.
-Pre-commit runs bind exact tracked/unignored source hashes. Committed-source
-binding follows the first source commit without modifying those original receipts.
+Final source: **`0b7b3eae05600ab91eae6f3fe769891aedb4ddbf`**. Pre-commit runs
+bind exact tracked/unignored source hashes. The post-commit audit checks every
+831/460 source entry against the unchanged working bytes and that commit's blobs;
+Git CRLF conversion is normalized only for the committed-blob comparison. Original
+run receipts are not rewritten. Binding receipt:
+`output/playwright/workspace-rooted-review/source-binding.json`, SHA-256
+`f36d20812cd2d733f7143670a7648b824ad4ec9398b559c76570e2aadea09118`.
+The subsequent evidence-only commit changes no tested source, dependency or asset.
 
 - Targeted Go checks cover packed/no-native Git inspection and preparation,
   native worktree/index reopening, missing trees, snapshot insertion/replacement,
@@ -75,7 +81,7 @@ all checks and unchanged source/assets. Runtime files stay ignored.
 
 Receipt: `output/playwright/local-core-87e92d9e-fbd8-4584-890b-03bd702a16ee/receipt.json`.
 Receipt SHA-256: `dbe187a0ce01ad3364e78efc6c80a1b970edf79e00c1c0676b07fbcfe64923ff`.
-Go PIDs: **26564, 31796**; **460** source hashes. Committed-source binding follows audit.
+Go PIDs: **26564, 31796**; **460** source hashes. Source binding is recorded above.
 The previous run `local-core-b60d55f6-30c7-4c56-9b19-483d75f40023` also passed
 13/13, exit 0, but preceded the CLI count fix and is not final-source evidence.
 
