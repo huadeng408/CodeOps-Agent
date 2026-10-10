@@ -101,7 +101,7 @@
   模型调用 0，累计 token 批次未重置。命令、失败分母与收据见
   [本机准备证据](evidence/local-core-preparation-trace-2026-10-10.md)。
 
-- **Windows Docker 启动恢复**：共享启动入口为 `IMPLEMENTED`。真实启动日志确认
+- **Windows Docker 启动恢复**：本项共享启动入口为 `VERIFIED`，源码 `1f7cae04`。真实启动日志确认
   Inference 和 Secrets Engine 残留 IPC 的 Windows 1920 错误；仅在 Desktop/backend
   停止时保留式归档白名单通信目录，拒绝未知内容、非空文件及重定向根/目录。
   冻结代码的三次冷启动均通过，退出 0，逐次运行离线容器并读回自有测试卷数据；

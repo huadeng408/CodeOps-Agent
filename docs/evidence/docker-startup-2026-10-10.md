@@ -1,8 +1,8 @@
 # Windows Docker startup recovery — 2026-10-10
 
 Scope: the project's shared startup helper and the local safe-start shortcut.
-Implementation: `IMPLEMENTED`; runtime: three cold starts passed. Commit binding
-and final regression details are recorded below when complete. Baseline:
+State: `VERIFIED` for this named startup/recovery scope, tested source
+`1f7cae04f1878f64b760e02873b5b7c541475afb`. Baseline:
 `3eb2c13cc4cd0009a8e33df1beabc1b992f96f03`.
 
 ## Failure and repair
@@ -115,3 +115,9 @@ SHA-256 `f32c12087295ed23994ee22ef4a2e7c2659e404a67aa027f261b1ac69c517b4e`;
 separate tool/test diagnostics SHA-256
 `a6f19df2ae8723046d78e1ed1ef86ead4e54245df7d72e372a20d852648ab887`.
 The latter is an excerpt collection; it is not a complete runtime receipt.
+
+Post-commit source binding checked all **4/883** raw hashes and committed blobs
+(only Git CRLF conversion normalized). Original receipts are not rewritten.
+Binding: `output/playwright/docker-startup-e69d9758cbcc4f37b0b6f818ca5d9ea7/source-binding.json`,
+SHA-256 `3cc37dbdac9e47996c80e46df451754824db15f6a9f882b729cac05264511217`.
+The following evidence-only commit changes no tested source/configuration.
