@@ -82,10 +82,13 @@ it does not grant execution. New product preparation on other platforms fails
 closed until their metadata pin contract is verified. Linux baseline,
 legacy callers and source CI are retained.
 
-[Issue #4](https://github.com/huadeng408/CodeOps-Agent/issues/4) stays open.
-The current implementation and browser receipt prove their named preparation
-checks; they do not establish the full race matrix, real coding tasks, complete
-Go/Python Trace or the milestone. See
+[Issue #4](https://github.com/huadeng408/CodeOps-Agent/issues/4)'s five preparation
+criteria are verified on the current Windows/SHA-1 contract. The 2026-10-11
+browser check includes allocated-lease failure/restart and actual Phoenix
+readback; its 16/16 result and safety regressions are bound to `cc9e36d8`.
+See [current preparation evidence](evidence/workspace-offline-2026-10-11.md).
+Real coding tasks, complete Go/Python/tool Trace, later application races and
+the milestone retain their separate acceptance gates. Historical evidence:
 [rooted Git evidence](evidence/workspace-rooted-git-2026-10-10.md),
 [preparation evidence](evidence/workspace-preparation-2026-10-10.md) and
 [the original baseline evidence](evidence/workspace-baseline-2026-10-10.md).

@@ -36,6 +36,24 @@
 
 ### 已完成的实施切片
 
+- **Issue #4 当前准备验收**：`VERIFIED`，源码 `cc9e36d8`。固定公开 chi 输入的
+  真实浏览器 16/16、两 Go 进程、退出 0，已从实际 Phoenix 读回当前 Session/
+  lease/基线对应的已结束 Go 准备 root span。新增产品入口的分配 lease 后失败、
+  原仓库/index 保留及同一失败 lease 重启恢复；检查发生在测试源恢复之前。
+  源码、资产和原仓库/index 未变，提交后逐项绑定 463 个浏览器源码文件。
+  五项准备验收满足；模型代码任务、完整 Go/Python/tool Trace 与后续任务继续
+  独立验收。完整分母、失败、命令和 SHA-256 见[本轮证据](evidence/workspace-offline-2026-10-11.md)。
+
+- **Issue #6 离线镜像边界**：共享 Docker/WSL Run/Start 增加 `--pull never`，
+  防止执行阶段经宿主 daemon 隐式下载镜像。源码 `cc9e36d8`；真实 Go Docker
+  Runner 3/3、退出 0，本地运行、只读/无网络拒绝及缺失镜像本地拒绝通过，
+  镜像库存未变。完整 Go 1,356 passed/56 skipped/0 failed、43 测试包，vet
+  退出 0；438/441 个源码文件提交后绑定。整票仍 `BLOCKED`：固定工具链镜像、
+  批准依赖准备及产品 Runner 入口尚未完成。命令和收据见[同轮证据](evidence/workspace-offline-2026-10-11.md)。
+
+以下旧切片的状态是当轮结论；#4 当前以 2026-10-11 的准备验收为准，不能用旧
+`OPEN/BLOCKED` 记录覆盖本项新鲜证据，也不能把本项提升为整个代码产品已验证。
+
 - **Issue #2 基础启动与历史**：`VERIFIED`，源码 `42ef664a`。
   本机 core 和旧全栈各 8/8 真实浏览器检查，当前提交的 Go 跨进程检查 7/7；
   已验证身份/吊销持久化、owner/ticket、私有 ACL、明确阻断与能力状态。
