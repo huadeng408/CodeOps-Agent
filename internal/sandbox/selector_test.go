@@ -25,6 +25,7 @@ func TestBuildWSLDockerCommandConvertsWindowsWorkspaceAndUsesRestrictedDocker(t 
 	for _, want := range []string{
 		"--distribution Ubuntu-24.04",
 		"--exec docker run --rm --init",
+		"--pull never",
 		"--network none",
 		"--read-only",
 		"src=/mnt/c/work/repo,dst=/workspace,readonly",

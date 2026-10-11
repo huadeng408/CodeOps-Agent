@@ -20,6 +20,13 @@ const runId = `${profile}-${randomUUID()}`;
 const artifacts = path.join(root, 'output', 'playwright', runId);
 await mkdir(artifacts, { recursive: true });
 const workspaceChecks = process.env.CODE_AGENT_E2E_WORKSPACE === '1';
+const phoenixChecks = process.env.CODE_AGENT_E2E_PHOENIX === '1';
+assert.ok(!phoenixChecks || workspaceChecks, 'Phoenix readback requires workspace checks');
+const traceContainsValue = (span, value) => JSON.stringify(span).includes(JSON.stringify(value).slice(1, -1));
+if (phoenixChecks) {
+  assert.equal(traceContainsValue({ path: 'C:\\private\\repo' }, 'C:\\private\\repo'), true);
+  assert.equal(traceContainsValue({ path: 'C:\\private\\other' }, 'C:\\private\\repo'), false);
+}
 const publicInput = process.env.CODE_AGENT_E2E_PUBLIC_INPUT === 'chi-v5.2.3';
 assert.ok(!publicInput || workspaceChecks, 'public input requires workspace checks');
 const publicInputRevision = publicInput ? '9b9fb55def404397748a9fc7e044efe9db1d618e' : undefined;
@@ -70,6 +77,7 @@ const captureRepository = async () => workspaceChecks ? {
 } : null;
 const repositoryBefore = await captureRepository();
 let workspaceId, workspaceSessionId, workspaceBaseline;
+let failedWorkspaceId, failedWorkspaceSessionId;
 const git = args => spawnSync('git', args, { cwd: root, encoding: 'utf8' }).stdout.trim();
 const sourceNames = () => [...new Set([...git(['ls-files']).split('\n'), ...git(['ls-files', '--others', '--exclude-standard']).split('\n')])]
   .filter(name => /\.(go|proto)$/.test(name) || /^(tests\/e2e\/(local_core|full_stack)|frontend\/(src\/|package|tsconfig|vite.config)|configs\/local-core.yaml$|go\.(mod|sum)$)/.test(name)).sort();
@@ -81,6 +89,7 @@ const captureAssets = async () => {
 const sourceHashes = await captureSources();
 const assetHashes = await captureAssets();
 const gitSha = git(['rev-parse', 'HEAD']);
+const startedAt = new Date().toISOString();
 const build = spawnSync('go', ['build', '-o', binary, './cmd/server'], { cwd: root, encoding: 'utf8' });
 await writeFile(path.join(artifacts, 'build.log'), build.stdout + build.stderr);
 assert.equal(build.status, 0, 'production Go server must compile');
@@ -135,6 +144,7 @@ log:
 Object.assign(env, { CODEAGENT_CONFIG: configPath, JWT_SECRET: secret,
   CODE_AGENT_LOCAL_SETUP_USER: username, CODE_AGENT_LOCAL_SETUP_PASSWORD: password,
   CODE_AGENT_ORCHESTRATOR_ADDR: `127.0.0.1:${port}` });
+if (phoenixChecks) Object.assign(env, { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:6006', OTEL_BSP_SCHEDULE_DELAY: '100' });
 if (profile === 'full-stack') {
   for (const key of ['MYSQL_DSN', 'REDIS_ADDR', 'MINIO_ENDPOINT', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY']) {
     assert.ok(process.env[`CODE_AGENT_E2E_${key}`], `isolated full-stack prerequisite ${key} is required`);
@@ -145,6 +155,7 @@ let server, serverExit, browser;
 const processIds = [];
 const processOutcomes = [];
 const checks = [];
+let workspaceTrace;
 let serverOutput = '';
 const start = async () => {
   server = spawn(binary, [], { cwd: artifacts, env, windowsHide: true });
@@ -225,6 +236,44 @@ try {
       await page.locator('.task-workspace-files').getByText('gone.py', { exact: true }).waitFor();
       await page.screenshot({ path: path.join(artifacts, 'workspace-02-expanded.png') });
     });
+    if (phoenixChecks) await check('real Phoenix returns this Session workspace preparation', async () => {
+      const deadline = Date.now() + 30_000;
+      while (!workspaceTrace) {
+        let cursor = '';
+        const cursors = new Set();
+        const matched = [];
+        do {
+          assert.ok(cursors.size < 100 && !cursors.has(cursor), 'Phoenix pagination must terminate');
+          cursors.add(cursor);
+          const query = new URLSearchParams({ start_time: startedAt, limit: '100', ...(cursor ? { cursor } : {}) });
+          const response = await fetch(`http://127.0.0.1:6006/v1/projects/default/spans?${query}`, { signal: AbortSignal.timeout(5_000) });
+          assert.ok(response.ok, `Phoenix readback status ${response.status}`);
+          const data = await response.json();
+          assert.ok(Array.isArray(data.data), 'Phoenix must return span data');
+          matched.push(...data.data.filter(span => span.name === 'workspace.prepare' && span.attributes?.['session.id'] === workspaceSessionId));
+          assert.ok(!data.next_cursor || typeof data.next_cursor === 'string', 'Phoenix cursor must be a string');
+          cursor = data.next_cursor || '';
+          assert.ok(Date.now() < deadline, 'Phoenix workspace readback timed out');
+        } while (cursor);
+        if (!matched.length) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          continue;
+        }
+        assert.equal(matched.length, 1, 'one preparation must have one attributable span');
+        const span = matched[0];
+        assert.match(span.context?.trace_id || '', /^(?!0+$)[a-f0-9]{32}$/);
+        assert.match(span.context?.span_id || '', /^(?!0+$)[a-f0-9]{16}$/);
+        assert.ok(!span.parent_id, 'workspace preparation must be a Go root span');
+        assert.ok(['OK', 'UNSET'].includes(span.status_code), 'preparation span must not be an error');
+        assert.ok(Date.parse(span.start_time) >= Date.parse(startedAt) && Date.parse(span.end_time) > Date.parse(span.start_time), 'preparation span must be finished in this run');
+        assert.equal(span.attributes['workspace.lease_id'], workspaceId);
+        assert.equal(span.attributes['workspace.baseline'], workspaceBaseline);
+        for (const value of [secret, password, repository, taskStorage, repository.replaceAll('\\', '/'), taskStorage.replaceAll('\\', '/')]) assert.ok(!traceContainsValue(span, value), 'trace must not contain credentials or local paths');
+        workspaceTrace = { name: span.name, context: span.context, parent_id: span.parent_id, start_time: span.start_time, end_time: span.end_time, status_code: span.status_code,
+          attributes: { 'session.id': workspaceSessionId, 'workspace.lease_id': workspaceId, 'workspace.baseline': workspaceBaseline } };
+        await writeFile(path.join(artifacts, 'workspace-trace.json'), JSON.stringify(workspaceTrace, null, 2) + '\n');
+      }
+    });
     await check('retained workspace refuses a second request and an unapproved repository', async () => {
       const duplicate = await context.request.post(`${base}/api/v1/sessions/${workspaceSessionId}/task-workspace/prepare`, { data: { expectedSeq: 3, requestId: 'replace-existing' } });
       assert.equal(duplicate.status(), 409);
@@ -232,6 +281,37 @@ try {
       const id = (await created.json()).data.id;
       assert.equal((await context.request.post(`${base}/api/v1/sessions/${id}/task-workspace/prepare`, { data: { expectedSeq: 1, requestId: 'denied' } })).status(), 400);
       assert.deepEqual(await captureRepository(), repositoryBefore);
+    });
+    await check('browser preparation failure retains its allocated lease without execution', async () => {
+      const original = await readFile(path.join(repository, 'main.go'));
+      try {
+        await writeFile(path.join(repository, 'main.go'), Buffer.concat([original, Buffer.from(`\n// credential refusal fixture: sk-${'x'.repeat(28)}\n`)]));
+        const refusalBaseline = await captureRepository();
+        await page.getByRole('button', { name: '新建代码任务' }).click();
+        await page.getByRole('textbox', { name: '项目', exact: true }).fill('browser-core');
+        await page.getByRole('textbox', { name: '标题', exact: true }).fill('Failed preparation');
+        await page.getByRole('textbox', { name: '工作目录', exact: true }).fill(repository);
+        await page.getByRole('button', { name: '创建会话', exact: true }).click();
+        await page.locator('.title-button').filter({ hasText: 'Failed preparation' }).waitFor();
+        await page.getByRole('button', { name: '准备隔离工作区', exact: true }).click();
+        await page.locator('.task-workspace-panel').getByText('需处理', { exact: true }).waitFor();
+        const sessions = (await (await context.request.get(`${base}/api/v1/sessions`)).json()).data;
+        failedWorkspaceSessionId = sessions.find(item => item.title === 'Failed preparation').id;
+        const { data } = await (await context.request.get(`${base}/api/v1/sessions/${failedWorkspaceSessionId}/task-workspace`)).json();
+        assert.equal(data.state, 'blocked'); assert.equal(data.eventCount, 3);
+        assert.ok(data.workspaceId); assert.ok(data.baseline.checksum);
+        failedWorkspaceId = data.workspaceId;
+        assert.ok(!(await readdir(taskStorage)).includes(failedWorkspaceId), 'credential refusal must happen before copying');
+        assert.ok(!sessions.find(item => item.id === failedWorkspaceSessionId).run, 'failed preparation must not start a task');
+        assert.equal((await context.request.post(`${base}/api/v1/sessions/${failedWorkspaceSessionId}/task-workspace/prepare`, { data: { expectedSeq: 3, requestId: 'replace-failed' } })).status(), 409);
+        assert.deepEqual(await captureRepository(), refusalBaseline, 'failed preparation must preserve source before fixture restoration');
+        await page.screenshot({ path: path.join(artifacts, 'workspace-05-failed-preparation.png') });
+      } finally {
+        await writeFile(path.join(repository, 'main.go'), original);
+      }
+      assert.deepEqual(await captureRepository(), repositoryBefore);
+      await page.locator('.session-list').getByText('Persistent browser task', { exact: true }).click();
+      await page.locator('.title-button').filter({ hasText: 'Persistent browser task' }).waitFor();
     });
   }
   await check('capabilities separate available history from blocked execution', async () => {
@@ -307,6 +387,19 @@ try {
       assert.deepEqual(await captureRepository(), repositoryBefore);
       await page.screenshot({ path: path.join(artifacts, 'workspace-03-restarted.png') });
     });
+    await check('new Go process retains the failed preparation lease without execution', async () => {
+      await page.locator('.session-list').getByText('Failed preparation', { exact: true }).click();
+      await page.locator('.task-workspace-panel').getByText('需处理', { exact: true }).waitFor();
+      const { data } = await (await context.request.get(`${base}/api/v1/sessions/${failedWorkspaceSessionId}/task-workspace`)).json();
+      assert.equal(data.state, 'blocked'); assert.equal(data.workspaceId, failedWorkspaceId); assert.equal(data.eventCount, 3);
+      const session = (await (await context.request.get(`${base}/api/v1/sessions/${failedWorkspaceSessionId}`)).json()).data;
+      assert.ok(!session.run, 'restart must not promote failed preparation to an active task');
+      assert.ok(!(await readdir(taskStorage)).includes(failedWorkspaceId));
+      assert.deepEqual(await captureRepository(), repositoryBefore);
+      await page.screenshot({ path: path.join(artifacts, 'workspace-06-failed-after-restart.png') });
+      await page.locator('.session-list').getByText('Persistent browser task', { exact: true }).click();
+      await page.locator('.title-button').filter({ hasText: 'Persistent browser task' }).waitFor();
+    });
     await check('changed isolated content is blocked and retained without touching the source', async () => {
       await writeFile(path.join(taskStorage, workspaceId, 'main.go'), 'package fixture\n// deliberate fixture mutation\n');
       await page.getByRole('button', { name: '重新检查工作区', exact: true }).click();
@@ -334,13 +427,13 @@ try {
   const sourceChangedWhileRunning = JSON.stringify(sourceHashes) !== JSON.stringify(await captureSources());
   const assetsChangedWhileRunning = JSON.stringify(assetHashes) !== JSON.stringify(await captureAssets());
   if (sourceChangedWhileRunning || assetsChangedWhileRunning) exitCode = 1;
-  const artifactsHashes = Object.fromEntries(await Promise.all((await readdir(artifacts)).filter(name => /\.(png|log)$/.test(name)).map(async name => [name, await hash(path.join(artifacts, name))])));
-  const denominator = workspaceChecks ? 13 : 9;
+  const artifactsHashes = Object.fromEntries(await Promise.all((await readdir(artifacts)).filter(name => /\.(png|log)$/.test(name) || name === 'workspace-trace.json').map(async name => [name, await hash(path.join(artifacts, name))])));
+  const denominator = (workspaceChecks ? 15 : 9) + Number(phoenixChecks);
   const receipt = { runId, scope: `production ${profile} browser authentication/history, no model execution`,
     gitSha, sourceHashes, sourceChangedWhileRunning, assetHashes, assetsChangedWhileRunning, binarySha256: await hash(binary), buildExitCode: build.status, processIds, processOutcomes,
-    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${publicInput ? 'CODE_AGENT_E2E_PUBLIC_INPUT=chi-v5.2.3 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
-    denominator, checks, notRun: denominator - checks.length, artifactsHashes, traceBackend: 'unknown', modelCalls: 0,
-    workspaceChecks, nativeGitAvailableToServer: workspaceChecks ? false : undefined, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline,
+    command: profile === 'full-stack' ? 'CODE_AGENT_RUN_LOCAL_CORE_E2E=1 pwsh -File tests/e2e/full_stack_startup.ps1' : `CODE_AGENT_RUN_LOCAL_CORE_E2E=1 ${workspaceChecks ? 'CODE_AGENT_E2E_WORKSPACE=1 ' : ''}${publicInput ? 'CODE_AGENT_E2E_PUBLIC_INPUT=chi-v5.2.3 ' : ''}${phoenixChecks ? 'CODE_AGENT_E2E_PHOENIX=1 ' : ''}${process.env.CODE_AGENT_BROWSER_HEADLESS === '1' ? 'CODE_AGENT_BROWSER_HEADLESS=1 ' : ''}node tests/e2e/local_core_browser.mjs`, exitCode,
+    denominator, checks, notRun: denominator - checks.length, artifactsHashes, traceBackend: workspaceTrace ? 'phoenix workspace preparation' : 'unknown', workspaceTrace, modelCalls: 0,
+    workspaceChecks, nativeGitAvailableToServer: workspaceChecks ? false : undefined, workspaceRoot, repositoryBefore, repositoryAfter: await captureRepository(), workspaceId, workspaceBaseline, failedWorkspaceId, failedWorkspaceSessionId,
     publicInputRevision, publicInputRepository: publicInput ? 'https://github.com/go-chi/chi' : undefined,
     workspaceInput: workspaceChecks ? (publicInput ? 'pinned public checkout with controlled dirty/new/empty/deleted inputs; no code task executed' : 'controlled fixture repository; not a coding task') : undefined };
   await writeFile(path.join(artifacts, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');

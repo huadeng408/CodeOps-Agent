@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,7 @@ func TestBuildDockerCommandEnforcesIsolationForLinux(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"run --rm --init",
+		"--pull never",
 		"--network none",
 		"--read-only",
 		"--cap-drop ALL",
@@ -107,6 +109,21 @@ func TestDockerRunnerIntegrationEnforcesReadOnlyWorkspaceAndNoNetwork(t *testing
 	})
 	if networkErr == nil || networkResult.ExitCode == 0 {
 		t.Fatalf("network-disabled sandbox reached external address: result=%+v err=%v", networkResult, networkErr)
+	}
+}
+
+func TestDockerRunnerIntegrationRefusesMissingImageWithoutPull(t *testing.T) {
+	if os.Getenv("CODE_AGENT_RUN_DOCKER_SANDBOX_TESTS") != "1" {
+		t.Skip("set CODE_AGENT_RUN_DOCKER_SANDBOX_TESTS=1 to run Docker sandbox integration")
+	}
+	workspace := t.TempDir()
+	image := fmt.Sprintf("codeops-missing-%x:missing", time.Now().UnixNano())
+	runner := NewDockerRunner(Config{Image: image, TrustRoot: workspace})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	result, err := runner.Run(ctx, Request{Workspace: workspace, WorkingDir: workspace, Program: "printf", Args: []string{"must-not-run"}})
+	if err == nil || result.ExitCode != 125 || !strings.Contains(result.Output, "No such image: "+image) || strings.Contains(result.Output, "Pulling from") {
+		t.Fatalf("missing image was not refused locally: result=%+v err=%v", result, err)
 	}
 }
 

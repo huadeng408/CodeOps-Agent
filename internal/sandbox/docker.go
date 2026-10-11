@@ -240,6 +240,7 @@ func buildDockerRunArgs(config Config, workspaceSource, containerDir string, req
 	}
 	args := []string{
 		"docker", "run", "--rm", "--init",
+		"--pull", "never",
 		"--network", "none",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=" + config.TmpfsSize,
