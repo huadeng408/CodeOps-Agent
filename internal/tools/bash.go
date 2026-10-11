@@ -58,7 +58,7 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 			WorkingDir: absDir,
 			Command:    command,
 		})
-		result := ToolResult{Name: "Bash", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode}
+		result := ToolResult{Name: "Bash", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, outputIncomplete: sandboxResult.Truncated}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {

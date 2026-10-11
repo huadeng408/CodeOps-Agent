@@ -31,15 +31,16 @@ type ToolRequest struct {
 }
 
 type ToolResult struct {
-	Name          string         `json:"name"`
-	Output        string         `json:"output,omitempty"`
-	Error         string         `json:"error,omitempty"`
-	ExitCode      int            `json:"exit_code"`
-	Truncated     bool           `json:"truncated"`
-	Spill         *SpillRef      `json:"spill,omitempty"`
-	Changes       []Change       `json:"changes,omitempty"`
-	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
-	spillContent  string
+	Name             string         `json:"name"`
+	Output           string         `json:"output,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	ExitCode         int            `json:"exit_code"`
+	Truncated        bool           `json:"truncated"`
+	Spill            *SpillRef      `json:"spill,omitempty"`
+	Changes          []Change       `json:"changes,omitempty"`
+	ContentBlocks    []ContentBlock `json:"content_blocks,omitempty"`
+	spillContent     string
+	outputIncomplete bool
 }
 
 type ContentBlock struct {
@@ -519,11 +520,19 @@ func (e *Executor) processResult(ctx context.Context, result ToolResult) ToolRes
 	}
 	ref, err := store.Save(ctx, SpillRequest{ToolName: result.Name, Content: complete})
 	if err != nil {
-		result.Output = strings.TrimSpace(result.Output) + "\n[Complete output was not saved: spill storage failed.]"
+		label := "Complete output"
+		if result.outputIncomplete {
+			label = "Captured output"
+		}
+		result.Output = strings.TrimSpace(result.Output) + "\n[" + label + " was not saved: spill storage failed.]"
 		return result
 	}
 	result.Spill = &ref
-	result.Output = strings.TrimSpace(result.Output) + fmt.Sprintf("\n[Complete redacted output: %s. Use ReadSpill with locator to retrieve a bounded range.]", ref.Locator)
+	label := "Complete redacted output"
+	if result.outputIncomplete {
+		label = "Captured redacted output (sandbox output limit reached)"
+	}
+	result.Output = strings.TrimSpace(result.Output) + fmt.Sprintf("\n[%s: %s. Use ReadSpill with locator to retrieve a bounded range.]", label, ref.Locator)
 	return result
 }
 

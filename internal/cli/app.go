@@ -138,7 +138,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
-	if cfg.Sandbox.Enabled {
+	if cfg.Sandbox.Enabled || cfg.Sandbox.Toolchain != "" {
 		trustRoot := cfg.Sandbox.TrustRoot
 		if strings.TrimSpace(trustRoot) == "" {
 			trustRoot = cfg.ProjectRoot
@@ -148,6 +148,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			WSLDistro:           cfg.Sandbox.WSLDistro,
 			TrustRoot:           trustRoot,
 			Image:               cfg.Sandbox.Image,
+			Toolchain:           cfg.Sandbox.Toolchain,
 			AllowWorkspaceWrite: cfg.Sandbox.AllowWorkspaceWrite,
 			MemoryLimit:         cfg.Sandbox.MemoryLimit,
 			CPULimit:            cfg.Sandbox.CPULimit,

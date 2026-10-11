@@ -514,7 +514,11 @@ func (r *Registry) capture(job *trackedJob, stdout, stderr io.ReadCloser) {
 		job.timer.Stop()
 	}
 	job.exitCode = exitCode(err)
-	if job.status == StatusStopping {
+	if errors.Is(err, sandbox.ErrSandboxOutcomeUnknown) {
+		job.status = StatusFailed
+		job.detail = sandbox.ErrSandboxOutcomeUnknown.Error()
+		job.exitCode = 126
+	} else if job.status == StatusStopping {
 		job.status = StatusKilled
 		if job.detail == "" {
 			job.detail = "process stopped"

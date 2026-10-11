@@ -9,12 +9,26 @@ import (
 )
 
 type recordingSandbox struct {
-	requests []sandbox.Request
+	requests  []sandbox.Request
+	truncated bool
 }
 
 func (s *recordingSandbox) Run(_ context.Context, request sandbox.Request) (sandbox.Result, error) {
 	s.requests = append(s.requests, request)
-	return sandbox.Result{Output: "sandboxed output", ExitCode: 0}, nil
+	return sandbox.Result{Output: "sandboxed output", ExitCode: 0, Truncated: s.truncated}, nil
+}
+
+func TestExecutorPreservesSandboxOutputLimit(t *testing.T) {
+	for _, name := range []string{"Bash", "Git"} {
+		t.Run(name, func(t *testing.T) {
+			executor := NewExecutor(t.TempDir())
+			executor.SetSandbox(&recordingSandbox{truncated: true})
+			result, err := executor.Execute(context.Background(), ToolRequest{Name: name, Arguments: map[string]any{"command": map[string]string{"Bash": "echo bounded", "Git": "status"}[name]}})
+			if err != nil || !result.Truncated || strings.Contains(result.Output, "Complete redacted output") {
+				t.Fatalf("lost sandbox limit: %+v err=%v", result, err)
+			}
+		})
+	}
 }
 
 func TestExecutorBashUsesConfiguredSandboxInsteadOfHostShell(t *testing.T) {

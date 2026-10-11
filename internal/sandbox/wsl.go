@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"strings"
@@ -26,27 +25,25 @@ func (r *wslRunner) Start(ctx context.Context, request Request) (Process, error)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := validateRequestTrustRoot(request, r.config.TrustRoot, r); err != nil {
+		return nil, err
+	}
 	binary, args, err := BuildWSLDockerCommand("windows", r.config, request)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(binary, args...)
-	configureSandboxProcess(cmd)
-	return &commandProcess{cmd: cmd}, nil
+	return newContainerProcess(binary, args, 4, request.Interactive)
 }
 
 func (r *wslRunner) Run(ctx context.Context, request Request) (Result, error) {
+	if err := validateRequestTrustRoot(request, r.config.TrustRoot, r); err != nil {
+		return Result{ExitCode: 126}, err
+	}
 	binary, args, err := BuildWSLDockerCommand("windows", r.config, request)
 	if err != nil {
 		return Result{ExitCode: 1}, err
 	}
-	output, err := (&osCommandExecutor{}).CombinedOutput(ctx, binary, args)
-	result := Result{Output: string(output)}
-	if err != nil {
-		result.ExitCode = exitCode(err)
-		return result, err
-	}
-	return result, nil
+	return runContainer(ctx, binary, args, 4, request.Interactive)
 }
 
 // BuildWSLDockerCommand constructs a WSL2 invocation that runs Docker inside

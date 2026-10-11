@@ -61,6 +61,7 @@ type SandboxConfig struct {
 	TrustRoot           string          `json:"trust_root"`
 	Enabled             bool            `json:"enabled"`
 	Image               string          `json:"image"`
+	Toolchain           string          `json:"toolchain"`
 	AllowWorkspaceWrite bool            `json:"allow_workspace_write"`
 	MemoryLimit         string          `json:"memory_limit"`
 	CPULimit            string          `json:"cpu_limit"`
@@ -415,6 +416,9 @@ func mergeSandboxConfig(dst *SandboxConfig, patch SandboxConfig, raw json.RawMes
 	}
 	if _, ok := fields["image"]; ok {
 		dst.Image = patch.Image
+	}
+	if _, ok := fields["toolchain"]; ok {
+		dst.Toolchain = patch.Toolchain
 	}
 	if _, ok := fields["allow_workspace_write"]; ok {
 		dst.AllowWorkspaceWrite = patch.AllowWorkspaceWrite

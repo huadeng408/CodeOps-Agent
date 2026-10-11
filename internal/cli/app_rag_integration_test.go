@@ -16,6 +16,7 @@ import (
 
 	"code-agent/internal/config"
 	"code-agent/internal/rag"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/tools"
 )
 
@@ -43,6 +44,21 @@ func TestNewAppWithoutOrchestratorDoesNotPanic(t *testing.T) {
 	}
 	if !app.executor.HasSandbox() {
 		t.Fatal("NewApp must install the configured sandbox runner")
+	}
+}
+
+func TestExplicitTaskToolchainCannotDisableIsolation(t *testing.T) {
+	cfg := config.Default(t.TempDir())
+	cfg.OrchestratorAddr = "127.0.0.1:1"
+	cfg.OrchestratorAutoStart = false
+	cfg.Sandbox.Enabled = false
+	cfg.Sandbox.Toolchain = "go"
+	cfg.Sandbox.Backend = sandbox.BackendNative
+	app := NewApp(cfg, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	t.Cleanup(func() { cleanupIntegrationApp(t, app) })
+	result, err := app.executor.Execute(context.Background(), tools.ToolRequest{Name: "Bash", Arguments: map[string]any{"command": "echo task-profile-must-not-run-on-host"}})
+	if err == nil || result.ExitCode == 0 || strings.Contains(result.Output, "task-profile-must-not-run-on-host") {
+		t.Fatalf("explicit profile bypassed unavailable isolation: %+v err=%v", result, err)
 	}
 }
 

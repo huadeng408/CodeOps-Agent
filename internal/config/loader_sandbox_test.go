@@ -18,6 +18,7 @@ func TestLoadAppliesSandboxPolicyFromProjectSettings(t *testing.T) {
   "sandbox": {
     "enabled": false,
     "image": "registry.example/code-agent:sandbox",
+    "toolchain": "go",
     "allow_workspace_write": true,
     "memory_limit": "2g",
     "cpu_limit": "3",
@@ -35,7 +36,7 @@ func TestLoadAppliesSandboxPolicyFromProjectSettings(t *testing.T) {
 	if cfg.Sandbox.Enabled {
 		t.Fatal("sandbox must honor explicit enabled=false")
 	}
-	if cfg.Sandbox.Image != "registry.example/code-agent:sandbox" || !cfg.Sandbox.AllowWorkspaceWrite {
+	if cfg.Sandbox.Image != "registry.example/code-agent:sandbox" || cfg.Sandbox.Toolchain != "go" || !cfg.Sandbox.AllowWorkspaceWrite {
 		t.Fatalf("sandbox policy = %+v", cfg.Sandbox)
 	}
 	if cfg.Sandbox.MemoryLimit != "2g" || cfg.Sandbox.CPULimit != "3" || cfg.Sandbox.PidsLimit != 64 || cfg.Sandbox.TmpfsSize != "96m" {

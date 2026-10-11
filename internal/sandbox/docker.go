@@ -3,6 +3,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -36,11 +37,14 @@ type Config struct {
 	// attempts and backoff. Zero uses the default 60-second budget.
 	ProbeReadinessTimeout time.Duration
 	Image                 string
-	AllowWorkspaceWrite   bool
-	MemoryLimit           string
-	CPULimit              string
-	PidsLimit             int
-	TmpfsSize             string
+	// Toolchain enables compiler scratch only for approved, digest-pinned task
+	// images. Generic sandboxes keep /tmp non-executable.
+	Toolchain           string
+	AllowWorkspaceWrite bool
+	MemoryLimit         string
+	CPULimit            string
+	PidsLimit           int
+	TmpfsSize           string
 }
 
 // Backend identifies an execution isolation strategy.
@@ -91,8 +95,9 @@ type Request struct {
 
 // Result is the normalized output of a sandboxed command.
 type Result struct {
-	Output   string
-	ExitCode int
+	Output    string
+	ExitCode  int
+	Truncated bool
 }
 
 // Runner is implemented by sandbox backends. The Harness only accepts a
@@ -101,29 +106,18 @@ type Runner interface {
 	Run(context.Context, Request) (Result, error)
 }
 
-type commandExecutor interface {
-	CombinedOutput(context.Context, string, []string) ([]byte, error)
-}
-
-type osCommandExecutor struct{}
-
-func (osCommandExecutor) CombinedOutput(ctx context.Context, name string, args []string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
-}
-
 // DockerRunner runs commands in a Docker Linux container. Docker Desktop uses
 // the same Linux container contract on Windows through its WSL2 backend.
 type DockerRunner struct {
 	config   Config
 	platform string
-	executor commandExecutor
 }
 
 // Backend identifies DockerRunner for callers that inspect a concrete runner.
 func (r *DockerRunner) Backend() Backend { return BackendDocker }
 
 func NewDockerRunner(config Config) *DockerRunner {
-	return newDockerRunner(config, runtime.GOOS, osCommandExecutor{})
+	return newDockerRunner(config, runtime.GOOS)
 }
 
 // Start launches one isolated Docker process with live stdio pipes. The
@@ -136,34 +130,33 @@ func (r *DockerRunner) Start(ctx context.Context, request Request) (Process, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if r.config.TrustRoot != "" {
+		if err := validateRequestTrustRoot(request, r.config.TrustRoot, r); err != nil {
+			return nil, err
+		}
+	}
 	binary, args, err := BuildDockerCommand(r.platform, r.config, request)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(binary, args...)
-	configureSandboxProcess(cmd)
-	return &commandProcess{cmd: cmd}, nil
+	return newContainerProcess(binary, args, 0, request.Interactive)
 }
 
-func newDockerRunner(config Config, platform string, executor commandExecutor) *DockerRunner {
-	if executor == nil {
-		executor = osCommandExecutor{}
-	}
-	return &DockerRunner{config: normalizeConfig(config), platform: platform, executor: executor}
+func newDockerRunner(config Config, platform string) *DockerRunner {
+	return &DockerRunner{config: normalizeConfig(config), platform: platform}
 }
 
 func (r *DockerRunner) Run(ctx context.Context, request Request) (Result, error) {
+	if r.config.TrustRoot != "" {
+		if err := validateRequestTrustRoot(request, r.config.TrustRoot, r); err != nil {
+			return Result{ExitCode: 126}, err
+		}
+	}
 	binary, args, err := BuildDockerCommand(r.platform, r.config, request)
 	if err != nil {
 		return Result{ExitCode: 1}, err
 	}
-	output, err := r.executor.CombinedOutput(ctx, binary, args)
-	result := Result{Output: string(output)}
-	if err != nil {
-		result.ExitCode = exitCode(err)
-		return result, err
-	}
-	return result, nil
+	return runContainer(ctx, binary, args, 0, request.Interactive)
 }
 
 // BuildDockerCommand constructs an argument-vector rather than a shell string
@@ -229,6 +222,27 @@ func ContainerWorkingDir(workspace, workingDir string) (string, error) {
 }
 
 func buildDockerRunArgs(config Config, workspaceSource, containerDir string, request Request) ([]string, error) {
+	if strings.ContainsAny(workspaceSource, ",\x00\r\n") {
+		return nil, errors.New("sandbox workspace contains Docker mount separators")
+	}
+	if config.Toolchain != "" {
+		if config.Toolchain != "go" && config.Toolchain != "python" {
+			return nil, errors.New("sandbox task toolchain must be go or python")
+		}
+		if config.TrustRoot == "" {
+			return nil, ErrTrustRootRequired
+		}
+		parts := strings.Split(config.Image, "@sha256:")
+		if len(parts) != 2 || parts[0] == "" || strings.HasPrefix(parts[0], "-") || strings.ContainsAny(parts[0], " \t\r\n") || len(parts[1]) != 64 {
+			return nil, errors.New("sandbox task image requires an approved SHA-256 digest")
+		}
+		if _, err := hex.DecodeString(parts[1]); err != nil {
+			return nil, errors.New("sandbox task image digest is invalid")
+		}
+		if config.AllowWorkspaceWrite {
+			return nil, errors.New("baseline task toolchain requires a read-only workspace")
+		}
+	}
 	command := strings.TrimSpace(request.Command)
 	program := strings.TrimSpace(request.Program)
 	if (command == "") == (program == "") {
@@ -252,8 +266,16 @@ func buildDockerRunArgs(config Config, workspaceSource, containerDir string, req
 		"--user", "65532:65532",
 		"--workdir", containerDir,
 		"--mount", mount,
-		config.Image,
 	}
+	if config.Toolchain != "" {
+		args = append(args, "--tmpfs", "/run/codeops:rw,exec,nosuid,nodev,size=512m,mode=1777", "--env", "HOME=/run/codeops", "--env", "TMPDIR=/run/codeops")
+		if config.Toolchain == "go" {
+			args = append(args, "--env", "GOCACHE=/run/codeops/go-build", "--env", "GOPATH=/run/codeops/go", "--env", "GOTOOLCHAIN=local", "--env", "GOENV=off", "--env", "GOPROXY=off", "--env", "GOSUMDB=off", "--env", "GOFLAGS=-mod=readonly")
+		} else {
+			args = append(args, "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "PYTHONNOUSERSITE=1", "--env", "PIP_NO_INDEX=1", "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1")
+		}
+	}
+	args = append(args, config.Image)
 	if request.Interactive {
 		// Keep stdin attached for JobWrite without allocating a terminal. This
 		// preserves separate stdout/stderr streams for incremental reads.

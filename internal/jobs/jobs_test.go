@@ -3,12 +3,14 @@ package jobs_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"code-agent/internal/jobs"
+	"code-agent/internal/sandbox"
 )
 
 func shellScript(body string) (string, []string) {
@@ -220,4 +222,37 @@ func TestRegistryRejectsWorkingDirectoryOutsideWorkspace(t *testing.T) {
 func ExampleStatus() {
 	fmt.Println(jobs.StatusRunning)
 	// Output: running
+}
+
+type unknownSandbox struct{}
+
+func (unknownSandbox) Start(context.Context, sandbox.Request) (sandbox.Process, error) {
+	return unknownProcess{}, nil
+}
+
+type unknownProcess struct{}
+
+func (unknownProcess) StdoutPipe() (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (unknownProcess) StderrPipe() (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (unknownProcess) StdinPipe() (io.WriteCloser, error) { return nil, fmt.Errorf("not interactive") }
+func (unknownProcess) Start() error                       { return nil }
+func (unknownProcess) Wait() error                        { return sandbox.ErrSandboxOutcomeUnknown }
+func (unknownProcess) Kill() error                        { return sandbox.ErrSandboxOutcomeUnknown }
+
+func TestRegistryDoesNotClaimUnconfirmedContainerStopped(t *testing.T) {
+	r := jobs.NewRegistry(t.TempDir(), jobs.Config{})
+	defer r.Close()
+	r.SetStreamingRunner(unknownSandbox{})
+	job, err := r.Start(context.Background(), jobs.Spec{Program: "unconfirmed", Owner: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := r.Wait(context.Background(), job.ID, "alice")
+	if err != nil || final.Status != jobs.StatusFailed || final.ExitCode != 126 || final.Detail != sandbox.ErrSandboxOutcomeUnknown.Error() {
+		t.Fatalf("unconfirmed outcome: %+v err=%v", final, err)
+	}
 }

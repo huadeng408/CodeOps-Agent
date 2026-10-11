@@ -108,7 +108,7 @@ type runnerFactory func(Config, string, Backend) (Runner, error)
 func defaultRunnerFactory(config Config, platform string, backend Backend) (Runner, error) {
 	switch backend {
 	case BackendDocker:
-		return newDockerRunner(config, platform, osCommandExecutor{}), nil
+		return newDockerRunner(config, platform), nil
 	case BackendWSL2:
 		return newWSLRunner(config), nil
 	default:

@@ -42,7 +42,7 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 			Program:    "git",
 			Args:       requestArgs,
 		})
-		result := ToolResult{Name: "Git", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode}
+		result := ToolResult{Name: "Git", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, outputIncomplete: sandboxResult.Truncated}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {
