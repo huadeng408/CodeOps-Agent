@@ -594,6 +594,28 @@ func TestIndependentAgentCancellationAndReadOnlyPolicy(t *testing.T) {
 	}
 }
 
+func TestIndependentAgentCancellationPersistsCanceledRun(t *testing.T) {
+	fixture := &independentAgentFixture{mode: "blocked", started: make(chan struct{})}
+	runner, parent, actor := agentTestRunner(t, fixture)
+	task := agentTestCall(t, runner, actor, "spawn-cancel", "SpawnAgent", `{"kind":"explore","title":"blocked","objective":"wait","parallel":true}`)
+	select {
+	case <-fixture.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("child never started")
+	}
+	_ = agentTestCall(t, runner, actor, "cancel-child", "AgentTask", `{"action":"cancel","task_id":"`+task.Id+`"}`)
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	view, err := runner.workbench.Get(context.Background(), parent.UserID, task.ChildSessionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Run == nil || view.Run.Status != RunCanceled || view.Run.CompletedAt == nil {
+		t.Fatalf("canceled task lost its terminal run: %+v", view.Run)
+	}
+}
+
 func TestIndependentAgentRequiresExplicitRegisteredExternalTool(t *testing.T) {
 	fixture := &independentAgentFixture{}
 	runner, _, actor := agentTestRunner(t, fixture)

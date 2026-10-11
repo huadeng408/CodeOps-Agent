@@ -1231,13 +1231,16 @@ func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask,
 }
 
 func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
-	r.agentMu.Lock()
-	for key, cancel := range r.activeAgentRuns {
-		if key.sessionID == task.ChildSessionId {
-			cancel()
+	// Persist the cancellation fence before a stopped worker can write a failure.
+	defer func() {
+		r.agentMu.Lock()
+		defer r.agentMu.Unlock()
+		for key, cancel := range r.activeAgentRuns {
+			if key.sessionID == task.ChildSessionId {
+				cancel()
+			}
 		}
-	}
-	r.agentMu.Unlock()
+	}()
 	for attempt := 0; attempt < 16; attempt++ {
 		snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
 		if err != nil {

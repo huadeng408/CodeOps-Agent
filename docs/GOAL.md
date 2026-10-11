@@ -45,6 +45,7 @@
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
 - OpenSandbox Runner／任务槽：[基础接口证据](evidence/opensandbox-foundation-2026-10-11.md)；实际部署与产品基线仍待验收。
+- Agent 取消终态：[Go 竞态修复证据](evidence/agent-cancellation-2026-10-12.md)；完整 runtime 取消仍按对应票验收。
 - Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
 - 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
