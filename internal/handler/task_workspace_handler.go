@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"code-agent/internal/session"
+	"encoding/json"
 	"github.com/gin-gonic/gin"
+	"io"
 	"net/http"
 )
 
@@ -15,10 +18,11 @@ func NewTaskWorkspaceHandler(w session.WorkbenchModule, tasks session.TaskWorksp
 	return &TaskWorkspaceHandler{workbench: w, tasks: tasks}
 }
 
-func (h *TaskWorkspaceHandler) Inspect(c *gin.Context) { h.handle(c, false) }
-func (h *TaskWorkspaceHandler) Prepare(c *gin.Context) { h.handle(c, true) }
+func (h *TaskWorkspaceHandler) Inspect(c *gin.Context)     { h.handle(c, "") }
+func (h *TaskWorkspaceHandler) Prepare(c *gin.Context)     { h.handle(c, "prepare") }
+func (h *TaskWorkspaceHandler) RunBaseline(c *gin.Context) { h.handle(c, "test") }
 
-func (h *TaskWorkspaceHandler) handle(c *gin.Context, prepare bool) {
+func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 	owner, err := authenticatedOwner(c)
 	if err != nil {
 		writeSessionError(c, err, "authenticated owner is required")
@@ -30,7 +34,7 @@ func (h *TaskWorkspaceHandler) handle(c *gin.Context, prepare bool) {
 			writeSessionError(c, err, "session unavailable")
 			return
 		}
-		if prepare {
+		if action != "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"code": 503, "message": "task repository and storage are not approved"})
 			return
 		}
@@ -38,16 +42,23 @@ func (h *TaskWorkspaceHandler) handle(c *gin.Context, prepare bool) {
 		return
 	}
 	var view session.TaskWorkspaceView
-	if prepare {
+	if action != "" {
 		var request struct {
 			ExpectedSeq *int64 `json:"expectedSeq"`
 			RequestID   string `json:"requestId"`
 		}
-		if c.ShouldBindJSON(&request) != nil || request.ExpectedSeq == nil {
+		data, readErr := io.ReadAll(io.LimitReader(c.Request.Body, 4097))
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if readErr != nil || len(data) > 4096 || decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF || request.ExpectedSeq == nil {
 			writeSessionError(c, session.ErrInvalidSessionInput, "invalid workspace request")
 			return
 		}
-		view, err = h.tasks.Prepare(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
+		if action == "test" {
+			view, err = h.tasks.RunBaseline(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
+		} else {
+			view, err = h.tasks.Prepare(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
+		}
 	} else {
 		view, err = h.tasks.Inspect(c.Request.Context(), owner, c.Param("id"))
 	}

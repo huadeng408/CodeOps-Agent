@@ -10,6 +10,43 @@ import (
 	"testing"
 )
 
+func TestTaskWorkspaceIncludesPinnedPublicTestFixturesAndRejectsChangedBytes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first task preparation")
+	}
+	root, storage := taskRepository(t), t.TempDir()
+	fixture := strings.Join([]string{"-----BEGIN", "PRIVATE KEY-----\npublic test placeholder"}, " ")
+	writeBaselineFile(t, root, "testdata/key.pem", fixture)
+	writeBaselineFile(t, root, "testdata/other.pem", "unapproved fixture")
+	baselineGit(t, root, "add", "testdata")
+	baselineGit(t, root, "commit", "-m", "public test fixture")
+	head := strings.TrimSpace(baselineGit(t, root, "rev-parse", "HEAD"))
+	manager := NewManager(root, "HEAD")
+	if err := manager.SetPublicTestFixtures(head, map[string]string{"testdata/key.pem": baselineDigest([]byte(fixture))}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := manager.PlanTask(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.PrepareTask(context.Background(), storage, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(storage, plan.LeaseID, "testdata/key.pem")); err != nil || string(data) != fixture {
+		t.Fatal("pinned public test fixture was excluded")
+	}
+	if _, err := os.Stat(filepath.Join(storage, plan.LeaseID, "testdata/other.pem")); !os.IsNotExist(err) {
+		t.Fatal("unapproved PEM was copied")
+	}
+	if err := NewManager(root, "HEAD").VerifyTask(context.Background(), storage, plan); err == nil {
+		t.Fatal("a restarted host without fixture approval admitted the copy")
+	}
+	writeBaselineFile(t, root, "testdata/key.pem", "changed key bytes")
+	if _, err := manager.PlanTask(context.Background()); err == nil {
+		t.Fatal("changed fixture was silently admitted or discarded")
+	}
+}
+
 func taskRepository(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

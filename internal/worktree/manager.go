@@ -52,11 +52,12 @@ type AgentSpawnRequest struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	root     string
-	baseRef  string
-	leaseTTL time.Duration
-	trees    map[string]Worktree
+	mu             sync.Mutex
+	root           string
+	baseRef        string
+	leaseTTL       time.Duration
+	publicFixtures *publicTestFixturePins
+	trees          map[string]Worktree
 }
 
 func NewManager(root, baseRef string) *Manager {

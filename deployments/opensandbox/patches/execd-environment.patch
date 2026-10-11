@@ -1,0 +1,12 @@
+diff --git a/components/execd/pkg/runtime/command_argv.go b/components/execd/pkg/runtime/command_argv.go
+--- a/components/execd/pkg/runtime/command_argv.go
++++ b/components/execd/pkg/runtime/command_argv.go
+@@ -55,7 +55,7 @@ func prepareCommand(ctx context.Context, request *ExecuteCodeRequest) (*exec.Cmd,
+ 		return nil, err
+ 	}
+ 	// Derive PWD from cwd before applying explicit overrides.
+-	env := mergeEnvs((&exec.Cmd{Dir: cwd}).Environ(), overrides)
++	env := mergeEnvs(filterEnvBlacklist((&exec.Cmd{Dir: cwd}).Environ()), overrides)
+ 	var cmd *exec.Cmd
+ 	if request.Argv != nil {
+ 		cmd = nativeCommand(ctx, request.Argv, cwd, env)

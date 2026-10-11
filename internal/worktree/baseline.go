@@ -3,6 +3,7 @@ package worktree
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,16 +25,55 @@ const (
 )
 
 type BaselineFile struct {
-	Path   string `json:"path"`
-	Exists bool   `json:"exists"`
-	SHA256 string `json:"sha256,omitempty"`
-	Size   int64  `json:"size"`
-	Mode   uint32 `json:"mode"`
+	Path              string `json:"path"`
+	Exists            bool   `json:"exists"`
+	SHA256            string `json:"sha256,omitempty"`
+	Size              int64  `json:"size"`
+	Mode              uint32 `json:"mode"`
+	PublicTestFixture bool   `json:"public_test_fixture,omitempty"`
 }
 
 type BaselineExclusion struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+}
+
+type publicTestFixturePins struct {
+	head  string
+	files map[string]string
+}
+
+// SetPublicTestFixtures is trusted startup policy, not a browser exception.
+// Exact public bytes at one fixed commit may be used by normal repository tests.
+func (m *Manager) SetPublicTestFixtures(head string, files map[string]string) error {
+	if len(head) != 40 && len(head) != 64 || strings.Trim(head, "0123456789abcdef") != "" || len(files) == 0 {
+		return errors.New("public test fixture identity is incomplete")
+	}
+	pins := &publicTestFixturePins{head: head, files: map[string]string{}}
+	for name, hash := range files {
+		if !publicTestFixturePath(name) || len(hash) != 64 || strings.Trim(hash, "0123456789abcdef") != "" {
+			return errors.New("invalid public test fixture pin")
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			return err
+		}
+		pins.files[name] = hash
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publicFixtures != nil {
+		return errors.New("public test fixtures are already configured")
+	}
+	m.publicFixtures = pins
+	return nil
+}
+
+func matchesPublicTestFixture(pins *publicTestFixturePins, head, name string, data []byte) bool {
+	return pins != nil && pins.head == head && pins.files[name] != "" && pins.files[name] == baselineDigest(data)
+}
+
+func publicTestFixturePath(name string) bool {
+	return validateBaselinePath(name) == nil && strings.HasPrefix(name, "testdata/") && strings.Count(name, "/") == 1 && (filepath.Ext(name) == ".pem" || filepath.Ext(name) == ".key")
 }
 
 // Baseline contains metadata only; credentials and file contents never enter
@@ -113,11 +153,11 @@ func (m *Manager) CaptureBaseline(ctx context.Context) (Baseline, error) {
 	if runtime.GOOS == "windows" {
 		identityPath = strings.ToLower(identityPath)
 	}
-	before, err := captureBaseline(ctx, root, metadata, reader, abs, initial, baselineDigest([]byte(identityPath)))
+	before, err := captureBaseline(ctx, root, metadata, reader, abs, initial, baselineDigest([]byte(identityPath)), m.publicFixtures)
 	if err != nil {
 		return Baseline{}, err
 	}
-	after, err := captureBaseline(ctx, root, metadata, reader, abs, initial, before.RepositoryID)
+	after, err := captureBaseline(ctx, root, metadata, reader, abs, initial, before.RepositoryID, m.publicFixtures)
 	if err != nil {
 		return Baseline{}, err
 	}
@@ -127,7 +167,7 @@ func (m *Manager) CaptureBaseline(ctx context.Context) (Baseline, error) {
 	return after, nil
 }
 
-func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitReader, abs string, initial fs.FileInfo, repositoryID string) (Baseline, error) {
+func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitReader, abs string, initial fs.FileInfo, repositoryID string, fixtures *publicTestFixturePins) (Baseline, error) {
 	if err := baselineRootUnchanged(abs, initial); err != nil {
 		return Baseline{}, err
 	}
@@ -184,6 +224,14 @@ func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitRe
 			return Baseline{}, err
 		}
 		if prefix, reason := baselineExclusion(name); reason != "" {
+			if fixtures != nil && fixtures.head == head && fixtures.files[name] != "" {
+				data, exists, err := readBaselineFile(root, name, maxBaselineFileBytes)
+				if err != nil || !exists || !matchesPublicTestFixture(fixtures, head, name, data) {
+					return Baseline{}, errors.New("public test fixture bytes differ from their approved pin")
+				}
+				paths[name] = true
+				continue
+			}
 			excluded[strings.ToLower(prefix)] = BaselineExclusion{Path: prefix, Reason: reason}
 			if len(excluded) > maxBaselineFiles {
 				return Baseline{}, errors.New("baseline exclusion metadata limit exceeded")
@@ -223,6 +271,7 @@ func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitRe
 			return Baseline{}, fmt.Errorf("baseline file %s: %w", name, err)
 		}
 		file := BaselineFile{Path: name, Exists: exists}
+		file.PublicTestFixture = exists && matchesPublicTestFixture(fixtures, head, name, data)
 		if exists {
 			info, err := baselineFileInfo(root, name)
 			if err != nil {

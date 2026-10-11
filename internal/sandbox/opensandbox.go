@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -45,9 +46,11 @@ type openSandboxManifest struct {
 type openSandboxContainer struct {
 	ID     string `json:"Id"`
 	Config struct {
-		Image  string
-		Labels map[string]string
-		Env    []string
+		Image           string
+		WorkingDir      string
+		Labels          map[string]string
+		Env             []string
+		Cmd, Entrypoint []string
 	}
 	State      struct{ Running bool }
 	HostConfig struct {
@@ -75,6 +78,28 @@ func NewOpenSandboxRunner(config Config) *OpenSandboxRunner {
 		Transport:     &http.Transport{Proxy: nil, ResponseHeaderTimeout: 10 * time.Second},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("OpenSandbox redirects are refused") },
 	}}
+}
+
+// Ready checks pinned local prerequisites without creating task resources.
+func (r *OpenSandboxRunner) Ready(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	manifest, err := r.manifest()
+	if err != nil || r.config.AllowWorkspaceWrite || r.config.Toolchain != "go" || !openSandboxImagePin(r.config.Image) {
+		return ErrSandboxUnavailable
+	}
+	if r.verifyServer(ctx, manifest) != nil || !r.imagePresent(ctx, r.config.Image) {
+		return ErrSandboxUnavailable
+	}
+	response, err := r.call(ctx, manifest, http.MethodGet, "/sandboxes", nil)
+	if err != nil {
+		return ErrSandboxUnavailable
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return ErrSandboxUnavailable
+	}
+	return nil
 }
 
 func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Result, resultErr error) {
@@ -141,15 +166,12 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	operation := request.OperationID
 	result.RuntimeID = operation
 	metadata := map[string]string{"codeops.operation_id": operation, "codeops.opensandbox.policy_sha256": manifest.PolicySHA256}
-	if runtime.GOOS == "windows" && len(workspace) > 2 && workspace[1] == ':' {
-		workspace = "/run/desktop/mnt/host/" + strings.ToLower(workspace[:1]) + strings.ReplaceAll(workspace[2:], `\`, "/")
-	}
+	workspace = openSandboxHostPath(workspace)
 	memory, err := openSandboxMemory(r.config.MemoryLimit)
 	if err != nil {
 		return result, fmt.Errorf("%w: invalid memory limit", ErrSandboxUnavailable)
 	}
 	environment := r.environment()
-	environment["OPENSANDBOX_EGRESS_MODE"] = "dns+nft"
 	create := map[string]any{
 		"image": map[string]string{"uri": r.config.Image}, "entrypoint": []string{"sleep", "infinity"}, "timeout": 120,
 		"resourceLimits": map[string]string{"cpu": r.config.CPULimit, "memory": strconv.FormatInt(memory, 10)},
@@ -166,7 +188,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 			State string `json:"state"`
 		}
 	}
-	if response.StatusCode != http.StatusCreated || openSandboxDecode(response, &created) != nil || !openSandboxUUID(created.ID) {
+	if response.StatusCode != http.StatusAccepted || openSandboxDecode(response, &created) != nil || !openSandboxUUID(created.ID) {
 		response.Body.Close()
 		return result, fmt.Errorf("%w: OpenSandbox creation unconfirmed; retain the operation identity", ErrSandboxOutcomeUnknown)
 	}
@@ -303,7 +325,8 @@ func (r *OpenSandboxRunner) inspect(ctx context.Context, value any, args ...stri
 	output := buffer.String()
 	if err != nil {
 		var exit *exec.ExitError
-		if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 && !buffer.truncated && (strings.HasPrefix(strings.TrimSpace(output), "Error: No such object") || strings.HasPrefix(strings.TrimSpace(output), "Error: No such container")) {
+		diagnostic := strings.ToLower(strings.TrimSpace(output))
+		if ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 && !buffer.truncated && (strings.HasPrefix(diagnostic, "error: no such object") || strings.HasPrefix(diagnostic, "error: no such container")) {
 			return errOpenSandboxObjectMissing
 		}
 		return ErrSandboxOutcomeUnknown
@@ -323,12 +346,62 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 	if labels["codeops.opensandbox.source_sha"] != manifest.SourceSHA || labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 || labels["codeops.opensandbox.execd_image"] != manifest.ExecdImage || labels["codeops.opensandbox.egress_image"] != manifest.EgressImage {
 		return errors.New("deployed runtime policy differs from approval")
 	}
+	host := server.HostConfig
+	if !host.ReadonlyRootfs || host.Privileged || len(host.CapAdd) != 0 || !openSandboxContains(host.CapDrop, "ALL") || len(host.SecurityOpt) != 1 || host.SecurityOpt[0] != "no-new-privileges=true" || host.Memory <= 0 || host.Memory > 512<<20 || host.NanoCpus <= 0 || host.NanoCpus > 2e9 || host.PidsLimit <= 0 || host.PidsLimit > 128 || host.NetworkMode == "host" || host.NetworkMode == "none" || host.NetworkMode == "" || strings.HasPrefix(host.NetworkMode, "container:") {
+		return errors.New("runtime control plane isolation differs from approval")
+	}
+	if len(host.Tmpfs) != 2 || !openSandboxTmpfs(host.Tmpfs["/run/codeops-control"], 64<<20, false) || !openSandboxTmpfs(host.Tmpfs["/tmp"], 64<<20, false) {
+		return errors.New("runtime control plane scratch differs from approval")
+	}
+	root := openSandboxHostPath(r.config.TrustRoot)
+	socket, workspace := false, false
+	for _, mount := range server.Mounts {
+		if mount.Type == "bind" && mount.Source == "/var/run/docker.sock" && mount.Destination == "/var/run/docker.sock" && mount.RW {
+			socket = true
+		} else if mount.Type == "bind" && mount.Source == root && mount.Destination == root && !mount.RW {
+			workspace = true
+		}
+	}
+	if len(server.Mounts) != 2 || !socket || !workspace || server.Config.WorkingDir != "/app" || len(server.Config.Entrypoint) != 0 || strings.Join(server.Config.Cmd, "\x00") != "python\x00-m\x00uvicorn\x00opensandbox_server.main:app\x00--host\x000.0.0.0\x00--port\x008080\x00--no-access-log" {
+		return errors.New("runtime control plane inputs differ from approval")
+	}
+	var image struct{ Config struct{ Env []string } }
+	if r.inspect(ctx, &image, "image", "inspect", manifest.ServerImage) != nil {
+		return errors.New("approved runtime image configuration is unavailable")
+	}
+	expected, actual := map[string]string{}, map[string]string{}
+	for index, entries := range [][]string{image.Config.Env, server.Config.Env} {
+		values := expected
+		if index == 1 {
+			values = actual
+		}
+		for _, entry := range entries {
+			key, value, valid := strings.Cut(entry, "=")
+			if _, duplicate := values[key]; !valid || key == "" || duplicate {
+				return errors.New("runtime control plane environment is ambiguous")
+			}
+			values[key] = value
+		}
+	}
+	expected["SANDBOX_CONFIG_PATH"] = "/app/codeops-runtime.toml"
+	expected["OPENSANDBOX_SERVER_API_KEY"] = os.Getenv("CODE_AGENT_OPENSANDBOX_API_KEY")
+	expected["CODEOPS_EXECD_ACCESS_TOKEN"] = os.Getenv("CODE_AGENT_OPENSANDBOX_EXECD_TOKEN")
+	if !maps.Equal(expected, actual) {
+		return errors.New("runtime control plane configuration differs from approval")
+	}
 	for _, pin := range []string{manifest.ServerImage, manifest.ExecdImage, manifest.EgressImage} {
 		if !r.imagePresent(ctx, pin) {
 			return errors.New("approved runtime component is not present locally")
 		}
 	}
 	return nil
+}
+
+func openSandboxHostPath(path string) string {
+	if runtime.GOOS == "windows" && len(path) > 2 && path[1] == ':' {
+		return "/run/desktop/mnt/host/" + strings.ToLower(path[:1]) + strings.ReplaceAll(path[2:], `\`, "/")
+	}
+	return path
 }
 
 func (r *OpenSandboxRunner) imagePresent(ctx context.Context, pin string) bool {
@@ -346,7 +419,7 @@ func (r *OpenSandboxRunner) imagePresent(ctx context.Context, pin string) bool {
 }
 
 func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandboxManifest, task openSandboxContainer, id, workspace string, memory int64) error {
-	if task.Config.Labels["opensandbox.io/volume-managed-by"] != "" {
+	if task.Config.Labels["opensandbox.io/volume-managed-by"] != "" || task.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 {
 		return ErrSandboxUnavailable
 	}
 	host := task.HostConfig
@@ -377,6 +450,11 @@ func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandbox
 	sidecarID := strings.TrimPrefix(host.NetworkMode, "container:")
 	var sidecar openSandboxContainer
 	if sidecarID == host.NetworkMode || !openSandboxHex(sidecarID, 64) || r.inspect(ctx, &sidecar, "inspect", sidecarID) != nil || sidecar.ID != sidecarID || sidecar.Config.Image != manifest.EgressImage || !sidecar.State.Running || sidecar.Config.Labels["opensandbox.io/egress-sidecar-for"] != id || !openSandboxContains(sidecar.Config.Env, "OPENSANDBOX_EGRESS_MODE=dns+nft") {
+		return ErrSandboxUnavailable
+	}
+	var server openSandboxContainer
+	egress := sidecar.HostConfig
+	if r.inspect(ctx, &server, "inspect", manifest.ServerContainerID) != nil || server.ID != manifest.ServerContainerID || egress.NetworkMode != server.HostConfig.NetworkMode || sidecar.Config.Labels["codeops.operation_id"] != task.Config.Labels["codeops.operation_id"] || sidecar.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 || !egress.ReadonlyRootfs || egress.Privileged || len(egress.CapAdd) != 1 || egress.CapAdd[0] != "NET_ADMIN" || !openSandboxContains(egress.CapDrop, "ALL") || len(egress.SecurityOpt) != 1 || egress.SecurityOpt[0] != "no-new-privileges=true" || egress.Memory <= 0 || egress.Memory > 256<<20 || egress.NanoCpus <= 0 || egress.NanoCpus > 1e9 || egress.PidsLimit <= 0 || egress.PidsLimit > 64 || len(sidecar.Mounts) != 0 || len(egress.Tmpfs) != 1 || !openSandboxTmpfs(egress.Tmpfs["/tmp"], 64<<20, false) {
 		return ErrSandboxUnavailable
 	}
 	return nil
@@ -412,14 +490,15 @@ func (r *OpenSandboxRunner) remove(ctx context.Context, manifest openSandboxMani
 		if err != nil && !errors.Is(err, errOpenSandboxObjectMissing) {
 			return err
 		}
-		if err == nil && (sidecar.ID != sidecarID || sidecar.Config.Labels["opensandbox.io/egress-sidecar-for"] != id) {
+		if err == nil && (sidecar.ID != sidecarID || sidecar.Config.Labels["opensandbox.io/egress-sidecar-for"] != id || sidecar.Config.Labels["codeops.operation_id"] != operation || sidecar.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256) {
 			return ErrSandboxOutcomeUnknown
 		}
 	} else {
 		sidecarID = ""
 	}
 	if taskExists {
-		response, err := r.call(ctx, manifest, http.MethodDelete, "/sandboxes/"+id, nil)
+		query := url.Values{"codeops_container_id": {task.ID}, "codeops_sidecar_id": {sidecarID}, "codeops_operation_id": {operation}}
+		response, err := r.call(ctx, manifest, http.MethodDelete, "/sandboxes/"+id+"?"+query.Encode(), nil)
 		if err != nil {
 			return err
 		}

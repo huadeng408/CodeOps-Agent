@@ -506,7 +506,13 @@ func main() {
 				"execution": execution, "rag": rag,
 				"trace": {State: "unknown", Reason: "trace backend has not been verified"},
 			}
-			addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities)
+			userValue, _ := c.Get("user")
+			user, _ := userValue.(*model.User)
+			var owner uint
+			if user != nil {
+				owner = user.ID
+			}
+			addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities, owner)
 			if sandboxState == "ok" {
 				sandboxState = "ready"
 			}

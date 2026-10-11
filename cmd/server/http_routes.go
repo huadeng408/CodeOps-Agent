@@ -86,6 +86,7 @@ func (routes sessionHTTP) register(r *gin.Engine, apiV1 *gin.RouterGroup, userSe
 		taskHandler := handler.NewTaskWorkspaceHandler(routes.workbench, routes.tasks)
 		sessions.GET("/:id/task-workspace", taskHandler.Inspect)
 		sessions.POST("/:id/task-workspace/prepare", taskHandler.Prepare)
+		sessions.POST("/:id/task-workspace/test", taskHandler.RunBaseline)
 		sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 		sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 		sessions.DELETE("/:id", sessionHandler.Delete)

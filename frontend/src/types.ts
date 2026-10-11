@@ -28,6 +28,19 @@ export interface TaskWorkspace {
     files: Array<{ path: string; exists: boolean; sha256?: string; size: number; mode: number }>;
     excluded: Array<{ path: string; reason: string }>;
   };
+  testAvailable: boolean;
+  testReason?: string;
+  test?: {
+    state: 'passed' | 'failed' | 'blocked' | 'unknown';
+    command: string[];
+    operationId: string;
+    runtimeId?: string;
+    traceId?: string;
+    exitCode?: number;
+    output: string;
+    truncated: boolean;
+    reason?: string;
+  };
 }
 
 export interface PlanTodo {

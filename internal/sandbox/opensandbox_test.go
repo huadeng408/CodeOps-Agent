@@ -59,7 +59,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"complete failed baseline", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"complete failed baseline", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -85,20 +85,45 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			policy := strings.Repeat("5", 64)
 			const sandboxID = "a10e5865-8f00-473e-8c20-5495b9f307f1"
 			fixtureFile := filepath.Join(t.TempDir(), "containers.json")
+			serverRoot := root
+			if runtime.GOOS == "windows" {
+				serverRoot = "/run/desktop/mnt/host/" + strings.ToLower(root[:1]) + strings.ReplaceAll(root[2:], `\`, "/")
+			}
 			objects := map[string]any{
 				serverID: map[string]any{"Id": serverID, "Config": map[string]any{"Image": serverImage, "Labels": map[string]string{
 					"codeops.opensandbox.source_sha": "f89eff24bbd15ae1c37a47769f7667849e679be0", "codeops.opensandbox.policy_sha256": policy,
 					"codeops.opensandbox.execd_image": execdImage, "codeops.opensandbox.egress_image": egressImage,
-				}}, "State": map[string]any{"Running": true}},
-				sidecarID:   map[string]any{"Id": sidecarID, "Config": map[string]any{"Image": egressImage, "Env": []string{"OPENSANDBOX_EGRESS_MODE=dns+nft"}, "Labels": map[string]string{"opensandbox.io/egress-sidecar-for": sandboxID}}, "State": map[string]any{"Running": true}},
+				}, "WorkingDir": "/app", "Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml", "OPENSANDBOX_SERVER_API_KEY=fixture-lifecycle", "CODEOPS_EXECD_ACCESS_TOKEN=fixture-execd"}, "Cmd": []string{"python", "-m", "uvicorn", "opensandbox_server.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"}}, "State": map[string]any{"Running": true},
+					"HostConfig": map[string]any{"ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "codeops-network", "Memory": 512 << 20, "NanoCpus": 2000000000, "PidsLimit": 128, "Tmpfs": map[string]string{"/run/codeops-control": "rw,noexec,nosuid,nodev,size=64m", "/tmp": "rw,noexec,nosuid,nodev,size=64m"}},
+					"Mounts":     []map[string]any{{"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": true}, {"Type": "bind", "Source": serverRoot, "Destination": serverRoot, "RW": false}}},
+				sidecarID: map[string]any{"Id": sidecarID, "Config": map[string]any{"Image": egressImage, "Env": []string{"OPENSANDBOX_EGRESS_MODE=dns+nft"}, "Labels": map[string]string{"opensandbox.io/egress-sidecar-for": sandboxID, "codeops.operation_id": strings.Repeat("7", 64), "codeops.opensandbox.policy_sha256": policy}}, "State": map[string]any{"Running": true},
+					"HostConfig": map[string]any{"ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "CapAdd": []string{"NET_ADMIN"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "codeops-network", "Memory": 256 << 20, "NanoCpus": 1000000000, "PidsLimit": 64, "Tmpfs": map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}}},
 				taskImage:   map[string]any{"RepoDigests": []string{taskImage}},
-				serverImage: map[string]any{"RepoDigests": []string{serverImage}},
+				serverImage: map[string]any{"RepoDigests": []string{serverImage}, "Config": map[string]any{"Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml"}}},
 				execdImage:  map[string]any{"RepoDigests": []string{execdImage}},
 				egressImage: map[string]any{"RepoDigests": []string{egressImage}},
 			}
+			if scenario == "writable server root" {
+				objects[serverID].(map[string]any)["HostConfig"].(map[string]any)["ReadonlyRootfs"] = false
+			}
+			if scenario == "server working directory" {
+				objects[serverID].(map[string]any)["Config"].(map[string]any)["WorkingDir"] = serverRoot
+			}
+			if scenario == "server environment override" || scenario == "server duplicate environment" {
+				config := objects[serverID].(map[string]any)["Config"].(map[string]any)
+				entry := "PYTHONPATH=" + serverRoot
+				if scenario == "server duplicate environment" {
+					entry = "SANDBOX_CONFIG_PATH=/workspace/unapproved.toml"
+				}
+				config["Env"] = append(config["Env"].([]string), entry)
+			}
+			if scenario == "privileged egress" {
+				objects[sidecarID].(map[string]any)["HostConfig"].(map[string]any)["CapAdd"] = []string{"NET_ADMIN", "SYS_ADMIN"}
+			}
 			if strings.Contains(scenario, "local image ID") {
 				for _, image := range []string{serverImage, execdImage, egressImage, taskImage} {
-					objects[image] = map[string]any{"Id": image, "RepoDigests": []string{}}
+					objects[image].(map[string]any)["Id"] = image
+					objects[image].(map[string]any)["RepoDigests"] = []string{}
 				}
 			}
 			if strings.HasPrefix(scenario, "mismatched local image ID") {
@@ -158,8 +183,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					if len(body.NetworkPolicy.Egress) != 2 || body.NetworkPolicy.Egress[0].Action != "deny" || body.NetworkPolicy.Egress[0].Target != "0.0.0.0/0" || body.NetworkPolicy.Egress[1].Action != "deny" || body.NetworkPolicy.Egress[1].Target != "::/0" {
 						t.Error("offline policy omitted explicit IPv4/IPv6 denial before upstream nameserver allowance")
 					}
-					if body.Env["OPENSANDBOX_EGRESS_MODE"] != "dns+nft" {
-						t.Error("runtime admission left the packet enforcement mode at the upstream DNS-only default")
+					if _, reserved := body.Env["OPENSANDBOX_EGRESS_MODE"]; reserved {
+						w.WriteHeader(http.StatusBadRequest)
+						return
 					}
 					labels := body.Metadata
 					if labels["codeops.operation_id"] != strings.Repeat("7", 64) {
@@ -184,7 +210,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					}
 					created++
 					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusCreated)
+					w.WriteHeader(http.StatusAccepted)
 					fmt.Fprintf(w, `{"id":%q,"status":{"state":"Running"}}`, sandboxID)
 				case r.Method == "POST" && r.URL.Path == "/v1/sandboxes/"+sandboxID+"/proxy/44772/command":
 					var body struct {
@@ -233,6 +259,11 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					}
 					fmt.Fprint(w, `{"id":"command-1","running":false,"exit_code":7}`)
 				case r.Method == "DELETE" && r.URL.Path == "/v1/sandboxes/"+sandboxID:
+					query := r.URL.Query()
+					if query.Get("codeops_container_id") != containerID || query.Get("codeops_sidecar_id") != sidecarID || query.Get("codeops_operation_id") != strings.Repeat("7", 64) {
+						w.WriteHeader(http.StatusConflict)
+						return
+					}
 					delete(objects, "sandbox-"+sandboxID)
 					delete(objects, containerID)
 					delete(objects, sidecarID)
@@ -264,7 +295,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				config.TmpfsSize = "16m"
 			}
 			result, err := sandbox.NewOpenSandboxRunner(config).Run(context.Background(), sandbox.Request{Workspace: root, WorkingDir: root, OperationID: strings.Repeat("7", 64), Program: "go", Args: []string{"test", "./...", "-count=1"}})
-			if scenario == "missing execd image" || strings.HasPrefix(scenario, "mismatched local image ID") || scenario == "short local image ID" {
+			if scenario == "missing execd image" || strings.HasPrefix(scenario, "mismatched local image ID") || scenario == "short local image ID" || scenario == "writable server root" || strings.HasPrefix(scenario, "server ") {
 				if !errors.Is(err, sandbox.ErrSandboxUnavailable) || result.ExitCode != 126 || created != 0 || executed != 0 || deleted != 0 {
 					t.Fatalf("missing runtime component admitted a sandbox: result=%+v lifecycle=%d/%d/%d err=%v", result, created, executed, deleted, err)
 				}
@@ -279,7 +310,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				if scenario == "unsupported managed volume" {
 					wantExecuted = 0
 				}
-				if scenario == "writable root" || scenario == "stricter scratch limit" {
+				if scenario == "writable root" || scenario == "stricter scratch limit" || scenario == "privileged egress" {
 					wantExecuted, wantError = 0, sandbox.ErrSandboxUnavailable
 				}
 				if !errors.Is(err, wantError) || result.ExitCode != 126 || created != 1 || executed != wantExecuted || deleted != wantDeleted || !strings.Contains(result.RuntimeID, containerID) {
@@ -316,7 +347,7 @@ func main(){
  b,e:=os.ReadFile(os.Getenv("CODEOPS_TEST_DOCKER_OBJECTS"));if e!=nil{os.Exit(78)}
  var objects map[string]json.RawMessage;if json.Unmarshal(b,&objects)!=nil{os.Exit(79)}
  if _,bad:=objects["__daemon_unavailable__"];bad{fmt.Fprintln(os.Stderr,"Cannot connect to the Docker daemon");os.Exit(1)}
- value,ok:=objects[a[len(a)-1]];if !ok{fmt.Fprintln(os.Stderr,"Error: No such object");os.Exit(1)}
+ value,ok:=objects[a[len(a)-1]];if !ok{fmt.Fprintln(os.Stderr,"error: no such object");os.Exit(1)}
  fmt.Print(string(value))
 }`
 	path := filepath.Join(dir, "docker.go")

@@ -12,16 +12,24 @@ const reasons: Record<string, string> = {
   'preparation failed; retained lease requires reconciliation': '准备失败，副本和记录保留，需要核对。',
   'preparation lease expired; retained workspace requires reconciliation': '准备租约已过期，副本保留，需要重新核验。',
   'task copy or Git registration changed; retained workspace requires reconciliation': '副本或 Git 登记发生变化，先核对结果再继续。',
+  'local task runtime is not attached': '请先在本机配置中启用已批准的 OpenSandbox 测试环境。',
+  'approved OpenSandbox prerequisites are unavailable': 'OpenSandbox 前提未通过核验，请检查本机服务、镜像和授权配置。',
+  'test outcome is unknown; reconcile the retained operation': '测试结果未知，执行标识和记录已保留；请先核验，避免重复运行。',
+  'task admission is unavailable; reconcile the retained operation': '任务槽暂不可用，请先核对已有任务；本次请求已保留。',
+  'repository or task baseline changed; reconcile the retained result': '仓库或隔离基线已变化，测试输出保留，请先核对。',
+  'task termination or admission release requires reconciliation': '无法确认任务结束或任务槽释放，请先核对执行记录。',
 };
 
 export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string; onChanged: () => Promise<void> }) {
   const [view, setView] = useState<TaskWorkspace | null>(null);
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [fileLimit, setFileLimit] = useState(200);
   const request = useRef<AbortController | null>(null);
   const requestId = useRef('');
+  const testRequestId = useRef('');
   const refresh = useCallback(async () => {
     request.current?.abort();
     const controller = new AbortController();
@@ -69,6 +77,30 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     }
   };
 
+  const runBaseline = async () => {
+    if (!view?.testAvailable || view.state !== 'prepared' || view.test || busy) return;
+    const controller = new AbortController();
+    request.current?.abort(); request.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 180_000);
+    const storageKey = `task-baseline-request:${sessionId}`;
+    try {
+      try { testRequestId.current = localStorage.getItem(storageKey) || testRequestId.current; } catch { /* Ledger prevents a second execution. */ }
+      testRequestId.current ||= createContinuationRequestId();
+      try { localStorage.setItem(storageKey, testRequestId.current); } catch { /* Ledger retains the operation after a browser restart. */ }
+      setBusy(true); setTesting(true); setError('');
+      const data = await api.runTaskBaseline(sessionId, view.eventCount, testRequestId.current, controller.signal);
+      if (!controller.signal.aborted && request.current === controller) { setView(data); await onChanged(); }
+    } catch (cause) {
+      if (request.current === controller) {
+        setView(null);
+        setError(cause instanceof ApiError && cause.status === 409 ? '会话或测试前提已变化，请重新检查。' : '无法确认测试结果，请重新检查；原请求和执行记录会保留。');
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (request.current === controller) { setBusy(false); setTesting(false); }
+    }
+  };
+
   const state = busy ? 'unknown' : view?.state || 'unknown';
   return <section className="task-workspace-panel" aria-label="隔离工作区">
     <div className="task-workspace-heading"><h2>隔离工作区</h2><span className={`capability-state ${state === 'prepared' ? 'ready' : state === 'unprepared' ? 'unknown' : state}`}>{busy ? '核验中' : labels[state]}</span></div>
@@ -90,6 +122,18 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
       </>}
     </details>}
     {error && <p className="capability-error" role="status">{error}</p>}
+    <section className="task-baseline-card" aria-label="基线测试">
+      <div className="task-workspace-heading"><h3>基线测试</h3><span role="status">{testing ? '正在运行' : view?.test ? { passed: '通过', failed: '失败', blocked: '需处理', unknown: '待核验' }[view.test.state] : '尚未运行'}</span></div>
+      {view?.test ? <>
+        <p><code>{view.test.command.join(' ')}</code></p>
+        <p>退出码：{view.test.exitCode ?? '待核验'}{view.test.truncated ? ' · 输出已截断' : ' · 输出未截断'}</p>
+        {view.test.reason && <p className="workspace-description">{reasons[view.test.reason] || view.test.reason}</p>}
+        <pre className="task-baseline-output" tabIndex={0} aria-label="测试输出">{view.test.output || '暂无可确认的输出。'}</pre>
+      </> : <>
+        <p className="workspace-description">{view?.testReason ? reasons[view.testReason] || view.testReason : '在已准备的隔离工作区运行完整 Go 基线。'}</p>
+        {view?.testAvailable && <button className="primary-btn" type="button" disabled={busy || view.state !== 'prepared'} onClick={() => void runBaseline()}>运行 Go 基线</button>}
+      </>}
+    </section>
     <div className="task-workspace-actions">
       {view?.available && view.state === 'unprepared' && <button className="primary-btn" type="button" disabled={busy} onClick={() => void prepare()}>准备隔离工作区</button>}
       <button className="subtle-btn" type="button" disabled={busy} onClick={() => void refresh()}>重新检查工作区</button>

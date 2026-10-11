@@ -26,7 +26,7 @@
 | 范围 | 仍需完成的验收 |
 | --- | --- |
 | #3 调用入场与预算 | 完整产品默认接入、任务槽生命周期、重试／未知用量对账和入口恢复；计量模块证据不代替这些行为 |
-| #6 执行环境与基线 | 用户已选 OpenSandbox、批准固定 pytz wheel 和 A 右侧卡片；接入票 [#21 Go 基线](https://github.com/huadeng408/CodeOps-Agent/issues/21) → [#22 Python 基线](https://github.com/huadeng408/CodeOps-Agent/issues/22) → [#23 取消／重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 已发布，按依赖实施。仍需实际运行环境、受控依赖准备、产品入口和两个公开项目完整基线 |
+| #6 执行环境与基线 | OpenSandbox 部署和 A 卡片的完整 Go 基线已按 [#21](https://github.com/huadeng408/CodeOps-Agent/issues/21) 范围验证；继续 [#22 Python 基线](https://github.com/huadeng408/CodeOps-Agent/issues/22) → [#23 取消／重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23)。固定 pytz wheel 已批准，仍需 Go 受控准备及完整 Python 产品基线 |
 | 模型代码任务与提案 | 真实仓库问答、Go 修复／Python 功能、可审查提案、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
 | Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
@@ -44,8 +44,9 @@
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
-- OpenSandbox Runner／任务槽：[基础接口证据](evidence/opensandbox-foundation-2026-10-11.md)；实际部署与产品基线仍待验收。
+- OpenSandbox Runner／任务槽：[基础接口证据](evidence/opensandbox-foundation-2026-10-11.md)。
 - OpenSandbox 本地构建镜像：[身份校验证据](evidence/opensandbox-image-pins-2026-10-12.md)。
+- OpenSandbox Go 产品基线：[实际部署、浏览器、故障／重开和 Trace 证据](evidence/opensandbox-product-2026-10-12.md)。
 - Agent 取消终态：[Go 竞态修复证据](evidence/agent-cancellation-2026-10-12.md)；完整 runtime 取消仍按对应票验收。
 - Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
 - 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。

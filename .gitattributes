@@ -38,3 +38,8 @@ tests/fixtures/**/*.pdf   -text
 # Terminal-Bench production inputs are hashed byte-for-byte by the official
 # receipt boundary. Keep their checked-in LF bytes unchanged on Windows.
 eval/benchmark_data/terminalbench/** -text
+
+# The approved profile hashes Linux bootstrap bytes; patch context is literal.
+deployments/opensandbox/**/*.sh text eol=lf
+deployments/opensandbox/**/Dockerfile text eol=lf
+deployments/opensandbox/**/*.patch -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

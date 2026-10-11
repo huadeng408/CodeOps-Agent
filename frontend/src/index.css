@@ -1359,6 +1359,10 @@ body[data-ds-dark-theme] {
 .task-workspace-files span { white-space: nowrap; color: var(--workbench-quiet); }
 .task-workspace-actions { margin-top: 10px; flex-wrap: wrap; }
 .task-workspace-actions button { font-size: 11px; }
+.task-baseline-card { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--workbench-line); font-size: 11px; }
+.task-baseline-card h3 { margin: 0; font-size: 12px; }
+.task-baseline-card code { overflow-wrap: anywhere; }
+.task-baseline-output { max-height: 240px; padding: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--workbench-line); border-radius: 5px; background: var(--workbench-surface); font-size: 10px; line-height: 1.6; }
 .goal-block { border-top-color: var(--workbench-line); }
 .checkpoint-panel { max-height: 42vh; padding: 13px 16px; border-top-color: var(--workbench-line); }
 .panel-heading h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }

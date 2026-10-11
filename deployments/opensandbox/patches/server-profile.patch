@@ -1,0 +1,460 @@
+diff --git a/server/opensandbox_server/api/lifecycle.py b/server/opensandbox_server/api/lifecycle.py
+index 2419e2d3..5d3d5316 100644
+--- a/server/opensandbox_server/api/lifecycle.py
++++ b/server/opensandbox_server/api/lifecycle.py
+@@ -257,6 +257,9 @@ def patch_sandbox_metadata(
+ def delete_sandbox(
+     sandbox_id: str,
+     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
++    codeops_container_id: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
++    codeops_sidecar_id: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
++    codeops_operation_id: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+ ) -> Response:
+     """
+     Delete a sandbox.
+@@ -273,7 +276,7 @@ def delete_sandbox(
+     Raises:
+         HTTPException: If sandbox not found or deletion fails
+     """
+-    sandbox_service.delete_sandbox(sandbox_id)
++    sandbox_service.delete_sandbox(sandbox_id, codeops_container_id=codeops_container_id, codeops_sidecar_id=codeops_sidecar_id, codeops_operation_id=codeops_operation_id)
+     return Response(status_code=status.HTTP_204_NO_CONTENT)
+ 
+ 
+
+diff --git a/server/opensandbox_server/services/docker/container_ops.py b/server/opensandbox_server/services/docker/container_ops.py
+index d70fe6c4..37f2b150 100644
+--- a/server/opensandbox_server/services/docker/container_ops.py
++++ b/server/opensandbox_server/services/docker/container_ops.py
+@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
+ from docker.errors import DockerException, ImageNotFound
+ from docker.types import DeviceRequest
+ from fastapi import HTTPException, status
++from opensandbox_server.codeops_profile import ensure_local_image, runtime_environment
+ 
+ from opensandbox_server.extensions import (
+     apply_access_renew_extend_seconds_to_mapping,
+@@ -222,62 +223,7 @@ class DockerContainerOpsMixin:
+         sandbox_id: str,
+         platform: Optional[PlatformSpec] = None,
+     ) -> None:
+-        expected_platform = platform
+-        if expected_platform is not None and is_windows_platform(expected_platform):
+-            expected_platform = None
+-        if expected_platform is None:
+-            expected_platform = self._get_daemon_platform()
+-        try:
+-            with self._docker_operation(f"inspect image {image_uri}", sandbox_id):
+-                image = self.docker_client.images.get(image_uri)
+-                if expected_platform is None:
+-                    logger.debug(
+-                        f"Sandbox {sandbox_id} using cached image {image_uri} "
+-                        "without platform check (daemon platform unavailable)"
+-                    )
+-                    return
+-                image_attrs = getattr(image, "attrs", {}) or {}
+-                image_os = (image_attrs.get("Os") or image_attrs.get("os") or "").lower()
+-                image_arch = (
+-                    image_attrs.get("Architecture")
+-                    or image_attrs.get("architecture")
+-                    or ""
+-                ).lower()
+-                image_os = self._normalize_os(image_os) or image_os
+-                image_arch = self._normalize_arch(image_arch) or image_arch
+-                requested_os = self._normalize_os(expected_platform.os) or expected_platform.os.lower()
+-                requested_arch = (
+-                    self._normalize_arch(expected_platform.arch) or expected_platform.arch.lower()
+-                )
+-                if image_os != requested_os or image_arch != requested_arch:
+-                    logger.info(
+-                        f"Sandbox {sandbox_id} cached image {image_uri} platform "
+-                        f"mismatch (cached={image_os or 'unknown'}/{image_arch or 'unknown'}, "
+-                        f"requested={requested_os}/{requested_arch}); repulling"
+-                    )
+-                    self._pull_image(
+-                        image_uri,
+-                        auth_config,
+-                        sandbox_id,
+-                        expected_platform,
+-                    )
+-                    return
+-                logger.debug(f"Sandbox {sandbox_id} using cached image {image_uri}")
+-        except ImageNotFound:
+-            self._pull_image(
+-                image_uri,
+-                auth_config,
+-                sandbox_id,
+-                platform,
+-            )
+-        except DockerException as exc:
+-            raise HTTPException(
+-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-                detail={
+-                    "code": SandboxErrorCodes.IMAGE_PULL_FAILED,
+-                    "message": f"Failed to inspect image {image_uri}: {str(exc)}",
+-                },
+-            ) from exc
++        return ensure_local_image(self, image_uri, auth_config, platform)
+ 
+ 
+     def _build_labels_and_env(
+@@ -311,7 +257,7 @@ class DockerContainerOpsMixin:
+         if self.app_config and self.app_config.runtime.execd_run_as_init:
+             environment.append("EXECD_INIT=1")
+         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
+-        return labels, environment
++        return labels, runtime_environment(environment)
+ 
+     def _resolve_image_auth(
+         self, request: CreateSandboxRequest, sandbox_id: str
+@@ -366,7 +312,14 @@ class DockerContainerOpsMixin:
+         network_mode: str,
+         gpu_count: Optional[int] = None,
+     ) -> Dict[str, Any]:
+-        host_config_kwargs: Dict[str, Any] = {"network_mode": network_mode}
++        host_config_kwargs: Dict[str, Any] = {
++            "network_mode": network_mode, "read_only": True,
++            "cap_add": ["SETUID", "SETGID"],
++            "tmpfs": {
++                "/run/codeops": "rw,exec,nosuid,nodev,size=512m,mode=1777",
++                "/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777",
++            },
++        }
+         security_opts: list[str] = []
+         docker_cfg = self.app_config.docker
+         if docker_cfg.no_new_privileges:
+
+diff --git a/server/opensandbox_server/services/docker/docker_service.py b/server/opensandbox_server/services/docker/docker_service.py
+index 8940e0e6..3cf3ba5f 100644
+--- a/server/opensandbox_server/services/docker/docker_service.py
++++ b/server/opensandbox_server/services/docker/docker_service.py
+@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional
+ import docker
+ from docker.errors import DockerException, NotFound as DockerNotFound
+ from fastapi import HTTPException, status
++from opensandbox_server.codeops_profile import validate_create, delete_owned
+ 
+ from opensandbox_server.extensions import (
+     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
+@@ -286,6 +287,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+         update_expiration: bool = True,
+         **expire_kwargs,
+     ) -> None:
++        if "codeops_container_id" not in expire_kwargs:
++            task = self._get_container_by_sandbox_id(sandbox_id)
++            labels = task.attrs["Config"].get("Labels") or {}
++            expire_kwargs.update(
++                codeops_container_id=task.id,
++                codeops_sidecar_id=task.attrs["HostConfig"]["NetworkMode"].removeprefix("container:"),
++                codeops_operation_id=labels.get("codeops.operation_id"),
++            )
+         # Delay might already be negative if the timer should fire immediately
+         delay = max(0.0, (expires_at - datetime.now(timezone.utc)).total_seconds())
+         timer = Timer(
+@@ -337,91 +346,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+         self,
+         sandbox_id: str,
+         fallback_mount_keys: Optional[list[str]] = None,
++        codeops_container_id=None,
++        codeops_sidecar_id=None,
++        codeops_operation_id=None,
+     ) -> None:
+-        """Timer callback to terminate expired sandboxes."""
+-        mount_keys: list[str] = []
+-        try:
+-            container = self._get_container_by_sandbox_id(sandbox_id)
+-        except HTTPException as exc:
+-            if exc.status_code == status.HTTP_404_NOT_FOUND:
+-                self._cleanup_egress_sidecar(sandbox_id)
+-                self._remove_expiration_tracking(sandbox_id)
+-                self._cleanup_windows_oem_volume(sandbox_id, None)
+-                if fallback_mount_keys:
+-                    self._release_ossfs_mounts(fallback_mount_keys)
+-                self._metadata_store.delete(sandbox_id)
+-            else:
+-                with self._expiration_lock:
+-                    current_expires = self._sandbox_expirations.get(sandbox_id)
+-                now = datetime.now(timezone.utc)
+-                if current_expires and current_expires > now:
+-                    logger.info(
+-                        f"Sandbox {sandbox_id} expiration was renewed; skipping retry."
+-                    )
+-                else:
+-                    logger.warning(
+-                        f"Failed to fetch sandbox {sandbox_id} for expiration: {exc.detail} — "
+-                        "scheduling retry in 30s"
+-                    )
+-                    retry_at = now + timedelta(seconds=30)
+-                    self._schedule_expiration(
+-                        sandbox_id,
+-                        retry_at,
+-                        update_expiration=False,
+-                        fallback_mount_keys=fallback_mount_keys,
+-                    )
+-            return
+-
+-        labels = container.attrs.get("Config", {}).get("Labels") or {}
+-        current_expires = self._get_tracked_expiration(sandbox_id, labels)
+-        if current_expires and current_expires > datetime.now(timezone.utc):
+-            self._schedule_expiration(sandbox_id, current_expires, update_expiration=False)
+-            logger.info(
+-                f"Sandbox {sandbox_id} was renewed "
+-                f"(expires {current_expires}); aborting expiration."
+-            )
+-            return
+-
+-        mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
+         try:
+-            parsed_mount_keys = json.loads(mount_keys_raw)
+-            if isinstance(parsed_mount_keys, list):
+-                mount_keys = [key for key in parsed_mount_keys if isinstance(key, str) and key]
+-        except (TypeError, json.JSONDecodeError):
+-            mount_keys = []
+-
+-        try:
+-            state = container.attrs.get("State", {})
+-            if state.get("Running", False):
+-                container.kill()
+-        except DockerException as exc:
+-            logger.warning(f"Failed to stop expired sandbox {sandbox_id}: {exc}")
+-
+-        try:
+-            container.remove(force=True)
+-        except DockerException as exc:
+-            logger.warning(f"Failed to remove expired sandbox {sandbox_id}: {exc}")
+-            # Re-read ownership on retry: a concurrent DELETE may already
+-            # have released the mount references captured by this callback.
+-            self._schedule_expiration(
+-                sandbox_id, datetime.now(timezone.utc) + timedelta(seconds=30),
+-                update_expiration=False,
+-            )
+-            return
+-
+-        managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
+-        try:
+-            managed_volumes: list[str] = json.loads(managed_volumes_raw)
+-        except (TypeError, json.JSONDecodeError):
+-            managed_volumes = []
+-
+-        self._remove_expiration_tracking(sandbox_id)
+-        # Ensure sidecar is also cleaned up on expiration
+-        self._cleanup_egress_sidecar(sandbox_id)
+-        self._cleanup_windows_oem_volume(sandbox_id, labels)
+-        self._release_ossfs_mounts(mount_keys)
+-        self._cleanup_managed_volumes(sandbox_id, managed_volumes)
+-        self._metadata_store.delete(sandbox_id)
++            delete_owned(self, sandbox_id, codeops_container_id, codeops_sidecar_id, codeops_operation_id)
++        except (HTTPException, DockerException):
++            logger.warning(f"Sandbox {sandbox_id} expiration ownership or removal is unconfirmed; Go reconciliation is required.")
+ 
+     def _restore_existing_sandboxes(self) -> None:
+         """On startup, rebuild expiration timers for containers already running."""
+@@ -612,6 +544,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+         return sandbox_id, created_at, expires_at
+ 
+     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
++        validate_create(request)
+         if request.lifecycle is not None:
+             raise HTTPException(
+                 status_code=status.HTTP_400_BAD_REQUEST,
+@@ -630,7 +563,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+             )
+         request = await resolve_sandbox_image_from_request(request)
+         ensure_entrypoint(request.entrypoint or [])
+-        ensure_metadata_labels(request.metadata)
++        ensure_metadata_labels({})  # The profile already validates its two complete SHA-256 values.
+         ensure_platform_valid(request.platform)
+         ensure_timeout_within_limit(
+             request.timeout,
+@@ -793,20 +726,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+             container_exposed_ports: Optional[list[str]] = exposed_ports
+ 
+             if request.network_policy:
+-                runtime_volume_name = f"opensandbox-runtime-{sandbox_id}"
+-                with self._docker_operation(
+-                    "create egress runtime volume", sandbox_id
+-                ):
+-                    self.docker_client.volumes.create(
+-                        name=runtime_volume_name,
+-                        labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
+-                    )
+-                auto_created_volumes = list(auto_created_volumes or [])
+-                auto_created_volumes.append(runtime_volume_name)
+-                labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
+-                    auto_created_volumes,
+-                    separators=(",", ":"),
+-                )
+                 if credential_proxy_enabled:
+                     environment = [
+                         entry
+@@ -845,6 +764,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+                     runtime_volume_name=runtime_volume_name,
+                     credential_proxy_enabled=credential_proxy_enabled,
+                     extra_env=egress_env or None,
++                    operation_metadata=request.metadata,
+                 )
+                 labels[SANDBOX_EMBEDDING_PROXY_PORT_LABEL] = str(host_execd_port)
+                 labels[SANDBOX_HTTP_PORT_LABEL] = str(host_http_port)
+@@ -1108,48 +1028,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
+         container = self._get_container_by_sandbox_id(sandbox_id)
+         return self._container_to_sandbox(container, sandbox_id)
+ 
+-    def delete_sandbox(self, sandbox_id: str) -> None:
+-        try:
+-            container = self._get_container_by_sandbox_id(sandbox_id)
+-        except HTTPException as exc:
+-            if exc.status_code == status.HTTP_404_NOT_FOUND:
+-                self._cleanup_egress_sidecar(sandbox_id)
+-            raise
+-        labels = container.attrs.get("Config", {}).get("Labels") or {}
+-        mount_keys_raw = labels.get(SANDBOX_OSSFS_MOUNTS_LABEL, "[]")
+-        try:
+-            mount_keys: list[str] = json.loads(mount_keys_raw)
+-        except (TypeError, json.JSONDecodeError):
+-            mount_keys = []
+-        managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
+-        try:
+-            managed_volumes: list[str] = json.loads(managed_volumes_raw)
+-        except (TypeError, json.JSONDecodeError):
+-            managed_volumes = []
+-        try:
+-            try:
+-                with self._docker_operation("kill sandbox container", sandbox_id):
+-                    container.kill()
+-            except DockerException as exc:
+-                # Ignore error if container is already stopped
+-                if "is not running" not in str(exc).lower():
+-                    raise
+-            with self._docker_operation("remove sandbox container", sandbox_id):
+-                container.remove(force=True)
+-        except DockerException as exc:
+-            raise HTTPException(
+-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-                detail={
+-                    "code": SandboxErrorCodes.SANDBOX_DELETE_FAILED,
+-                    "message": f"Failed to delete sandbox container: {str(exc)}",
+-                },
+-            ) from exc
+-        self._remove_expiration_tracking(sandbox_id)
+-        self._cleanup_egress_sidecar(sandbox_id)
+-        self._cleanup_windows_oem_volume(sandbox_id, labels)
+-        self._release_ossfs_mounts(mount_keys)
+-        self._cleanup_managed_volumes(sandbox_id, managed_volumes)
+-        self._metadata_store.delete(sandbox_id)
++    def delete_sandbox(self, sandbox_id: str, *, codeops_container_id=None, codeops_sidecar_id=None, codeops_operation_id=None) -> None:
++        return delete_owned(self, sandbox_id, codeops_container_id, codeops_sidecar_id, codeops_operation_id)
+ 
+     def pause_sandbox(self, sandbox_id: str) -> None:
+         container = self._get_container_by_sandbox_id(sandbox_id)
+
+diff --git a/server/opensandbox_server/services/docker/networking.py b/server/opensandbox_server/services/docker/networking.py
+index 147c640a..d6e14d1b 100644
+--- a/server/opensandbox_server/services/docker/networking.py
++++ b/server/opensandbox_server/services/docker/networking.py
+@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional
+ from requests.exceptions import RequestException
+ from docker.errors import DockerException, NotFound as DockerNotFound
+ from fastapi import HTTPException, status
++from opensandbox_server.codeops_profile import PROFILE
+ 
+ from opensandbox_server.api.schema import Endpoint, NetworkPolicy
+ from opensandbox_server.services.constants import (
+@@ -169,9 +170,8 @@ class DockerNetworkingMixin:
+                 },
+             )
+ 
+-        # User-defined networks cannot be combined with networkPolicy: the egress sidecar
+-        # always runs on the default bridge, which would silently discard the configured network.
+-        if self._is_user_defined_network():
++        # The private sidecar joins the same pinned dual-stack network as its task.
++        if self._is_user_defined_network() and self.network_mode != PROFILE["network"]:
+             raise HTTPException(
+                 status_code=status.HTTP_400_BAD_REQUEST,
+                 detail={
+@@ -264,11 +264,11 @@ class DockerNetworkingMixin:
+             # main container's private IP is not a stable proxy target. In that case, treat the
+             # server-proxy target as the server-local host-mapped endpoint instead of a container IP.
+             if labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY):
+-                return self._resolve_host_mapped_endpoint(
+-                    self._resolve_proxy_host(),
+-                    labels,
+-                    port,
+-                )
++                sidecar_id = container.attrs["HostConfig"]["NetworkMode"].removeprefix("container:")
++                sidecar = self.docker_client.containers.get(sidecar_id)
++                endpoint = Endpoint(endpoint=f"{self._extract_bridge_ip(sidecar)}:{port}")
++                self._attach_egress_auth_headers(endpoint, labels, port)
++                return endpoint
+             return self._resolve_internal_endpoint(container, port)
+ 
+         # The server-side proxy needs a locally reachable host: when the
+@@ -457,10 +457,12 @@ class DockerNetworkingMixin:
+         runtime_volume_name: Optional[str] = None,
+         credential_proxy_enabled: bool = False,
+         extra_env: Optional[Dict[str, Optional[str]]] = None,
++        operation_metadata: Optional[Dict[str, str]] = None,
+     ):
+         sidecar_name = f"sandbox-egress-{sandbox_id}"
+         sidecar_labels = {
+             EGRESS_SIDECAR_LABEL: sandbox_id,
++            **(operation_metadata or {}),
+         }
+ 
+         # Ensure sidecar image is available before create/start.
+@@ -508,8 +510,11 @@ class DockerNetworkingMixin:
+             sidecar_port_bindings.update(extra_port_bindings)
+ 
+         base_sidecar_host_config_kwargs: dict[str, Any] = {
+-            "network_mode": BRIDGE_NETWORK_MODE,
++            "network_mode": self.network_mode,
+             "cap_add": ["NET_ADMIN"],
++            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges=true"],
++            "read_only": True, "mem_limit": 268435456, "nano_cpus": 1000000000,
++            "pids_limit": 64, "tmpfs": {"/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777"},
+             "port_bindings": normalize_port_bindings(sidecar_port_bindings),
+         }
+         sidecar_binds: list[str] = []
+@@ -590,11 +595,14 @@ class DockerNetworkingMixin:
+             with self._docker_operation("start egress sidecar", sandbox_id):
+                 sidecar_container.start()
+             if egress_api_host_port is not None:
++                sidecar_container.reload()
++                codeops_egress_ip = sidecar_container.attrs["NetworkSettings"]["Networks"][self.network_mode]["IPAddress"]
+                 self._wait_for_egress_sidecar_ready(
+                     sandbox_id,
+                     egress_api_host_port,
+                     egress_token,
+                     timeout_seconds=self.app_config.egress.readiness_timeout_seconds,
++                    codeops_ip=codeops_egress_ip,
+                 )
+             return sidecar_container
+         except Exception as exc:
+@@ -630,9 +638,10 @@ class DockerNetworkingMixin:
+         host_port: int,
+         egress_token: str,
+         timeout_seconds: float,
++        codeops_ip: str,
+     ) -> None:
+         deadline = time.monotonic() + timeout_seconds
+-        url = f"http://{self._resolve_proxy_host()}:{host_port}/healthz"
++        url = f"http://{codeops_ip}:18080/healthz"
+         last_error: Exception | None = None
+         while time.monotonic() < deadline:
+             request = urllib.request.Request(
+
+diff --git a/server/opensandbox_server/services/docker/runtime.py b/server/opensandbox_server/services/docker/runtime.py
+index fcc43ad7..ad399166 100644
+--- a/server/opensandbox_server/services/docker/runtime.py
++++ b/server/opensandbox_server/services/docker/runtime.py
+@@ -381,8 +381,5 @@ class DockerRuntimeMixin:
+         sandbox_id: str,
+         platform: Optional[PlatformSpec] = None,
+     ) -> None:
+-        self._copy_execd_to_container(container, sandbox_id, platform)
+-        self._install_bootstrap_script(container, sandbox_id, platform)
+-        self._copy_bwrap_to_container(container, sandbox_id, platform)
+-        self._copy_session_gate_to_container(container, sandbox_id, platform)
+-        self._copy_launcher_to_container(container, sandbox_id, platform)
++        from opensandbox_server.codeops_profile import verify_prebaked_runtime
++        verify_prebaked_runtime(self, container)
+

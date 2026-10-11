@@ -15,6 +15,7 @@ import (
 	"code-agent/internal/handler"
 	"code-agent/internal/localidentity"
 	"code-agent/internal/middleware"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
 	"code-agent/internal/session"
@@ -79,8 +80,30 @@ func runLocalCore(cfg serverconfig.Config) error {
 		api.Any(prefix+"/*path", middleware.AuthMiddleware(jwtManager, users), optionalUnavailable)
 	}
 	var tasks session.TaskWorkspaceModule
+	var taskRuntime *sandbox.OpenSandboxRunner
 	if cfg.Harness.RepositoryRoot != "" && cfg.Harness.TaskWorkspaceRoot != "" {
-		tasks = session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
+		workspaces := session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
+		if os.Getenv("CODE_AGENT_TASK_RUNTIME") == "opensandbox" {
+			if err := workspaces.SetPublicTestFixtures("9b9fb55def404397748a9fc7e044efe9db1d618e", map[string]string{
+				"testdata/key.pem":  "1f2d4e39e1a799bd668e0fa10fde499505048a4ea6ba0828b0343edc848b2a16",
+				"testdata/cert.pem": "f089d14120e9f344fa13a9e45f46098bd8c19c1b3d883526edd8fc5270810bb8",
+			}); err != nil {
+				return err
+			}
+			taskRuntime = sandbox.NewOpenSandboxRunner(sandbox.Config{Backend: sandbox.BackendOpenSandbox, TrustRoot: cfg.Harness.TaskWorkspaceRoot, Toolchain: "go", Image: os.Getenv("CODE_AGENT_TASK_IMAGE"), OpenSandboxManifest: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST"), OpenSandboxManifestSHA256: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST_SHA256")})
+			budget := admission.NewBudget(ledger)
+			workspaces.WithBaselineRuntime(session.TaskBaselineRuntime{Runner: taskRuntime, Ready: taskRuntime.Ready,
+				Acquire: func(ctx context.Context, owner uint, id string) error {
+					_, err := budget.AcquireTask(ctx, owner, id)
+					return err
+				},
+				Finish: func(ctx context.Context, owner uint, id string) error {
+					_, err := budget.FinishTask(ctx, owner, id)
+					return err
+				},
+			})
+		}
+		tasks = workspaces
 	}
 	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: session.NewContinuationSlot()}).register(router, api, users, jwtManager)
 	api.GET("/capabilities", middleware.AuthMiddleware(jwtManager, users), func(c *gin.Context) {
@@ -91,14 +114,22 @@ func runLocalCore(cfg serverconfig.Config) error {
 			"rag":       {State: "degraded", Reason: "optional services are disabled in the local profile"},
 			"trace":     {State: "unknown", Reason: "trace backend has not been verified"},
 		}
-		addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities)
+		owner, _ := identity.OwnerID(c.Request.Context())
+		addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities, owner)
 		capabilities["sandbox"] = CapabilityStatus{State: "blocked", Reason: "local task runtime is not attached"}
+		if taskRuntime != nil {
+			if taskRuntime.Ready(c.Request.Context()) == nil {
+				capabilities["sandbox"] = CapabilityStatus{State: "ready", Reason: "approved OpenSandbox baseline profile"}
+			} else {
+				capabilities["sandbox"] = CapabilityStatus{State: "blocked", Reason: "approved OpenSandbox prerequisites are unavailable"}
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": capabilities})
 	})
 	return serveHTTPServer(&http.Server{Addr: net.JoinHostPort(host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 5 * time.Second})
 }
 
-func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog, capabilities map[string]CapabilityStatus) {
+func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog, capabilities map[string]CapabilityStatus, owner uint) {
 	provider := admission.ProviderFromEnv()
 	reason := "model admission is not enabled"
 	state := "blocked"
@@ -117,7 +148,7 @@ func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog,
 		}
 	}
 	capabilities["provider"] = CapabilityStatus{State: state, Reason: reason}
-	batch, err := admission.NewBudget(ledger).Inspect(ctx, 1)
+	batch, err := admission.NewBudget(ledger).Inspect(ctx, owner)
 	if err != nil {
 		capabilities["budget"] = CapabilityStatus{State: "unknown", Reason: "token Ledger is unavailable; restore it before calling a model"}
 		return

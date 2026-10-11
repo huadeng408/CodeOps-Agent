@@ -67,6 +67,9 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	fixtures := m.publicFixtures
+	m.mu.Unlock()
 	metadata, err := openBaselineMetadata(source)
 	if err != nil {
 		return err
@@ -95,7 +98,10 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 		if err != nil || !matchesTaskFile(item, data, exists) {
 			return errors.New("task source changed or is unsafe")
 		}
-		if taskCredentialPattern.Match(data) {
+		if item.PublicTestFixture && !matchesPublicTestFixture(fixtures, task.Baseline.HeadCommit, item.Path, data) {
+			return errors.New("public test fixture lacks current host approval")
+		}
+		if taskCredentialPattern.Match(data) && !matchesPublicTestFixture(fixtures, task.Baseline.HeadCommit, item.Path, data) {
 			return errors.New("credential-shaped content requires removal before task preparation")
 		}
 	}
@@ -228,7 +234,7 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 			return err
 		}
 		data, exists, err := readBaselineFile(source, item.Path, maxBaselineFileBytes)
-		if err != nil || !matchesTaskFile(item, data, exists) || taskCredentialPattern.Match(data) {
+		if err != nil || !matchesTaskFile(item, data, exists) || taskCredentialPattern.Match(data) && !matchesPublicTestFixture(fixtures, task.Baseline.HeadCommit, item.Path, data) {
 			return errors.New("task source changed or is unsafe")
 		}
 		if !exists {
@@ -279,6 +285,9 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 	if err := task.Validate(); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	fixtures := m.publicFixtures
+	m.mu.Unlock()
 	store, err := m.openTaskStorage(storage)
 	if err != nil {
 		return err
@@ -334,6 +343,9 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 		data, exists, err := readBaselineFile(destination, item.Path, maxBaselineFileBytes)
 		if err != nil || !matchesTaskFile(item, data, exists) {
 			return errors.New("task copy does not match recorded baseline")
+		}
+		if item.PublicTestFixture && !matchesPublicTestFixture(fixtures, task.Baseline.HeadCommit, item.Path, data) {
+			return errors.New("public test fixture lacks current host approval")
 		}
 		if exists {
 			info, err := baselineFileInfo(destination, item.Path)
@@ -541,7 +553,10 @@ func (task TaskWorkspace) Validate() error {
 		if err := validateBaselinePath(item.Path); err != nil {
 			return err
 		}
-		if _, reason := baselineExclusion(item.Path); reason != "" {
+		if item.PublicTestFixture && (!item.Exists || !publicTestFixturePath(item.Path)) {
+			return errors.New("invalid public test fixture entry")
+		}
+		if _, reason := baselineExclusion(item.Path); reason != "" && !item.PublicTestFixture {
 			return errors.New("excluded file in task baseline")
 		}
 	}

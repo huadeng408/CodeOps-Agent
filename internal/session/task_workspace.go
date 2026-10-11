@@ -26,6 +26,7 @@ const (
 type TaskWorkspaceModule interface {
 	Inspect(context.Context, uint, string) (TaskWorkspaceView, error)
 	Prepare(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
+	RunBaseline(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 }
 
 // TaskWorkspaces keeps preparation on the Workbench's canonical Ledger. Only
@@ -35,6 +36,7 @@ type TaskWorkspaces struct {
 	owner               func(context.Context) (uint, error)
 	repository, storage string
 	manager             *worktree.Manager
+	baselineRuntime     *TaskBaselineRuntime
 }
 
 type TaskWorkspaceView struct {
@@ -46,6 +48,9 @@ type TaskWorkspaceView struct {
 	Baseline       *worktree.Baseline `json:"baseline,omitempty"`
 	LeaseExpiresAt *time.Time         `json:"leaseExpiresAt,omitempty"`
 	EventCount     int                `json:"eventCount"`
+	TestAvailable  bool               `json:"testAvailable"`
+	TestReason     string             `json:"testReason,omitempty"`
+	Test           *TaskBaselineView  `json:"test,omitempty"`
 }
 
 type taskPreparePayload struct {
@@ -185,6 +190,19 @@ func (t *TaskWorkspaces) approved(ctx context.Context, ownerID uint, workingDir 
 
 func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionView SessionView) (TaskWorkspaceView, error) {
 	view := TaskWorkspaceView{Available: t.approved(ctx, sessionView.UserID, sessionView.WorkingDir), State: "unprepared", Repository: sessionView.ProjectName, EventCount: len(events)}
+	test, err := taskBaseline(events)
+	if err != nil {
+		return TaskWorkspaceView{}, err
+	}
+	if test != nil {
+		view.Test = &test.View
+	}
+	view.TestAvailable = t.baselineRuntime != nil && t.baselineRuntime.Runner != nil && t.baselineRuntime.Acquire != nil && t.baselineRuntime.Finish != nil
+	if !view.TestAvailable {
+		view.TestReason = "local task runtime is not attached"
+	} else if t.baselineRuntime.Ready != nil && t.baselineRuntime.Ready(ctx) != nil {
+		view.TestAvailable, view.TestReason = false, "approved OpenSandbox prerequisites are unavailable"
+	}
 	if !view.Available {
 		view.State, view.Reason = "blocked", "repository is not approved for task preparation"
 	}
