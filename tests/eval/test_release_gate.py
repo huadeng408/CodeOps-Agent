@@ -5,6 +5,8 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from eval.release_gate import GateStatus, evaluate_release
 
 
@@ -25,6 +27,14 @@ def _receipt(root: Path, lane: str, payload: dict) -> None:
     path = root / "data" / "eval" / lane / "receipts" / "receipt.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+def _git_symlink(repo: Path, path: str, target: str) -> None:
+    blob = subprocess.check_output(
+        ["git", "hash-object", "-w", "--stdin"], cwd=repo, input=target.encode("utf-8")
+    ).decode("ascii").strip()
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"120000,{blob},{path}"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout-index", "--force", "--", path], cwd=repo, check=True)
 
 
 def _evidence(sha: str, run_id: str = "run") -> dict:
@@ -244,10 +254,199 @@ def test_release_gate_accepts_receipt_commit_bound_to_its_source_parent(tmp_path
 
     assert report.status is GateStatus.ELIGIBLE
     assert all(
-        check.detail == "source-bound receipt satisfies the lane contract"
+        check.detail.startswith("source-bound receipt satisfies the lane contract")
         for check in report.checks
         if check.name.startswith("evidence.")
     )
+
+
+def test_release_gate_keeps_receipts_across_explanatory_document_commits(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    for path in ("README.md", "docs/usage.md"):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("Explanatory documentation only.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "--", path], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "documentation"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.ELIGIBLE
+    assert report.git_sha != source_sha
+    assert all(source_sha in check.detail for check in report.checks if check.name.startswith("evidence."))
+
+
+@pytest.mark.parametrize("path", [
+    "app.go", "settings.toml", "go.mod", "requirements.txt", "AGENTS.md", "AGENT.md", "CLAUDE.md",
+    "CONTEXT.md", "docs/SKILL.md", "docs/agents/policy.md", "docs/AGENTS/policy.md",
+    "docs/prompts/task.md", "docs/GOAL.md", "docs/release-gate.md", "data/eval/workflow/inputs.json",
+    "runtime/data/eval/demo/receipts/input.json", "runtime/data/eval/workflow/receipts/input.json",
+    "data/eval/demo/receipts/input.json",
+])
+def test_release_gate_rejects_changed_runtime_inputs(tmp_path: Path, path: str) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("changed runtime input\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--", path], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "runtime input"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert all(check.status == "BLOCKED" for check in report.checks if check.name.startswith("evidence."))
+
+
+@pytest.mark.parametrize(("linked_target", "changed_path", "same_pin", "expected"), [
+    ("docs/usage.md", "docs/usage.md", False, GateStatus.BLOCKED),
+    ("docs/usage.md", "docs/other.md", False, GateStatus.ELIGIBLE),
+    ("docs/usage-link.md", "docs/usage.md", False, GateStatus.BLOCKED),
+    ("AGENTS.md", "docs/other.md", False, GateStatus.BLOCKED),
+    ("../external-policy.md", "docs/other.md", False, GateStatus.BLOCKED),
+    ("docs/usage.md", "docs/other.md", True, GateStatus.ELIGIBLE),
+    ("../external-policy.md", "docs/other.md", True, GateStatus.BLOCKED),
+])
+def test_release_gate_checks_instruction_symlink_targets(
+    tmp_path: Path, monkeypatch, linked_target: str, changed_path: str, same_pin: bool, expected: GateStatus
+) -> None:
+    repo, _ = _git_repo(tmp_path)
+    subprocess.run(["git", "config", "core.symlinks", "false"], cwd=repo, check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "usage.md").write_text("Original instruction body.\n", encoding="utf-8")
+    subprocess.run(["git", "add", "docs/usage.md"], cwd=repo, check=True)
+    # Use the Git tree contract without requiring Windows symlink privileges.
+    links = {"AGENTS.md": linked_target}
+    if linked_target == "docs/usage-link.md":
+        links[linked_target] = "usage.md"
+    for path, target in links.items():
+        _git_symlink(repo, path, target)
+    subprocess.run(["git", "commit", "-q", "-m", "instruction link"], cwd=repo, check=True)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, source_sha)
+    (repo / changed_path).write_text("Changed documentation body.\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--", changed_path], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "documentation"], cwd=repo, check=True)
+    if same_pin:
+        monkeypatch.setattr("eval.release_gate._git_head", lambda _: source_sha)
+
+    assert evaluate_release(repo, run_tests=False).status is expected
+
+
+@pytest.mark.parametrize("change", ["committed_gitlink", "dirty_tracked", "untracked_child"])
+def test_release_gate_rejects_changed_submodule_dependencies(tmp_path: Path, change: str) -> None:
+    repo, _ = _git_repo(tmp_path)
+    (repo / "vendor").mkdir()
+    dependency, dependency_sha = _git_repo(repo / "vendor")
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(dependency), "vendor/repo"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "dependency baseline"], cwd=repo, check=True)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, source_sha)
+    subprocess.run(["git", "config", "diff.ignoreSubmodules", "all"], cwd=repo, check=True)
+    target = dependency / ("new-input.txt" if change == "untracked_child" else "tracked.txt")
+    target.write_text("changed dependency\n", encoding="utf-8")
+    if change == "committed_gitlink":
+        subprocess.run(["git", "add", "tracked.txt"], cwd=dependency, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "dependency change"], cwd=dependency, check=True)
+        dependency_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=dependency, text=True).strip()
+        subprocess.run(["git", "update-index", "--cacheinfo", f"160000,{dependency_sha},vendor/repo"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "dependency pin"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    clean = next(check for check in report.checks if check.name == "git.clean")
+    assert clean.status == ("PASS" if change == "committed_gitlink" else "BLOCKED")
+
+
+@pytest.mark.parametrize("change", ["unchanged", "dirty_tracked", "untracked_child", "uninitialized_child"])
+def test_release_gate_checks_nested_dependency_inputs(tmp_path: Path, change: str) -> None:
+    repo, _ = _git_repo(tmp_path)
+    modules = []
+    for name in ("leaf", "child"):
+        directory = tmp_path / name
+        directory.mkdir()
+        module, _ = _git_repo(directory)
+        modules.append(module)
+    leaf, child = modules
+    for parent, source, destination in ((child, leaf, "nested/leaf"), (repo, child, "vendor/child")):
+        subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), destination],
+            cwd=parent, check=True, capture_output=True,
+        )
+        subprocess.run(["git", "commit", "-q", "-m", "dependency tree"], cwd=parent, check=True)
+    if change != "uninitialized_child":
+        subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", "--recursive"],
+            cwd=repo, check=True, capture_output=True,
+        )
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, source_sha)
+    checkout = repo / "vendor" / "child"
+    subprocess.run(["git", "config", "diff.ignoreSubmodules", "all"], cwd=checkout, check=True)
+    if change in {"dirty_tracked", "untracked_child"}:
+        target = "tracked.txt" if change == "dirty_tracked" else "new-input.txt"
+        (checkout / "nested" / "leaf" / target).write_text("changed nested input\n", encoding="utf-8")
+
+    report = evaluate_release(repo, run_tests=False)
+
+    expected = GateStatus.ELIGIBLE if change == "unchanged" else GateStatus.BLOCKED
+    assert report.status is expected
+    clean = next(check for check in report.checks if check.name == "git.clean")
+    assert clean.status == ("PASS" if change == "unchanged" else "BLOCKED")
+
+
+@pytest.mark.parametrize("target", ["tracked.txt", "../unconfirmed-source.py"])
+@pytest.mark.parametrize("path", ["runtime.py", "README.md"])
+def test_release_gate_confirms_runtime_links_in_dependencies(tmp_path: Path, target: str, path: str) -> None:
+    repo, _ = _git_repo(tmp_path)
+    directory = tmp_path / "module"
+    directory.mkdir()
+    module, _ = _git_repo(directory)
+    subprocess.run(["git", "config", "core.symlinks", "false"], cwd=module, check=True)
+    _git_symlink(module, path, target)
+    subprocess.run(["git", "commit", "-q", "-m", "runtime link"], cwd=module, check=True)
+    subprocess.run(
+        ["git", "-c", "core.symlinks=false", "-c", "protocol.file.allow=always",
+         "submodule", "add", "-q", str(module), "vendor/module"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "dependency pin"], cwd=repo, check=True)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, source_sha)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert next(check for check in report.checks if check.name == "git.clean").status == "PASS"
+    assert report.status is (GateStatus.ELIGIBLE if target == "tracked.txt" else GateStatus.BLOCKED)
+
+
+def test_release_gate_rejects_executable_documentation(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    (repo / "README.md").write_text("documentation\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "documentation baseline"], cwd=repo, check=True)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, source_sha)
+    subprocess.run(["git", "update-index", "--chmod=+x", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "executable file"], cwd=repo, check=True)
+
+    assert evaluate_release(repo, run_tests=False).status is GateStatus.BLOCKED
+
+
+def test_release_gate_checks_final_content_not_intermediate_commits(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    for body in ("changed runtime input\n", "tracked\n"):
+        (repo / "tracked.txt").write_text(body, encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "runtime content"], cwd=repo, check=True)
+
+    assert evaluate_release(repo, run_tests=False).status is GateStatus.ELIGIBLE
 
 
 def test_release_gate_rejects_receipt_pin_after_a_non_evidence_commit(tmp_path: Path) -> None:

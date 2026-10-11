@@ -13,42 +13,47 @@ type InstructionSource struct {
 }
 
 func LoadInstructions(projectRoot, workingDir string) ([]InstructionSource, error) {
-	paths := []string{}
+	directories := []string{}
 
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths, filepath.Join(home, ".agent", "AGENT.md"))
+		directories = append(directories, filepath.Join(home, ".agent"))
 	}
 
 	if projectRoot != "" {
-		paths = append(paths, filepath.Join(projectRoot, "AGENT.md"))
+		directories = append(directories, projectRoot)
 	}
 
 	if workingDir != "" {
-		paths = append(paths, filepath.Join(workingDir, "AGENT.md"))
+		directories = append(directories, workingDir)
 	}
 
 	seen := map[string]struct{}{}
-	instructions := make([]InstructionSource, 0, len(paths))
-	for _, path := range paths {
-		if path == "" {
+	instructions := make([]InstructionSource, 0, len(directories))
+	for _, directory := range directories {
+		if directory == "" {
 			continue
 		}
-		abs := absPathOr(path, "")
+		abs := absPathOr(directory, "")
 		if abs == "" {
-			abs = path
+			abs = directory
 		}
 		if _, ok := seen[abs]; ok {
 			continue
 		}
 		seen[abs] = struct{}{}
-		content, err := os.ReadFile(abs)
+		path := filepath.Join(abs, "AGENTS.md")
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			path = filepath.Join(abs, "AGENT.md")
+			content, err = os.ReadFile(path)
+		}
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, fmt.Errorf("read AGENT.md %s: %w", abs, err)
+			return nil, fmt.Errorf("read instructions %s: %w", path, err)
 		}
-		instructions = append(instructions, InstructionSource{Path: abs, Content: string(content)})
+		instructions = append(instructions, InstructionSource{Path: path, Content: string(content)})
 	}
 
 	return instructions, nil

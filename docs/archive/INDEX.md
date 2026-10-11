@@ -45,6 +45,7 @@ Promoted, redacted release evidence stays under `data/eval/`. Live operator docs
 
 | File | Summary |
 | --- | --- |
+| [receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md](receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md) | Exact live Goal snapshot before the six approved instruction/validation changes; historical test counts, blockers and implementation slices |
 | [receipts/GOAL-log-2026-09.md](receipts/GOAL-log-2026-09.md) | Full Goal daily log through 2026-09-14, copied before the live file was slimmed |
 | [receipts/interview-verified-2026-09-11.md](receipts/interview-verified-2026-09-11.md) | Interview conversation verification receipt |
 | [receipts/interview-readiness-2026-09-10.md](receipts/interview-readiness-2026-09-10.md) | Interview readiness snapshot (provider route still blocked that day) |

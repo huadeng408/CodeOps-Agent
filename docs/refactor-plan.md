@@ -28,7 +28,7 @@
 | D11 | 同用户、同仓库跨会话召回；跨仓库使用须显式选择或晋升 | [ADR-0005](adr/0005-scope-repository-memory-to-owner-and-repository.md) |
 
 产品术语见 [CONTEXT](../CONTEXT.md)。架构与信任边界继续遵循
-[AGENT](../AGENT.md)、[ADR-0001](adr/0001-go-harness-python-orchestrator-ownership.md)
+[AGENTS](../AGENTS.md)、[ADR-0001](adr/0001-go-harness-python-orchestrator-ownership.md)
 和 [ADR-0002](adr/0002-single-append-only-session-ledger.md)。
 
 ## 现有源码决定的起点

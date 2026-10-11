@@ -4,7 +4,7 @@
 
 ## Reading
 
-- 保持 AGENTS.md → AGENT.md → docs/GOAL.md 的启动顺序。
+- 保持 AGENTS.md → docs/GOAL.md → 任务相关源码／测试的启动顺序。
 - 探索领域时读取 [CONTEXT.md](../../CONTEXT.md)，使用其中定义的术语。
 - 只读取与任务有关的 [ADR](../adr/)。
 - 执行边界相关任务读取 0001-go-harness-python-orchestrator-ownership.md。

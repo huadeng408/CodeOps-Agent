@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -73,66 +74,150 @@ def _git_head(repo_root: Path) -> str:
 
 def _git_is_clean(repo_root: Path) -> bool:
     result = subprocess.run(
-        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],
         check=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
-    return not bool(result.stdout.strip())
+    if result.stdout.strip():
+        return False
+    tracked = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "--stage", "-z"],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if not any(entry.startswith("160000 ") for entry in tracked.stdout.split("\0")):
+        return True
+    pins = subprocess.run(
+        ["git", "-C", str(repo_root), "submodule", "status", "--recursive"],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if any(not line.startswith(" ") for line in pins.stdout.splitlines()):
+        return False
+    # A child's ignore settings can hide deeper inputs from its parent status.
+    children = subprocess.run(
+        ["git", "-C", str(repo_root), "submodule", "foreach", "--quiet", "--recursive",
+         "git status --porcelain --untracked-files=all --ignore-submodules=none"],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    return not bool(children.stdout.strip())
 
 
 def _check(name: str, ok: bool, detail: str) -> GateCheck:
     return GateCheck(name=name, status="PASS" if ok else GateStatus.BLOCKED.value, detail=detail)
 
 
-def _source_pin_matches_head(repo_root: Path, source_sha: str, current_sha: str) -> bool:
-    """Accept HEAD or the parent of a commit that only adds curated receipts.
-
-    Evaluation runs finish before their redacted receipt is committed. The
-    receipt therefore cannot pin the commit that contains itself. A narrow
-    exception keeps the source binding intact: the current commit must have
-    exactly one parent equal to the pinned source, and every changed path must
-    be a curated JSON receipt.
-    """
-
-    if source_sha == current_sha:
+def _non_runtime_path(path: str) -> bool:
+    relative = PurePosixPath(path)
+    parts = relative.parts
+    if (
+        len(parts) == 5
+        and parts[:2] == ("data", "eval")
+        and parts[2] in {lane for lane, _ in _LANE_SPECS}
+        and parts[3] == "receipts"
+        and relative.suffix == ".json"
+    ):
         return True
+    if path == "README.md":
+        return True
+    # Instructions and runtime templates are inputs even when written in Markdown.
+    if relative.suffix != ".md" or not path.startswith("docs/"):
+        return False
+    if relative.name.upper() in {"AGENTS.MD", "AGENT.MD", "CLAUDE.MD", "CONTEXT.MD", "SKILL.MD"}:
+        return False
+    folded = path.casefold()
+    return folded not in {"docs/goal.md", "docs/design-map.md", "docs/release-gate.md"} and not any(
+        folded.startswith("docs/" + directory + "/")
+        for directory in ("agents", "adr", "design", "prompts", "templates")
+    )
+
+
+def _source_pin_matches_runtime(
+    repo_root: Path, source_sha: str, current_sha: str, *, dependency_tree: bool = False
+) -> bool:
+    """Keep provenance while allowing changes to non-runtime documentation."""
+
+    if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (source_sha, current_sha)):
+        return False
     try:
-        parents = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-list", "--parents", "-n", "1", current_sha],
-            check=True,
+        ancestor = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", source_sha, current_sha],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        ).stdout.strip().split()[1:]
-        if parents != [source_sha]:
+        )
+        if ancestor.returncode != 0:
             return False
-        changed_paths = subprocess.run(
+        changes = subprocess.run(
             [
                 "git",
                 "-C",
                 str(repo_root),
-                "diff-tree",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
+                "diff",
+                "--raw",
+                "-z",
+                "--no-renames",
+                "--ignore-submodules=none",
+                source_sha,
                 current_sha,
+                "--",
             ],
             check=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
-            errors="replace",
-        ).stdout.splitlines()
-    except (OSError, subprocess.CalledProcessError):
+        ).stdout.split("\0")
+    except (OSError, UnicodeError, subprocess.CalledProcessError):
         return False
-    return bool(changed_paths) and all(
-        PurePosixPath(path.replace("\\", "/")).match("data/eval/*/receipts/*.json")
-        for path in changed_paths
-    )
+    if changes[-1] != "" or len(changes) % 2 != 1:
+        return False
+    for index in range(0, len(changes) - 1, 2):
+        metadata, path = changes[index:index + 2]
+        modes = metadata.split()[:2]
+        if len(modes) != 2 or modes[0] not in {":000000", ":100644"} or modes[1] not in {"000000", "100644"}:
+            return False
+        if not _non_runtime_path(path):
+            return False
+
+    # An unchanged instruction symlink can still load a changed documentation blob.
+    changed_paths = set(changes[1::2])
+    try:
+        tree = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-tree", "-r", "-z", current_sha],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout
+        entries = {}
+        for record in tree.split("\0")[:-1]:
+            metadata, path = record.split("\t", 1)
+            mode, _, blob = metadata.split()
+            entries[path] = (mode, blob)
+        for path, (mode, _) in entries.items():
+            if mode != "120000" or (not dependency_tree and _non_runtime_path(path)):
+                continue
+            visited: set[str] = set()
+            while entries.get(path, ("", ""))[0] == "120000":
+                if path in visited:
+                    return False
+                visited.add(path)
+                target = subprocess.run(
+                    ["git", "-C", str(repo_root), "cat-file", "blob", entries[path][1]],
+                    check=True, capture_output=True, text=True, encoding="utf-8",
+                ).stdout
+                if not target or PurePosixPath(target).is_absolute() or "\\" in target or "\0" in target:
+                    return False
+                path = posixpath.normpath(str(PurePosixPath(path).parent / target))
+            if path not in entries or entries[path][0] not in {"100644", "100755"} or path in changed_paths:
+                return False
+        # Dependency layouts do not inherit this repository's documentation exemptions.
+        for path, (mode, commit) in entries.items():
+            if mode == "160000":
+                child = (repo_root / path).resolve()
+                if not child.is_relative_to(repo_root.resolve()) or not _source_pin_matches_runtime(
+                    child, commit, commit, dependency_tree=True
+                ):
+                    return False
+    except (OSError, UnicodeError, ValueError, RecursionError, subprocess.CalledProcessError):
+        return False
+    return True
 
 
 def _read_receipts(data_root: Path, lane: str) -> tuple[list[dict[str, Any]], GateCheck | None]:
@@ -176,10 +261,10 @@ def _receipt_base(
     if require_verified and payload.get("status") != "VERIFIED":
         return False, f"status is {payload.get('status', '<missing>')!r}"
     source_pin = payload.get("source_pin")
-    if not isinstance(source_pin, dict) or not _source_pin_matches_head(
+    if not isinstance(source_pin, dict) or not _source_pin_matches_runtime(
         repo_root, str(source_pin.get("git_sha", "")), current_sha
     ):
-        return False, "source_pin.git_sha is not current HEAD or an evidence-only commit parent"
+        return False, "source_pin.git_sha is not current HEAD or a runtime-equivalent source ancestor"
     if source_pin.get("dirty_hash") != EMPTY_DIRTY_HASH or source_pin.get("untracked_files") != 0:
         return False, "source_pin records a dirty or untracked source tree"
     run_id = payload.get("run_id")
@@ -217,7 +302,11 @@ def _find_lane_receipt(
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             reasons.append(f"{Path(str(payload.get('__path', 'receipt'))).name}: {exc}")
             continue
-        return payload, "source-bound receipt satisfies the lane contract"
+        detail = "source-bound receipt satisfies the lane contract"
+        source_sha = payload["source_pin"]["git_sha"]
+        if source_sha != current_sha:
+            detail += f"; runtime inputs unchanged since {source_sha}"
+        return payload, detail
     return None, "; ".join(reasons) if reasons else "no receipt satisfies the lane contract"
 
 
@@ -501,6 +590,17 @@ def _test_check(name: str, command: Sequence[str], repo_root: Path, timeout: flo
     return _check(name, result.returncode == 0, detail)
 
 
+_LANE_SPECS = (
+    ("extension-onboarding", _extension_onboarding_predicate),
+    ("workflow", _workflow_predicate),
+    ("context-token", _context_predicate),
+    ("skills", _skills_predicate),
+    ("agent-e2e", _agent_e2e_predicate),
+    ("terminalbench", _terminalbench_predicate),
+    ("swebench", _swebench_predicate),
+)
+
+
 def evaluate_release(
     repo_root: str | Path = ".",
     *,
@@ -536,16 +636,7 @@ def evaluate_release(
             checks.append(_test_check(f"tests.{index}", command, root, test_timeout_seconds))
 
     data_root = root / "data" / "eval"
-    lane_specs = (
-        ("extension-onboarding", _extension_onboarding_predicate),
-        ("workflow", _workflow_predicate),
-        ("context-token", _context_predicate),
-        ("skills", _skills_predicate),
-        ("agent-e2e", _agent_e2e_predicate),
-        ("terminalbench", _terminalbench_predicate),
-        ("swebench", _swebench_predicate),
-    )
-    for lane, predicate in lane_specs:
+    for lane, predicate in _LANE_SPECS:
         receipts, loading_check = _read_receipts(data_root, lane)
         if loading_check is not None:
             checks.append(loading_check)
