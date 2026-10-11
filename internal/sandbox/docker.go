@@ -90,7 +90,9 @@ type Request struct {
 	WorkingDir string
 	// OperationID is persisted by the Harness before a remote runtime effect.
 	OperationID string
-	Interactive bool
+	// DependencyOperationID names the retained, approved pytz artifact under TrustRoot.
+	DependencyOperationID string
+	Interactive           bool
 	// Command is interpreted by the sandbox shell. It is intended for the Bash
 	// tool only; structured callers must set Program and Args instead.
 	Command string
@@ -228,6 +230,9 @@ func ContainerWorkingDir(workspace, workingDir string) (string, error) {
 }
 
 func buildDockerRunArgs(config Config, workspaceSource, containerDir string, request Request) ([]string, error) {
+	if request.DependencyOperationID != "" {
+		return nil, errors.New("prepared task dependencies require the selected OpenSandbox backend")
+	}
 	if strings.ContainsAny(workspaceSource, ",\x00\r\n") {
 		return nil, errors.New("sandbox workspace contains Docker mount separators")
 	}

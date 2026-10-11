@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"code-agent/internal/sandbox"
 	"code-agent/internal/worktree"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,6 +27,7 @@ const (
 type TaskWorkspaceModule interface {
 	Inspect(context.Context, uint, string) (TaskWorkspaceView, error)
 	Prepare(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
+	PrepareDependency(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 	RunBaseline(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 }
 
@@ -40,17 +42,20 @@ type TaskWorkspaces struct {
 }
 
 type TaskWorkspaceView struct {
-	Available      bool               `json:"available"`
-	State          string             `json:"state"`
-	Reason         string             `json:"reason,omitempty"`
-	Repository     string             `json:"repository"`
-	WorkspaceID    string             `json:"workspaceId,omitempty"`
-	Baseline       *worktree.Baseline `json:"baseline,omitempty"`
-	LeaseExpiresAt *time.Time         `json:"leaseExpiresAt,omitempty"`
-	EventCount     int                `json:"eventCount"`
-	TestAvailable  bool               `json:"testAvailable"`
-	TestReason     string             `json:"testReason,omitempty"`
-	Test           *TaskBaselineView  `json:"test,omitempty"`
+	Available           bool                `json:"available"`
+	State               string              `json:"state"`
+	Reason              string              `json:"reason,omitempty"`
+	Repository          string              `json:"repository"`
+	WorkspaceID         string              `json:"workspaceId,omitempty"`
+	Baseline            *worktree.Baseline  `json:"baseline,omitempty"`
+	LeaseExpiresAt      *time.Time          `json:"leaseExpiresAt,omitempty"`
+	EventCount          int                 `json:"eventCount"`
+	TestAvailable       bool                `json:"testAvailable"`
+	TestReason          string              `json:"testReason,omitempty"`
+	Test                *TaskBaselineView   `json:"test,omitempty"`
+	Dependency          *TaskDependencyView `json:"dependency,omitempty"`
+	DependencyAvailable bool                `json:"dependencyAvailable"`
+	Toolchain           string              `json:"toolchain"`
 }
 
 type taskPreparePayload struct {
@@ -190,6 +195,10 @@ func (t *TaskWorkspaces) approved(ctx context.Context, ownerID uint, workingDir 
 
 func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionView SessionView) (TaskWorkspaceView, error) {
 	view := TaskWorkspaceView{Available: t.approved(ctx, sessionView.UserID, sessionView.WorkingDir), State: "unprepared", Repository: sessionView.ProjectName, EventCount: len(events)}
+	view.Toolchain = "go"
+	if t.baselineRuntime != nil && t.baselineRuntime.Toolchain != "" {
+		view.Toolchain = t.baselineRuntime.Toolchain
+	}
 	test, err := taskBaseline(events)
 	if err != nil {
 		return TaskWorkspaceView{}, err
@@ -197,11 +206,26 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 	if test != nil {
 		view.Test = &test.View
 	}
+	dependency, err := taskDependency(events)
+	if err != nil {
+		return TaskWorkspaceView{}, err
+	}
+	if dependency != nil {
+		view.Dependency = &dependency.View
+		if dependency.View.State == "ready" && sandbox.ValidatePytz(ctx, t.storage, dependency.View.OperationID) != nil {
+			copy := dependency.View
+			copy.State, copy.Reason = "blocked", "prepared dependency differs from its retained identity"
+			view.Dependency = &copy
+		}
+	}
 	view.TestAvailable = t.baselineRuntime != nil && t.baselineRuntime.Runner != nil && t.baselineRuntime.Acquire != nil && t.baselineRuntime.Finish != nil
 	if !view.TestAvailable {
 		view.TestReason = "local task runtime is not attached"
 	} else if t.baselineRuntime.Ready != nil && t.baselineRuntime.Ready(ctx) != nil {
 		view.TestAvailable, view.TestReason = false, "approved OpenSandbox prerequisites are unavailable"
+	}
+	if view.Toolchain == "python" && (view.Dependency == nil || view.Dependency.State != "ready") {
+		view.TestAvailable, view.TestReason = false, "approved Python test dependency is not prepared"
 	}
 	if !view.Available {
 		view.State, view.Reason = "blocked", "repository is not approved for task preparation"
@@ -227,6 +251,7 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 	case t.manager.VerifyTask(ctx, t.storage, payload.Task) != nil:
 		view.State, view.Reason = "blocked", "task copy or Git registration changed; retained workspace requires reconciliation"
 	}
+	view.DependencyAvailable = view.Available && view.State == "prepared" && view.Toolchain == "python" && view.Dependency == nil && view.Test == nil
 	return view, nil
 }
 

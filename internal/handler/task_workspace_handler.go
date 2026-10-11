@@ -18,9 +18,10 @@ func NewTaskWorkspaceHandler(w session.WorkbenchModule, tasks session.TaskWorksp
 	return &TaskWorkspaceHandler{workbench: w, tasks: tasks}
 }
 
-func (h *TaskWorkspaceHandler) Inspect(c *gin.Context)     { h.handle(c, "") }
-func (h *TaskWorkspaceHandler) Prepare(c *gin.Context)     { h.handle(c, "prepare") }
-func (h *TaskWorkspaceHandler) RunBaseline(c *gin.Context) { h.handle(c, "test") }
+func (h *TaskWorkspaceHandler) Inspect(c *gin.Context)           { h.handle(c, "") }
+func (h *TaskWorkspaceHandler) Prepare(c *gin.Context)           { h.handle(c, "prepare") }
+func (h *TaskWorkspaceHandler) RunBaseline(c *gin.Context)       { h.handle(c, "test") }
+func (h *TaskWorkspaceHandler) PrepareDependency(c *gin.Context) { h.handle(c, "dependency") }
 
 func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 	owner, err := authenticatedOwner(c)
@@ -56,6 +57,8 @@ func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 		}
 		if action == "test" {
 			view, err = h.tasks.RunBaseline(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
+		} else if action == "dependency" {
+			view, err = h.tasks.PrepareDependency(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
 		} else {
 			view, err = h.tasks.Prepare(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
 		}

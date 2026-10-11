@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -85,7 +86,7 @@ func (r *OpenSandboxRunner) Ready(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	manifest, err := r.manifest()
-	if err != nil || r.config.AllowWorkspaceWrite || r.config.Toolchain != "go" || !openSandboxImagePin(r.config.Image) {
+	if err != nil || r.config.AllowWorkspaceWrite || (r.config.Toolchain != "go" && r.config.Toolchain != "python") || !openSandboxImagePin(r.config.Image) {
 		return ErrSandboxUnavailable
 	}
 	if r.verifyServer(ctx, manifest) != nil || !r.imagePresent(ctx, r.config.Image) {
@@ -124,6 +125,25 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	if r.config.AllowWorkspaceWrite || (r.config.Toolchain != "go" && r.config.Toolchain != "python") || !openSandboxImagePin(r.config.Image) || request.Interactive {
 		return result, fmt.Errorf("%w: OpenSandbox requires an approved read-only task profile", ErrSandboxUnavailable)
+	}
+	dependency := ""
+	if r.config.Toolchain == "python" && request.DependencyOperationID == "" {
+		return result, fmt.Errorf("%w: approved Python dependency identity is required", ErrSandboxUnavailable)
+	}
+	if request.DependencyOperationID != "" {
+		if r.config.Toolchain != "python" || !openSandboxHex(request.DependencyOperationID, 64) {
+			return result, fmt.Errorf("%w: approved Python dependency identity is required", ErrSandboxUnavailable)
+		}
+		dependency = filepath.Join(r.config.TrustRoot, "dependency-"+request.DependencyOperationID, PytzName)
+		release, err := safety.PinReadOnlyFiles(dependency)
+		if err != nil {
+			return result, ErrSandboxUnavailable
+		}
+		defer release()
+		if ValidatePytz(ctx, r.config.TrustRoot, request.DependencyOperationID) != nil {
+			return result, ErrSandboxUnavailable
+		}
+		dependency = openSandboxHostPath(dependency)
 	}
 	cpu, err := strconv.ParseFloat(r.config.CPULimit, 64)
 	if err != nil || math.IsNaN(cpu) || math.IsInf(cpu, 0) || cpu <= 0 || cpu > 64 {
@@ -178,6 +198,9 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		"metadata":       metadata, "env": environment, "networkPolicy": map[string]any{"defaultAction": "deny", "egress": []any{map[string]string{"action": "deny", "target": "0.0.0.0/0"}, map[string]string{"action": "deny", "target": "::/0"}}},
 		"volumes": []any{map[string]any{"name": "workspace", "host": map[string]string{"path": workspace}, "mountPath": "/workspace", "readOnly": true}},
 	}
+	if dependency != "" {
+		create["volumes"] = append(create["volumes"].([]any), map[string]any{"name": "dependency", "host": map[string]string{"path": dependency}, "mountPath": "/deps/" + PytzName, "readOnly": true})
+	}
 	response, err := r.call(ctx, manifest, http.MethodPost, "/sandboxes", create)
 	if err != nil {
 		return result, fmt.Errorf("%w: OpenSandbox creation unconfirmed; retain the operation identity", ErrSandboxOutcomeUnknown)
@@ -206,7 +229,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 			resultErr = errors.Join(resultErr, fmt.Errorf("%w: OpenSandbox termination is unconfirmed; reconcile the retained resource identity", ErrSandboxOutcomeUnknown))
 		}
 	}()
-	if !strings.EqualFold(created.Status.State, "Running") || r.verifyTask(ctx, manifest, container, created.ID, workspace, memory) != nil {
+	if !strings.EqualFold(created.Status.State, "Running") || r.verifyTask(ctx, manifest, container, created.ID, workspace, dependency, memory) != nil {
 		return result, fmt.Errorf("%w: OpenSandbox task isolation is not confirmed", ErrSandboxUnavailable)
 	}
 	command := map[string]any{"argv": argv, "cwd": cwd, "uid": 65534, "gid": 65534, "timeout": 120000, "envs": r.environment()}
@@ -343,6 +366,13 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 		return errors.New("approved runtime server identity is unavailable")
 	}
 	labels := server.Config.Labels
+	toolchain := labels["codeops.opensandbox.toolchain"]
+	if toolchain == "" {
+		toolchain = "go"
+	}
+	if toolchain != r.config.Toolchain {
+		return errors.New("runtime toolchain differs from approval")
+	}
 	if labels["codeops.opensandbox.source_sha"] != manifest.SourceSHA || labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 || labels["codeops.opensandbox.execd_image"] != manifest.ExecdImage || labels["codeops.opensandbox.egress_image"] != manifest.EgressImage {
 		return errors.New("deployed runtime policy differs from approval")
 	}
@@ -418,7 +448,7 @@ func (r *OpenSandboxRunner) imagePresent(ctx context.Context, pin string) bool {
 	return openSandboxContains(image.RepoDigests, pin)
 }
 
-func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandboxManifest, task openSandboxContainer, id, workspace string, memory int64) error {
+func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandboxManifest, task openSandboxContainer, id, workspace, dependency string, memory int64) error {
 	if task.Config.Labels["opensandbox.io/volume-managed-by"] != "" || task.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 {
 		return ErrSandboxUnavailable
 	}
@@ -444,7 +474,23 @@ func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandbox
 	if err != nil || len(host.Tmpfs) != 2 || !openSandboxTmpfs(host.Tmpfs["/run/codeops"], 512<<20, true) || !openSandboxTmpfs(host.Tmpfs["/tmp"], min(tmpfsLimit, 64<<20), false) {
 		return ErrSandboxUnavailable
 	}
-	if len(task.Mounts) != 1 || task.Mounts[0].Type != "bind" || task.Mounts[0].Destination != "/workspace" || task.Mounts[0].RW || task.Mounts[0].Source != workspace {
+	workspaceMount, dependencyMount := false, dependency == ""
+	for _, mount := range task.Mounts {
+		if mount.Type != "bind" || mount.RW {
+			return ErrSandboxUnavailable
+		}
+		if mount.Destination == "/workspace" && mount.Source == workspace {
+			workspaceMount = true
+		}
+		if dependency != "" && mount.Destination == "/deps/"+PytzName && mount.Source == dependency {
+			dependencyMount = true
+		}
+	}
+	expectedMounts := 1
+	if dependency != "" {
+		expectedMounts = 2
+	}
+	if len(task.Mounts) != expectedMounts || !workspaceMount || !dependencyMount {
 		return ErrSandboxUnavailable
 	}
 	sidecarID := strings.TrimPrefix(host.NetworkMode, "container:")
@@ -546,6 +592,7 @@ func (r *OpenSandboxRunner) environment() map[string]string {
 		for _, key := range []string{"PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PIP_NO_INDEX", "PIP_DISABLE_PIP_VERSION_CHECK"} {
 			env[key] = "1"
 		}
+		env["PYTHONPATH"] = "/run/codeops/python-site"
 	}
 	return env
 }

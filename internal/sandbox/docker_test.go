@@ -84,6 +84,18 @@ func TestBuildDockerCommandRejectsWorkingDirectoryOutsideWorkspace(t *testing.T)
 	}
 }
 
+func TestDockerAndWSLRefuseOpenSandboxDependencyInsteadOfIgnoringIt(t *testing.T) {
+	workspace := t.TempDir()
+	request := Request{Workspace: workspace, WorkingDir: workspace, Program: "python", DependencyOperationID: strings.Repeat("1", 64)}
+	if _, _, err := BuildDockerCommand("linux", Config{}, request); err == nil {
+		t.Fatal("Docker silently ignored the approved dependency")
+	}
+	request.Workspace, request.WorkingDir = `D:\approved`, `D:\approved`
+	if _, _, err := BuildWSLDockerCommand("windows", Config{TrustRoot: `D:\approved`, WSLDistro: "Ubuntu"}, request); err == nil {
+		t.Fatal("WSL silently ignored the approved dependency")
+	}
+}
+
 func TestDockerRunnerIntegrationEnforcesReadOnlyWorkspaceAndNoNetwork(t *testing.T) {
 	if os.Getenv("CODE_AGENT_RUN_DOCKER_SANDBOX_TESTS") != "1" {
 		t.Skip("set CODE_AGENT_RUN_DOCKER_SANDBOX_TESTS=1 to run Docker sandbox integration")

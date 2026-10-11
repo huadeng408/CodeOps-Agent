@@ -35,14 +35,27 @@ def validate_create(request):
     }:
         reject()
     volumes = request.volumes or []
-    if len(volumes) != 1 or volumes[0].name != "workspace" or volumes[0].host is None or not volumes[0].read_only or volumes[0].mount_path != "/workspace" or volumes[0].sub_path:
+    python = PROFILE.get("toolchain", "go") == "python"
+    if len(volumes) != (2 if python else 1) or volumes[0].name != "workspace" or volumes[0].host is None or not volumes[0].read_only or volumes[0].mount_path != "/workspace" or volumes[0].sub_path:
         reject()
+    if python:
+        wheel = "pytz-2026.5-py2.py3-none-any.whl"
+        dependency = volumes[1]
+        if dependency.name != "dependency" or dependency.host is None or not dependency.read_only or dependency.mount_path != "/deps/" + wheel or dependency.sub_path or not re.fullmatch(re.escape(PROFILE["workspace_root"]) + "/dependency-[0-9a-f]{64}/" + re.escape(wheel), dependency.host.path):
+            reject()
     env = request.env or {}
     expected = {
         "HOME": "/run/codeops", "TMPDIR": "/run/codeops", "GOCACHE": "/run/codeops/go-build",
         "GOPATH": "/run/codeops/go", "GOTOOLCHAIN": "local", "GOENV": "off", "GOPROXY": "off",
         "GOSUMDB": "off", "GOFLAGS": "-mod=readonly",
     }
+    if python:
+        expected = {
+            "HOME": "/run/codeops", "TMPDIR": "/run/codeops",
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+            "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PYTHONPATH": "/run/codeops/python-site",
+        }
     if env != expected:
         reject()
     limits = request.resource_limits.root if request.resource_limits else {}

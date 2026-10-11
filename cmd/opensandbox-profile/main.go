@@ -17,6 +17,7 @@ import (
 )
 
 type profile struct {
+	Toolchain       string   `json:"toolchain,omitempty"`
 	SourceSHA       string   `json:"source_sha"`
 	TaskImages      []string `json:"task_images"`
 	ExecdImage      string   `json:"execd_image"`
@@ -53,6 +54,9 @@ func render(directory, input string) error {
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&p) != nil || decoder.Decode(new(any)) != io.EOF {
 		return errors.New("invalid profile input")
+	}
+	if p.Toolchain != "" && p.Toolchain != "go" && p.Toolchain != "python" {
+		return errors.New("task toolchain differs from approval")
 	}
 	hex64 := regexp.MustCompile(`^[0-9a-f]{64}$`)
 	pin := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -120,6 +124,9 @@ mode = "dns+nft"
 disable_ipv6 = false
 `, p.ExecdImage, p.WorkspaceRoot, p.Network, p.EgressImage)
 	profileMap := map[string]any{"source_sha": p.SourceSHA, "task_images": p.TaskImages, "execd_image": p.ExecdImage, "egress_image": p.EgressImage, "execd_sha256": p.ExecdSHA256, "bootstrap_sha256": p.BootstrapSHA256, "workspace_root": p.WorkspaceRoot, "network": p.Network}
+	if p.Toolchain != "" {
+		profileMap["toolchain"] = p.Toolchain
+	}
 	inputs := map[string]any{"profile_without_hash": profileMap, "config_sha256": digest([]byte(config)), "server_files": serverFiles}
 	canonical, err := json.Marshal(inputs)
 	if err != nil {

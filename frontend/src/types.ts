@@ -29,6 +29,20 @@ export interface TaskWorkspace {
     excluded: Array<{ path: string; reason: string }>;
   };
   testAvailable: boolean;
+	toolchain?: 'go' | 'python';
+	dependencyAvailable?: boolean;
+	dependency?: {
+		state: 'ready' | 'blocked' | 'unknown';
+		name: string;
+		version: string;
+		license: string;
+		source: string;
+		sha256: string;
+		size: number;
+		operationId: string;
+		traceId?: string;
+		reason?: string;
+	};
   testReason?: string;
   test?: {
     state: 'passed' | 'failed' | 'blocked' | 'unknown';

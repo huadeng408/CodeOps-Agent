@@ -18,6 +18,12 @@ const reasons: Record<string, string> = {
   'task admission is unavailable; reconcile the retained operation': '任务槽暂不可用，请先核对已有任务；本次请求已保留。',
   'repository or task baseline changed; reconcile the retained result': '仓库或隔离基线已变化，测试输出保留，请先核对。',
   'task termination or admission release requires reconciliation': '无法确认任务结束或任务槽释放，请先核对执行记录。',
+  'approved Python test dependency is not prepared': '准备已批准的 Python 测试依赖后，可运行完整基线。',
+  'dependency preparation is unknown; reconcile the retained operation': '依赖准备曾中断，记录已保留；请先核对，避免重复下载。',
+  'approved Python dependency preparation failed; retained operation requires reconciliation': '依赖来源、内容或准备过程未通过核验；原请求保留，需要核对。',
+  'prepared dependency differs from its retained identity': '依赖文件与原记录不符，执行已阻断；请先核对。',
+  'dependency admission release requires reconciliation': '无法确认依赖准备的任务槽释放，请先核对记录。',
+  'repository or task baseline changed; reconcile dependency preparation': '原仓库或隔离基线已变化，依赖准备结果保留，请先核对。',
 };
 
 export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string; onChanged: () => Promise<void> }) {
@@ -30,6 +36,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
   const request = useRef<AbortController | null>(null);
   const requestId = useRef('');
   const testRequestId = useRef('');
+  const dependencyRequestId = useRef('');
   const refresh = useCallback(async () => {
     request.current?.abort();
     const controller = new AbortController();
@@ -101,6 +108,27 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     }
   };
 
+  const prepareDependency = async () => {
+    if (!view?.dependencyAvailable || busy) return;
+    const controller = new AbortController();
+    request.current?.abort(); request.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 90_000);
+    const storageKey = `task-dependency-request:${sessionId}`;
+    try {
+      try { dependencyRequestId.current = localStorage.getItem(storageKey) || dependencyRequestId.current; } catch { /* Ledger keeps the preparation identity. */ }
+      dependencyRequestId.current ||= createContinuationRequestId();
+      try { localStorage.setItem(storageKey, dependencyRequestId.current); } catch { /* Ledger prevents a repeated download. */ }
+      setBusy(true); setError('');
+      const data = await api.prepareTaskDependency(sessionId, view.eventCount, dependencyRequestId.current, controller.signal);
+      if (!controller.signal.aborted && request.current === controller) { setView(data); await onChanged(); }
+    } catch {
+      if (request.current === controller) { setView(null); setError('无法确认依赖准备结果，请重新检查；不要另建请求重试。'); }
+    } finally {
+      window.clearTimeout(timeout);
+      if (request.current === controller) setBusy(false);
+    }
+  };
+
   const state = busy ? 'unknown' : view?.state || 'unknown';
   return <section className="task-workspace-panel" aria-label="隔离工作区">
     <div className="task-workspace-heading"><h2>隔离工作区</h2><span className={`capability-state ${state === 'prepared' ? 'ready' : state === 'unprepared' ? 'unknown' : state}`}>{busy ? '核验中' : labels[state]}</span></div>
@@ -124,14 +152,21 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     {error && <p className="capability-error" role="status">{error}</p>}
     <section className="task-baseline-card" aria-label="基线测试">
       <div className="task-workspace-heading"><h3>基线测试</h3><span role="status">{testing ? '正在运行' : view?.test ? { passed: '通过', failed: '失败', blocked: '需处理', unknown: '待核验' }[view.test.state] : '尚未运行'}</span></div>
+      {view?.dependency && <div aria-label="Python 测试依赖">
+        <p>pytz {view.dependency.version} · {view.dependency.license} · {{ ready: '已准备', blocked: '需处理', unknown: '待核验' }[view.dependency.state]}</p>
+        <p><a href={view.dependency.source} target="_blank" rel="noreferrer">批准来源</a> · {view.dependency.size.toLocaleString()} B</p>
+        <p title={view.dependency.sha256}>SHA-256：{view.dependency.sha256.slice(0, 16)}…</p>
+        {view.dependency.reason && <p className="workspace-description">{reasons[view.dependency.reason] || view.dependency.reason}</p>}
+      </div>}
+      {view?.dependencyAvailable && <button className="primary-btn" type="button" disabled={busy} onClick={() => void prepareDependency()}>准备 Python 测试依赖</button>}
       {view?.test ? <>
         <p><code>{view.test.command.join(' ')}</code></p>
         <p>退出码：{view.test.exitCode ?? '待核验'}{view.test.truncated ? ' · 输出已截断' : ' · 输出未截断'}</p>
         {view.test.reason && <p className="workspace-description">{reasons[view.test.reason] || view.test.reason}</p>}
         <pre className="task-baseline-output" tabIndex={0} aria-label="测试输出">{view.test.output || '暂无可确认的输出。'}</pre>
       </> : <>
-        <p className="workspace-description">{view?.testReason ? reasons[view.testReason] || view.testReason : '在已准备的隔离工作区运行完整 Go 基线。'}</p>
-        {view?.testAvailable && <button className="primary-btn" type="button" disabled={busy || view.state !== 'prepared'} onClick={() => void runBaseline()}>运行 Go 基线</button>}
+        <p className="workspace-description">{view?.testReason ? reasons[view.testReason] || view.testReason : `在已准备的隔离工作区运行完整 ${view?.toolchain === 'python' ? 'Python' : 'Go'} 基线。`}</p>
+        {view?.testAvailable && <button className="primary-btn" type="button" disabled={busy || view.state !== 'prepared'} onClick={() => void runBaseline()}>运行 {view.toolchain === 'python' ? 'Python' : 'Go'} 基线</button>}
       </>}
     </section>
     <div className="task-workspace-actions">

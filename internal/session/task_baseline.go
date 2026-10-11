@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,9 +25,11 @@ const taskBaselineOutcomeEvent = "workspace/test-outcome"
 
 // Callbacks adapt the existing admission module without a Session import cycle.
 type TaskBaselineRuntime struct {
-	Runner          sandbox.Runner
-	Ready           func(context.Context) error
-	Acquire, Finish func(context.Context, uint, string) error
+	Toolchain        string
+	DependencyClient *http.Client
+	Runner           sandbox.Runner
+	Ready            func(context.Context) error
+	Acquire, Finish  func(context.Context, uint, string) error
 }
 
 type TaskBaselineView struct {
@@ -42,10 +45,11 @@ type TaskBaselineView struct {
 }
 
 type taskBaselinePayload struct {
-	RequestID        string           `json:"request_id"`
-	BaselineChecksum string           `json:"baseline_checksum"`
-	IntentEventID    string           `json:"intent_event_id,omitempty"`
-	View             TaskBaselineView `json:"view"`
+	RequestID             string           `json:"request_id"`
+	BaselineChecksum      string           `json:"baseline_checksum"`
+	IntentEventID         string           `json:"intent_event_id,omitempty"`
+	DependencyOperationID string           `json:"dependency_operation_id,omitempty"`
+	View                  TaskBaselineView `json:"view"`
 }
 
 // WithBaselineRuntime is configured once by the local Harness, never by HTTP.
@@ -110,19 +114,37 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 	if prepared == nil || state != "prepared" || time.Now().After(prepared.Task.LeaseExpiresAt) || t.manager.VerifyTask(ctx, t.storage, prepared.Task) != nil {
 		return view, ErrSessionStateConflict
 	}
-	goModule := false
+	goModule, pythonModule := false, false
 	for _, file := range prepared.Task.Baseline.Files {
 		if file.Path == "go.mod" && file.Exists {
 			goModule = true
 		}
+		if file.Exists && (file.Path == "setup.py" || file.Path == "pyproject.toml") {
+			pythonModule = true
+		}
 	}
 	profile := t.baselineRuntime
-	if !goModule || profile == nil || profile.Runner == nil || profile.Acquire == nil || profile.Finish == nil {
+	if profile == nil || profile.Runner == nil || profile.Acquire == nil || profile.Finish == nil {
+		return view, ErrSessionStateConflict
+	}
+	command := []string{"go", "test", "./...", "-count=1"}
+	dependencyOperation := ""
+	if profile.Toolchain == "python" {
+		dependency, err := taskDependency(snapshot.Events)
+		if err != nil {
+			return view, err
+		}
+		if !pythonModule || dependency == nil || dependency.View.State != "ready" || dependency.BaselineChecksum != prepared.Task.Baseline.Checksum || sandbox.ValidatePytz(ctx, t.storage, dependency.View.OperationID) != nil {
+			return view, ErrSessionStateConflict
+		}
+		dependencyOperation = dependency.View.OperationID
+		command = []string{"python", "-m", "unittest", "discover", "-v"}
+	} else if (profile.Toolchain != "" && profile.Toolchain != "go") || !goModule {
 		return view, ErrSessionStateConflict
 	}
 	digest := sha256.Sum256([]byte(id + "\x00" + requestID + "\x00" + prepared.Task.LeaseID + "\x00" + prepared.Task.Baseline.Checksum))
 	operation := hex.EncodeToString(digest[:])
-	payload := taskBaselinePayload{RequestID: requestID, BaselineChecksum: prepared.Task.Baseline.Checksum, View: TaskBaselineView{State: "unknown", Command: []string{"go", "test", "./...", "-count=1"}, OperationID: operation, Reason: "test outcome is unknown; reconcile the retained operation"}}
+	payload := taskBaselinePayload{RequestID: requestID, BaselineChecksum: prepared.Task.Baseline.Checksum, DependencyOperationID: dependencyOperation, View: TaskBaselineView{State: "unknown", Command: command, OperationID: operation, Reason: "test outcome is unknown; reconcile the retained operation"}}
 	if span.SpanContext().IsValid() {
 		payload.View.TraceID = span.SpanContext().TraceID().String()
 	}
@@ -154,7 +176,13 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 			return view, ctx.Err()
 		}
 		workspace := filepath.Join(t.storage, prepared.Task.LeaseID)
-		result, runErr := profile.Runner.Run(ctx, sandbox.Request{Workspace: workspace, WorkingDir: workspace, OperationID: operation, Program: "go", Args: []string{"test", "./...", "-count=1"}})
+		request := sandbox.Request{Workspace: workspace, WorkingDir: workspace, OperationID: operation, Program: command[0], Args: command[1:], DependencyOperationID: dependencyOperation}
+		if dependencyOperation != "" {
+			// Installation stays in sandbox scratch; neither host nor source inventory changes.
+			script := "import os,subprocess,sys;subprocess.run([sys.executable,'-m','pip','install','--no-index','--no-deps','--disable-pip-version-check','--target','/run/codeops/python-site','/deps/" + sandbox.PytzName + "'],check=True);os.execv(sys.executable,[sys.executable,'-m','unittest','discover','-v'])"
+			request.Args = []string{"-c", script}
+		}
+		result, runErr := profile.Runner.Run(ctx, request)
 		payload.View.Output, payload.View.Truncated, payload.View.RuntimeID = tools.RedactSensitive(result.Output), result.Truncated, result.RuntimeID
 		for _, key := range []string{"CODE_AGENT_OPENSANDBOX_API_KEY", "CODE_AGENT_OPENSANDBOX_EXECD_TOKEN", "JWT_SECRET"} {
 			if value := os.Getenv(key); value != "" {
@@ -175,7 +203,7 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 			}
 			checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 			current, captureErr := t.manager.CaptureBaseline(checkCtx)
-			if captureErr != nil || current.Checksum != payload.BaselineChecksum || t.manager.VerifyTask(checkCtx, t.storage, prepared.Task) != nil {
+			if captureErr != nil || current.Checksum != payload.BaselineChecksum || t.manager.VerifyTask(checkCtx, t.storage, prepared.Task) != nil || dependencyOperation != "" && sandbox.ValidatePytz(checkCtx, t.storage, dependencyOperation) != nil {
 				payload.View.State, payload.View.Reason = "blocked", "repository or task baseline changed; reconcile the retained result"
 			}
 			stop()
@@ -212,7 +240,22 @@ func taskBaseline(events []Event) (*taskBaselinePayload, error) {
 			continue
 		}
 		var payload taskBaselinePayload
-		if json.Unmarshal(event.Payload, &payload) != nil || payload.RequestID == "" || len(payload.View.OperationID) != 64 || payload.BaselineChecksum == "" || strings.Join(payload.View.Command, "\x00") != "go\x00test\x00./...\x00-count=1" {
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.RequestID == "" || len(payload.View.OperationID) != 64 || payload.BaselineChecksum == "" {
+			return nil, ErrEventIntegrity
+		}
+		command := strings.Join(payload.View.Command, "\x00")
+		if command == "go\x00test\x00./...\x00-count=1" {
+			if payload.DependencyOperationID != "" {
+				return nil, ErrEventIntegrity
+			}
+		} else if command == "python\x00-m\x00unittest\x00discover\x00-v" {
+			if len(payload.DependencyOperationID) != 64 {
+				return nil, ErrEventIntegrity
+			}
+			if _, err := hex.DecodeString(payload.DependencyOperationID); err != nil {
+				return nil, ErrEventIntegrity
+			}
+		} else {
 			return nil, ErrEventIntegrity
 		}
 		if _, err := hex.DecodeString(payload.View.OperationID); err != nil {
@@ -224,7 +267,7 @@ func taskBaseline(events []Event) (*taskBaselinePayload, error) {
 			}
 			result, intentID = &payload, event.EventID
 		} else {
-			if result == nil || finished || payload.IntentEventID != intentID || payload.RequestID != result.RequestID || payload.BaselineChecksum != result.BaselineChecksum || payload.View.OperationID != result.View.OperationID {
+			if result == nil || finished || payload.IntentEventID != intentID || payload.RequestID != result.RequestID || payload.BaselineChecksum != result.BaselineChecksum || payload.View.OperationID != result.View.OperationID || payload.DependencyOperationID != result.DependencyOperationID || strings.Join(payload.View.Command, "\x00") != strings.Join(result.View.Command, "\x00") {
 				return nil, ErrEventIntegrity
 			}
 			switch payload.View.State {

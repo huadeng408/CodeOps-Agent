@@ -84,15 +84,24 @@ func runLocalCore(cfg serverconfig.Config) error {
 	if cfg.Harness.RepositoryRoot != "" && cfg.Harness.TaskWorkspaceRoot != "" {
 		workspaces := session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
 		if os.Getenv("CODE_AGENT_TASK_RUNTIME") == "opensandbox" {
-			if err := workspaces.SetPublicTestFixtures("9b9fb55def404397748a9fc7e044efe9db1d618e", map[string]string{
-				"testdata/key.pem":  "1f2d4e39e1a799bd668e0fa10fde499505048a4ea6ba0828b0343edc848b2a16",
-				"testdata/cert.pem": "f089d14120e9f344fa13a9e45f46098bd8c19c1b3d883526edd8fc5270810bb8",
-			}); err != nil {
-				return err
+			toolchain := os.Getenv("CODE_AGENT_TASK_TOOLCHAIN")
+			if toolchain == "" {
+				toolchain = "go"
 			}
-			taskRuntime = sandbox.NewOpenSandboxRunner(sandbox.Config{Backend: sandbox.BackendOpenSandbox, TrustRoot: cfg.Harness.TaskWorkspaceRoot, Toolchain: "go", Image: os.Getenv("CODE_AGENT_TASK_IMAGE"), OpenSandboxManifest: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST"), OpenSandboxManifestSHA256: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST_SHA256")})
+			if toolchain != "go" && toolchain != "python" {
+				return errors.New("approved task toolchain must be go or python")
+			}
+			if toolchain == "go" {
+				if err := workspaces.SetPublicTestFixtures("9b9fb55def404397748a9fc7e044efe9db1d618e", map[string]string{
+					"testdata/key.pem":  "1f2d4e39e1a799bd668e0fa10fde499505048a4ea6ba0828b0343edc848b2a16",
+					"testdata/cert.pem": "f089d14120e9f344fa13a9e45f46098bd8c19c1b3d883526edd8fc5270810bb8",
+				}); err != nil {
+					return err
+				}
+			}
+			taskRuntime = sandbox.NewOpenSandboxRunner(sandbox.Config{Backend: sandbox.BackendOpenSandbox, TrustRoot: cfg.Harness.TaskWorkspaceRoot, Toolchain: toolchain, Image: os.Getenv("CODE_AGENT_TASK_IMAGE"), OpenSandboxManifest: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST"), OpenSandboxManifestSHA256: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST_SHA256")})
 			budget := admission.NewBudget(ledger)
-			workspaces.WithBaselineRuntime(session.TaskBaselineRuntime{Runner: taskRuntime, Ready: taskRuntime.Ready,
+			workspaces.WithBaselineRuntime(session.TaskBaselineRuntime{Toolchain: toolchain, Runner: taskRuntime, Ready: taskRuntime.Ready,
 				Acquire: func(ctx context.Context, owner uint, id string) error {
 					_, err := budget.AcquireTask(ctx, owner, id)
 					return err

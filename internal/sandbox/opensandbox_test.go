@@ -59,7 +59,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"complete failed baseline", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"complete failed baseline", "approved Python prerequisites", "Python missing dependency", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -106,6 +106,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			if scenario == "writable server root" {
 				objects[serverID].(map[string]any)["HostConfig"].(map[string]any)["ReadonlyRootfs"] = false
 			}
+			if scenario == "approved Python prerequisites" || strings.HasPrefix(scenario, "Python ") {
+				objects[serverID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["codeops.opensandbox.toolchain"] = "python"
+			}
 			if scenario == "server working directory" {
 				objects[serverID].(map[string]any)["Config"].(map[string]any)["WorkingDir"] = serverRoot
 			}
@@ -151,6 +154,11 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			t.Setenv("CODE_AGENT_OPENSANDBOX_EXECD_TOKEN", "fixture-execd")
 			created, executed, deleted := 0, 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes" {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{"items":[]}`)
+					return
+				}
 				if r.Header.Get("OPEN-SANDBOX-API-KEY") != "fixture-lifecycle" {
 					w.WriteHeader(http.StatusUnauthorized)
 					return
@@ -291,11 +299,25 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			}
 			digest := sha256.Sum256(manifest)
 			config := sandbox.Config{TrustRoot: root, Toolchain: "go", Image: taskImage, OpenSandboxManifest: manifestPath, OpenSandboxManifestSHA256: hex.EncodeToString(digest[:])}
+			if strings.HasPrefix(scenario, "Python ") {
+				config.Toolchain = "python"
+			}
+			if scenario == "approved Python prerequisites" {
+				config.Toolchain = "python"
+				if err := sandbox.NewOpenSandboxRunner(config).Ready(context.Background()); err != nil {
+					t.Fatalf("approved Python runtime was not ready: %v", err)
+				}
+				return
+			}
 			if scenario == "stricter scratch limit" {
 				config.TmpfsSize = "16m"
 			}
-			result, err := sandbox.NewOpenSandboxRunner(config).Run(context.Background(), sandbox.Request{Workspace: root, WorkingDir: root, OperationID: strings.Repeat("7", 64), Program: "go", Args: []string{"test", "./...", "-count=1"}})
-			if scenario == "missing execd image" || strings.HasPrefix(scenario, "mismatched local image ID") || scenario == "short local image ID" || scenario == "writable server root" || strings.HasPrefix(scenario, "server ") {
+			request := sandbox.Request{Workspace: root, WorkingDir: root, OperationID: strings.Repeat("7", 64), Program: "go", Args: []string{"test", "./...", "-count=1"}}
+			if scenario == "Go profile dependency" {
+				request.DependencyOperationID = strings.Repeat("8", 64)
+			}
+			result, err := sandbox.NewOpenSandboxRunner(config).Run(context.Background(), request)
+			if strings.HasPrefix(scenario, "Python ") || scenario == "Go profile dependency" || scenario == "missing execd image" || strings.HasPrefix(scenario, "mismatched local image ID") || scenario == "short local image ID" || scenario == "writable server root" || strings.HasPrefix(scenario, "server ") {
 				if !errors.Is(err, sandbox.ErrSandboxUnavailable) || result.ExitCode != 126 || created != 0 || executed != 0 || deleted != 0 {
 					t.Fatalf("missing runtime component admitted a sandbox: result=%+v lifecycle=%d/%d/%d err=%v", result, created, executed, deleted, err)
 				}
