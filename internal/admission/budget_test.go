@@ -152,6 +152,58 @@ func TestVerificationBatchHasOneTaskAcrossOwners(t *testing.T) {
 	}
 }
 
+func TestNonModelTaskHoldsTheSamePersistentSlotWithoutChangingConsumption(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite")
+	ledger, err := session.OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := admission.NewBudget(ledger)
+	if _, err := budget.Reserve(ctx, 7, "previous", "paid-call", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.Settle(ctx, 7, "paid-call", 25); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.FinishTask(ctx, 7, "previous"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := budget.AcquireTask(ctx, 7, "baseline")
+	if err != nil || claimed.TaskID != "baseline" || claimed.TaskOwnerID != 7 || claimed.UsedTokens != 25 || claimed.ReservedTokens != 0 {
+		t.Fatalf("baseline slot altered accounting: %+v %v", claimed, err)
+	}
+	if _, err := admission.NewBudget(ledger).AcquireTask(ctx, 8, "another"); !errors.Is(err, admission.ErrTaskBusy) {
+		t.Fatalf("second owner acquired the running task slot: %v", err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = session.OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	budget = admission.NewBudget(ledger)
+	retained, err := budget.AcquireTask(ctx, 7, "baseline")
+	if err != nil || retained.ID != claimed.ID || retained.TaskID != "baseline" || retained.UsedTokens != 25 || retained.ReservedTokens != 0 {
+		t.Fatalf("restart lost the active slot or accounting: %+v %v", retained, err)
+	}
+	finished, err := budget.FinishTask(ctx, 7, "baseline")
+	if err != nil || finished.TaskID != "" || finished.UsedTokens != 25 {
+		t.Fatalf("baseline completion changed consumption: %+v %v", finished, err)
+	}
+	if _, err := budget.AcquireTask(ctx, 7, "baseline"); !errors.Is(err, admission.ErrTaskClosed) {
+		t.Fatalf("completed baseline reopened its slot: %v", err)
+	}
+	if _, err := budget.AcquireTask(ctx, 8, "next"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.Reserve(ctx, 8, "next", "next-call", 1); err != nil {
+		t.Fatal("a claimed model task could not reserve its call")
+	}
+}
+
 func TestTaskReleasePreservesConsumptionAndRejectsLateCalls(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))

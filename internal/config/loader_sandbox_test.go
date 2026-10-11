@@ -23,7 +23,9 @@ func TestLoadAppliesSandboxPolicyFromProjectSettings(t *testing.T) {
     "memory_limit": "2g",
     "cpu_limit": "3",
     "pids_limit": 64,
-    "tmpfs_size": "96m"
+    "tmpfs_size": "96m",
+    "opensandbox_manifest": "/approved/runtime.json",
+    "opensandbox_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -41,6 +43,9 @@ func TestLoadAppliesSandboxPolicyFromProjectSettings(t *testing.T) {
 	}
 	if cfg.Sandbox.MemoryLimit != "2g" || cfg.Sandbox.CPULimit != "3" || cfg.Sandbox.PidsLimit != 64 || cfg.Sandbox.TmpfsSize != "96m" {
 		t.Fatalf("sandbox limits = %+v", cfg.Sandbox)
+	}
+	if cfg.Sandbox.OpenSandboxManifest != "/approved/runtime.json" || cfg.Sandbox.OpenSandboxManifestSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatal("runtime approval was discarded during configuration loading")
 	}
 }
 

@@ -56,17 +56,19 @@ type Config struct {
 // SandboxConfig is the persisted policy for Docker-backed Bash execution.
 // It intentionally has no host-fallback or network-enable option.
 type SandboxConfig struct {
-	Backend             sandbox.Backend `json:"backend"`
-	WSLDistro           string          `json:"wsl_distro"`
-	TrustRoot           string          `json:"trust_root"`
-	Enabled             bool            `json:"enabled"`
-	Image               string          `json:"image"`
-	Toolchain           string          `json:"toolchain"`
-	AllowWorkspaceWrite bool            `json:"allow_workspace_write"`
-	MemoryLimit         string          `json:"memory_limit"`
-	CPULimit            string          `json:"cpu_limit"`
-	PidsLimit           int             `json:"pids_limit"`
-	TmpfsSize           string          `json:"tmpfs_size"`
+	Backend                   sandbox.Backend `json:"backend"`
+	WSLDistro                 string          `json:"wsl_distro"`
+	TrustRoot                 string          `json:"trust_root"`
+	Enabled                   bool            `json:"enabled"`
+	Image                     string          `json:"image"`
+	Toolchain                 string          `json:"toolchain"`
+	AllowWorkspaceWrite       bool            `json:"allow_workspace_write"`
+	MemoryLimit               string          `json:"memory_limit"`
+	CPULimit                  string          `json:"cpu_limit"`
+	PidsLimit                 int             `json:"pids_limit"`
+	TmpfsSize                 string          `json:"tmpfs_size"`
+	OpenSandboxManifest       string          `json:"opensandbox_manifest"`
+	OpenSandboxManifestSHA256 string          `json:"opensandbox_manifest_sha256"`
 }
 
 type PermissionConfig struct {
@@ -434,6 +436,12 @@ func mergeSandboxConfig(dst *SandboxConfig, patch SandboxConfig, raw json.RawMes
 	}
 	if _, ok := fields["tmpfs_size"]; ok {
 		dst.TmpfsSize = patch.TmpfsSize
+	}
+	if _, ok := fields["opensandbox_manifest"]; ok {
+		dst.OpenSandboxManifest = patch.OpenSandboxManifest
+	}
+	if _, ok := fields["opensandbox_manifest_sha256"]; ok {
+		dst.OpenSandboxManifestSHA256 = patch.OpenSandboxManifestSHA256
 	}
 }
 

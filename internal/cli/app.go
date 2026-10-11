@@ -138,22 +138,24 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 	executor := tools.NewExecutor(cfg.ProjectRoot)
 	_ = executor.SetWorkingDir(cfg.WorkingDir)
-	if cfg.Sandbox.Enabled || cfg.Sandbox.Toolchain != "" {
+	if cfg.Sandbox.Enabled || cfg.Sandbox.Toolchain != "" || strings.EqualFold(strings.TrimSpace(string(cfg.Sandbox.Backend)), string(sandbox.BackendOpenSandbox)) {
 		trustRoot := cfg.Sandbox.TrustRoot
 		if strings.TrimSpace(trustRoot) == "" {
 			trustRoot = cfg.ProjectRoot
 		}
 		executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{
-			Backend:             cfg.Sandbox.Backend,
-			WSLDistro:           cfg.Sandbox.WSLDistro,
-			TrustRoot:           trustRoot,
-			Image:               cfg.Sandbox.Image,
-			Toolchain:           cfg.Sandbox.Toolchain,
-			AllowWorkspaceWrite: cfg.Sandbox.AllowWorkspaceWrite,
-			MemoryLimit:         cfg.Sandbox.MemoryLimit,
-			CPULimit:            cfg.Sandbox.CPULimit,
-			PidsLimit:           cfg.Sandbox.PidsLimit,
-			TmpfsSize:           cfg.Sandbox.TmpfsSize,
+			Backend:                   cfg.Sandbox.Backend,
+			WSLDistro:                 cfg.Sandbox.WSLDistro,
+			TrustRoot:                 trustRoot,
+			Image:                     cfg.Sandbox.Image,
+			Toolchain:                 cfg.Sandbox.Toolchain,
+			AllowWorkspaceWrite:       cfg.Sandbox.AllowWorkspaceWrite,
+			MemoryLimit:               cfg.Sandbox.MemoryLimit,
+			CPULimit:                  cfg.Sandbox.CPULimit,
+			PidsLimit:                 cfg.Sandbox.PidsLimit,
+			TmpfsSize:                 cfg.Sandbox.TmpfsSize,
+			OpenSandboxManifest:       cfg.Sandbox.OpenSandboxManifest,
+			OpenSandboxManifestSHA256: cfg.Sandbox.OpenSandboxManifestSHA256,
 		}))
 	}
 	executor.SetMCPManager(mcpManager)

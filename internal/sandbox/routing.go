@@ -109,6 +109,8 @@ func defaultRunnerFactory(config Config, platform string, backend Backend) (Runn
 	switch backend {
 	case BackendDocker:
 		return newDockerRunner(config, platform), nil
+	case BackendOpenSandbox:
+		return NewOpenSandboxRunner(config), nil
 	case BackendWSL2:
 		return newWSLRunner(config), nil
 	default:
@@ -337,8 +339,9 @@ func detectAvailabilityWithRetry(ctx context.Context, config Config, platform st
 }
 
 func backendReady(requested Backend, platform string, availability Availability) bool {
+	requested = Backend(strings.ToLower(strings.TrimSpace(string(requested))))
 	switch requested {
-	case BackendDocker:
+	case BackendDocker, BackendOpenSandbox:
 		return availability.Docker
 	case BackendWSL2:
 		return strings.EqualFold(strings.TrimSpace(platform), "windows") && availability.WSL2
@@ -405,6 +408,11 @@ func chooseBackend(requested Backend, platform string, availability Availability
 			return "", fmt.Errorf("%w: docker sandbox is unavailable", errBackendUnavailable)
 		}
 		return BackendDocker, nil
+	case BackendOpenSandbox:
+		if !availability.Docker {
+			return "", fmt.Errorf("%w: OpenSandbox requires the local Docker daemon", errBackendUnavailable)
+		}
+		return BackendOpenSandbox, nil
 	case BackendWSL2:
 		if !strings.EqualFold(strings.TrimSpace(platform), "windows") {
 			return "", errors.New("wsl2 sandbox requires Windows")

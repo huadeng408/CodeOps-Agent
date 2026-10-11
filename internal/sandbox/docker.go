@@ -39,23 +39,26 @@ type Config struct {
 	Image                 string
 	// Toolchain enables compiler scratch only for approved, digest-pinned task
 	// images. Generic sandboxes keep /tmp non-executable.
-	Toolchain           string
-	AllowWorkspaceWrite bool
-	MemoryLimit         string
-	CPULimit            string
-	PidsLimit           int
-	TmpfsSize           string
+	Toolchain                 string
+	AllowWorkspaceWrite       bool
+	MemoryLimit               string
+	CPULimit                  string
+	PidsLimit                 int
+	TmpfsSize                 string
+	OpenSandboxManifest       string
+	OpenSandboxManifestSHA256 string
 }
 
 // Backend identifies an execution isolation strategy.
 type Backend string
 
 const (
-	BackendAuto    Backend = "auto"
-	BackendDocker  Backend = "docker"
-	BackendWSL2    Backend = "wsl2"
-	BackendNative  Backend = "native"
-	backendMissing Backend = "unavailable"
+	BackendAuto        Backend = "auto"
+	BackendDocker      Backend = "docker"
+	BackendOpenSandbox Backend = "opensandbox"
+	BackendWSL2        Backend = "wsl2"
+	BackendNative      Backend = "native"
+	backendMissing     Backend = "unavailable"
 )
 
 // Availability is the result of bounded backend health probes. It is exposed
@@ -83,8 +86,10 @@ func DefaultConfig() Config {
 
 // Request describes the workspace-scoped command to run.
 type Request struct {
-	Workspace   string
-	WorkingDir  string
+	Workspace  string
+	WorkingDir string
+	// OperationID is persisted by the Harness before a remote runtime effect.
+	OperationID string
 	Interactive bool
 	// Command is interpreted by the sandbox shell. It is intended for the Bash
 	// tool only; structured callers must set Program and Args instead.
@@ -98,6 +103,7 @@ type Result struct {
 	Output    string
 	ExitCode  int
 	Truncated bool
+	RuntimeID string
 }
 
 // Runner is implemented by sandbox backends. The Harness only accepts a

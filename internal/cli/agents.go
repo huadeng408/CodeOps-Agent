@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	pb "code-agent/gen/codeagentpb"
@@ -122,9 +123,10 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 		_ = skillManager.Discover(skills.DiscoveryOptions{ProjectDSHDir: filepath.Join(dir, ".dsh", "skills"), ProjectAgentsDir: filepath.Join(dir, ".agents", "skills"), ProjectDir: filepath.Join(dir, ".agent", "skills"),
 			Directories: a.cfg.SkillDirectories, UserDSHDir: filepath.Join(user, ".dsh", "skills"), UserAgentsDir: filepath.Join(user, ".agents", "skills"), GlobalDir: filepath.Join(user, ".agent", "skills")})
 		executor.SetSkillsManager(skillManager)
-		if a.cfg.Sandbox.Enabled || a.cfg.Sandbox.Toolchain != "" {
+		if a.cfg.Sandbox.Enabled || a.cfg.Sandbox.Toolchain != "" || strings.EqualFold(strings.TrimSpace(string(a.cfg.Sandbox.Backend)), string(sandbox.BackendOpenSandbox)) {
 			executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{Backend: a.cfg.Sandbox.Backend, WSLDistro: a.cfg.Sandbox.WSLDistro, TrustRoot: dir, Image: a.cfg.Sandbox.Image, Toolchain: a.cfg.Sandbox.Toolchain, AllowWorkspaceWrite: a.cfg.Sandbox.AllowWorkspaceWrite,
-				MemoryLimit: a.cfg.Sandbox.MemoryLimit, CPULimit: a.cfg.Sandbox.CPULimit, PidsLimit: a.cfg.Sandbox.PidsLimit, TmpfsSize: a.cfg.Sandbox.TmpfsSize}))
+				MemoryLimit: a.cfg.Sandbox.MemoryLimit, CPULimit: a.cfg.Sandbox.CPULimit, PidsLimit: a.cfg.Sandbox.PidsLimit, TmpfsSize: a.cfg.Sandbox.TmpfsSize,
+				OpenSandboxManifest: a.cfg.Sandbox.OpenSandboxManifest, OpenSandboxManifestSHA256: a.cfg.Sandbox.OpenSandboxManifestSHA256}))
 		}
 		a.items[sessionID] = executor
 	}

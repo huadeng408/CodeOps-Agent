@@ -100,6 +100,9 @@ func (r *lazySandboxRunner) Capability() (string, string) {
 		return "unknown", "sandbox backend has not been probed"
 	}
 	if backend := runner.Backend(); backend != "" && backend != "unavailable" {
+		if backend == sandbox.BackendOpenSandbox {
+			return "unknown", "OpenSandbox selected; each task still requires runtime admission"
+		}
 		return "ok", "sandbox backend: " + string(backend)
 	}
 	return "blocked", "no isolated sandbox backend is available"

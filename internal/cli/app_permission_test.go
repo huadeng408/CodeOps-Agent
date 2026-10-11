@@ -17,6 +17,7 @@ import (
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/permission"
 	"code-agent/internal/safety"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"code-agent/internal/skills"
 	"code-agent/internal/tools"
@@ -170,6 +171,24 @@ func TestNewAppWiresIdleInterruptHandler(t *testing.T) {
 	app := NewApp(config.Config{ProjectRoot: root, WorkingDir: root, SessionDBPath: filepath.Join(root, "sessions.db")}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if app.input == nil || app.input.onInterrupt == nil {
 		t.Fatal("NewApp must wire idle Ctrl+C to App interrupt handling")
+	}
+}
+
+func TestNewAppExplicitOpenSandboxCannotOptOutIntoHostShell(t *testing.T) {
+	for _, backend := range []sandbox.Backend{sandbox.BackendOpenSandbox, " OpenSandbox "} {
+		t.Run(string(backend), func(t *testing.T) {
+			root := t.TempDir()
+			app := NewApp(config.Config{ProjectRoot: root, WorkingDir: root, SessionDBPath: filepath.Join(root, "sessions.db"),
+				Sandbox: config.SandboxConfig{Backend: backend, Enabled: false}}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			t.Cleanup(func() { _ = app.executor.Close(); _ = app.session.Close() })
+			result, err := app.executor.Execute(context.Background(), tools.ToolRequest{Name: "Bash", Arguments: map[string]any{"command": "echo bypassed > escaped.txt"}})
+			if err == nil || result.ExitCode == 0 {
+				t.Fatalf("explicit runtime admitted an unapproved command: result=%+v err=%v", result, err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "escaped.txt")); !os.IsNotExist(err) {
+				t.Fatalf("explicit runtime escaped into host execution: %v", err)
+			}
+		})
 	}
 }
 

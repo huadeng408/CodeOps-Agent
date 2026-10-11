@@ -117,6 +117,11 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 				return state, session.ErrEventIntegrity
 			}
 			state.ID = event.EventID
+		case "admission/task_started":
+			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.TaskID) || state.TaskID != "" || state.unknownUsage() || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.CallID != "" || fact.Tokens != 0 {
+				return state, session.ErrEventIntegrity
+			}
+			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
 		case "admission/call_reserved":
 			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.unknownUsage() || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
@@ -185,6 +190,45 @@ func (budget *Budget) Open(ctx context.Context, owner uint) (Batch, error) {
 func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
 	state, err := budget.read(ctx, owner)
 	return state.Batch, err
+}
+
+// AcquireTask claims the same durable slot for work that has not called a
+// model. Reclaiming one's slot never authorizes replaying a task's effects.
+func (budget *Budget) AcquireTask(ctx context.Context, owner uint, taskID string) (Batch, error) {
+	if !validID(taskID) {
+		return Batch{}, ErrInvalidAdmission
+	}
+	if _, err := budget.Open(ctx, owner); err != nil {
+		return Batch{}, err
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		state, err := budget.read(ctx, owner)
+		if err != nil {
+			return Batch{}, err
+		}
+		if state.UnknownUsage {
+			return state.Batch, ErrUsageUnknown
+		}
+		if state.closedTasks[taskKey(owner, taskID)] {
+			return state.Batch, ErrTaskClosed
+		}
+		if state.TaskID != "" {
+			if state.TaskID == taskID && state.TaskOwnerID == owner {
+				return state.Batch, nil
+			}
+			return state.Batch, ErrTaskBusy
+		}
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_started", budgetFact{OwnerID: owner, TaskID: taskID})
+		if errors.Is(err, session.ErrSequenceConflict) {
+			continue
+		}
+		if err != nil {
+			return state.Batch, err
+		}
+		updated, err := budget.read(ctx, owner)
+		return updated.Batch, err
+	}
+	return Batch{}, session.ErrSequenceConflict
 }
 
 func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64) (Batch, error) {

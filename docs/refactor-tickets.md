@@ -34,3 +34,16 @@
 
 本地每张任务的投影位于 `.scratch/matt-refactor/issues/`，保留实际 Issue 链接和工作笔记，
 不另立任务权威。完整长期门槛继续独立推进，发布任务卡不构成产品完成或 runtime 验证。
+
+## 已批准的 OpenSandbox 接入票
+
+以下三票是 #6 的原生子任务，均为 `DESIGNED`；GitHub 原生依赖与正文一致。
+
+| 正式任务 | Blocked by |
+| --- | --- |
+| [#21：从产品入口运行真实 Go 基线](https://github.com/huadeng408/CodeOps-Agent/issues/21) | 无新增阻塞；沿用已完成的 #4 |
+| [#22：Go 准备已批准的 pytz，离线运行完整 Python 基线](https://github.com/huadeng408/CodeOps-Agent/issues/22) | #21 |
+| [#23：取消、故障重开与 CLI 共用执行契约](https://github.com/huadeng408/CodeOps-Agent/issues/23) | #21、#22 |
+
+沿用用户已选的 A 右侧测试卡片，以及真实浏览器产品入口和公开 Runner／Task Workspace 测试接缝。
+原 #6 的完整验收保持；子票发布不代表其 runtime 已通过。
