@@ -59,7 +59,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"complete failed baseline", "terminal keepalive", "missing execd image", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"complete failed baseline", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -67,6 +67,21 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			execdImage := "opensandbox-execd@sha256:" + strings.Repeat("2", 64)
 			egressImage := "opensandbox-egress@sha256:" + strings.Repeat("3", 64)
 			taskImage := "golang@sha256:" + strings.Repeat("4", 64)
+			if strings.Contains(scenario, "local image ID") {
+				serverImage = "sha256:" + strings.Repeat("1", 64)
+				execdImage = "sha256:" + strings.Repeat("2", 64)
+				egressImage = "sha256:" + strings.Repeat("3", 64)
+				taskImage = "sha256:" + strings.Repeat("4", 64)
+			}
+			if scenario == "short local image ID" {
+				execdImage = "sha256:" + strings.Repeat("2", 12)
+			}
+			if scenario == "complete failed baseline registry named sha256" {
+				serverImage = "sha256:5000/" + serverImage
+				execdImage = "sha256:5000/" + execdImage
+				egressImage = "sha256:5000/" + egressImage
+				taskImage = "sha256:5000/" + taskImage
+			}
 			policy := strings.Repeat("5", 64)
 			const sandboxID = "a10e5865-8f00-473e-8c20-5495b9f307f1"
 			fixtureFile := filepath.Join(t.TempDir(), "containers.json")
@@ -80,6 +95,18 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				serverImage: map[string]any{"RepoDigests": []string{serverImage}},
 				execdImage:  map[string]any{"RepoDigests": []string{execdImage}},
 				egressImage: map[string]any{"RepoDigests": []string{egressImage}},
+			}
+			if strings.Contains(scenario, "local image ID") {
+				for _, image := range []string{serverImage, execdImage, egressImage, taskImage} {
+					objects[image] = map[string]any{"Id": image, "RepoDigests": []string{}}
+				}
+			}
+			if strings.HasPrefix(scenario, "mismatched local image ID") {
+				image := execdImage
+				if strings.HasSuffix(scenario, " task") {
+					image = taskImage
+				}
+				objects[image] = map[string]any{"Id": "sha256:" + strings.Repeat("9", 64), "RepoDigests": []string{image}}
 			}
 			if scenario == "missing execd image" {
 				delete(objects, execdImage)
@@ -237,13 +264,13 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				config.TmpfsSize = "16m"
 			}
 			result, err := sandbox.NewOpenSandboxRunner(config).Run(context.Background(), sandbox.Request{Workspace: root, WorkingDir: root, OperationID: strings.Repeat("7", 64), Program: "go", Args: []string{"test", "./...", "-count=1"}})
-			if scenario == "missing execd image" {
+			if scenario == "missing execd image" || strings.HasPrefix(scenario, "mismatched local image ID") || scenario == "short local image ID" {
 				if !errors.Is(err, sandbox.ErrSandboxUnavailable) || result.ExitCode != 126 || created != 0 || executed != 0 || deleted != 0 {
 					t.Fatalf("missing runtime component admitted a sandbox: result=%+v lifecycle=%d/%d/%d err=%v", result, created, executed, deleted, err)
 				}
 				return
 			}
-			if scenario != "complete failed baseline" && scenario != "terminal keepalive" {
+			if scenario != "complete failed baseline" && scenario != "complete failed baseline local image IDs" && scenario != "complete failed baseline registry named sha256" && scenario != "terminal keepalive" {
 				wantExecuted, wantError := 1, sandbox.ErrSandboxOutcomeUnknown
 				wantDeleted := 1
 				if strings.HasPrefix(scenario, "replaced ") || scenario == "unsupported managed volume" {

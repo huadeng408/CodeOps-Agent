@@ -132,8 +132,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	if err := r.verifyServer(ctx, manifest); err != nil {
 		return result, fmt.Errorf("%w: %s", ErrSandboxUnavailable, err)
 	}
-	var image struct{ RepoDigests []string }
-	if r.inspect(ctx, &image, "image", "inspect", r.config.Image) != nil || !openSandboxContains(image.RepoDigests, r.config.Image) {
+	if !r.imagePresent(ctx, r.config.Image) {
 		return result, fmt.Errorf("%w: approved task image is not present locally", ErrSandboxUnavailable)
 	}
 	if !openSandboxHex(request.OperationID, 64) {
@@ -325,12 +324,25 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 		return errors.New("deployed runtime policy differs from approval")
 	}
 	for _, pin := range []string{manifest.ServerImage, manifest.ExecdImage, manifest.EgressImage} {
-		var image struct{ RepoDigests []string }
-		if r.inspect(ctx, &image, "image", "inspect", pin) != nil || !openSandboxContains(image.RepoDigests, pin) {
+		if !r.imagePresent(ctx, pin) {
 			return errors.New("approved runtime component is not present locally")
 		}
 	}
 	return nil
+}
+
+func (r *OpenSandboxRunner) imagePresent(ctx context.Context, pin string) bool {
+	var image struct {
+		ID          string `json:"Id"`
+		RepoDigests []string
+	}
+	if r.inspect(ctx, &image, "image", "inspect", pin) != nil {
+		return false
+	}
+	if strings.HasPrefix(pin, "sha256:") && !strings.Contains(pin, "@") {
+		return image.ID == pin
+	}
+	return openSandboxContains(image.RepoDigests, pin)
 }
 
 func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandboxManifest, task openSandboxContainer, id, workspace string, memory int64) error {
@@ -526,6 +538,9 @@ func openSandboxHex(value string, length int) bool {
 }
 
 func openSandboxImagePin(image string) bool {
+	if strings.HasPrefix(image, "sha256:") && !strings.Contains(image, "@") {
+		return openSandboxHex(strings.TrimPrefix(image, "sha256:"), 64)
+	}
 	parts := strings.Split(image, "@sha256:")
 	return len(parts) == 2 && parts[0] != "" && !strings.HasPrefix(parts[0], "-") && !strings.ContainsAny(parts[0], " \t\r\n\x00") && openSandboxHex(parts[1], 64)
 }
