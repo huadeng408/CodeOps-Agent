@@ -415,6 +415,7 @@ def test_release_gate_confirms_runtime_links_in_dependencies(tmp_path: Path, tar
          "submodule", "add", "-q", str(module), "vendor/module"],
         cwd=repo, check=True, capture_output=True,
     )
+    subprocess.run(["git", "config", "core.symlinks", "false"], cwd=repo / "vendor/module", check=True)
     subprocess.run(["git", "commit", "-q", "-m", "dependency pin"], cwd=repo, check=True)
     source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     _passing_receipts(repo, source_sha)

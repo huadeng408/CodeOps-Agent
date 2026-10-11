@@ -24,7 +24,7 @@
 | 完整产品、浏览器与真实模型 | `NOT_RUN`，不在本次声明范围 |
 | 完整发布 | `NOT_RUN`，原七条 lane 门槛保留 |
 
-| 命令 | 完整结果 | 退出码 |
+| 本地 Windows 命令 | 完整结果 | 退出码 |
 | --- | --- | --- |
 | `go test ./... -count=1 -json` | 1,370 个通过、60 个跳过、0 失败的测试终态（含子测试）；43 个有测试的包通过 | 0 |
 | `go vet ./...` | 通过 | 0 |
@@ -46,3 +46,12 @@ Standards／Spec 均无剩余问题；未产生 `HUMAN_REVIEWED` 或真实运行
 最终 Python 原始收据 SHA-256：`087ecb9c310ac79f2dd00f374b09ded8b84ff6e69ba13d9deb7baf13bf887fe8`。
 历史快照 SHA-256：`9a08565f567534ee65dfb078a8431aec2a7ac7a8ed5cb12ee9bffd84ebfa1cde`。
 未修改前端、协议、API 预算或凭据约定；OpenSandbox 三票的已批准方案保留，接入实施待续。
+
+## 跨平台 CI
+
+首次 [Linux CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/38127420540)
+保留 2,469 通过、12 跳过、4 失败的完整分母。四项失败均来自新增依赖链接测试：
+克隆命令临时设置 `core.symlinks=false`，子仓库随后恢复默认检查模式，导致字面链接被判为脏文件。
+修正仅在该测试夹具的子仓库持久设置相同模式，生产门禁未改；四项定向回归全部通过，退出码 0。
+Standards／Spec 复审均无剩余问题，仍为 `AI_REVIEWED`。
+Linux 完整结果以修正提交的 CI run 单独绑定，Windows 结果不代替 Linux 验证；原失败记录不覆盖。
