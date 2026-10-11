@@ -36,6 +36,22 @@
 
 ### 已完成的实施切片
 
+- **Issue #6 输出、生命周期与工具链切片**：`IMPLEMENTED`，源码 `08af7c76`。
+  Docker/WSL 先 create／按完整 CID attach，取消后确认本次临时容器停止；
+  创建或停止无法确认时保留 unknown。输出限额和截断状态经工具／Spill 保留，
+  显式 pinned Go/Python profile 不可通过禁用标志落到 host，编译产物只进容器 scratch。
+  实际 Docker／工具链 fixture **9 pass test actions**、0 fail／skip、退出 0；
+  Phoenix 读回 2 个当前 Go root、6 spans，镜像／基线未改。
+  最终 Go 1,367 pass／60 skip／0 fail、43 包，vet 退出 0；439／442 源码
+  绑定当前提交。[命令、完整分母、失败与收据](evidence/task-runtime-2026-10-11.md)
+  保留。fixture 不证明公开项目正常测试或产品能力；完整 #6 继续 `BLOCKED`。
+
+- **Issue #6 当前沙箱选型**：用户要求先调查 GitHub 方案；[固定源码调研](sandbox-options-2026-10-11.md)
+  为 `DESIGNED`，建议先验证 microsandbox Windows WHP，OpenSandbox 作服务化备选。
+  Windows WHP 仍为 preview；尚未安装候选或验证运行、离线策略、挂载和恢复。
+  `pytz` 只是公开 Python 项目的时区测试依赖，下载未批准、未进行。
+  产品测试入口 A 方案已选；产品运行时接入与受控依赖准备继续验收，整票 `BLOCKED`。
+
 - **Issue #4 当前准备验收**：`VERIFIED`，源码 `cc9e36d8`。固定公开 chi 输入的
   真实浏览器 16/16、两 Go 进程、退出 0，已从实际 Phoenix 读回当前 Session/
   lease/基线对应的已结束 Go 准备 root span。新增产品入口的分配 lease 后失败、
