@@ -22,12 +22,15 @@ import (
 const maxMultimodalBytes = 20 << 20
 
 type ToolRequest struct {
-	Name                  string         `json:"name"`
-	Arguments             map[string]any `json:"arguments,omitempty"`
-	OwnerSessionID        string         `json:"owner_session_id,omitempty"`
-	MCPServer             string         `json:"-"`
-	MCPInputSchemaSHA256  string         `json:"-"`
-	MCPServerConfigSHA256 string         `json:"-"`
+	Name           string         `json:"name"`
+	Arguments      map[string]any `json:"arguments,omitempty"`
+	OwnerSessionID string         `json:"owner_session_id,omitempty"`
+	// OperationID is supplied by Go after persisting the invocation, never by tool arguments.
+	OperationID           string `json:"-"`
+	DependencyOperationID string `json:"-"`
+	MCPServer             string `json:"-"`
+	MCPInputSchemaSHA256  string `json:"-"`
+	MCPServerConfigSHA256 string `json:"-"`
 }
 
 type ToolResult struct {
@@ -36,6 +39,9 @@ type ToolResult struct {
 	Error            string         `json:"error,omitempty"`
 	ExitCode         int            `json:"exit_code"`
 	Truncated        bool           `json:"truncated"`
+	RuntimeID        string         `json:"runtime_id,omitempty"`
+	Stopped          bool           `json:"stopped,omitempty"`
+	OutcomeUnknown   bool           `json:"outcome_unknown,omitempty"`
 	Spill            *SpillRef      `json:"spill,omitempty"`
 	Changes          []Change       `json:"changes,omitempty"`
 	ContentBlocks    []ContentBlock `json:"content_blocks,omitempty"`
@@ -241,7 +247,7 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 	case "Write":
 		result, err = e.executeWrite(ctx, req.Arguments)
 	case "Bash":
-		result, err = e.executeBash(ctx, req.Arguments)
+		result, err = e.executeBash(ctx, req)
 	case "JobStart", "job_start":
 		result, err = e.executeJobStart(ctx, req)
 	case "JobOutput", "job_output":
@@ -259,7 +265,7 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 	case "Grep":
 		result, err = e.executeGrep(ctx, req.Arguments)
 	case "Git":
-		result, err = e.executeGit(ctx, req.Arguments)
+		result, err = e.executeGit(ctx, req)
 	case "WebFetch":
 		result, err = e.executeWebFetch(ctx, req.Arguments)
 	case "WebSearch":

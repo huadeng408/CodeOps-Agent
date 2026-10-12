@@ -140,9 +140,12 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 	}
 	result, err := executor.Execute(ctx, tools.ToolRequest{
 		Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
-		MCPServer: call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
+		OperationID:           call.OperationID,
+		DependencyOperationID: a.cfg.Sandbox.DependencyOperationID,
+		MCPServer:             call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
 	})
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
+	out.RuntimeID, out.Stopped, out.OutcomeUnknown = result.RuntimeID, result.Stopped, result.OutcomeUnknown
 	for _, change := range result.Changes {
 		out.Changes = append(out.Changes, orchestrator.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
 	}

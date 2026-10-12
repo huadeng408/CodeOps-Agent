@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +12,8 @@ import (
 	"code-agent/internal/sandbox"
 )
 
-func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeGit(ctx context.Context, req ToolRequest) (ToolResult, error) {
+	args := req.Arguments
 	command, _ := stringArg(args, "command", "subcommand")
 	if command == "" {
 		command = "status"
@@ -37,12 +39,14 @@ func (e *Executor) executeGit(ctx context.Context, args map[string]any) (ToolRes
 		}
 		requestArgs := safety.HardenedGitArgs(containerDir, command, extraArgs)
 		sandboxResult, sandboxErr := runner.Run(ctx, sandbox.Request{
-			Workspace:  e.Root,
-			WorkingDir: e.WorkingDir(),
-			Program:    "git",
-			Args:       requestArgs,
+			Workspace:             e.Root,
+			WorkingDir:            e.WorkingDir(),
+			OperationID:           req.OperationID,
+			DependencyOperationID: req.DependencyOperationID,
+			Program:               "git",
+			Args:                  requestArgs,
 		})
-		result := ToolResult{Name: "Git", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, outputIncomplete: sandboxResult.Truncated}
+		result := ToolResult{Name: "Git", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, RuntimeID: sandboxResult.RuntimeID, Stopped: sandboxResult.Stopped, OutcomeUnknown: errors.Is(sandboxErr, sandbox.ErrSandboxOutcomeUnknown), outputIncomplete: sandboxResult.Truncated}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {

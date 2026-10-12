@@ -30,7 +30,7 @@ func TestBuildWSLDockerCommandConvertsWindowsWorkspaceAndUsesRestrictedDocker(t 
 		"--read-only",
 		"src=/mnt/c/work/repo,dst=/workspace,readonly",
 		"--workdir /workspace/pkg",
-		"sh -lc printf ok",
+		"sh -c printf ok",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("WSL command missing %q: %s", want, joined)

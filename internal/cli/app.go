@@ -131,6 +131,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			Phase:   hooks.Phase(hookConfig.Type),
 			Matcher: hookConfig.Matcher,
 			Command: hookConfig.Command,
+			Program: hookConfig.Program,
+			Args:    hookConfig.Args,
 			WorkDir: cfg.ProjectRoot,
 			Timeout: hookConfig.Timeout,
 		})
@@ -143,7 +145,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		if strings.TrimSpace(trustRoot) == "" {
 			trustRoot = cfg.ProjectRoot
 		}
-		executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{
+		runner := sandbox.NewSandboxRunner(sandbox.Config{
 			Backend:                   cfg.Sandbox.Backend,
 			WSLDistro:                 cfg.Sandbox.WSLDistro,
 			TrustRoot:                 trustRoot,
@@ -156,7 +158,9 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			TmpfsSize:                 cfg.Sandbox.TmpfsSize,
 			OpenSandboxManifest:       cfg.Sandbox.OpenSandboxManifest,
 			OpenSandboxManifestSHA256: cfg.Sandbox.OpenSandboxManifestSHA256,
-		}))
+		})
+		executor.SetSandbox(runner)
+		hookEngine.SetSandbox(runner, cfg.ProjectRoot)
 	}
 	executor.SetMCPManager(mcpManager)
 	ragClient := rag.NewClient(rag.Config{
@@ -935,6 +939,9 @@ func (a *App) restartOrchestrator() (*orchestrator.Client, error) {
 }
 
 func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	if strings.TrimSpace(call.ID) == "" {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation id is required", ExitCode: 1}
+	}
 	params := map[string]any{}
 	if strings.TrimSpace(call.ParametersJSON) != "" {
 		if err := json.Unmarshal([]byte(call.ParametersJSON), &params); err != nil {
@@ -983,49 +990,59 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		}
 	}
 
+	var prepared session.InvocationRecord
+	var err error
+	if strings.TrimSpace(call.ID) != "" {
+		prepared, err = a.session.BeginInvocation(call.ID, call.Name, call.ParametersJSON)
+		if err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation persistence failed: " + err.Error(), ExitCode: 1}
+		}
+		if prepared.Status == session.InvocationCommitted || (prepared.Status == session.InvocationUnknown && !prepared.CompletedAt.IsZero()) {
+			return invocationToolResult(prepared)
+		}
+		if prepared.Status != session.InvocationPrepared {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: fmt.Sprintf("invocation %s is %s; reconcile before retry", call.ID, prepared.Status), ExitCode: 1}
+		}
+		if _, err = a.session.MarkInvocationDispatched(call.ID); err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed: " + err.Error(), ExitCode: 1}
+		}
+	}
+
 	current := a.session.Current()
 	hookCtx := hooks.Context{
-		SessionID: current.ID,
-		ToolName:  call.Name,
-		Payload:   params,
+		SessionID:             current.ID,
+		OperationID:           prepared.OperationID,
+		DependencyOperationID: a.cfg.Sandbox.DependencyOperationID,
+		ToolName:              call.Name,
+		Payload:               params,
 		Metadata: map[string]string{
 			"phase": "pre_tool",
 		},
+	}
+	if call.ID != "" {
+		hookCtx.RecordRuntime = func(phase hooks.Phase, result hooks.Result) error {
+			id, _ := result.Values["runtime_id"].(string)
+			stopped, _ := result.Values["stopped"].(bool)
+			return a.session.RecordInvocationRuntime(call.ID, string(phase), id, stopped)
+		}
 	}
 	preResults, err := a.hooks.Run(ctx, hooks.PhasePreTool, hookCtx)
 	if err != nil || hooksCancelled(preResults) {
 		if err == nil {
 			err = errors.New("hook blocked tool execution")
 		}
-		return orchestrator.ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   call.Name,
-			Output:     hookMessages(preResults),
-			Error:      err.Error(),
-			ExitCode:   1,
-		}
-	}
-
-	var prepared session.InvocationRecord
-	if strings.TrimSpace(call.ID) != "" {
-		prepared, err = a.session.BeginInvocation(call.ID, call.Name, call.ParametersJSON)
-		if err != nil {
-			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation persistence failed: " + err.Error(), ExitCode: 1}
-		}
-		if prepared.Status == session.InvocationCommitted {
-			return invocationToolResult(prepared)
-		}
-		if prepared.Status != session.InvocationPrepared {
-			return orchestrator.ToolResult{
-				ToolCallID: call.ID,
-				ToolName:   call.Name,
-				Error:      fmt.Sprintf("invocation %s is %s; reconcile before retry", call.ID, prepared.Status),
-				ExitCode:   1,
+		blocked := tools.ToolResult{Name: call.Name, Output: hookMessages(preResults), Error: err.Error(), ExitCode: 1, OutcomeUnknown: errors.Is(err, sandbox.ErrSandboxOutcomeUnknown)}
+		for _, hookResult := range preResults {
+			if id, ok := hookResult.Values["runtime_id"].(string); ok && id != "" {
+				blocked.RuntimeID = id
+				blocked.Stopped, _ = hookResult.Values["stopped"].(bool)
+				blocked.Truncated, _ = hookResult.Values["truncated"].(bool)
 			}
 		}
-		if _, err = a.session.MarkInvocationDispatched(call.ID); err != nil {
-			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed: " + err.Error(), ExitCode: 1}
+		if recordErr := a.recordToolResult(ctx, call, blocked); recordErr != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "Hook result persistence failed", ExitCode: 1}
 		}
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: blocked.Output, Error: blocked.Error, ExitCode: 1, Truncated: blocked.Truncated, RuntimeID: blocked.RuntimeID, Stopped: blocked.Stopped, OutcomeUnknown: blocked.OutcomeUnknown}
 	}
 
 	var result tools.ToolResult
@@ -1060,12 +1077,20 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		}
 	} else {
 		result, err = a.executor.Execute(ctx, tools.ToolRequest{
-			Name:           call.Name,
-			Arguments:      params,
-			OwnerSessionID: current.ID,
+			Name:                  call.Name,
+			Arguments:             params,
+			OwnerSessionID:        current.ID,
+			OperationID:           prepared.OperationID,
+			DependencyOperationID: a.cfg.Sandbox.DependencyOperationID,
 		})
 	}
 	a.metrics.RecordToolCall()
+	if call.ID != "" && result.RuntimeID != "" {
+		if persistErr := a.session.RecordInvocationRuntime(call.ID, "tool", result.RuntimeID, result.Stopped); persistErr != nil {
+			_, _ = a.session.MarkInvocationUnknown(call.ID, "runtime receipt persistence failed")
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: "runtime receipt persistence failed; reconcile before retry", ExitCode: 1, RuntimeID: result.RuntimeID, Stopped: result.Stopped, OutcomeUnknown: true}
+		}
+	}
 	postCtx := hookCtx
 	if active := a.session.Current(); active.ID != "" {
 		postCtx.SessionID = active.ID
@@ -1076,14 +1101,27 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		"truncated":  fmt.Sprint(result.Truncated),
 		"tool_error": result.Error,
 	}
-	if postResults, hookErr := a.hooks.Run(ctx, hooks.PhasePostTool, postCtx); (hookErr != nil || hooksCancelled(postResults)) && result.Error == "" {
-		if hookErr != nil {
-			result.Error = hookErr.Error()
-		} else {
-			result.Error = "post hook blocked tool execution"
+	if !result.OutcomeUnknown {
+		if postResults, hookErr := a.hooks.Run(ctx, hooks.PhasePostTool, postCtx); hookErr != nil || hooksCancelled(postResults) {
+			message := "post hook blocked tool execution"
+			if hookErr != nil {
+				message = hookErr.Error()
+			}
+			result.Error = strings.TrimSpace(result.Error + "\n" + message)
+			result.OutcomeUnknown = result.OutcomeUnknown || errors.Is(hookErr, sandbox.ErrSandboxOutcomeUnknown)
+			for _, hookResult := range postResults {
+				id, _ := hookResult.Values["runtime_id"].(string)
+				unknown, _ := hookResult.Values["outcome_unknown"].(bool)
+				truncated, _ := hookResult.Values["truncated"].(bool)
+				result.Truncated = result.Truncated || truncated
+				if id != "" && (result.RuntimeID == "" || unknown) {
+					result.RuntimeID = id
+					result.Stopped, _ = hookResult.Values["stopped"].(bool)
+				}
+			}
+			result.ExitCode = 1
+			result.Output = strings.TrimSpace(result.Output + "\n" + hookMessages(postResults))
 		}
-		result.ExitCode = 1
-		result.Output = strings.TrimSpace(result.Output + "\n" + hookMessages(postResults))
 	}
 	a.recordUndo(call, result)
 	if recordErr := a.recordToolResult(ctx, call, result); recordErr != nil {
@@ -1095,23 +1133,25 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 	a.recordToolWorkingDir(call, result)
 	if err != nil {
 		return orchestrator.ToolResult{
-			ToolCallID:    call.ID,
-			ToolName:      call.Name,
-			Output:        result.Output,
-			Error:         result.Error,
-			ExitCode:      int32(result.ExitCode),
-			Truncated:     result.Truncated,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Output:     result.Output,
+			Error:      result.Error,
+			ExitCode:   int32(result.ExitCode),
+			Truncated:  result.Truncated,
+			RuntimeID:  result.RuntimeID, Stopped: result.Stopped, OutcomeUnknown: result.OutcomeUnknown,
 			Spill:         orchestratorSpillRef(result.Spill),
 			ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 		}
 	}
 	return orchestrator.ToolResult{
-		ToolCallID:    call.ID,
-		ToolName:      call.Name,
-		Output:        result.Output,
-		Error:         result.Error,
-		ExitCode:      int32(result.ExitCode),
-		Truncated:     result.Truncated,
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Output:     result.Output,
+		Error:      result.Error,
+		ExitCode:   int32(result.ExitCode),
+		Truncated:  result.Truncated,
+		RuntimeID:  result.RuntimeID, Stopped: result.Stopped, OutcomeUnknown: result.OutcomeUnknown,
 		Spill:         orchestratorSpillRef(result.Spill),
 		ContentBlocks: orchestratorContentBlocks(result.ContentBlocks),
 	}
@@ -1843,6 +1883,7 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 		if _, err := a.session.CommitInvocation(session.InvocationResult{
 			ID: call.ID, Name: call.Name, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode,
 			Truncated: result.Truncated, SpillLocator: spillLocator(result.Spill), SpillSHA256: spillSHA256(result.Spill), SpillBytes: spillBytes(result.Spill),
+			RuntimeID: result.RuntimeID, Stopped: result.Stopped, OutcomeUnknown: result.OutcomeUnknown,
 			ModifiedFiles: modifiedFiles,
 		}); err != nil {
 			return err
@@ -1881,6 +1922,7 @@ func (a *App) recordToolResult(ctx context.Context, call orchestrator.ToolCall, 
 
 func invocationToolResult(record session.InvocationRecord) orchestrator.ToolResult {
 	result := orchestrator.ToolResult{ToolCallID: record.ID, ToolName: record.Name, Output: record.Output, Error: record.Error, ExitCode: int32(record.ExitCode), Truncated: record.Truncated}
+	result.RuntimeID, result.Stopped, result.OutcomeUnknown = record.RuntimeID, record.Stopped, record.OutcomeUnknown
 	if record.SpillLocator != "" {
 		result.Spill = &orchestrator.SpillRef{Locator: record.SpillLocator, SHA256: record.SpillSHA256, Bytes: record.SpillBytes}
 	}

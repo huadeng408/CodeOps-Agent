@@ -154,7 +154,8 @@ func (s *SQLiteEventStore) Fork(ctx context.Context, sourceSessionID, targetSess
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.Load(ctx, sourceSessionID); err != nil {
+	source, err := s.Load(ctx, sourceSessionID)
+	if err != nil {
 		return nil, err
 	}
 	sourceEvents, err := log.Events(ctx, sourceSessionID)
@@ -166,6 +167,7 @@ func (s *SQLiteEventStore) Fork(ctx context.Context, sourceSessionID, targetSess
 		return nil, err
 	}
 	child.ID = strings.TrimSpace(targetSessionID)
+	retainInvocations(source, child)
 	if err := rebindActorToSession(child); err != nil {
 		return nil, err
 	}
@@ -202,6 +204,11 @@ func (s *SQLiteEventStore) Rewind(ctx context.Context, sessionID string, targetS
 		return nil, err
 	}
 	restored.ID = sessionID
+	latest, err := replaySessionState(events, int64(len(events)-1))
+	if err != nil {
+		return nil, err
+	}
+	retainInvocations(latest, restored)
 	if err := rebindActorToSession(restored); err != nil {
 		return nil, err
 	}
@@ -209,6 +216,56 @@ func (s *SQLiteEventStore) Rewind(ctx context.Context, sessionID string, targetS
 		return nil, err
 	}
 	return restored, nil
+}
+
+// History projections cannot erase side-effect facts or make them executable again.
+func retainInvocations(source, target *Session) {
+	if source == nil {
+		return
+	}
+	for _, record := range source.Invocations {
+		index := -1
+		for candidate := range target.Invocations {
+			if target.Invocations[candidate].ID == record.ID {
+				index = candidate
+				break
+			}
+		}
+		record.Runtimes = append([]InvocationRuntime(nil), record.Runtimes...)
+		if index >= 0 {
+			target.Invocations[index] = record
+		} else {
+			target.Invocations = append(target.Invocations, record)
+		}
+		messages := make([]Message, 0, len(target.Messages)+2)
+		callIndex := -1
+		for _, message := range target.Messages {
+			if message.Role == RoleTool && message.ToolCallID == record.ID {
+				continue
+			}
+			for _, call := range message.ToolCalls {
+				if call.ID == record.ID {
+					callIndex = len(messages)
+				}
+			}
+			messages = append(messages, message)
+		}
+		if callIndex < 0 {
+			callIndex = len(messages)
+			messages = append(messages, Message{Role: RoleAssistant, CreatedAt: record.CreatedAt, SchemaVersion: ConversationMessageSchemaVersion,
+				ToolCalls: []ToolCall{{ID: record.ID, Name: record.Name, ArgumentsJSON: record.ArgumentsJSON}}})
+		}
+		if !record.CompletedAt.IsZero() {
+			resultIndex := callIndex + 1
+			for resultIndex < len(messages) && messages[resultIndex].Role == RoleTool {
+				resultIndex++
+			}
+			messages = append(messages, Message{})
+			copy(messages[resultIndex+1:], messages[resultIndex:])
+			messages[resultIndex] = Message{Role: RoleTool, Name: record.Name, ToolCallID: record.ID, Content: record.Output, IsError: record.Error != "", CreatedAt: record.CompletedAt, SchemaVersion: ConversationMessageSchemaVersion}
+		}
+		target.Messages = messages
+	}
 }
 
 // replaySessionState derives the state projection at an event sequence. A

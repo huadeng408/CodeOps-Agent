@@ -110,7 +110,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	ctx, span := otel.Tracer("code-agent/sandbox").Start(ctx, "opensandbox.run")
 	defer func() {
-		span.SetAttributes(attribute.Int("sandbox.exit_code", result.ExitCode), attribute.Bool("sandbox.output_truncated", result.Truncated), attribute.String("sandbox.runtime_id", result.RuntimeID))
+		span.SetAttributes(attribute.Int("sandbox.exit_code", result.ExitCode), attribute.Bool("sandbox.output_truncated", result.Truncated), attribute.String("sandbox.runtime_id", result.RuntimeID), attribute.Bool("sandbox.stopped", result.Stopped))
 		if resultErr != nil || result.ExitCode != 0 {
 			span.SetStatus(codes.Error, "")
 		}
@@ -125,6 +125,9 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	if r.config.AllowWorkspaceWrite || (r.config.Toolchain != "go" && r.config.Toolchain != "python") || !openSandboxImagePin(r.config.Image) || request.Interactive {
 		return result, fmt.Errorf("%w: OpenSandbox requires an approved read-only task profile", ErrSandboxUnavailable)
+	}
+	if r.config.Toolchain == "python" && request.Program == "git" {
+		return result, fmt.Errorf("%w: Git is not supported by the approved Python task profile", ErrSandboxUnavailable)
 	}
 	dependency := ""
 	if r.config.Toolchain == "python" && request.DependencyOperationID == "" {
@@ -158,7 +161,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		if request.Program != "" {
 			return result, errors.New("sandbox request must contain exactly one of command or program")
 		}
-		argv = []string{"sh", "-lc", request.Command}
+		argv = []string{"sh", "-c", request.Command}
 	}
 	if strings.TrimSpace(argv[0]) == "" {
 		return result, errors.New("sandbox executable is required")
@@ -217,7 +220,10 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	result.RuntimeID += "/" + created.ID
 	var container openSandboxContainer
-	if r.inspect(ctx, &container, "inspect", "sandbox-"+created.ID) != nil || !openSandboxHex(container.ID, 64) || container.Config.Labels["opensandbox.io/id"] != created.ID || container.Config.Labels["codeops.operation_id"] != operation {
+	ownershipCtx, stopOwnership := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	ownershipErr := r.inspect(ownershipCtx, &container, "inspect", "sandbox-"+created.ID)
+	stopOwnership()
+	if ownershipErr != nil || !openSandboxHex(container.ID, 64) || container.Config.Labels["opensandbox.io/id"] != created.ID || container.Config.Labels["codeops.operation_id"] != operation {
 		return result, fmt.Errorf("%w: OpenSandbox ownership unconfirmed; reconcile the operation identity", ErrSandboxOutcomeUnknown)
 	}
 	result.RuntimeID += "/" + container.ID
@@ -227,8 +233,13 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		if err := r.remove(cleanupCtx, manifest, created.ID, operation, container); err != nil {
 			result.ExitCode = 126
 			resultErr = errors.Join(resultErr, fmt.Errorf("%w: OpenSandbox termination is unconfirmed; reconcile the retained resource identity", ErrSandboxOutcomeUnknown))
+		} else {
+			result.Stopped = true
 		}
 	}()
+	if ctx.Err() != nil {
+		return result, fmt.Errorf("%w: request ended before command dispatch", ErrSandboxOutcomeUnknown)
+	}
 	if !strings.EqualFold(created.Status.State, "Running") || r.verifyTask(ctx, manifest, container, created.ID, workspace, dependency, memory) != nil {
 		return result, fmt.Errorf("%w: OpenSandbox task isolation is not confirmed", ErrSandboxUnavailable)
 	}
@@ -243,6 +254,9 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	output, executionID, truncated, err := openSandboxStream(stream.Body)
 	result.Output, result.Truncated = output, truncated
+	if err != nil && output != "" {
+		result.Truncated = true
+	}
 	if err != nil {
 		return result, err
 	}

@@ -36,6 +36,7 @@ func TestHandleToolCallExecutesVersionedSessionControls(t *testing.T) {
 	})
 
 	fork := app.handleToolCall(ctx, orchestrator.ToolCall{
+		ID:             "fork-child",
 		Name:           "SessionFork",
 		ParametersJSON: `{"api_version":"v1","operation":"fork","target_session_id":"child","target_seq":2}`,
 	})
@@ -57,6 +58,7 @@ func TestHandleToolCallExecutesVersionedSessionControls(t *testing.T) {
 	}
 
 	rewind := app.handleToolCall(ctx, orchestrator.ToolCall{
+		ID:             "rewind-child",
 		Name:           "SessionRewind",
 		ParametersJSON: `{"api_version":"v1","operation":"rewind","target_seq":1}`,
 	})
@@ -77,7 +79,7 @@ func TestHandleToolCallExecutesVersionedSessionControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load parent after child controls: %v", err)
 	}
-	if loadedParent == nil || len(loadedParent.Messages) != 2 {
+	if loadedParent == nil || len(loadedParent.Messages) != 3 || loadedParent.Messages[0].Content != "first" || loadedParent.Messages[1].Content != "second" || len(loadedParent.Invocations) != 1 || loadedParent.Invocations[0].ID != "fork-child" {
 		t.Fatalf("parent session changed after child controls: %+v", loadedParent)
 	}
 }
@@ -91,6 +93,7 @@ func TestHandleToolCallRejectsInvalidSessionControlVersion(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:             "invalid-version",
 		Name:           "SessionRewind",
 		ParametersJSON: `{"api_version":"v0","target_seq":1}`,
 	})
@@ -110,6 +113,7 @@ func TestHandleToolCallRejectsMismatchedSessionControlOperation(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:             "invalid-operation",
 		Name:           "SessionFork",
 		ParametersJSON: `{"api_version":"v1","operation":"rewind","target_session_id":"child","target_seq":0}`,
 	})
@@ -131,6 +135,7 @@ func TestHandleToolCallDeniesSessionControlByPolicy(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:             "policy-denied",
 		Name:           "SessionFork",
 		ParametersJSON: `{"api_version":"v1","operation":"fork","target_session_id":"child","target_seq":0}`,
 	})
@@ -153,6 +158,7 @@ func TestHandleToolCallDeniesSessionControlWhenUserDeclines(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:             "operator-declined",
 		Name:           "SessionFork",
 		ParametersJSON: `{"api_version":"v1","operation":"fork","target_session_id":"child","target_seq":0}`,
 	})

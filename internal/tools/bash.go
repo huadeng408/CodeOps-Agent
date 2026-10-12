@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,7 +14,8 @@ import (
 	"code-agent/internal/sandbox"
 )
 
-func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolResult, error) {
+func (e *Executor) executeBash(ctx context.Context, req ToolRequest) (ToolResult, error) {
+	args := req.Arguments
 	command, ok := stringArg(args, "command", "cmd")
 	if !ok || command == "" {
 		return ToolResult{Name: "Bash", Error: "command is required", ExitCode: 1}, fmt.Errorf("command is required")
@@ -54,11 +56,13 @@ func (e *Executor) executeBash(ctx context.Context, args map[string]any) (ToolRe
 
 	if runner := e.sandboxRunner(); runner != nil {
 		sandboxResult, sandboxErr := runner.Run(runCtx, sandbox.Request{
-			Workspace:  e.Root,
-			WorkingDir: absDir,
-			Command:    command,
+			Workspace:             e.Root,
+			WorkingDir:            absDir,
+			OperationID:           req.OperationID,
+			DependencyOperationID: req.DependencyOperationID,
+			Command:               command,
 		})
-		result := ToolResult{Name: "Bash", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, outputIncomplete: sandboxResult.Truncated}
+		result := ToolResult{Name: "Bash", Output: sandboxResult.Output, ExitCode: sandboxResult.ExitCode, Truncated: sandboxResult.Truncated, RuntimeID: sandboxResult.RuntimeID, Stopped: sandboxResult.Stopped, OutcomeUnknown: errors.Is(sandboxErr, sandbox.ErrSandboxOutcomeUnknown), outputIncomplete: sandboxResult.Truncated}
 		if sandboxErr != nil {
 			result.Error = sandboxErr.Error()
 			if result.ExitCode == 0 {

@@ -42,20 +42,31 @@ const (
 )
 
 type InvocationRecord struct {
-	ID            string           `json:"id"`
-	Name          string           `json:"name"`
-	ArgumentsJSON string           `json:"arguments_json,omitempty"`
-	Status        InvocationStatus `json:"status"`
-	Output        string           `json:"output,omitempty"`
-	Error         string           `json:"error,omitempty"`
-	ExitCode      int              `json:"exit_code"`
-	Truncated     bool             `json:"truncated,omitempty"`
-	SpillLocator  string           `json:"spill_locator,omitempty"`
-	SpillSHA256   string           `json:"spill_sha256,omitempty"`
-	SpillBytes    int64            `json:"spill_bytes,omitempty"`
-	ModifiedFiles []string         `json:"modified_files,omitempty"`
-	CreatedAt     time.Time        `json:"created_at"`
-	CompletedAt   time.Time        `json:"completed_at,omitempty"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	ArgumentsJSON  string              `json:"arguments_json,omitempty"`
+	Status         InvocationStatus    `json:"status"`
+	OperationID    string              `json:"operation_id,omitempty"`
+	RuntimeID      string              `json:"runtime_id,omitempty"`
+	Stopped        bool                `json:"stopped,omitempty"`
+	OutcomeUnknown bool                `json:"outcome_unknown,omitempty"`
+	Runtimes       []InvocationRuntime `json:"runtimes,omitempty"`
+	Output         string              `json:"output,omitempty"`
+	Error          string              `json:"error,omitempty"`
+	ExitCode       int                 `json:"exit_code"`
+	Truncated      bool                `json:"truncated,omitempty"`
+	SpillLocator   string              `json:"spill_locator,omitempty"`
+	SpillSHA256    string              `json:"spill_sha256,omitempty"`
+	SpillBytes     int64               `json:"spill_bytes,omitempty"`
+	ModifiedFiles  []string            `json:"modified_files,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	CompletedAt    time.Time           `json:"completed_at,omitempty"`
+}
+
+type InvocationRuntime struct {
+	Phase     string `json:"phase"`
+	RuntimeID string `json:"runtime_id"`
+	Stopped   bool   `json:"stopped"`
 }
 
 type Message struct {
@@ -327,7 +338,11 @@ func (m *Manager) BeginInvocation(id, name, argumentsJSON string) (InvocationRec
 	previous := cloneSession(m.current)
 	now := time.Now()
 	m.ensureCurrentLocked(now)
-	record := InvocationRecord{ID: id, Name: name, ArgumentsJSON: argumentsJSON, Status: InvocationPrepared, CreatedAt: now}
+	var operation [32]byte
+	if _, err := rand.Read(operation[:]); err != nil {
+		return InvocationRecord{}, fmt.Errorf("generate invocation operation: %w", err)
+	}
+	record := InvocationRecord{ID: id, Name: name, ArgumentsJSON: argumentsJSON, Status: InvocationPrepared, OperationID: hex.EncodeToString(operation[:]), CreatedAt: now}
 	m.current.Invocations = append(m.current.Invocations, record)
 	m.current.Messages = append(m.current.Messages, Message{
 		Role: RoleAssistant, CreatedAt: now, SchemaVersion: ConversationMessageSchemaVersion,
@@ -366,17 +381,56 @@ func (m *Manager) MarkInvocationDispatched(id string) (InvocationRecord, error) 
 	return InvocationRecord{}, ErrNotFound
 }
 
+// RecordInvocationRuntime retains a completed Runner handoff before the next effect.
+func (m *Manager) RecordInvocationRuntime(id, phase, runtimeID string, stopped bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if (phase != "pre_tool" && phase != "tool" && phase != "post_tool") || runtimeID == "" || len(runtimeID) > 512 {
+		return errors.New("invalid invocation runtime receipt")
+	}
+	for index := range m.current.Invocations {
+		record := &m.current.Invocations[index]
+		if record.ID != strings.TrimSpace(id) {
+			continue
+		}
+		if record.Status != InvocationDispatched {
+			return fmt.Errorf("invocation %s is not dispatched", id)
+		}
+		for _, existing := range record.Runtimes {
+			if existing.RuntimeID != runtimeID {
+				continue
+			}
+			if existing.Phase != phase || existing.Stopped != stopped {
+				return errors.New("invocation runtime receipt conflicts with retained identity")
+			}
+			return nil
+		}
+		previous := cloneSession(m.current)
+		record.Runtimes = append(record.Runtimes, InvocationRuntime{Phase: phase, RuntimeID: runtimeID, Stopped: stopped})
+		m.current.UpdatedAt = time.Now()
+		if !m.commitLocked(context.Background(), previous) {
+			return errors.New("persist invocation runtime receipt")
+		}
+		return nil
+	}
+	return ErrNotFound
+}
+
 type InvocationResult struct {
-	ID            string
-	Name          string
-	Output        string
-	Error         string
-	ExitCode      int
-	Truncated     bool
-	SpillLocator  string
-	SpillSHA256   string
-	SpillBytes    int64
-	ModifiedFiles []string
+	ID             string
+	Name           string
+	Output         string
+	Error          string
+	ExitCode       int
+	Truncated      bool
+	RuntimeID      string
+	Stopped        bool
+	OutcomeUnknown bool
+	Runtimes       []InvocationRuntime
+	SpillLocator   string
+	SpillSHA256    string
+	SpillBytes     int64
+	ModifiedFiles  []string
 }
 
 // ReconcileInvocation records an externally verified result for an unknown
@@ -396,6 +450,28 @@ func (m *Manager) ReconcileInvocation(result InvocationResult) (InvocationRecord
 		if existing.Status != InvocationUnknown {
 			return InvocationRecord{}, fmt.Errorf("invocation %s is %s; only unknown invocations can be reconciled", id, existing.Status)
 		}
+		if result.OutcomeUnknown || (existing.RuntimeID != "" && (result.RuntimeID != existing.RuntimeID || !result.Stopped)) {
+			return InvocationRecord{}, fmt.Errorf("invocation %s requires a confirmed outcome for the retained runtime identity", id)
+		}
+		confirmed := append([]InvocationRuntime(nil), existing.Runtimes...)
+		for _, receipt := range result.Runtimes {
+			matched := false
+			for runtimeIndex := range confirmed {
+				if confirmed[runtimeIndex].RuntimeID == receipt.RuntimeID && confirmed[runtimeIndex].Phase == receipt.Phase && receipt.Stopped {
+					confirmed[runtimeIndex].Stopped = true
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return InvocationRecord{}, errors.New("reconciliation runtime receipt conflicts with retained identity")
+			}
+		}
+		for _, receipt := range confirmed {
+			if !receipt.Stopped {
+				return InvocationRecord{}, errors.New("reconciliation requires stop confirmation for every retained runtime")
+			}
+		}
 		previous := cloneSession(m.current)
 		now := time.Now()
 		existing.Status = InvocationCommitted
@@ -404,13 +480,19 @@ func (m *Manager) ReconcileInvocation(result InvocationResult) (InvocationRecord
 		existing.Error = result.Error
 		existing.ExitCode = result.ExitCode
 		existing.Truncated = result.Truncated
+		existing.RuntimeID = firstNonEmpty(result.RuntimeID, existing.RuntimeID)
+		existing.Stopped = existing.Stopped || result.Stopped
+		existing.OutcomeUnknown = false
+		existing.Runtimes = confirmed
 		existing.SpillLocator = result.SpillLocator
 		existing.SpillSHA256 = result.SpillSHA256
 		existing.SpillBytes = result.SpillBytes
 		existing.CompletedAt = now
 		existing.ModifiedFiles = mergeFiles(existing.ModifiedFiles, result.ModifiedFiles)
+		if m.current.Invocations[index].CompletedAt.IsZero() {
+			m.current.Metrics.ToolCalls++
+		}
 		m.current.Invocations[index] = existing
-		m.current.Metrics.ToolCalls++
 		m.current.Metrics.FilesModified = mergeFiles(m.current.Metrics.FilesModified, result.ModifiedFiles)
 		m.current.Messages = append(m.current.Messages, Message{
 			Role: RoleTool, Name: existing.Name, ToolCallID: id, Content: existing.Output,
@@ -446,14 +528,18 @@ func (m *Manager) CommitInvocation(result InvocationResult) (InvocationRecord, e
 			continue
 		}
 		existing := m.current.Invocations[index]
-		if existing.Status == InvocationCommitted {
+		if existing.Status == InvocationCommitted || (existing.Status == InvocationUnknown && !existing.CompletedAt.IsZero()) {
 			return existing, nil
 		}
 		previous := cloneSession(m.current)
 		now := time.Now()
 		existing.Status = InvocationCommitted
+		if result.OutcomeUnknown {
+			existing.Status = InvocationUnknown
+		}
 		existing.Output, existing.Error, existing.ExitCode, existing.CompletedAt = result.Output, result.Error, result.ExitCode, now
 		existing.Truncated = result.Truncated
+		existing.RuntimeID, existing.Stopped, existing.OutcomeUnknown = result.RuntimeID, result.Stopped, result.OutcomeUnknown
 		existing.SpillLocator = result.SpillLocator
 		existing.SpillSHA256 = result.SpillSHA256
 		existing.SpillBytes = result.SpillBytes
@@ -1228,6 +1314,9 @@ func cloneSession(session Session) Session {
 	}
 	if len(session.Invocations) > 0 {
 		out.Invocations = append([]InvocationRecord(nil), session.Invocations...)
+		for index := range out.Invocations {
+			out.Invocations[index].Runtimes = append([]InvocationRuntime(nil), session.Invocations[index].Runtimes...)
+		}
 	}
 	if session.Metadata != nil {
 		out.Metadata = make(map[string]string, len(session.Metadata))

@@ -56,19 +56,21 @@ type Config struct {
 // SandboxConfig is the persisted policy for Docker-backed Bash execution.
 // It intentionally has no host-fallback or network-enable option.
 type SandboxConfig struct {
-	Backend                   sandbox.Backend `json:"backend"`
-	WSLDistro                 string          `json:"wsl_distro"`
-	TrustRoot                 string          `json:"trust_root"`
-	Enabled                   bool            `json:"enabled"`
-	Image                     string          `json:"image"`
-	Toolchain                 string          `json:"toolchain"`
-	AllowWorkspaceWrite       bool            `json:"allow_workspace_write"`
-	MemoryLimit               string          `json:"memory_limit"`
-	CPULimit                  string          `json:"cpu_limit"`
-	PidsLimit                 int             `json:"pids_limit"`
-	TmpfsSize                 string          `json:"tmpfs_size"`
-	OpenSandboxManifest       string          `json:"opensandbox_manifest"`
-	OpenSandboxManifestSHA256 string          `json:"opensandbox_manifest_sha256"`
+	Backend   sandbox.Backend `json:"backend"`
+	WSLDistro string          `json:"wsl_distro"`
+	TrustRoot string          `json:"trust_root"`
+	Enabled   bool            `json:"enabled"`
+	Image     string          `json:"image"`
+	Toolchain string          `json:"toolchain"`
+	// This local Harness configuration names an artifact Go must validate before execution.
+	DependencyOperationID     string `json:"dependency_operation_id,omitempty"`
+	AllowWorkspaceWrite       bool   `json:"allow_workspace_write"`
+	MemoryLimit               string `json:"memory_limit"`
+	CPULimit                  string `json:"cpu_limit"`
+	PidsLimit                 int    `json:"pids_limit"`
+	TmpfsSize                 string `json:"tmpfs_size"`
+	OpenSandboxManifest       string `json:"opensandbox_manifest"`
+	OpenSandboxManifestSHA256 string `json:"opensandbox_manifest_sha256"`
 }
 
 type PermissionConfig struct {
@@ -82,10 +84,12 @@ type PermissionRule struct {
 }
 
 type HookConfig struct {
-	Type    string `json:"type"`
-	Matcher string `json:"matcher"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout"`
+	Type    string   `json:"type"`
+	Matcher string   `json:"matcher"`
+	Command string   `json:"command"`
+	Program string   `json:"program,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Timeout int      `json:"timeout"`
 }
 
 func Default(projectRoot string) Config {

@@ -100,7 +100,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     } catch (cause) {
       if (request.current === controller) {
         setView(null);
-        setError(cause instanceof ApiError && cause.status === 409 ? '会话或测试前提已变化，请重新检查。' : '无法确认测试结果，请重新检查；原请求和执行记录会保留。');
+        setError(cause instanceof ApiError && cause.status === 409 ? '会话或测试前提已变化，请重新检查。' : controller.signal.reason === 'operator-cancelled' ? '取消请求已发出，请重新检查停止状态；原请求和执行记录会保留。' : '无法确认测试结果，请重新检查；原请求和执行记录会保留。');
       }
     } finally {
       window.clearTimeout(timeout);
@@ -151,7 +151,8 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     </details>}
     {error && <p className="capability-error" role="status">{error}</p>}
     <section className="task-baseline-card" aria-label="基线测试">
-      <div className="task-workspace-heading"><h3>基线测试</h3><span role="status">{testing ? '正在运行' : view?.test ? { passed: '通过', failed: '失败', blocked: '需处理', unknown: '待核验' }[view.test.state] : '尚未运行'}</span></div>
+      <div className="task-workspace-heading"><h3>基线测试</h3><span role="status">{testing ? '正在运行' : view?.test ? { passed: '通过', failed: '失败', blocked: '需处理', unknown: '待核验' }[view.test.state] : error ? '待核验' : '尚未运行'}</span></div>
+      {testing && <button className="subtle-btn" type="button" onClick={() => request.current?.abort('operator-cancelled')}>取消测试</button>}
       {view?.dependency && <div aria-label="Python 测试依赖">
         <p>pytz {view.dependency.version} · {view.dependency.license} · {{ ready: '已准备', blocked: '需处理', unknown: '待核验' }[view.dependency.state]}</p>
         <p><a href={view.dependency.source} target="_blank" rel="noreferrer">批准来源</a> · {view.dependency.size.toLocaleString()} B</p>
@@ -162,6 +163,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
       {view?.test ? <>
         <p><code>{view.test.command.join(' ')}</code></p>
         <p>退出码：{view.test.exitCode ?? '待核验'}{view.test.truncated ? ' · 输出已截断' : ' · 输出未截断'}</p>
+        {(view.test.stopped || view.test.state === 'unknown') && <p>{view.test.stopped ? '隔离任务停止已确认。' : '隔离任务停止尚未确认，请先核对。'}</p>}
         {view.test.reason && <p className="workspace-description">{reasons[view.test.reason] || view.test.reason}</p>}
         <pre className="task-baseline-output" tabIndex={0} aria-label="测试输出">{view.test.output || '暂无可确认的输出。'}</pre>
       </> : <>

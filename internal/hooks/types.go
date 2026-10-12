@@ -13,9 +13,13 @@ const (
 
 type Context struct {
 	SessionID string
-	ToolName  string
-	Payload   map[string]any
-	Metadata  map[string]string
+	// Go persists this invocation before any Hook or tool runtime is dispatched.
+	OperationID           string
+	DependencyOperationID string
+	RecordRuntime         func(Phase, Result) error
+	ToolName              string
+	Payload               map[string]any
+	Metadata              map[string]string
 }
 
 type Result struct {
@@ -28,6 +32,8 @@ type CommandHook struct {
 	Phase   Phase
 	Matcher string
 	Command string
+	Program string
+	Args    []string
 	WorkDir string
 	Timeout int
 }

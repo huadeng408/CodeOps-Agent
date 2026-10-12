@@ -106,6 +106,8 @@ type Result struct {
 	ExitCode  int
 	Truncated bool
 	RuntimeID string
+	// Stopped confirms exact owned resource cleanup independently of the command outcome.
+	Stopped bool
 }
 
 // Runner is implemented by sandbox backends. The Harness only accepts a
@@ -296,7 +298,7 @@ func buildDockerRunArgs(config Config, workspaceSource, containerDir string, req
 		args = append(args, program)
 		args = append(args, request.Args...)
 	} else {
-		args = append(args, "sh", "-lc", command)
+		args = append(args, "sh", "-c", command)
 	}
 	return args, nil
 }

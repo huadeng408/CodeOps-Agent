@@ -85,6 +85,11 @@ API key 与 execd token 只通过进程环境传入：
 截断标记。重复请求和重开读取同一 Ledger 结果；保留未知 intent，需核验后处理。
 测试不调用模型，仍使用既有持久任务槽，释放任务槽不会重置 token 批次。
 
+运行时可点击“取消测试”，随后“重新检查工作区”读取 Go 保存的终态。
+“停止已确认”只表示精确隔离资源已终止；中断、部分输出和未知执行仍为待核验，
+不显示成功或伪造退出码。清理使用独立的有界 context；停止未确认时保留身份与任务槽。
+重开、重启和重复请求读取同一 Ledger intent，不重新执行未知测试。
+
 Python 的 Go 准备阶段只接受已批准的 [pytz 2026.5 wheel](https://files.pythonhosted.org/packages/4f/ef/c66110d46fb800dda0bf33164182dfadabe26a90e4476844d502a23dca8e/pytz-2026.5-py2.py3-none-any.whl)：
 MIT、506,342 字节，SHA-256
 `e658af3757f9e26a9d25dd2aff38335acd92bc9104f890a894b2c1ba28311b03`。
@@ -111,6 +116,16 @@ scratch。egress sidecar 采用 dns+nft 与 IPv4／IPv6 全拒绝策略。Go 核
 文件标为 `public_test_fixture`，字节变化或主机准入缺失会拒绝准备／核验。
 实际文件内容只进入受控副本，Ledger 保存摘要。
 
+CLI 的 Shell、Git 与可执行 Hook 共用配置中所选 Runner。Python CLI 使用 Go 已保存的
+批准 dependency operation；缺少前提明确拒绝。Hook 可用 `program` 与 `args` 保持
+字面参数，和旧 `command` 互斥；插入的模板值不递归解释。Go 在每阶段副作用前保存
+invocation，阶段结束保存 runtime 身份及停止状态，再进入下一阶段；unknown 不执行
+后置 Hook。fork／rewind 保留调用事实和有效消息配对，不能借历史切换重放副作用。
+
+当前批准 Python 任务镜像没有 Git，结构化 Git 在创建前拒绝。Go 隔离 worktree 的
+Windows Git 管理路径可能不可访问，保留实际错误，不扩大挂载。OpenSandbox 的后台
+job／PTY 等未支持接口明确拒绝；已有 Docker／WSL 路由继续使用隔离执行。
+
 ## 恢复与验收
 
 停用此入口时移除本轮启用配置，保留 Ledger、Task Workspace 和所有失败证据。
@@ -120,3 +135,7 @@ scratch。egress sidecar 采用 dns+nft 与 IPv4／IPv6 全拒绝策略。Go 核
 每轮验收冻结源码、配置、镜像和任务输入，检查真实浏览器结果、原仓库／index／
 准备副本、精确资源终止，以及真实后端的结束根／子 Trace。完整分母包含失败、
 部分结果与跳过；本基线证据按范围记录，完整发布遵循 `release-gate.md`。
+
+取消、故障／重开及 CLI 的完整范围见 [#23 证据](evidence/opensandbox-lifecycle-2026-10-12.md)。
+对账必须确认原身份、明确结果与全部未停止的阶段资源；空结果、替代 ID 或只核对一个
+成员不能清除整个 invocation 的 unknown。历史 raw events 与原收据保持不变。

@@ -43,7 +43,7 @@ func TestBuildDockerCommandEnforcesIsolationForLinux(t *testing.T) {
 		"type=bind",
 		"dst=/workspace",
 		"readonly",
-		"code-agent/sandbox:test sh -lc go test ./...",
+		"code-agent/sandbox:test sh -c go test ./...",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("isolated command missing %q: %s", want, joined)
@@ -194,6 +194,9 @@ func TestDockerRunnerIntegrationCancellationStopsContainer(t *testing.T) {
 	result, err := runner.Run(ctx, Request{Workspace: workspace, Program: "sh", Args: []string{"-c", "echo READY; sleep 120", marker}})
 	if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 124 || !strings.Contains(result.Output, "READY") {
 		t.Errorf("cancellation: exit=%d output=%q err=%v", result.ExitCode, result.Output, err)
+	}
+	if !result.Stopped || len(result.RuntimeID) != 64 {
+		t.Errorf("confirmed Docker cleanup lost its exact identity: %+v", result)
 	}
 	output, inspectErr := exec.Command("docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.Command}} {{.Names}}").CombinedOutput()
 	if inspectErr != nil || strings.Contains(string(output), marker) {

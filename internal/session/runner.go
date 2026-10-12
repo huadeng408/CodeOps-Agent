@@ -276,16 +276,20 @@ type toolCallPayload struct {
 	ToolCallID    string `json:"tool_call_id"`
 	ToolName      string `json:"tool_name"`
 	ArgumentsJSON string `json:"arguments_json"`
+	OperationID   string `json:"operation_id,omitempty"`
 }
 
 type toolResultPayload struct {
-	RunID      string `json:"run_id"`
-	ToolCallID string `json:"tool_call_id"`
-	ToolName   string `json:"tool_name"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
-	ExitCode   int32  `json:"exit_code"`
-	Truncated  bool   `json:"truncated,omitempty"`
+	RunID          string `json:"run_id"`
+	ToolCallID     string `json:"tool_call_id"`
+	ToolName       string `json:"tool_name"`
+	Output         string `json:"output,omitempty"`
+	Error          string `json:"error,omitempty"`
+	ExitCode       int32  `json:"exit_code"`
+	Truncated      bool   `json:"truncated,omitempty"`
+	RuntimeID      string `json:"runtime_id,omitempty"`
+	Stopped        bool   `json:"stopped,omitempty"`
+	OutcomeUnknown bool   `json:"outcome_unknown,omitempty"`
 }
 
 // commitPayload binds one side-effect attempt to the append-only Ledger.
@@ -1682,6 +1686,8 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid tool parameters", ExitCode: 1}, true
 	}
 	call.ParametersJSON = canonicalArguments
+	operation := sha256.Sum256([]byte("tool-operation/v1\x00" + key.sessionID + "\x00" + key.runID + "\x00" + call.ID))
+	call.OperationID = hex.EncodeToString(operation[:])
 	events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool ledger unavailable", ExitCode: 1}, true
@@ -1791,7 +1797,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON})
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
 	}
-	callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON}
+	callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON, OperationID: call.OperationID}
 	if state.prepared == nil {
 		if err := r.appendLeasedSurface(ctx, key, lease, "tool/call", callPayload); err != nil {
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
@@ -2067,11 +2073,11 @@ func pendingCommits(events []Event, runID string) []commitPayload {
 }
 
 func toolResultPayloadFrom(result orchestrator.ToolResult, runID string) toolResultPayload {
-	return toolResultPayload{RunID: runID, ToolCallID: result.ToolCallID, ToolName: result.ToolName, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode, Truncated: result.Truncated}
+	return toolResultPayload{RunID: runID, ToolCallID: result.ToolCallID, ToolName: result.ToolName, Output: result.Output, Error: result.Error, ExitCode: result.ExitCode, Truncated: result.Truncated, RuntimeID: result.RuntimeID, Stopped: result.Stopped, OutcomeUnknown: result.OutcomeUnknown}
 }
 
 func toolResultFromPayload(payload toolResultPayload) orchestrator.ToolResult {
-	return orchestrator.ToolResult{ToolCallID: payload.ToolCallID, ToolName: payload.ToolName, Output: payload.Output, Error: payload.Error, ExitCode: payload.ExitCode, Truncated: payload.Truncated}
+	return orchestrator.ToolResult{ToolCallID: payload.ToolCallID, ToolName: payload.ToolName, Output: payload.Output, Error: payload.Error, ExitCode: payload.ExitCode, Truncated: payload.Truncated, RuntimeID: payload.RuntimeID, Stopped: payload.Stopped, OutcomeUnknown: payload.OutcomeUnknown}
 }
 
 func toolResultSucceeded(payload toolResultPayload) bool {

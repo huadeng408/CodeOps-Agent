@@ -52,7 +52,9 @@ var ErrConversationFailed = errors.New("orchestrator conversation failed")
 type ActorIdentity = identity.Actor
 
 type ToolCall struct {
-	ID                 string
+	ID string
+	// OperationID is Harness-only identity bound to the persisted Go invocation.
+	OperationID        string
 	Name               string
 	ParametersJSON     string
 	RequiredPermission codeagentpb.PermissionLevel
@@ -64,14 +66,18 @@ type ToolCall struct {
 }
 
 type ToolResult struct {
-	ToolCallID    string
-	ToolName      string
-	Output        string
-	Error         string
-	ExitCode      int32
-	Truncated     bool
-	Spill         *SpillRef
-	ContentBlocks []ContentBlock
+	ToolCallID string
+	ToolName   string
+	Output     string
+	Error      string
+	ExitCode   int32
+	Truncated  bool
+	// Runtime lifecycle stays in Go's Ledger, not in model-controlled transport.
+	RuntimeID      string
+	Stopped        bool
+	OutcomeUnknown bool
+	Spill          *SpillRef
+	ContentBlocks  []ContentBlock
 	// Changes are Harness-local metadata used to produce content-free ledger
 	// receipts. They are not serialized back to the model transport.
 	Changes []CodeChange

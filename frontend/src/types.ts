@@ -53,6 +53,7 @@ export interface TaskWorkspace {
     exitCode?: number;
     output: string;
     truncated: boolean;
+    stopped?: boolean;
     reason?: string;
   };
 }

@@ -30,6 +30,7 @@ func TestHandleToolCallPromptsAndApprovesAskSessionTool(t *testing.T) {
 	app, out := newPermissionTestApp(root, "y\n")
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:                 "write-approved",
 		Name:               "Write",
 		RequiredPermission: 2,
 		ParametersJSON:     `{"path":"notes.txt","content":"approved"}`,
@@ -58,6 +59,7 @@ func TestHandleToolCallPersistsApprovalAuditRecord(t *testing.T) {
 	app, _ := newPermissionTestApp(root, "y\n")
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:                 "write-audit",
 		Name:               "Write",
 		RequiredPermission: 2,
 		ParametersJSON:     `{"path":"docs/audit.txt","content":"recorded"}`,
@@ -216,6 +218,7 @@ func TestHandleToolCallDeniesWhenUserDeclines(t *testing.T) {
 	app, _ := newPermissionTestApp(root, "n\n")
 
 	result := app.handleToolCall(context.Background(), orchestrator.ToolCall{
+		ID:                 "write-declined",
 		Name:               "Write",
 		RequiredPermission: 2,
 		ParametersJSON:     `{"path":"notes.txt","content":"denied"}`,

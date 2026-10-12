@@ -151,7 +151,7 @@ func runContainer(ctx context.Context, binary string, args []string, runIndex in
 	}
 	ctx, span := otel.Tracer("code-agent/sandbox").Start(ctx, "sandbox.run")
 	defer func() {
-		span.SetAttributes(attribute.Int("sandbox.exit_code", result.ExitCode), attribute.Bool("sandbox.output_truncated", result.Truncated), attribute.Bool("sandbox.outcome_unknown", errors.Is(err, ErrSandboxOutcomeUnknown)))
+		span.SetAttributes(attribute.Int("sandbox.exit_code", result.ExitCode), attribute.Bool("sandbox.output_truncated", result.Truncated), attribute.Bool("sandbox.outcome_unknown", errors.Is(err, ErrSandboxOutcomeUnknown)), attribute.Bool("sandbox.stopped", result.Stopped))
 		if err != nil {
 			span.SetStatus(codes.Error, "")
 		}
@@ -164,6 +164,12 @@ func runContainer(ctx context.Context, binary string, args []string, runIndex in
 	if err != nil {
 		return Result{ExitCode: 126}, err
 	}
+	defer func() {
+		result.RuntimeID = p.containerID
+		p.mu.Lock()
+		result.Stopped = p.removed
+		p.mu.Unlock()
+	}()
 	buffer := &boundedBuffer{}
 	p.cmd.Stdout, p.cmd.Stderr = buffer, buffer
 	if err := p.start(ctx); err != nil {

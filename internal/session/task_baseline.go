@@ -41,6 +41,7 @@ type TaskBaselineView struct {
 	ExitCode    *int     `json:"exitCode,omitempty"`
 	Output      string   `json:"output"`
 	Truncated   bool     `json:"truncated"`
+	Stopped     bool     `json:"stopped,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
 }
 
@@ -183,7 +184,7 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 			request.Args = []string{"-c", script}
 		}
 		result, runErr := profile.Runner.Run(ctx, request)
-		payload.View.Output, payload.View.Truncated, payload.View.RuntimeID = tools.RedactSensitive(result.Output), result.Truncated, result.RuntimeID
+		payload.View.Output, payload.View.Truncated, payload.View.RuntimeID, payload.View.Stopped = tools.RedactSensitive(result.Output), result.Truncated, result.RuntimeID, result.Stopped
 		for _, key := range []string{"CODE_AGENT_OPENSANDBOX_API_KEY", "CODE_AGENT_OPENSANDBOX_EXECD_TOKEN", "JWT_SECRET"} {
 			if value := os.Getenv(key); value != "" {
 				payload.View.Output = strings.ReplaceAll(payload.View.Output, value, "[REDACTED]")
@@ -192,8 +193,9 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 		if len(payload.View.Output) > 1<<20 {
 			payload.View.Output, payload.View.Truncated = payload.View.Output[:1<<20], true
 		}
-		knownStopped = runErr == nil || errors.Is(runErr, sandbox.ErrSandboxUnavailable) && !errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown)
-		if knownStopped {
+		knownOutcome := runErr == nil || errors.Is(runErr, sandbox.ErrSandboxUnavailable) && !errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown)
+		knownStopped = result.Stopped || knownOutcome
+		if knownOutcome {
 			payload.View.ExitCode = &result.ExitCode
 			payload.View.State, payload.View.Reason = "passed", ""
 			if runErr != nil {
@@ -201,6 +203,8 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 			} else if result.ExitCode != 0 {
 				payload.View.State = "failed"
 			}
+		}
+		if knownStopped {
 			checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 			current, captureErr := t.manager.CaptureBaseline(checkCtx)
 			if captureErr != nil || current.Checksum != payload.BaselineChecksum || t.manager.VerifyTask(checkCtx, t.storage, prepared.Task) != nil || dependencyOperation != "" && sandbox.ValidatePytz(checkCtx, t.storage, dependencyOperation) != nil {
@@ -262,7 +266,7 @@ func taskBaseline(events []Event) (*taskBaselinePayload, error) {
 			return nil, ErrEventIntegrity
 		}
 		if event.Type == taskBaselineIntentEvent {
-			if result != nil || payload.IntentEventID != "" || payload.View.State != "unknown" || payload.View.ExitCode != nil {
+			if result != nil || payload.IntentEventID != "" || payload.View.State != "unknown" || payload.View.ExitCode != nil || payload.View.Stopped {
 				return nil, ErrEventIntegrity
 			}
 			result, intentID = &payload, event.EventID

@@ -26,7 +26,7 @@
 | 范围 | 仍需完成的验收 |
 | --- | --- |
 | #3 调用入场与预算 | 完整产品默认接入、任务槽生命周期、重试／未知用量对账和入口恢复；计量模块证据不代替这些行为 |
-| #6 执行环境与基线 | OpenSandbox 部署及 A 卡片的完整 Go／Python 基线已按 [#21](https://github.com/huadeng408/CodeOps-Agent/issues/21)、[#22](https://github.com/huadeng408/CodeOps-Agent/issues/22) 范围验证；继续 [#23 取消／重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23)。普通重启读回的基线证据不代替完整故障／取消契约 |
+| #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
 | 模型代码任务与提案 | 真实仓库问答、Go 修复／Python 功能、可审查提案、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
 | Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
@@ -48,6 +48,7 @@
 - OpenSandbox 本地构建镜像：[身份校验证据](evidence/opensandbox-image-pins-2026-10-12.md)。
 - OpenSandbox Go 产品基线：[实际部署、浏览器、故障／重开和 Trace 证据](evidence/opensandbox-product-2026-10-12.md)。
 - OpenSandbox Python 产品基线：[固定依赖准备、离线完整测试、保护／重开和 Trace 证据](evidence/opensandbox-python-2026-10-12.md)。
+- OpenSandbox 取消、故障恢复与 CLI：[范围证据、完整分母和不可变收据](evidence/opensandbox-lifecycle-2026-10-12.md)。
 - Agent 取消终态：[Go 竞态修复证据](evidence/agent-cancellation-2026-10-12.md)；完整 runtime 取消仍按对应票验收。
 - Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
 - 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。

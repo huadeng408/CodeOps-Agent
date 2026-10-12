@@ -3,21 +3,33 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"code-agent/internal/sandbox"
 )
 
 type Engine struct {
 	mu       sync.RWMutex
 	handlers map[Phase][]Handler
+	runner   sandbox.Runner
+	root     string
 }
 
 func NewEngine() *Engine {
 	return &Engine{handlers: map[Phase][]Handler{}}
+}
+
+// SetSandbox shares the Harness execution boundary with command Hooks.
+func (e *Engine) SetSandbox(runner sandbox.Runner, root string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.runner, e.root = runner, root
 }
 
 func (e *Engine) Register(phase Phase, handler Handler) {
@@ -33,15 +45,51 @@ func (e *Engine) RegisterCommandHook(hook CommandHook) {
 			return Result{}, nil
 		}
 		command := expandCommand(hook.Command, hookCtx)
-		if strings.TrimSpace(command) == "" {
+		if (strings.TrimSpace(command) != "" && hook.Program != "") || (hook.Program == "" && len(hook.Args) != 0) {
+			return Result{Cancel: true}, errors.New("hook requires exactly one command or program with literal arguments")
+		}
+		if strings.TrimSpace(command) == "" && hook.Program == "" {
 			return Result{}, nil
+		}
+		args := make([]string, len(hook.Args))
+		for index, value := range hook.Args {
+			args[index] = expandCommand(value, hookCtx)
 		}
 		if hook.Timeout > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, time.Duration(hook.Timeout)*time.Second)
 			defer cancel()
 		}
-		name, args := shellCommand(command)
+		e.mu.RLock()
+		runner, root := e.runner, e.root
+		e.mu.RUnlock()
+		if runner != nil {
+			workingDir := hook.WorkDir
+			if workingDir == "" {
+				workingDir = root
+			}
+			outcome, err := runner.Run(ctx, sandbox.Request{Workspace: root, WorkingDir: workingDir, OperationID: hookCtx.OperationID, DependencyOperationID: hookCtx.DependencyOperationID, Command: command, Program: hook.Program, Args: args})
+			result := Result{Message: strings.TrimSpace(outcome.Output), Values: map[string]any{
+				"output": strings.TrimSpace(outcome.Output), "exit_code": outcome.ExitCode,
+				"truncated": outcome.Truncated, "runtime_id": outcome.RuntimeID, "stopped": outcome.Stopped,
+				"outcome_unknown": errors.Is(err, sandbox.ErrSandboxOutcomeUnknown),
+			}}
+			if err == nil && outcome.ExitCode != 0 {
+				err = fmt.Errorf("exit status %d", outcome.ExitCode)
+			}
+			if err != nil {
+				result.Cancel = true
+				if result.Message == "" {
+					result.Message = err.Error()
+				}
+				return result, fmt.Errorf("hook command failed: %w", err)
+			}
+			return result, nil
+		}
+		name := hook.Program
+		if name == "" {
+			name, args = shellCommand(command)
+		}
 		cmd := exec.CommandContext(ctx, name, args...)
 		if hook.WorkDir != "" {
 			cmd.Dir = hook.WorkDir
@@ -73,6 +121,11 @@ func (e *Engine) Run(ctx context.Context, phase Phase, hook Context) ([]Result, 
 	for _, handler := range handlers {
 		result, err := handler(ctx, hook)
 		results = append(results, result)
+		if id, _ := result.Values["runtime_id"].(string); id != "" && hook.RecordRuntime != nil {
+			if persistErr := hook.RecordRuntime(phase, result); persistErr != nil {
+				return results, errors.Join(err, fmt.Errorf("%w: Hook runtime receipt was not persisted", sandbox.ErrSandboxOutcomeUnknown))
+			}
+		}
 		if err != nil {
 			return results, err
 		}
@@ -96,10 +149,11 @@ func expandCommand(command string, hook Context) string {
 	for key, value := range hook.Metadata {
 		replacements["${"+strings.ToUpper(key)+"}"] = value
 	}
+	pairs := make([]string, 0, len(replacements)*2)
 	for needle, value := range replacements {
-		command = strings.ReplaceAll(command, needle, value)
+		pairs = append(pairs, needle, value)
 	}
-	return command
+	return strings.NewReplacer(pairs...).Replace(command)
 }
 
 func shellCommand(command string) (string, []string) {
