@@ -60,6 +60,16 @@ func TestGatewayRefusesUnadmittedTaskBeforeReservationOrHTTP(t *testing.T) {
 	if err != nil || batch.ID != "" || batch.UsedTokens != 0 || batch.ReservedTokens != 0 {
 		t.Fatalf("runtime refusal created billing facts: %+v %v", batch, err)
 	}
+	legacy := session.NewSQLiteEventStore(ledger.Path)
+	defer legacy.Close()
+	if listed, err := legacy.List(ctx); err != nil || len(listed) != 0 {
+		t.Fatalf("a pre-batch model scope became a legacy conversation: %v", err)
+	}
+	runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), nil, nil, session.SessionRunnerOptions{})
+	defer runner.Close()
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatalf("a pre-batch model scope poisoned recovery: %v", err)
+	}
 }
 
 func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
@@ -310,8 +320,8 @@ func TestGatewayRefusesProviderHostedToolsBeforeReservation(t *testing.T) {
 	if status.Code(err) != codes.InvalidArgument || calls.Load() != 0 {
 		t.Fatal("provider-hosted side effects escaped Harness tools")
 	}
-	ids, err := ledger.SessionIDs(context.Background())
-	if err != nil || len(ids) != 0 {
+	batch, err := budget.Inspect(context.Background(), 7)
+	if err != nil || batch.ID != "" || batch.UsedTokens != 0 || batch.ReservedTokens != 0 {
 		t.Fatal("invalid payload reserved funds")
 	}
 }
@@ -461,6 +471,13 @@ func TestGatewayOperatorFinishesIdleTaskWithoutResettingAllowance(t *testing.T) 
 	if err := gateway.FinishTask(ctx, actor); err != nil {
 		t.Fatal(err)
 	}
+	_, delayedRelease, err := gateway.BindActor(actor, first.ID)
+	if delayedRelease != nil {
+		delayedRelease()
+	}
+	if !errors.Is(err, admission.ErrTaskClosed) {
+		t.Fatal("finished root issued a new model or tool capability")
+	}
 	before, err := budget.Inspect(ctx, 7)
 	if err != nil || before.UsedTokens != 11 || before.TaskID != "" {
 		t.Fatal("completion changed consumption")
@@ -485,5 +502,140 @@ func TestGatewayOperatorFinishesIdleTaskWithoutResettingAllowance(t *testing.T) 
 	after, err := budget.Inspect(ctx, 7)
 	if err != nil || after.ID != before.ID || after.UsedTokens != 22 {
 		t.Fatal("the second task reset or double-counted the batch")
+	}
+}
+
+func TestGatewayTaskFinishRequiresKnownToolStop(t *testing.T) {
+	for _, scenario := range []string{"missing result", "unknown stop", "confirmed stop"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "fixture", "finish", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor, err := identity.Default().BindSession(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{})
+			if _, err := ledger.Append(ctx, created.ID, 1, "tool/dispatched", map[string]any{"run_id": "interrupted", "tool_call_id": "shell", "tool_name": "Bash"}); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "missing result" {
+				if _, err := ledger.Append(ctx, created.ID, 2, "tool/result", map[string]any{"run_id": "interrupted", "tool_call_id": "shell", "tool_name": "Bash", "exit_code": 126, "runtime_id": "retained-runtime", "outcome_unknown": true, "stopped": scenario == "confirmed stop"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = gateway.FinishTask(ctx, actor)
+			if scenario == "confirmed stop" {
+				if err != nil {
+					t.Fatal("explicit task end refused a confirmed stopped execution")
+				}
+			} else if !errors.Is(err, session.ErrSessionStateConflict) {
+				t.Fatal("missing outcome or unconfirmed stop allowed task completion")
+			}
+			events, err := ledger.Events(ctx, created.ID)
+			if err != nil || len(events) != map[bool]int{true: 2, false: 3}[scenario == "missing result"] {
+				t.Fatal("task end rewrote the retained tool outcome")
+			}
+		})
+	}
+}
+
+func TestGatewayExplicitFinishClosesUnusedRootWithoutSpendingTokens(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "fixture", "unused", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := identity.Default().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := admission.NewBudget(ledger)
+	gateway := admission.NewGateway(budget, admission.ProviderConfig{})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	if err := gateway.FinishTask(ctx, actor); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := gateway.BindActor(actor, created.ID)
+	if release != nil {
+		release()
+	}
+	if !errors.Is(err, admission.ErrTaskClosed) {
+		t.Fatal("a successful explicit finish left an unused root open")
+	}
+	batch, err := budget.Inspect(ctx, 7)
+	if err != nil || batch.UsedTokens != 0 || batch.ReservedTokens != 0 || batch.TaskID != "" || batch.CostStatus != "unknown" {
+		t.Fatal("ending an unused task changed token consumption")
+	}
+}
+
+func TestGatewayFinishChecksPersistedCLIInvocations(t *testing.T) {
+	for _, scenario := range []string{"prepared", "dispatched", "unknown", "unconfirmed hook", "unconfirmed committed hook", "confirmed unknown", "committed"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			store := session.NewSQLiteEventStore(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			manager := session.NewManager(store)
+			defer manager.Close()
+			current := manager.NewSession(t.TempDir())
+			actor, err := identity.Default().BindSession(current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.SetActor(actor)
+			if _, err := manager.BeginInvocation("shell", "Bash", `{}`); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "prepared" {
+				if _, err := manager.MarkInvocationDispatched("shell"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "unconfirmed hook" || scenario == "unconfirmed committed hook" {
+				if err := manager.RecordInvocationRuntime("shell", "post_tool", "retained-hook", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario != "prepared" && scenario != "dispatched" {
+				if _, err := manager.CommitInvocation(session.InvocationResult{ID: "shell", Name: "Bash", RuntimeID: "retained-tool", Stopped: scenario != "unknown", OutcomeUnknown: scenario != "committed" && scenario != "unconfirmed committed hook"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ledger, err := store.Ledger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := ledger.Events(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{})
+			err = gateway.FinishTask(ctx, actor)
+			if scenario == "confirmed unknown" || scenario == "committed" {
+				if err != nil {
+					t.Fatalf("confirmed stopped CLI task refused explicit completion: %v", err)
+				}
+			} else if !errors.Is(err, session.ErrSessionStateConflict) {
+				t.Fatalf("unfinished CLI execution allowed task completion: %v", err)
+			}
+			after, err := ledger.Events(ctx, current.ID)
+			if err != nil || len(after) != len(before) || after[len(after)-1].Checksum != before[len(before)-1].Checksum {
+				t.Fatal("task completion rewrote retained CLI invocation facts")
+			}
+		})
 	}
 }

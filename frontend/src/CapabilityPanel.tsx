@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from './api';
-import type { RuntimeCapabilities } from './types';
+import { api, ApiError } from './api';
+import type { RuntimeCapabilities, Session } from './types';
 
 const labels = { identity: '本机身份', history: '会话历史', provider: '模型接入', sandbox: '执行环境', budget: 'token 批次', execution: '任务执行', rag: '知识检索', trace: '追踪记录' } as const;
 const reasons: Record<string, string> = {
@@ -22,14 +22,21 @@ const reasons: Record<string, string> = {
   'a model attempt is unresolved; wait or reconcile after restart': '有未结算调用；等待完成，重启后仍未结算则需对账。',
   'token batch is exhausted': '本批次 token 额度已耗尽，不能新增调用。',
   'token batch initializes on the first admitted call': '首次获准调用时创建持久批次，随后重启不会重置余额。',
+  'verification batch already has another task': '任务仍有活动调用，或批次正被其他任务占用；等待完成后重新核验。',
+  'verification usage requires reconciliation': '有未结算或未知用量，预留继续保留；对账后才能结束任务。',
+  'session state conflict': '任务仍在运行或工具尚未确认停止；等待完成或对账后再结束。',
 };
 
-export function CapabilityPanel({ capabilities, onChange }: {
+export function CapabilityPanel({ capabilities, onChange, session }: {
   capabilities: RuntimeCapabilities | null;
   onChange: (value: RuntimeCapabilities | null) => void;
+  session: Session | null;
 }) {
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
+  const [finishing, setFinishing] = useState(false);
+  const [finishedTask, setFinishedTask] = useState('');
+  const [finishError, setFinishError] = useState<{ taskId: string; message: string } | null>(null);
   const request = useRef<AbortController | null>(null);
   const refresh = useCallback(async () => {
     request.current?.abort();
@@ -57,6 +64,23 @@ export function CapabilityPanel({ capabilities, onChange }: {
     };
   }, [refresh]);
 
+  const taskId = capabilities?.budget?.tokens?.task_id;
+  const finishTask = async () => {
+    if (!taskId || taskId !== session?.id || finishing) return;
+    setFinishing(true);
+    setError('');
+    setFinishError(null);
+    try {
+      await api.finishTask(taskId);
+      setFinishedTask(taskId);
+      await refresh();
+    } catch (cause) {
+      setFinishError({ taskId, message: cause instanceof ApiError ? reasons[cause.message] || cause.message : '无法确认任务已结束，请检查连接后重新核验。' });
+    } finally {
+      setFinishing(false);
+    }
+  };
+
   return <section className="capability-panel" aria-label="运行能力">
     <h2>运行能力</h2>
     <p className="capability-intro">{checking ? '正在检查当前运行条件…' : '每项能力独立报告状态'}</p>
@@ -76,6 +100,11 @@ export function CapabilityPanel({ capabilities, onChange }: {
         <span className={`capability-state ${state}`}>{state.toUpperCase()}</span>
       </div>;
     })}
+    {taskId && taskId === session?.id && <button className="primary-btn capability-refresh" type="button" aria-label="结束代码任务"
+      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || (capabilities?.budget?.tokens?.reserved || 0) > 0 || session.run?.status === 'queued' || session.run?.status === 'running'}
+      onClick={() => void finishTask()}>{finishing ? '结束中…' : '结束代码任务'}</button>}
+    {finishedTask && finishedTask === session?.id && <p role="status">代码任务已结束。历史和累计额度保留；新建会话后仍按剩余额度准入。</p>}
+    {finishError && finishError.taskId === session?.id && <p className="capability-error" role="status">{finishError.message}</p>}
     {error && <p className="capability-error" role="status">{error}</p>}
     <button className="primary-btn capability-refresh" type="button" aria-label="重新检查能力" disabled={checking} onClick={() => void refresh()}>{checking ? '检查中…' : '重新检查能力'}</button>
   </section>;

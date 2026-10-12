@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"code-agent/internal/admission"
 	"code-agent/internal/handler"
 	"code-agent/internal/middleware"
 	"code-agent/internal/service"
@@ -68,6 +69,7 @@ type sessionHTTP struct {
 	worktree     *worktree.Manager
 	tasks        session.TaskWorkspaceModule
 	continuation *session.ContinuationSlot
+	modelGateway *admission.Gateway
 }
 
 func (routes sessionHTTP) register(r *gin.Engine, apiV1 *gin.RouterGroup, userService service.UserService, jwtManager *token.JWTManager) {
@@ -88,6 +90,7 @@ func (routes sessionHTTP) register(r *gin.Engine, apiV1 *gin.RouterGroup, userSe
 		sessions.POST("/:id/task-workspace/prepare", taskHandler.Prepare)
 		sessions.POST("/:id/task-workspace/test", taskHandler.RunBaseline)
 		sessions.POST("/:id/task-workspace/dependency", taskHandler.PrepareDependency)
+		sessions.POST("/:id/task/finish", handler.NewModelTaskHandler(routes.workbench, routes.modelGateway).Finish)
 		sessions.PUT("/:id/title", sessionHandler.UpdateTitle)
 		sessions.PUT("/:id/status", sessionHandler.UpdateStatus)
 		sessions.DELETE("/:id", sessionHandler.Delete)

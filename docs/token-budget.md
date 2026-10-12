@@ -94,8 +94,27 @@ live scopes, open runs and unfinished agents refuse completion. Ending a
 process leaves the task available for explicit resume, while `/budget` reports
 its Session ID. The cumulative allowance never resets on task completion.
 
+Authenticated `POST /api/v1/sessions/:id/task/finish` exposes the same Go
+completion boundary in the selected sidebar. The owner must match the root;
+foreign/deleted Sessions refuse access. Repeated completion, including after
+HTTP restart, preserves the batch and does not release a later task. Explicitly
+ending an unused root records a zero-token completion and prevents rebinding.
+An exhausted but fully settled task can still be ended; its allowance stays
+exhausted. Missing tool outcomes and unconfirmed tool/Hook stops in ordinary
+or legacy CLI histories refuse completion without rewriting those outcomes.
+
+Model scope bindings and releases are lifecycle facts in the same admission
+Ledger. A scope ID is a capability digest; the capability itself remains
+transient. Scope facts can precede the first admitted call without creating a
+token batch or reserving funds. Completion checks scopes in its sequence CAS,
+so another Harness process holding a binding still prevents completion.
+Normal Gateway shutdown stops handlers before releasing its bindings. A crash
+or failed release append retains the fence; explicit recovery of that fence
+remains part of #3 reconciliation and is not covered by the successful HTTP
+restart checks. [Scoped checks](evidence/model-task-finish-2026-10-12.md).
+
 Remaining: real-provider local-core acceptance and controlled process startup,
-task-slot completion across HTTP/product lifecycles, fully metered
+task-slot recovery across process faults and complete product lifecycles, fully metered
 retry/reconciliation, production CLI/HTTP model recovery and complete trace
 backend readback. Keep #3 open until those criteria have fresh evidence.
 

@@ -541,6 +541,58 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 				}
 			}
 		}
+		pending := map[string]bool{}
+		for _, event := range snapshot.Events {
+			switch event.Type {
+			case commitPendingEventType, toolDispatchedType:
+				var call toolCallPayload
+				if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" {
+					return ErrEventIntegrity
+				}
+				pending[invocationHistoryKey(call.RunID, call.ToolCallID)] = true
+			case "tool/result":
+				var result toolResultPayload
+				if json.Unmarshal(event.Payload, &result) != nil || result.RunID == "" || result.ToolCallID == "" {
+					return ErrEventIntegrity
+				}
+				if (result.OutcomeUnknown || result.RuntimeID != "") && !result.Stopped {
+					return ErrSessionStateConflict
+				}
+				delete(pending, invocationHistoryKey(result.RunID, result.ToolCallID))
+			case toolUnknownEventType:
+				return ErrSessionStateConflict
+			}
+		}
+		if len(pending) != 0 {
+			return ErrSessionStateConflict
+		}
+		for i := len(snapshot.Events) - 1; i >= 0; i-- {
+			if snapshot.Events[i].Type != sessionStateEventType {
+				continue
+			}
+			state, err := decodeSessionState(snapshot.Events[i].Payload)
+			if err != nil || state.ID != id || state.Actor.ScopeKey() != current.ScopeKey() {
+				return ErrEventIntegrity
+			}
+			for _, invocation := range state.Invocations {
+				switch invocation.Status {
+				case InvocationCommitted, InvocationUnknown:
+					if invocation.CompletedAt.IsZero() || ((invocation.OutcomeUnknown || invocation.RuntimeID != "") && !invocation.Stopped) {
+						return ErrSessionStateConflict
+					}
+				case InvocationPrepared, InvocationDispatched:
+					return ErrSessionStateConflict
+				default:
+					return ErrEventIntegrity
+				}
+				for _, runtime := range invocation.Runtimes {
+					if !runtime.Stopped {
+						return ErrSessionStateConflict
+					}
+				}
+			}
+			break
+		}
 		for _, event := range snapshot.Events {
 			if event.Type != "agent/task-linked" {
 				continue

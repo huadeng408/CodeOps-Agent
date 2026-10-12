@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| #3 调用入场与预算 | 本机 continuation／工作区预检的工程接入已有范围证据；仍需真实模型接入、任务槽生命周期、重试／未知用量对账和入口恢复；工程证据不代替完整产品验收 |
+| #3 调用入场与预算 | 本机 continuation／工作区预检及 HTTP 显式结束已有工程范围证据；仍需真实模型接入、故障占用恢复、重试／未知用量对账和入口恢复；工程证据不代替完整产品验收 |
 | #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
 | 模型代码任务与提案 | 真实仓库问答、Go 修复／Python 功能、可审查提案、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
@@ -42,6 +42,7 @@
 - 本机核心启动与历史：[范围证据](evidence/local-core-2026-10-09.md)。
 - Token 批次：[接口与缺口](token-budget.md)、[接入证据](evidence/token-gateway-2026-10-10.md)、[默认边界验证](evidence/model-default-admission-2026-10-12.md)。
 - 本机模型工作区准入：[范围证据](evidence/model-local-workspace-2026-10-12.md)。
+- 代码任务显式结束：[HTTP／CLI 结束边界与右侧入口证据](evidence/model-task-finish-2026-10-12.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

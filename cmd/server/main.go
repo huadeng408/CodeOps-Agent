@@ -551,7 +551,7 @@ func main() {
 			conversation.GET("", handler.NewConversationHandler(conversationService).GetConversations)
 		}
 
-		(sessionHTTP{workbench: workbench, hub: wsHub, tickets: wsTickets, worktree: workspaceManager, continuation: continuationSlot}).register(r, apiV1, userService, jwtManager)
+		(sessionHTTP{workbench: workbench, hub: wsHub, tickets: wsTickets, worktree: workspaceManager, continuation: continuationSlot, modelGateway: modelGateway}).register(r, apiV1, userService, jwtManager)
 		// Legacy /chat/:token and its token-in-URL ticket endpoint were removed.
 		// Session WebSocket tickets above are the only supported browser transport.
 
@@ -672,6 +672,7 @@ type CapabilityStatus struct {
 
 type TokenBatchStatus struct {
 	BatchID    string `json:"batch_id,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
 	Limit      int64  `json:"limit"`
 	Used       int64  `json:"used"`
 	Reserved   int64  `json:"reserved"`

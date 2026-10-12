@@ -42,6 +42,7 @@ type budgetFact struct {
 	OwnerID       uint   `json:"owner_id,omitempty"`
 	Limit         int64  `json:"limit_tokens,omitempty"`
 	TaskID        string `json:"task_id,omitempty"`
+	ScopeID       string `json:"scope_id,omitempty"`
 	CallID        string `json:"call_id,omitempty"`
 	Tokens        int64  `json:"tokens,omitempty"`
 	Purpose       string `json:"purpose,omitempty"`
@@ -67,6 +68,7 @@ type projection struct {
 	seq         int64
 	calls       map[string]call
 	closedTasks map[string]bool
+	scopes      map[string]budgetFact
 }
 
 func (state projection) outstanding() int {
@@ -88,6 +90,15 @@ func (state projection) unknownUsage() bool {
 	return false
 }
 
+func (state projection) taskHasScopes(owner uint, taskID string) bool {
+	for _, scope := range state.scopes {
+		if scope.OwnerID == owner && scope.TaskID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 // All processes in the verification batch must use the same canonical Ledger.
 const verificationLedgerID = session.VerificationAdmissionLedgerID
 
@@ -98,7 +109,7 @@ func validID(value string) bool {
 }
 
 func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) {
-	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}}
+	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
 	if owner == 0 || budget.ledger == nil {
 		return state, ErrInvalidAdmission
 	}
@@ -106,17 +117,31 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 	if err != nil {
 		return state, err
 	}
-	for index, event := range snapshot.Events {
+	for _, event := range snapshot.Events {
 		var fact budgetFact
 		if err := json.Unmarshal(event.Payload, &fact); err != nil {
 			return state, session.ErrEventIntegrity
 		}
 		switch event.Type {
 		case session.VerificationAdmissionCreatedEventType:
-			if index != 0 || fact.OwnerID == 0 || fact.Limit != VerificationTokenLimit {
+			if state.ID != "" || fact.OwnerID == 0 || fact.Limit != VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
 			}
 			state.ID = event.EventID
+		case session.VerificationAdmissionScopeBoundEventType:
+			if fact.OwnerID == 0 || !validID(fact.TaskID) || !validID(fact.ScopeID) || fact.CallID != "" || fact.Tokens != 0 || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] {
+				return state, session.ErrEventIntegrity
+			}
+			if _, exists := state.scopes[fact.ScopeID]; exists {
+				return state, session.ErrEventIntegrity
+			}
+			state.scopes[fact.ScopeID] = fact
+		case "admission/scope_released":
+			bound, exists := state.scopes[fact.ScopeID]
+			if !exists || bound.OwnerID != fact.OwnerID || bound.TaskID != fact.TaskID || fact.CallID != "" || fact.Tokens != 0 {
+				return state, session.ErrEventIntegrity
+			}
+			delete(state.scopes, fact.ScopeID)
 		case "admission/task_started":
 			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.TaskID) || state.TaskID != "" || state.unknownUsage() || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.CallID != "" || fact.Tokens != 0 {
 				return state, session.ErrEventIntegrity
@@ -153,7 +178,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			request.boundViolated = request.boundViolated || fact.BoundViolated || fact.Tokens > request.reserved
 			state.calls[fact.CallID] = request
 		case "admission/task_finished":
-			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || state.outstanding() != 0 {
+			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || state.outstanding() != 0 || state.taskHasScopes(fact.OwnerID, fact.TaskID) {
 				return state, session.ErrEventIntegrity
 			}
 			state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
@@ -173,7 +198,7 @@ func (budget *Budget) Open(ctx context.Context, owner uint) (Batch, error) {
 		if err != nil || state.ID != "" {
 			return state.Batch, err
 		}
-		event, err := budget.ledger.Append(ctx, verificationLedgerID, 0, session.VerificationAdmissionCreatedEventType, budgetFact{OwnerID: owner, Limit: VerificationTokenLimit})
+		event, err := budget.ledger.Append(ctx, verificationLedgerID, state.seq, session.VerificationAdmissionCreatedEventType, budgetFact{OwnerID: owner, Limit: VerificationTokenLimit})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}
@@ -190,6 +215,41 @@ func (budget *Budget) Open(ctx context.Context, owner uint) (Batch, error) {
 func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
 	state, err := budget.read(ctx, owner)
 	return state.Batch, err
+}
+
+// Scope facts coordinate idle checks across processes without creating a token batch.
+func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scopeID, eventType string) error {
+	if owner == 0 || !validID(taskID) || !validID(scopeID) || (eventType != session.VerificationAdmissionScopeBoundEventType && eventType != "admission/scope_released") {
+		return ErrInvalidAdmission
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		state, err := budget.read(ctx, owner)
+		if err != nil {
+			return err
+		}
+		bound, exists := state.scopes[scopeID]
+		if eventType == session.VerificationAdmissionScopeBoundEventType {
+			if state.closedTasks[taskKey(owner, taskID)] {
+				return ErrTaskClosed
+			}
+			if exists {
+				return ErrInvalidAdmission
+			}
+		} else {
+			if !exists {
+				return nil
+			}
+			if bound.OwnerID != owner || bound.TaskID != taskID {
+				return ErrInvalidAdmission
+			}
+		}
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, eventType, budgetFact{OwnerID: owner, TaskID: taskID, ScopeID: scopeID})
+		if errors.Is(err, session.ErrSequenceConflict) {
+			continue
+		}
+		return err
+	}
+	return session.ErrSequenceConflict
 }
 
 // AcquireTask claims the same durable slot for work that has not called a
@@ -368,6 +428,9 @@ func (budget *Budget) FinishTask(ctx context.Context, owner uint, taskID string)
 		}
 		if state.outstanding() != 0 {
 			return state.Batch, ErrUsageUnknown
+		}
+		if state.taskHasScopes(owner, taskID) {
+			return state.Batch, ErrTaskBusy
 		}
 		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_finished", budgetFact{OwnerID: owner, TaskID: taskID})
 		if errors.Is(err, session.ErrSequenceConflict) {

@@ -166,7 +166,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 		}
 		return "disabled"
 	}, supervisor.Status))
-	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: continuation}).register(router, api, users, jwtManager)
+	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: continuation, modelGateway: gateway}).register(router, api, users, jwtManager)
 	api.GET("/capabilities", middleware.AuthMiddleware(jwtManager, users), func(c *gin.Context) {
 		capabilities := map[string]CapabilityStatus{
 			"identity":  {State: "ready", Reason: "local persistent authentication"},
@@ -218,6 +218,11 @@ func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog,
 	budget := CapabilityStatus{State: "ready", Reason: "persistent token admission; price unknown", Tokens: &TokenBatchStatus{
 		BatchID: batch.ID, Limit: batch.LimitTokens, Used: batch.UsedTokens, Reserved: batch.ReservedTokens, CostStatus: batch.CostStatus,
 	}}
+	if batch.TaskID != "" {
+		if _, err := session.NewWorkbench(ledger, nil).Get(ctx, owner, batch.TaskID); err == nil {
+			budget.Tokens.TaskID = batch.TaskID
+		}
+	}
 	switch {
 	case batch.UnknownUsage:
 		budget.State, budget.Reason = "blocked", "token usage is unknown; reconcile retained reservations"

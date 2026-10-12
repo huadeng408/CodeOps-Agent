@@ -4,7 +4,9 @@ package session
 // module. Conversation readers must leave its projection to that module.
 const VerificationAdmissionLedgerID = "admission:verification:v1"
 const VerificationAdmissionCreatedEventType = "admission/batch_created"
+const VerificationAdmissionScopeBoundEventType = "admission/scope_bound"
 
 func isVerificationAdmissionStream(events []Event) bool {
-	return len(events) > 0 && events[0].SessionID == VerificationAdmissionLedgerID && events[0].Type == VerificationAdmissionCreatedEventType
+	return len(events) > 0 && events[0].SessionID == VerificationAdmissionLedgerID &&
+		(events[0].Type == VerificationAdmissionCreatedEventType || events[0].Type == VerificationAdmissionScopeBoundEventType)
 }

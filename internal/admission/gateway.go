@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +37,7 @@ type ProviderConfig struct {
 type modelScope struct {
 	owner  uint
 	taskID string
+	id     string
 }
 
 // Gateway owns upstream transport and accounting; Python supplies the
@@ -86,7 +88,8 @@ func (gateway *Gateway) Start() error {
 
 func (gateway *Gateway) Close() {
 	gateway.mu.Lock()
-	clear(gateway.scopes)
+	scopes := gateway.scopes
+	gateway.scopes = make(map[[32]byte]modelScope)
 	server, listener := gateway.server, gateway.listener
 	// Stop outside the mutex: a canceled handler may still need its scope.
 	gateway.address = ""
@@ -96,6 +99,18 @@ func (gateway *Gateway) Close() {
 	}
 	if listener != nil {
 		_ = listener.Close()
+	}
+	for _, scope := range scopes {
+		gateway.releaseScope(scope)
+	}
+}
+
+func (gateway *Gateway) releaseScope(scope modelScope) {
+	if gateway.budget != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// A failed append retains the cross-process fence for explicit recovery.
+		_ = gateway.budget.recordScope(ctx, scope.owner, scope.taskID, scope.id, "admission/scope_released")
 	}
 }
 
@@ -108,13 +123,29 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 		return nil, nil, err
 	}
 	digest := sha256.Sum256(capability)
+	scope := modelScope{owner: owner, taskID: taskID, id: hex.EncodeToString(digest[:])}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	if gateway.address == "" {
 		return nil, nil, errors.New("model gateway unavailable")
 	}
-	gateway.scopes[digest] = modelScope{owner: owner, taskID: taskID}
-	release := func() { gateway.mu.Lock(); delete(gateway.scopes, digest); gateway.mu.Unlock() }
+	if gateway.budget != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := gateway.budget.recordScope(ctx, owner, taskID, scope.id, session.VerificationAdmissionScopeBoundEventType)
+		cancel()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	gateway.scopes[digest] = scope
+	release := func() {
+		gateway.mu.Lock()
+		defer gateway.mu.Unlock()
+		if _, exists := gateway.scopes[digest]; exists {
+			delete(gateway.scopes, digest)
+			gateway.releaseScope(scope)
+		}
+	}
 	return &pb.ModelGatewayBinding{SchemaVersion: 1, Address: gateway.address, Capability: capability,
 		Protocol: gateway.provider.Protocol, Model: gateway.provider.Model, OutputLimit: gateway.provider.OutputLimit}, release, nil
 }
@@ -157,19 +188,30 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 	if root != actor.SessionID {
 		return ErrInvalidAdmission
 	}
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
 	if err := session.ModelTaskIdle(ctx, gateway.budget.ledger, actor); err != nil {
 		return err
 	}
-	gateway.mu.Lock()
-	defer gateway.mu.Unlock()
 	for _, scope := range gateway.scopes {
 		if scope.taskID == root {
 			return ErrTaskBusy
 		}
 	}
-	batch, err := gateway.budget.Inspect(ctx, actorOwner(actor))
-	if err != nil || batch.TaskID == "" {
+	state, err := gateway.budget.read(ctx, actorOwner(actor))
+	if err != nil {
 		return err
+	}
+	if state.closedTasks[taskKey(actorOwner(actor), root)] {
+		return nil
+	}
+	if state.taskHasScopes(actorOwner(actor), root) {
+		return ErrTaskBusy
+	}
+	if state.TaskID == "" {
+		if _, err := gateway.budget.AcquireTask(ctx, actorOwner(actor), root); err != nil {
+			return err
+		}
 	}
 	_, err = gateway.budget.FinishTask(ctx, actorOwner(actor), root)
 	return err

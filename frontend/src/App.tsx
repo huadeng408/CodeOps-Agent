@@ -674,7 +674,7 @@ function App() {
         </div>
         <div className="task-list">
           {selectedSession && <TaskWorkspacePanel key={selectedSession.id} sessionId={selectedSession.id} onChanged={refreshSelected} />}
-          <CapabilityPanel capabilities={capabilities} onChange={setCapabilities} />
+          <CapabilityPanel capabilities={capabilities} onChange={setCapabilities} session={selectedSession} />
           {selectedSession ? <SessionStatus session={selectedSession} onContinue={() => void handleContinueSession()} busy={busy} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} executionCapability={capabilities?.execution} /> : <div className="empty-panel">未选择</div>}
         </div>
         {selectedSession && <CheckpointPanel session={selectedSession} refreshKey={refreshKey} onChanged={refreshSelected} continuationHealth={continuationHealth} continuationHealthKnown={continuationHealthKnown} onRunChanged={(run) => {

@@ -68,6 +68,10 @@ class ApiClient {
     return result.data;
   }
 
+  async finishTask(sessionId: string): Promise<void> {
+    await this.request('POST', `/sessions/${encodeURIComponent(sessionId)}/task/finish`, { body: {} });
+  }
+
   async logout(): Promise<void> {
     await this.request('POST', '/users/logout', { body: {} });
   }
