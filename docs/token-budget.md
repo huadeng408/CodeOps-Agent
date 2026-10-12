@@ -109,12 +109,25 @@ transient. Scope facts can precede the first admitted call without creating a
 token batch or reserving funds. Completion checks scopes in its sequence CAS,
 so another Harness process holding a binding still prevents completion.
 Normal Gateway shutdown stops handlers before releasing its bindings. A crash
-or failed release append retains the fence; explicit recovery of that fence
-remains part of #3 reconciliation and is not covered by the successful HTTP
-restart checks. [Scoped checks](evidence/model-task-finish-2026-10-12.md).
+or failed release append retains the fence. New binding facts also record a
+hashed local host identity, platform, PID and canonical OS creation identity.
+The existing explicit completion action can recover a retained scope only
+after Go confirms its exact original holder stopped. Recovery appends the
+original scope identities through the same Ledger CAS; a conflict requires
+fresh proof. It never kills a process or changes token accounting.
+
+An alive holder, legacy fact without process metadata, different host or
+unavailable OS proof continues to refuse completion. Linux additionally
+requires a confirmed proc PID view and matching PID/user namespace identity;
+unsupported platforms refuse new bindings. A failed release append while its
+holder is still alive remains fenced. Outstanding or unknown model usage is
+not reconciled by holder exit and keeps its complete reservation.
+[Completion checks](evidence/model-task-finish-2026-10-12.md) and
+[confirmed holder recovery checks](evidence/model-scope-recovery-2026-10-12.md)
+describe their separate scopes.
 
 Remaining: real-provider local-core acceptance and controlled process startup,
-task-slot recovery across process faults and complete product lifecycles, fully metered
+complete task-slot recovery across process faults and product lifecycles, fully metered
 retry/reconciliation, production CLI/HTTP model recovery and complete trace
 backend readback. Keep #3 open until those criteria have fresh evidence.
 

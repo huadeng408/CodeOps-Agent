@@ -39,18 +39,20 @@ type Budget struct{ ledger session.EventLog }
 func NewBudget(ledger session.EventLog) *Budget { return &Budget{ledger: ledger} }
 
 type budgetFact struct {
-	OwnerID       uint   `json:"owner_id,omitempty"`
-	Limit         int64  `json:"limit_tokens,omitempty"`
-	TaskID        string `json:"task_id,omitempty"`
-	ScopeID       string `json:"scope_id,omitempty"`
-	CallID        string `json:"call_id,omitempty"`
-	Tokens        int64  `json:"tokens,omitempty"`
-	Purpose       string `json:"purpose,omitempty"`
-	InputTokens   int64  `json:"input_tokens,omitempty"`
-	OutputTokens  int64  `json:"output_tokens,omitempty"`
-	CachedTokens  int64  `json:"cached_tokens,omitempty"`
-	CostStatus    string `json:"cost_status,omitempty"`
-	BoundViolated bool   `json:"bound_violated,omitempty"`
+	OwnerID         uint             `json:"owner_id,omitempty"`
+	Limit           int64            `json:"limit_tokens,omitempty"`
+	TaskID          string           `json:"task_id,omitempty"`
+	ScopeID         string           `json:"scope_id,omitempty"`
+	Process         *scopeProcess    `json:"process,omitempty"`
+	RecoveredScopes []recoveredScope `json:"recovered_scopes,omitempty"`
+	CallID          string           `json:"call_id,omitempty"`
+	Tokens          int64            `json:"tokens,omitempty"`
+	Purpose         string           `json:"purpose,omitempty"`
+	InputTokens     int64            `json:"input_tokens,omitempty"`
+	OutputTokens    int64            `json:"output_tokens,omitempty"`
+	CachedTokens    int64            `json:"cached_tokens,omitempty"`
+	CostStatus      string           `json:"cost_status,omitempty"`
+	BoundViolated   bool             `json:"bound_violated,omitempty"`
 }
 
 type call struct {
@@ -135,7 +137,21 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if _, exists := state.scopes[fact.ScopeID]; exists {
 				return state, session.ErrEventIntegrity
 			}
+			if fact.Process != nil && !fact.Process.valid() {
+				return state, session.ErrEventIntegrity
+			}
 			state.scopes[fact.ScopeID] = fact
+		case "admission/scopes_recovered":
+			if fact.OwnerID == 0 || !validID(fact.TaskID) || len(fact.RecoveredScopes) == 0 || state.outstanding() != 0 || fact.ScopeID != "" || fact.CallID != "" || fact.Tokens != 0 || fact.Process != nil {
+				return state, session.ErrEventIntegrity
+			}
+			for _, recovered := range fact.RecoveredScopes {
+				bound, exists := state.scopes[recovered.ID]
+				if !exists || bound.OwnerID != fact.OwnerID || bound.TaskID != fact.TaskID || bound.Process == nil || *bound.Process != recovered.Process {
+					return state, session.ErrEventIntegrity
+				}
+				delete(state.scopes, recovered.ID)
+			}
 		case "admission/scope_released":
 			bound, exists := state.scopes[fact.ScopeID]
 			if !exists || bound.OwnerID != fact.OwnerID || bound.TaskID != fact.TaskID || fact.CallID != "" || fact.Tokens != 0 {
@@ -222,6 +238,14 @@ func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scope
 	if owner == 0 || !validID(taskID) || !validID(scopeID) || (eventType != session.VerificationAdmissionScopeBoundEventType && eventType != "admission/scope_released") {
 		return ErrInvalidAdmission
 	}
+	fact := budgetFact{OwnerID: owner, TaskID: taskID, ScopeID: scopeID}
+	if eventType == session.VerificationAdmissionScopeBoundEventType {
+		process, err := currentScopeProcess()
+		if err != nil {
+			return err
+		}
+		fact.Process = process
+	}
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {
@@ -243,7 +267,38 @@ func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scope
 				return ErrInvalidAdmission
 			}
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, eventType, budgetFact{OwnerID: owner, TaskID: taskID, ScopeID: scopeID})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, eventType, fact)
+		if errors.Is(err, session.ErrSequenceConflict) {
+			continue
+		}
+		return err
+	}
+	return session.ErrSequenceConflict
+}
+
+func (budget *Budget) recoverScopes(ctx context.Context, owner uint, taskID string) error {
+	for attempt := 0; attempt < 8; attempt++ {
+		state, err := budget.read(ctx, owner)
+		if err != nil {
+			return err
+		}
+		if state.outstanding() != 0 {
+			return ErrUsageUnknown
+		}
+		fact := budgetFact{OwnerID: owner, TaskID: taskID}
+		for id, bound := range state.scopes {
+			if bound.OwnerID != owner || bound.TaskID != taskID {
+				continue
+			}
+			if bound.Process == nil || !bound.Process.confirmedStopped() {
+				return ErrTaskBusy
+			}
+			fact.RecoveredScopes = append(fact.RecoveredScopes, recoveredScope{ID: id, Process: *bound.Process})
+		}
+		if len(fact.RecoveredScopes) == 0 {
+			return nil
+		}
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/scopes_recovered", fact)
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}

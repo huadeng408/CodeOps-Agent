@@ -206,7 +206,9 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 		return nil
 	}
 	if state.taskHasScopes(actorOwner(actor), root) {
-		return ErrTaskBusy
+		if err := gateway.budget.recoverScopes(ctx, actorOwner(actor), root); err != nil {
+			return err
+		}
 	}
 	if state.TaskID == "" {
 		if _, err := gateway.budget.AcquireTask(ctx, actorOwner(actor), root); err != nil {
