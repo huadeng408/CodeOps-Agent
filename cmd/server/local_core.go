@@ -140,21 +140,19 @@ func runLocalCore(cfg serverconfig.Config) error {
 
 func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog, capabilities map[string]CapabilityStatus, owner uint) {
 	provider := admission.ProviderFromEnv()
-	reason := "model admission is not enabled"
+	reason := ""
 	state := "blocked"
-	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
-		switch {
-		case provider.APIKey == "":
-			reason = "model credentials are missing"
-		case provider.Model == "" || provider.BaseURL == "":
-			reason = "model and endpoint are missing"
-		case provider.InputLimit <= 0 || provider.OutputLimit <= 0:
-			reason = "model token bounds are missing"
-		case provider.Validate() != nil:
-			reason = "model profile is invalid"
-		default:
-			state, reason = "unknown", "model profile configured; live validity is not confirmed"
-		}
+	switch {
+	case provider.APIKey == "":
+		reason = "model credentials are missing"
+	case provider.Model == "" || provider.BaseURL == "":
+		reason = "model and endpoint are missing"
+	case provider.InputLimit <= 0 || provider.OutputLimit <= 0:
+		reason = "model token bounds are missing"
+	case provider.Validate() != nil:
+		reason = "model profile is invalid"
+	default:
+		state, reason = "unknown", "model profile configured; live validity is not confirmed"
 	}
 	capabilities["provider"] = CapabilityStatus{State: state, Reason: reason}
 	batch, err := admission.NewBudget(ledger).Inspect(ctx, owner)

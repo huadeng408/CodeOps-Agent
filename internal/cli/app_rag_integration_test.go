@@ -267,6 +267,9 @@ func cleanupIntegrationApp(t *testing.T, app *App) {
 	if app == nil {
 		return
 	}
+	if app.modelGateway != nil {
+		app.modelGateway.Close()
+	}
 	if app.session != nil {
 		if err := app.session.Close(); err != nil {
 			t.Logf("session shutdown: %v", err)

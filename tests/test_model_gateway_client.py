@@ -57,7 +57,8 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage():
 
 
 @pytest.mark.parametrize("gateway_error", ["", "token_usage_unknown", "missing_binding"])
-def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, gateway_error):
+@pytest.mark.parametrize("admission_mode", ["required", ""])
+def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, gateway_error, admission_mode):
     # Explicit blanks also prevent repository dotenv from activating a relay.
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
@@ -65,10 +66,10 @@ def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, g
     monkeypatch.setenv("MODEL_FAST", "")
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
-    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", "required")
+    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", admission_mode)
     # The controlled product must not read a credential file or construct a
     # direct provider client, even when a legacy configuration is inherited.
-    monkeypatch.setenv("CODE_AGENT_PROVIDER_CONFIG", str(tmp_path / "unreadable-provider.json"))
+    monkeypatch.setenv("CODE_AGENT_PROVIDER_CONFIG", str(tmp_path / "unreadable-provider.json") if admission_mode else "")
     app = OrchestratorServer(ServerConfig(project_root=str(tmp_path), working_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")))
     calls = []
     class Service(rpc.ModelGatewayServicer):
@@ -106,7 +107,8 @@ def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, g
         assert meta.cost_status == "unknown"
         assert len(calls) == 1 and calls[0].capability == b"a" * 32
         assert json.loads(calls[0].payload_json)["model"] == "fixture-model"
-        assert app.llm is None and app.fast_llm is None and not app.provider_clients
+        if admission_mode:
+            assert app.llm is None and app.fast_llm is None and not app.provider_clients
     finally:
         server.stop(0).wait()
         model_server.stop(0).wait()

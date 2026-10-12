@@ -69,7 +69,6 @@ type App struct {
 	orchestratorPM *orchestrator.ProcessManager
 	modelGateway   *admission.Gateway
 	tokenBudget    *admission.Budget
-	admissionErr   error
 	hooks          *hooks.Engine
 	executor       *tools.Executor
 	ragClient      *rag.Client
@@ -253,24 +252,18 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		instructions:   instructions,
 		telemetry:      telemetry,
 	}
-	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
-		ledger, err := sessionStore.Ledger()
-		if err == nil {
-			app.tokenBudget = admission.NewBudget(ledger)
-			app.modelGateway = admission.NewGateway(app.tokenBudget, admission.ProviderFromEnv())
-			app.status.CostUnknown = true
-			err = app.modelGateway.Start()
-		}
-		app.admissionErr = err
-		if err == nil {
-			orchestratorManager.SetModelScopeFactory(app.modelGateway.BindActor)
-		}
-	}
+	app.status.CostUnknown = true
 	app.memory = memory.NewLazyLedgerCLI(func() (*memory.LedgerMemory, error) {
 		ledger, err := sessionStore.Ledger()
 		if err != nil {
 			return nil, err
 		}
+		app.tokenBudget = admission.NewBudget(ledger)
+		app.modelGateway = admission.NewGateway(app.tokenBudget, admission.ProviderFromEnv())
+		if err := app.modelGateway.Start(); err != nil {
+			return nil, errors.New("model admission initialization unavailable")
+		}
+		orchestratorManager.SetModelScopeFactory(app.modelGateway.BindActor)
 		app.ledgerMemory = memory.NewLedgerMemory(ledger, func(ctx context.Context, request *codeagentpb.MemoryReflectionRequest) (*codeagentpb.MemoryReflectionResponse, error) {
 			return app.orchestrator.ReflectMemory(ctx, request)
 		})
@@ -320,30 +313,22 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 
 func (a *App) Run(ctx context.Context) error {
 	defer func() {
-		if a.modelGateway != nil {
-			a.modelGateway.Close()
-		}
 		if a.agentRunner != nil {
 			_ = a.agentRunner.Close()
 		}
 		if a.agentTools != nil {
 			_ = a.agentTools.Close()
 		}
+		if a.modelGateway != nil {
+			a.modelGateway.Close()
+		}
+		_ = a.session.Close()
 	}()
-	if a.admissionErr != nil {
-		return errors.New("model admission initialization unavailable")
-	}
-	defer func() { _ = a.session.Close() }()
 	defer func() {
 		if a.executor != nil {
 			_ = a.executor.Close()
 		}
 	}()
-	if a.memory != nil {
-		if err := a.memory.Err(); err != nil {
-			return fmt.Errorf("memory initialization failed: %w", err)
-		}
-	}
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	if a.orchestratorPM != nil {
@@ -374,6 +359,11 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("bind initial session actor: %w", err)
 	}
 	a.session.SetMode("chat")
+	if a.memory != nil {
+		if err := a.memory.Err(); err != nil {
+			return fmt.Errorf("memory initialization failed: %w", err)
+		}
+	}
 	a.renderBootstrap()
 
 	// Wire up streaming text rendering so each orchestrator text delta
@@ -1994,7 +1984,7 @@ func (a *App) budgetLines() []string {
 		if err != nil {
 			return []string{"token batch unavailable; restore the Ledger before calling a model", "cost: unknown"}
 		}
-		return []string{fmt.Sprintf("batch: %s | tokens: %d used / %d reserved / %d limit", batch.ID, batch.UsedTokens, batch.ReservedTokens, batch.LimitTokens),
+		return []string{"batch: " + batch.ID, fmt.Sprintf("tokens: %d used / %d reserved / %d limit", batch.UsedTokens, batch.ReservedTokens, batch.LimitTokens),
 			"active task session: " + batch.TaskID, "cost: unknown | no monetary cap", fmt.Sprintf("usage unknown: %t", batch.UnknownUsage)}
 	}
 	snapshot := a.metrics.Snapshot()

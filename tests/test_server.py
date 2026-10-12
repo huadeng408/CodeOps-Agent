@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent import futures
+import json
 import subprocess
 import threading
 import time
@@ -431,7 +432,20 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
             memory_dir=str(tmp_path / "memory"),
         )
     )
-    app.llm = HistoryFakeLLM()
+    requests = []
+
+    class ModelService(orchestrator_pb2_grpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            requests.append(json.loads(request.payload_json))
+            return orchestrator_pb2.ModelCallResponse(
+                payload_json=b'{"model":"fixture","choices":[{"message":{"content":"ok"}}]}',
+                input_tokens=17, output_tokens=3, cost_status="unknown",
+            )
+
+    model_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+    orchestrator_pb2_grpc.add_ModelGatewayServicer_to_server(ModelService(), model_server)
+    model_port = model_server.add_insecure_port("127.0.0.1:0")
+    model_server.start()
     service = OrchestratorService(app)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(service, server)
@@ -476,6 +490,10 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
                                     actor=_session_actor(session_id),
                                     working_dir=str(tmp_path),
                                     harness_managed=True,
+                                    model_gateway=orchestrator_pb2.ModelGatewayBinding(
+                                        schema_version=1, address=f"127.0.0.1:{model_port}",
+                                        capability=b"a" * 32, protocol="openai", model="fixture",
+                                    ),
                                     context_envelope=envelope,
                                 )
                             )
@@ -485,7 +503,7 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
             )
         assert responses[-1].done.success is True
         system_prompt = "\n".join(
-            message.content for message in app.llm.requests[0].messages if message.role == "system"
+            message["content"] for message in requests[0]["messages"] if message["role"] == "system"
         )
         assert "P0 directory summary" in system_prompt
         assert "P1 node summaries" in system_prompt
@@ -495,6 +513,7 @@ def test_harness_context_envelope_reaches_prompt_without_raw_p3_content(
         assert project_instruction_marker not in system_prompt
     finally:
         server.stop(grace=0)
+        model_server.stop(0).wait()
         app.close()
 
 

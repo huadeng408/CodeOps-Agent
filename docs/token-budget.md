@@ -37,10 +37,10 @@ from missing provider fields and does not calculate money from a model name.
 
 ## Model invocation migration
 
-Engineering status: **IMPLEMENTED** for the Ledger module and opt-in invocation
-migration; **BLOCKED** for Issue #3's complete product acceptance. In
-`CODE_AGENT_MODEL_ADMISSION=required` mode the Go CLI and full-stack continuation
-client issue transient, actor-bound gRPC capabilities. Python uses its existing
+Engineering status: **IMPLEMENTED** for the Ledger module and default CLI /
+full-stack invocation boundary; **BLOCKED** for Issue #3's complete product
+acceptance. The Go CLI and full-stack continuation client always issue transient,
+actor-bound gRPC capabilities. Python uses its existing
 OpenAI/Anthropic payload adapters, while Go owns credentials, HTTP dispatch,
 reservation and settlement. Capabilities do not enter model Context or checkpoints.
 
@@ -52,9 +52,12 @@ SessionMeta, CLI and browser report unknown price explicitly.
 
 Configure the approved provider in the Go process environment together with
 `CODE_AGENT_MODEL_INPUT_LIMIT` and `CODE_AGENT_MODEL_OUTPUT_LIMIT`. Absent or
-invalid credentials, endpoint, model or bounds refuse dispatch. Python in
-required mode skips dotenv/provider-file loading and direct client construction;
-the Go subprocess launcher strips model credentials from its environment.
+invalid credentials, endpoint, model or bounds refuse dispatch. Go always starts
+its Python subprocess in required mode and strips provider credentials and the
+provider-file entry point, even when the parent inherits a disabled admission
+setting. Required mode skips dotenv/provider-file loading and direct client
+construction. Harness-managed Converse requests also refuse a missing binding
+when an external Python server was started outside required mode.
 
 The gateway admits **one unresolved upstream call** across the canonical
 Ledger, within the permitted aggregate range of 1–10. This preserves a fence
@@ -75,15 +78,16 @@ streaming is a remaining product migration item.
 The existing authenticated capabilities endpoint now exposes a read-only batch
 projection and specific model/sandbox prerequisites in the approved right
 sidebar. A read creates no batch facts. The local-core profile still refuses
-execution. Legacy direct callers remain available outside required mode;
-their calls are not claimed to be part of this metered batch.
+model continuation. Legacy standalone Python callers remain available outside
+required mode; their calls are not claimed to be part of this metered batch.
+Default-boundary checks: [2026-10-12 evidence](evidence/model-default-admission-2026-10-12.md).
 
 CLI `/clear` completes a settled root task before creating the next Session;
 live scopes, open runs and unfinished agents refuse completion. Ending a
 process leaves the task available for explicit resume, while `/budget` reports
 its Session ID. The cumulative allowance never resets on task completion.
 
-Remaining: default product enablement, controlled secret injection/approved
+Remaining: local-core model enablement, controlled secret injection/approved
 sandbox, task-slot completion across HTTP/product lifecycles, fully metered
 retry/reconciliation, production CLI/HTTP model recovery and complete trace
 backend readback. Keep #3 open until those criteria have fresh evidence.

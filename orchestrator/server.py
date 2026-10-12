@@ -655,6 +655,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
 
         runner = None
         try:
+            if harness_managed and model_gateway is None:
+                raise ModelGatewayError("model_prerequisites_missing")
             if agent_task is not None:
                 # An independent child receives a separate project boundary.
                 # Its working tree is the only root from which model-facing

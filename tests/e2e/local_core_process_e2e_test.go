@@ -60,6 +60,7 @@ func TestProductionLocalCoreTokenAdmissionProjection(t *testing.T) {
 		var result struct {
 			Data map[string]struct {
 				State  string
+				Reason string
 				Tokens struct {
 					BatchID    string `json:"batch_id"`
 					Limit      int64
@@ -73,6 +74,9 @@ func TestProductionLocalCoreTokenAdmissionProjection(t *testing.T) {
 			t.Fatal("authenticated capabilities unavailable")
 		}
 		budget := result.Data["budget"]
+		if result.Data["provider"].Reason != "model credentials are missing" {
+			t.Fatalf("default product entry did not name the missing prerequisite: %q", result.Data["provider"].Reason)
+		}
 		if budget.Tokens.Limit != 100_000_000 || budget.Tokens.CostStatus != "unknown" || result.Data["execution"].State != "blocked" {
 			t.Fatal("token projection invented money or admitted execution")
 		}

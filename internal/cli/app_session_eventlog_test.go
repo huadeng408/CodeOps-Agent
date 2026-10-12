@@ -30,7 +30,11 @@ func TestCLIReportsClearPersistenceFailureAndKeepsHistory(t *testing.T) {
 	cfg := config.Default(root)
 	cfg.Sandbox.Enabled = false
 	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.OrchestratorStartupTimeout = "127.0.0.1:1", false, 1
-	backend := &failOnceSessionStore{MemoryStore: session.NewMemoryStore()}
+	db, err := sql.Open("sqlite", cfg.SessionDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 	output := &strings.Builder{}
 	var app *App
 	previous := ""
@@ -39,12 +43,15 @@ func TestCLIReportsClearPersistenceFailureAndKeepsHistory(t *testing.T) {
 			return 0, io.EOF
 		}
 		previous = app.session.Current().ID
-		backend.fail()
+		if _, err := db.Exec(`CREATE TRIGGER fail_new_session BEFORE INSERT ON session_events
+			WHEN NEW.type = 'session/state' AND NEW.seq = 0
+			BEGIN SELECT RAISE(ABORT, 'fixture new session storage failure'); END;`); err != nil {
+			t.Fatal(err)
+		}
 		return copy(p, "/clear\n"), nil
 	})
 	app = NewApp(cfg, input, output, &strings.Builder{})
 	defer cleanupIntegrationApp(t, app)
-	app.session = session.NewManager(backend)
 	if err := app.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -439,18 +439,16 @@ func buildOrchestratorCmd(cfg ProcessConfig) *exec.Cmd {
 	cmd := exec.CommandContext(context.Background(), cfg.Command, args...)
 	cmd.Dir = cfg.ProjectRoot
 	cmd.Env = os.Environ()
-	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
-		filtered := cmd.Env[:0]
-		for _, item := range cmd.Env {
-			name, _, _ := strings.Cut(item, "=")
-			name = strings.ToUpper(name)
-			if name == "OPENAI_API_KEY" || name == "ANTHROPIC_API_KEY" || name == "ANTHROPIC_AUTH_TOKEN" || name == "CODE_AGENT_PROVIDER_CONFIG" {
-				continue
-			}
-			filtered = append(filtered, item)
+	filtered := cmd.Env[:0]
+	for _, item := range cmd.Env {
+		name, _, _ := strings.Cut(item, "=")
+		name = strings.ToUpper(name)
+		if name == "OPENAI_API_KEY" || name == "ANTHROPIC_API_KEY" || name == "ANTHROPIC_AUTH_TOKEN" || name == "CODE_AGENT_PROVIDER_CONFIG" || name == "CODE_AGENT_MODEL_ADMISSION" {
+			continue
 		}
-		cmd.Env = filtered
+		filtered = append(filtered, item)
 	}
+	cmd.Env = append(filtered, "CODE_AGENT_MODEL_ADMISSION=required")
 	if cfg.RequireHarnessWorktree {
 		cmd.Env = append(cmd.Env, "CODE_AGENT_REQUIRE_HARNESS_WORKTREE=1")
 	}

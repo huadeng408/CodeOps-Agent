@@ -285,15 +285,12 @@ func main() {
 		return
 	}
 	defer ledger.Close()
-	var modelGateway *admission.Gateway
-	if os.Getenv("CODE_AGENT_MODEL_ADMISSION") == "required" {
-		modelGateway = admission.NewGateway(admission.NewBudget(ledger), admission.ProviderFromEnv())
-		if err := modelGateway.Start(); err != nil {
-			log.Error("model admission initialization unavailable", err)
-			return
-		}
-		defer modelGateway.Close()
+	modelGateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderFromEnv())
+	if err := modelGateway.Start(); err != nil {
+		log.Error("model admission initialization unavailable", err)
+		return
 	}
+	defer modelGateway.Close()
 	workbench := session.NewWorkbench(ledger, wsHub)
 	workspaceRoot, rootErr := os.Getwd()
 	if rootErr != nil || strings.TrimSpace(workspaceRoot) == "" {
@@ -368,9 +365,7 @@ func main() {
 			return nil, err
 		}
 		client.SetTracer(telemetry)
-		if modelGateway != nil {
-			client.SetModelScopeFactory(modelGateway.BindActor)
-		}
+		client.SetModelScopeFactory(modelGateway.BindActor)
 		sessionMemory := memory.NewLedgerMemory(ledger, client.ReflectMemory)
 		sessionMemory.SetTracer(telemetry)
 		client.OnAgentSpawn = func(spawnCtx context.Context, spawn *codeagentpb.AgentSpawn) error {
