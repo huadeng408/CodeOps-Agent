@@ -1796,7 +1796,7 @@ func TestSessionRunnerEmitsOnlyOneSlowRunNarration(t *testing.T) {
 	workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
 	blocking := &blockingConversationAdapter{started: make(chan struct{})}
 	runner := NewSessionRunner(workbench, blocking, nil, SessionRunnerOptions{
-		WorkerID: "worker-single-narration", LeaseDuration: 200 * time.Millisecond,
+		WorkerID: "worker-single-narration", LeaseDuration: 3 * time.Second,
 		HeartbeatInterval: 5 * time.Millisecond, ProgressInterval: 12 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = runner.Close() })
@@ -1811,23 +1811,38 @@ func TestSessionRunnerEmitsOnlyOneSlowRunNarration(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("conversation did not start")
 	}
-	time.Sleep(70 * time.Millisecond)
-	events, err := ledger.Events(ctx, created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	narrations := 0
-	for _, event := range events {
-		if event.Type != progressEventType {
-			continue
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		events, err := ledger.Events(ctx, created.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
-		var payload progressPayload
-		if json.Unmarshal(event.Payload, &payload) == nil && payload.Kind == progressNarration {
-			narrations++
+		narrations, laterHeartbeats := 0, 0
+		for _, event := range events {
+			if event.Type == runHeartbeatEventType && narrations > 0 {
+				laterHeartbeats++
+			}
+			if event.Type == progressEventType {
+				var payload progressPayload
+				if json.Unmarshal(event.Payload, &payload) == nil && payload.Kind == progressNarration {
+					narrations++
+				}
+			}
 		}
-	}
-	if narrations != 1 {
-		t.Fatalf("slow-run narrations = %d, want exactly 1", narrations)
+		if narrations > 1 {
+			t.Fatalf("slow-run narrations = %d, want exactly 1", narrations)
+		}
+		if narrations == 1 && laterHeartbeats >= 3 {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("slow-run narration not confirmed after later heartbeats: narrations=%d heartbeats=%d", narrations, laterHeartbeats)
+		}
 	}
 	if err := runner.Close(); err != nil {
 		t.Fatal(err)

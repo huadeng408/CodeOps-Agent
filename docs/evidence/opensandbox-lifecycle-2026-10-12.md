@@ -85,3 +85,21 @@ SHA-256：`a0544cd7d0a3f5ba9f6478a5f6ab1be940cfe8c16fadacee5abec285983dba38`。
 
 收据中的基点 SHA 只追溯构建前 checkout；交付绑定另核对当前提交与运行输入指纹。
 不会改写原收据 SHA、结果、分母或失败。此为 #23 的工程范围收据，不作为完整发布 lane。
+
+## 交付补充验证
+
+首次提交 `11ec14f83966a95db2dbd35ddc1cec0d0c6c7baf` 的
+[CI Go job](https://github.com/huadeng408/CodeOps-Agent/actions/runs/38196797761)
+在旧 `TestSessionRunnerEmitsOnlyOneSlowRunNarration` 失败：固定 sleep 70 ms 后
+读取到 0 条 narration。原 CI 日志保留；本机原测试连续 10 次通过，不能覆盖该失败。
+测试改为最多 3 秒等待真实 Ledger 的一条 narration，再确认其后至少三个 heartbeat
+期间没有重复；仅延长测试 lease，生产代码未变化。修复后连续 20 次测试退出码 0，
+Standards／Spec 窄审均 remaining 0。
+
+修复后的完整 `go test ./... -json -count=1` 退出码 0，仍为 1,433 pass／60 skip／
+0 fail、45 个测试包通过及 13 个无测试包。首次 CI 其余三项通过，Python 为
+2,473 pass／12 skip／3 warnings；该成功不覆盖原 Go 失败。原日志、修改后的测试、
+20 次定向结果、完整 v9 JSONL 和指纹绑定均保存在原收据目录的 `ci-fix-v9/` 及补充文件。
+
+`*_test.go` 不参与 native `go build`；实际运行源码和前端产物指纹未变化，原 runtime
+收据保持适用。新增测试、CI 和提交绑定作为补充记录保存，原收据不改写。
