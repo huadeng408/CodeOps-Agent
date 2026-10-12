@@ -36,6 +36,8 @@ message ModelCallRequest {
 message ModelCallResponse {
   bytes payload_json = 1;
   string error_code = 2;
+  // Counters include every settled transport attempt for this invocation.
+  // An error can still have unknown usage held separately by the Go Ledger.
   int64 input_tokens = 3;
   int64 output_tokens = 4;
   int64 cached_input_tokens = 5;

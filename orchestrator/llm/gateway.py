@@ -21,6 +21,8 @@ class ModelGatewayError(RuntimeError):
             "model_gateway_response_invalid", "provider_request_invalid", "provider_transport_unknown",
             "provider_response_unknown", "provider_http_unknown", "provider_rate_limited_unknown",
             "provider_transient_unknown", "provider_authentication_unknown", "provider_usage_unknown",
+            "provider_http", "provider_rate_limited", "provider_transient", "provider_authentication",
+            "provider_retry_canceled",
             "provider_bound_violated", "provider_settlement_unknown", "token_budget_exhausted",
             "token_usage_unknown", "code_task_busy", "model_concurrency_exhausted",
             "model_call_already_reserved", "code_task_closed", "token_admission_unavailable",
@@ -79,7 +81,7 @@ class HarnessModelClient(LLMClient):
             while True:
                 if cancel is not None and cancel.is_set():
                     future.cancel()
-                    raise RequestInterrupted("model request canceled; Go retains unknown usage")
+                    raise RequestInterrupted("model request canceled; Go preserves the retained accounting")
                 try:
                     result = future.result(timeout=0.1)
                     break

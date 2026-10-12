@@ -56,7 +56,11 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage():
         server.stop(0).wait()
 
 
-@pytest.mark.parametrize("gateway_error", ["", "token_usage_unknown", "task_prerequisites_missing", "missing_binding"])
+@pytest.mark.parametrize("gateway_error", [
+    "", "token_usage_unknown", "task_prerequisites_missing", "missing_binding",
+    "provider_rate_limited", "provider_transient", "provider_authentication",
+    "provider_http", "provider_retry_canceled",
+])
 @pytest.mark.parametrize("admission_mode", ["required", ""])
 def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, gateway_error, admission_mode):
     # Explicit blanks also prevent repository dotenv from activating a relay.

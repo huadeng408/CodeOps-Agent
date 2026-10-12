@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -223,8 +224,9 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	if request == nil || len(request.Capability) != 32 {
 		return nil, status.Error(codes.Unauthenticated, "model capability required")
 	}
+	digest := sha256.Sum256(request.Capability)
 	gateway.mu.Lock()
-	scope, found := gateway.scopes[sha256.Sum256(request.Capability)]
+	scope, found := gateway.scopes[digest]
 	checkTask := gateway.taskAdmission
 	gateway.mu.Unlock()
 	if !found {
@@ -287,97 +289,170 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid model payload")
 	}
-	if checkTask != nil && checkTask(ctx, scope.taskID) != nil {
-		result.ErrorCode = "task_prerequisites_missing"
-		return result, nil
-	}
-	// Initial product concurrency is one across the canonical Ledger. An
-	// abandoned reservation therefore fences dispatch even after a crash.
-	if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, request.CallId, config.InputLimit+config.OutputLimit, 1, purpose); err != nil {
-		result.ErrorCode = admissionErrorCode(err)
-		return result, nil
-	}
-	// A canceled RPC cannot release an upstream attempt whose outcome is unknown.
-	confirmed := false
-	defer func() {
-		if !confirmed {
+	invokeAttempt := func(callID, retryOf string) (*pb.ModelCallResponse, string) {
+		result := &pb.ModelCallResponse{CostStatus: "unknown"}
+		if ctx.Err() != nil {
+			result.ErrorCode = "provider_retry_canceled"
+			return result, ""
+		}
+		gateway.mu.Lock()
+		bound, active := gateway.scopes[digest]
+		checkTask = gateway.taskAdmission
+		gateway.mu.Unlock()
+		if !active || bound != scope {
+			result.ErrorCode = "model_gateway_unavailable"
+			return result, ""
+		}
+		if checkTask != nil && checkTask(ctx, scope.taskID) != nil {
+			result.ErrorCode = "task_prerequisites_missing"
+			return result, ""
+		}
+		// An unresolved attempt fences dispatch across the canonical Ledger.
+		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.InputLimit+config.OutputLimit, 1, purpose, retryOf); err != nil {
+			result.ErrorCode = admissionErrorCode(err)
+			return result, ""
+		}
+		confirmed := false
+		defer func() {
+			if !confirmed {
+				auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, _ = gateway.budget.MarkUnknown(auditCtx, scope.owner, callID)
+			}
+		}()
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			result.ErrorCode = "provider_request_invalid"
+			return result, ""
+		}
+		upstream.Header.Set("Content-Type", "application/json")
+		if config.Protocol == "anthropic" {
+			upstream.Header.Set("x-api-key", config.APIKey)
+			upstream.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
+		}
+		response, err := gateway.http.Do(upstream)
+		if err != nil {
+			result.ErrorCode = "provider_transport_unknown"
+			return result, ""
+		}
+		defer response.Body.Close()
+		result.HttpStatus = int32(response.StatusCode)
+		if response.StatusCode < 100 || response.StatusCode > 599 {
+			result.ErrorCode = "provider_http_unknown"
+			return result, ""
+		}
+		data, err := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
+		if err != nil || len(data) > 16<<20 {
+			result.ErrorCode = "provider_response_unknown"
+			return result, ""
+		}
+		failure := "provider_http"
+		if response.StatusCode == http.StatusTooManyRequests {
+			failure = "provider_rate_limited"
+		} else if response.StatusCode >= 500 && response.StatusCode <= 599 {
+			failure = "provider_transient"
+		} else if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			failure = "provider_authentication"
+		}
+		usage, err := normalizeUsage(config.Protocol, data)
+		if err != nil {
+			result.ErrorCode = "provider_usage_unknown"
+			if response.StatusCode != http.StatusOK {
+				result.ErrorCode = failure + "_unknown"
+			}
+			return result, ""
+		}
+		if usage.input > config.InputLimit || usage.output > config.OutputLimit {
+			result.ErrorCode = "provider_bound_violated"
 			auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, _ = gateway.budget.MarkUnknown(auditCtx, scope.owner, request.CallId)
+			_, _ = gateway.budget.markUnknown(auditCtx, scope.owner, callID, usage.input+usage.output, true)
+			return result, ""
 		}
-	}()
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		result.ErrorCode = "provider_request_invalid"
-		return result, nil
-	}
-	upstream.Header.Set("Content-Type", "application/json")
-	if config.Protocol == "anthropic" {
-		upstream.Header.Set("x-api-key", config.APIKey)
-		upstream.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
-	}
-	response, err := gateway.http.Do(upstream)
-	if err != nil {
-		result.ErrorCode = "provider_transport_unknown"
-		return result, nil
-	}
-	defer response.Body.Close()
-	result.HttpStatus = int32(response.StatusCode)
-	data, err := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
-	if err != nil || len(data) > 16<<20 {
-		result.ErrorCode = "provider_response_unknown"
-		return result, nil
-	}
-	if response.StatusCode != http.StatusOK {
-		result.ErrorCode = "provider_http_unknown"
-		if response.StatusCode == http.StatusTooManyRequests {
-			result.ErrorCode = "provider_rate_limited_unknown"
-		} else if response.StatusCode >= 500 {
-			result.ErrorCode = "provider_transient_unknown"
-		} else if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-			result.ErrorCode = "provider_authentication_unknown"
-		}
-		return result, nil
-	}
-	usage, err := normalizeUsage(config.Protocol, data)
-	if err != nil {
-		result.ErrorCode = "provider_usage_unknown"
-		return result, nil
-	}
-	if usage.input > config.InputLimit || usage.output > config.OutputLimit {
-		result.ErrorCode = "provider_bound_violated"
 		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = gateway.budget.markUnknown(auditCtx, scope.owner, request.CallId, usage.input+usage.output, true)
-		return result, nil
+		if _, err := gateway.budget.settle(auditCtx, scope.owner, callID, usage.input+usage.output,
+			budgetFact{InputTokens: usage.input, OutputTokens: usage.output, CachedTokens: usage.cached, CostStatus: "unknown", HTTPStatus: result.HttpStatus}); err != nil {
+			result.ErrorCode = "provider_settlement_unknown"
+			return result, ""
+		}
+		confirmed = true
+		result.InputTokens, result.OutputTokens, result.CachedInputTokens = usage.input, usage.output, usage.cached
+		if response.StatusCode != http.StatusOK {
+			result.ErrorCode = failure
+			return result, response.Header.Get("Retry-After")
+		}
+		// Canonical JSON exposes escaped echoes before they cross into Python.
+		var decoded any
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if decoder.Decode(&decoded) != nil {
+			result.ErrorCode = "provider_response_unknown"
+			return result, ""
+		}
+		canonical, err := json.Marshal(decoded)
+		if err != nil {
+			result.ErrorCode = "provider_response_unknown"
+			return result, ""
+		}
+		encodedKey, _ := json.Marshal(config.APIKey)
+		result.PayloadJson = bytes.ReplaceAll(canonical, encodedKey[1:len(encodedKey)-1], []byte("<redacted>"))
+		return result, ""
 	}
-	auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := gateway.budget.settle(auditCtx, scope.owner, request.CallId, usage.input+usage.output,
-		budgetFact{InputTokens: usage.input, OutputTokens: usage.output, CachedTokens: usage.cached, CostStatus: "unknown"}); err != nil {
-		result.ErrorCode = "provider_settlement_unknown"
-		return result, nil
+	callID, retryOf := request.CallId, ""
+	var total tokenUsage
+	for attempt := 0; attempt < modelAttemptLimit; attempt++ {
+		current, retryAfter := invokeAttempt(callID, retryOf)
+		total.input += current.InputTokens
+		total.output += current.OutputTokens
+		total.cached += current.CachedInputTokens
+		current.InputTokens, current.OutputTokens, current.CachedInputTokens = total.input, total.output, total.cached
+		if attempt == modelAttemptLimit-1 || (current.ErrorCode != "provider_rate_limited" && current.ErrorCode != "provider_transient") {
+			return current, nil
+		}
+		delay, allowed := retryAfterDelay(retryAfter, time.Now())
+		if !allowed {
+			return current, nil
+		}
+		if backoff := time.Second << attempt; delay < backoff {
+			delay = backoff
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			current.ErrorCode = "provider_retry_canceled"
+			return current, nil
+		case <-timer.C:
+		}
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			current.ErrorCode = "token_admission_unavailable"
+			return current, nil
+		}
+		retryOf, callID = callID, hex.EncodeToString(nonce)
 	}
-	confirmed = true
-	result.InputTokens, result.OutputTokens, result.CachedInputTokens = usage.input, usage.output, usage.cached
-	// Canonical JSON exposes escaped echoes before they cross into Python.
-	var decoded any
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if decoder.Decode(&decoded) != nil {
-		result.ErrorCode = "provider_response_unknown"
-		return result, nil
-	}
-	canonical, err := json.Marshal(decoded)
-	if err != nil {
-		result.ErrorCode = "provider_response_unknown"
-		return result, nil
-	}
-	encodedKey, _ := json.Marshal(config.APIKey)
-	result.PayloadJson = bytes.ReplaceAll(canonical, encodedKey[1:len(encodedKey)-1], []byte("<redacted>"))
+	result.ErrorCode = "token_admission_unavailable"
 	return result, nil
+}
+
+func retryAfterDelay(value string, now time.Time) (time.Duration, bool) {
+	if value == "" {
+		return 0, true
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		if seconds > 10 {
+			return 0, false
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	date, err := http.ParseTime(value)
+	if err != nil || date.Sub(now) > 10*time.Second {
+		return 0, false
+	}
+	return max(0, date.Sub(now)), true
 }
 
 func (config ProviderConfig) Validate() error {

@@ -140,6 +140,367 @@ func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
 	}
 }
 
+func TestGatewayRetriesOnlyAfterErrorUsageSettles(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	budget := admission.NewBudget(ledger)
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		batch, err := budget.Inspect(r.Context(), 7)
+		if err != nil || batch.ReservedTokens != 103 || batch.CostStatus != "unknown" {
+			t.Error("retry reached upstream without its own retained reservation")
+		}
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":"temporary","usage":{"prompt_tokens":8,"completion_tokens":0}}`)
+			return
+		}
+		if batch.UsedTokens != 8 {
+			t.Error("retry dispatched before the original attributable usage settled")
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"recovered"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+		Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	binding, release, err := gateway.Bind(7, "retry-task", "retry-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	conn, err := grpc.NewClient(binding.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	response, err := pb.NewModelGatewayClient(conn).Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability,
+		CallId: "original-attempt", PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+	if err != nil || response.GetErrorCode() != "" || attempts.Load() != 2 {
+		t.Fatalf("known error usage could not recover through bounded retry: calls=%d code=%s err=%v", attempts.Load(), response.GetErrorCode(), err)
+	}
+	if response.InputTokens != 11 || response.OutputTokens != 2 || response.CostStatus != "unknown" {
+		t.Fatal("the logical invocation omitted its settled failed attempt")
+	}
+	batch, err := budget.Inspect(ctx, 7)
+	if err != nil || batch.UsedTokens != 13 || batch.ReservedTokens != 0 || batch.UnknownUsage || batch.CostStatus != "unknown" {
+		t.Fatal("retry reset, skipped or double-counted attributable usage")
+	}
+}
+
+func TestGatewayRetainsRetryBoundaries(t *testing.T) {
+	for _, scenario := range []struct {
+		name, retryAfter, code string
+		status, attempts       int
+		used, reserved         int64
+		unknown                bool
+	}{
+		{"exhausted 429", "", "provider_rate_limited", 429, 3, 24, 0, false},
+		{"exhausted 503", "", "provider_transient", 503, 3, 24, 0, false},
+		{"authentication", "", "provider_authentication", 401, 1, 8, 0, false},
+		{"unsupported HTTP status", "", "provider_http_unknown", 600, 1, 0, 103, true},
+		{"excessive delay", "11", "provider_rate_limited", 429, 1, 8, 0, false},
+		{"malformed delay", "invalid", "provider_rate_limited", 429, 1, 8, 0, false},
+		{"signed delay", "+1", "provider_rate_limited", 429, 1, 8, 0, false},
+		{"unknown retry usage", "", "provider_rate_limited_unknown", 429, 2, 8, 103, true},
+		{"retry output violation", "", "provider_bound_violated", 429, 2, 8, 103, true},
+		{"revoked binding", "", "model_gateway_unavailable", 429, 1, 8, 0, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "ledger.sqlite")
+			ledger, err := session.OpenSQLiteEventLog(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			budget := admission.NewBudget(ledger)
+			var attempts atomic.Int32
+			releaseHolder := make(chan func(), 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempt := attempts.Add(1)
+				if scenario.name == "revoked binding" {
+					(<-releaseHolder)()
+				}
+				w.Header().Set("Retry-After", scenario.retryAfter)
+				w.WriteHeader(scenario.status)
+				if scenario.name == "unknown retry usage" && attempt == 2 {
+					fmt.Fprint(w, `{"error":"fixture-only"}`)
+					return
+				}
+				output := 0
+				if scenario.name == "retry output violation" && attempt == 2 {
+					output = 4
+				}
+				fmt.Fprintf(w, `{"usage":{"prompt_tokens":8,"completion_tokens":%d}}`, output)
+			}))
+			defer upstream.Close()
+			gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+				Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer gateway.Close()
+			binding, release, err := gateway.Bind(7, "retry-task", "retry-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseHolder <- release
+			request := &pb.ModelCallRequest{Capability: binding.Capability, CallId: "original-attempt",
+				PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)}
+			response, err := gateway.Invoke(ctx, request)
+			if err != nil || response.GetErrorCode() != scenario.code || int(attempts.Load()) != scenario.attempts {
+				t.Fatalf("retry boundary changed: code=%s attempts=%d err=%v", response.GetErrorCode(), attempts.Load(), err)
+			}
+			before, err := budget.Inspect(ctx, 7)
+			if err != nil || before.UsedTokens != scenario.used || before.ReservedTokens != scenario.reserved || before.UnknownUsage != scenario.unknown {
+				t.Fatal("retry lost complete usage or reservation accounting")
+			}
+			gateway.Close()
+			if err := ledger.Close(); err != nil {
+				t.Fatal(err)
+			}
+			ledger, err = session.OpenSQLiteEventLog(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			after, err := admission.NewBudget(ledger).Inspect(ctx, 7)
+			if err != nil || before != after {
+				t.Fatal("retry facts did not survive real Ledger reopen")
+			}
+		})
+	}
+}
+
+func TestGatewayCancelBackoffRetainsOnlySettledAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	budget := admission.NewBudget(ledger)
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"usage":{"prompt_tokens":8,"completion_tokens":0}}`)
+	}))
+	defer upstream.Close()
+	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+		Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	binding, release, err := gateway.Bind(7, "retry-task", "retry-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	result := make(chan *pb.ModelCallResponse, 1)
+	go func() {
+		response, _ := gateway.Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: "original-attempt",
+			PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+		result <- response
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("the initial attributed attempt did not settle")
+		case <-ticker.C:
+			batch, err := budget.Inspect(ctx, 7)
+			if err != nil || batch.UsedTokens != 8 || batch.ReservedTokens != 0 {
+				continue
+			}
+			cancel()
+			select {
+			case response := <-result:
+				if response.GetErrorCode() != "provider_retry_canceled" || attempts.Load() != 1 {
+					t.Fatal("canceling backoff dispatched another attempt")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("backoff did not stop after cancellation")
+			}
+			retained, err := budget.Inspect(context.Background(), 7)
+			if err != nil || retained != batch || retained.UnknownUsage {
+				t.Fatal("canceling an undispatched retry invented unknown usage or cleared accounting")
+			}
+			return
+		}
+	}
+}
+
+func TestGatewayHonorsBoundedRetryAfter(t *testing.T) {
+	for _, format := range []string{"seconds", "HTTP date"} {
+		t.Run(format, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			budget := admission.NewBudget(ledger)
+			var attempts atomic.Int32
+			allowed := make(chan time.Time, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if attempts.Add(1) == 1 {
+					next := time.Now().Add(2 * time.Second)
+					header := "2"
+					if format == "HTTP date" {
+						next = time.Now().Add(3 * time.Second).UTC().Truncate(time.Second)
+						header = next.Format(http.TimeFormat)
+					}
+					allowed <- next
+					w.Header().Set("Retry-After", header)
+					w.WriteHeader(http.StatusServiceUnavailable)
+					fmt.Fprint(w, `{"usage":{"prompt_tokens":8,"completion_tokens":0}}`)
+					return
+				}
+				if time.Now().Before(<-allowed) {
+					t.Error("upstream retry preceded its declared Retry-After")
+				}
+				fmt.Fprint(w, `{"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+			}))
+			defer upstream.Close()
+			gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+				Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer gateway.Close()
+			binding, release, err := gateway.Bind(7, "retry-task", "retry-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			response, err := gateway.Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: "original-attempt",
+				PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+			if err != nil || response.GetErrorCode() != "" || attempts.Load() != 2 {
+				t.Fatalf("bounded Retry-After failed: %s %v", response.GetErrorCode(), err)
+			}
+		})
+	}
+}
+
+func TestGatewayRejectsContradictoryRetryLedgerFacts(t *testing.T) {
+	for _, scenario := range []string{"missing parent", "foreign owner", "foreign task", "changed bound", "changed purpose", "unsettled parent", "nontransient parent", "branched retry", "fourth attempt"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			budget := admission.NewBudget(ledger)
+			var attempts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.Header().Set("Retry-After", "11")
+				status := http.StatusTooManyRequests
+				if scenario == "nontransient parent" {
+					status = http.StatusUnauthorized
+				}
+				w.WriteHeader(status)
+				if scenario == "unsettled parent" {
+					fmt.Fprint(w, `{"error":"fixture-only"}`)
+					return
+				}
+				fmt.Fprint(w, `{"usage":{"prompt_tokens":8,"completion_tokens":0}}`)
+			}))
+			defer upstream.Close()
+			gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+				Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer gateway.Close()
+			binding, _, err := gateway.Bind(7, "retry-task", "retry-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := &pb.ModelCallRequest{Capability: binding.Capability, CallId: "original-attempt",
+				PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)}
+			if _, err := gateway.Invoke(ctx, request); err != nil || attempts.Load() != 1 {
+				t.Fatal("fixture did not retain its first attempt")
+			}
+			appendFact := func(kind string, fact map[string]any) {
+				t.Helper()
+				snapshot, err := session.ReadVerifiedSnapshot(ctx, ledger, session.VerificationAdmissionLedgerID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ledger.Append(ctx, session.VerificationAdmissionLedgerID, int64(len(snapshot.Events)), kind, fact); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reserved := map[string]any{"owner_id": 7, "task_id": "retry-task", "call_id": "contradictory-retry",
+				"tokens": 103, "purpose": "foreground", "retry_of": "original-attempt"}
+			switch scenario {
+			case "missing parent":
+				reserved["retry_of"] = "missing-call"
+			case "foreign owner":
+				reserved["owner_id"] = 8
+			case "foreign task":
+				reserved["task_id"] = "different-task"
+			case "changed bound":
+				reserved["tokens"] = 102
+			case "changed purpose":
+				reserved["purpose"] = "compaction"
+			case "branched retry", "fourth attempt":
+				parent := "original-attempt"
+				last := 2
+				if scenario == "fourth attempt" {
+					last = 3
+				}
+				for index := 2; index <= last; index++ {
+					id := fmt.Sprintf("fixture-retry-%d", index)
+					appendFact("admission/call_reserved", map[string]any{"owner_id": 7, "task_id": "retry-task", "call_id": id,
+						"tokens": 103, "purpose": "foreground", "retry_of": parent})
+					appendFact("admission/call_settled", map[string]any{"owner_id": 7, "call_id": id, "tokens": 8,
+						"input_tokens": 8, "output_tokens": 0, "cost_status": "unknown", "http_status": 429})
+					parent = id
+				}
+				if scenario == "fourth attempt" {
+					reserved["retry_of"] = parent
+				}
+			}
+			appendFact("admission/call_reserved", reserved)
+			if _, err := budget.Inspect(ctx, 7); !errors.Is(err, session.ErrEventIntegrity) {
+				t.Fatalf("contradictory retry was accepted: %v", err)
+			}
+			before, err := ledger.Events(ctx, session.VerificationAdmissionLedgerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.CallId = "next-attempt"
+			result, err := gateway.Invoke(ctx, request)
+			if err != nil || result.GetErrorCode() != "token_admission_unavailable" || attempts.Load() != 1 {
+				t.Fatal("contradictory history dispatched another model attempt")
+			}
+			after, err := ledger.Events(ctx, session.VerificationAdmissionLedgerID)
+			if err != nil || len(after) != len(before) || after[len(after)-1].Checksum != before[len(before)-1].Checksum {
+				t.Fatal("contradictory retry history was rewritten")
+			}
+		})
+	}
+}
+
 func TestGatewayUnsettledReservationFencesNewProcess(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite")

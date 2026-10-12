@@ -12,6 +12,7 @@ import (
 
 const VerificationTokenLimit int64 = 100_000_000
 const RelayConcurrencyLimit = 10
+const modelAttemptLimit = 3
 
 var (
 	ErrBudgetExhausted  = errors.New("verification token budget exhausted")
@@ -46,6 +47,8 @@ type budgetFact struct {
 	Process         *scopeProcess    `json:"process,omitempty"`
 	RecoveredScopes []recoveredScope `json:"recovered_scopes,omitempty"`
 	CallID          string           `json:"call_id,omitempty"`
+	RetryOf         string           `json:"retry_of,omitempty"`
+	HTTPStatus      int32            `json:"http_status,omitempty"`
 	Tokens          int64            `json:"tokens,omitempty"`
 	Purpose         string           `json:"purpose,omitempty"`
 	InputTokens     int64            `json:"input_tokens,omitempty"`
@@ -63,6 +66,10 @@ type call struct {
 	settled       bool
 	unknown       bool
 	boundViolated bool
+	purpose       string
+	attempt       int
+	retried       bool
+	httpStatus    int32
 }
 
 type projection struct {
@@ -110,6 +117,23 @@ func validID(value string) bool {
 	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\x00\r\n")
 }
 
+func retryableHTTPStatus(status int32) bool {
+	return status == 429 || (status >= 500 && status <= 599)
+}
+
+func (state projection) retryDepth(fact budgetFact) (int, error) {
+	if fact.RetryOf == "" {
+		return 1, nil
+	}
+	parent, found := state.calls[fact.RetryOf]
+	if !validID(fact.RetryOf) || !found || !parent.settled || parent.retried || parent.boundViolated ||
+		parent.owner != fact.OwnerID || parent.taskID != fact.TaskID || parent.reserved != fact.Tokens ||
+		parent.purpose != fact.Purpose || !retryableHTTPStatus(parent.httpStatus) || parent.attempt >= modelAttemptLimit {
+		return 0, ErrInvalidAdmission
+	}
+	return parent.attempt + 1, nil
+}
+
 func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) {
 	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
 	if owner == 0 || budget.ledger == nil {
@@ -122,6 +146,10 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 	for _, event := range snapshot.Events {
 		var fact budgetFact
 		if err := json.Unmarshal(event.Payload, &fact); err != nil {
+			return state, session.ErrEventIntegrity
+		}
+		if (fact.RetryOf != "" && event.Type != "admission/call_reserved") ||
+			(fact.HTTPStatus != 0 && (event.Type != "admission/call_settled" || fact.HTTPStatus < 100 || fact.HTTPStatus > 599 || fact.CostStatus != "unknown")) {
 			return state, session.ErrEventIntegrity
 		}
 		switch event.Type {
@@ -170,8 +198,17 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if _, exists := state.calls[fact.CallID]; exists || (state.TaskID != "" && (state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID)) || state.outstanding() >= RelayConcurrencyLimit || fact.Tokens > state.LimitTokens-state.UsedTokens-state.ReservedTokens {
 				return state, session.ErrEventIntegrity
 			}
+			depth, err := state.retryDepth(fact)
+			if err != nil {
+				return state, session.ErrEventIntegrity
+			}
+			if fact.RetryOf != "" {
+				parent := state.calls[fact.RetryOf]
+				parent.retried = true
+				state.calls[fact.RetryOf] = parent
+			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
-			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens}
+			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens, purpose: fact.Purpose, attempt: depth}
 			state.ReservedTokens += fact.Tokens
 		case "admission/call_settled":
 			request, exists := state.calls[fact.CallID]
@@ -184,6 +221,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			state.ReservedTokens -= request.reserved
 			state.UsedTokens += fact.Tokens
 			request.settled, request.used = true, fact.Tokens
+			request.httpStatus = fact.HTTPStatus
 			state.calls[fact.CallID] = request
 		case "admission/call_unknown":
 			request, exists := state.calls[fact.CallID]
@@ -347,16 +385,17 @@ func (budget *Budget) AcquireTask(ctx context.Context, owner uint, taskID string
 }
 
 func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64) (Batch, error) {
-	return budget.reserve(ctx, owner, taskID, callID, tokens, RelayConcurrencyLimit, "")
+	return budget.reserve(ctx, owner, taskID, callID, tokens, RelayConcurrencyLimit, "", "")
 }
 
-func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64, concurrency int, purpose string) (Batch, error) {
+func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64, concurrency int, purpose, retryOf string) (Batch, error) {
 	if !validID(taskID) || !validID(callID) || tokens <= 0 || tokens > VerificationTokenLimit {
 		return Batch{}, ErrInvalidAdmission
 	}
 	if _, err := budget.Open(ctx, owner); err != nil {
 		return Batch{}, err
 	}
+	fact := budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens, Purpose: purpose, RetryOf: retryOf}
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {
@@ -374,6 +413,9 @@ func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID st
 		if state.closedTasks[taskKey(owner, taskID)] {
 			return state.Batch, ErrTaskClosed
 		}
+		if _, err := state.retryDepth(fact); err != nil {
+			return state.Batch, err
+		}
 		if state.TaskID != "" && (state.TaskID != taskID || state.TaskOwnerID != owner) {
 			return state.Batch, ErrTaskBusy
 		}
@@ -383,7 +425,7 @@ func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID st
 		if tokens > state.LimitTokens-state.UsedTokens-state.ReservedTokens {
 			return state.Batch, ErrBudgetExhausted
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens, Purpose: purpose})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", fact)
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}
@@ -401,6 +443,9 @@ func (budget *Budget) Settle(ctx context.Context, owner uint, callID string, tok
 }
 
 func (budget *Budget) settle(ctx context.Context, owner uint, callID string, tokens int64, fact budgetFact) (Batch, error) {
+	if fact.HTTPStatus != 0 && (fact.HTTPStatus < 100 || fact.HTTPStatus > 599 || fact.CostStatus != "unknown") {
+		return Batch{}, ErrInvalidAdmission
+	}
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {

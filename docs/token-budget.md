@@ -68,10 +68,30 @@ OpenAI uses `max_completion_tokens`, which includes reasoning output under its
 [API contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 Compatible relays must support that contract; there is no silent parameter downgrade.
 
-429, transport failures and responses without attributable usage retain the
-whole reservation and return a distinct, nonretryable blocked classification.
-There is currently no automatic paid retry after such an unknown outcome.
-Retries with confirmed accounting and their recovery matrix remain incomplete.
+Transport failures and responses without attributable usage retain the whole
+reservation and return a distinct, nonretryable blocked classification. An
+unknown 429/5xx is never assumed to cost zero and is not automatically retried.
+When a response has complete bounded usage, Go durably settles that attempt
+before any retry. Only such accounted 429/5xx responses permit up to three
+attempts, with one/two-second backoff and a valid Retry-After of at most ten
+seconds. An excessive or malformed delay stops retries rather than retrying
+earlier than requested. Authentication and other HTTP errors are not retried.
+
+Each retry gets a new Go call ID and a same-Ledger `retry_of` link. Replay and
+CAS require a settled transient parent, unchanged owner/task/bound/purpose,
+one successor and at most three attempts. Every attempt rechecks the active
+capability and task prerequisites before its own reservation and dispatch.
+The protocol counters include all settled attempts; Python does not retry the
+provider independently. An invalid HTTP status is rejected before settlement
+and preserves the reservation without poisoning the Ledger.
+
+Canceling backoff adds no undispatched reservation. Canceling an in-flight
+attempt still preserves its unknown outcome. Python retains its existing
+65-second invocation deadline, so slow retries may exhaust that deadline;
+the timeout does not authorize another attempt or clear pending usage.
+These are transport/accounting contracts. Real relay error responses do not
+necessarily supply attributable usage; missing usage still requires separate
+reconciliation. [Accounted retry checks](evidence/model-accounted-retry-2026-10-12.md).
 The admitted transport currently returns a single final chunk; metered SSE
 streaming is a remaining product migration item.
 
@@ -128,7 +148,7 @@ describe their separate scopes.
 
 Remaining: real-provider local-core acceptance and controlled process startup,
 complete task-slot recovery across process faults and product lifecycles, fully metered
-retry/reconciliation, production CLI/HTTP model recovery and complete trace
+real-provider retries and usage reconciliation, production CLI/HTTP model recovery and complete trace
 backend readback. Keep #3 open until those criteria have fresh evidence.
 
 ## Reproducible checks
