@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| #3 调用入场与预算 | 本机 continuation／工作区预检、显式结束、确认退出后的 scope 恢复及可结算有界重试已有工程范围证据；仍需真实模型接入、完整故障恢复、真实 provider 重试／未知用量对账和入口恢复；工程证据不代替完整产品验收 |
+| #3 调用入场与预算 | 新消息接收前工作区／预算预检、continuation、显式结束、scope 恢复及可结算有界重试已有工程证据；本轮反思尝试已按用户逐笔确认零用量追加结算。仍需真实前台模型闭环、完整故障恢复、provider 重试／自动用量对账和入口恢复；工程与人工对账不代替完整产品验收 |
 | #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
 | 模型代码任务与提案 | 真实仓库问答、Go 修复／Python 功能、可审查提案、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
@@ -45,6 +45,7 @@
 - 代码任务显式结束：[HTTP／CLI 结束边界与右侧入口证据](evidence/model-task-finish-2026-10-12.md)。
 - 模型占用恢复：[真实进程退出、Linux namespace 与生产 HTTP 边界证据](evidence/model-scope-recovery-2026-10-12.md)。
 - 可结算有界重试：[Go／Python 计量、退避和 Ledger 拒绝边界证据](evidence/model-accounted-retry-2026-10-12.md)。
+- 新消息准入：[草稿保留、幂等与真实运行／人工零用量对账记录](evidence/model-message-preflight-2026-10-12.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

@@ -118,6 +118,23 @@ func runLocalCore(cfg serverconfig.Config) error {
 	}
 	provider := admission.ProviderFromEnv()
 	gateway := admission.NewGateway(admission.NewBudget(ledger), provider)
+	modelWorkspace := func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
+		workspace, err := workspaces.ModelWorkspace(ctx, owner, id)
+		if err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		batch, err := admission.NewBudget(ledger).Inspect(ctx, owner)
+		if err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		if batch.UnknownUsage || batch.ReservedTokens != 0 {
+			return session.TaskModelWorkspace{}, admission.ErrUsageUnknown
+		}
+		if batch.TaskID != "" && batch.TaskID != id {
+			return session.TaskModelWorkspace{}, admission.ErrTaskBusy
+		}
+		return workspace, nil
+	}
 	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
 		if workspaces == nil {
 			return session.ErrContinuationUnavailable
@@ -126,7 +143,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 		if err != nil {
 			return err
 		}
-		_, err = workspaces.ModelWorkspace(ctx, owner, id)
+		_, err = modelWorkspace(ctx, owner, id)
 		return err
 	})
 	if err := gateway.Start(); err != nil {
@@ -155,7 +172,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 		client.SetModelScopeFactory(gateway.BindActor)
 		memories := memory.NewLedgerMemory(ledger, client.ReflectMemory)
 		memories.SetTracer(telemetry)
-		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: workspaces.ModelWorkspace})
+		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: modelWorkspace})
 		return &managedContinuation{runner: runner, client: client}, nil
 	})
 	supervisor.Start(context.Background())

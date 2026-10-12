@@ -153,6 +153,12 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 	var created struct{ Data session.SessionView }
 	request(http.MethodPost, "/api/v1/sessions", map[string]any{"projectName": "approved-repo", "title": "edit isolated copy", "workingDir": repository}, &created, http.StatusOK)
 	path := "/api/v1/sessions/" + created.Data.ID
+	request(http.MethodPost, path+"/messages", map[string]any{"requestId": "not-prepared", "expectedSeq": created.Data.EventCount, "content": "keep this draft until the task copy is ready"}, nil, http.StatusConflict)
+	var rejected struct{ Data session.SessionView }
+	request(http.MethodGet, path, nil, &rejected, http.StatusOK)
+	if rejected.Data.EventCount != created.Data.EventCount || rejected.Data.Run != nil || modelCalls.Load() != 0 {
+		t.Fatal("workspace refusal persisted a message, started a run or called the provider")
+	}
 	var prepared struct{ Data session.TaskWorkspaceView }
 	request(http.MethodPost, path+"/task-workspace/prepare", map[string]any{"requestId": "prepare", "expectedSeq": created.Data.EventCount}, &prepared, http.StatusOK)
 	if prepared.Data.State != "prepared" {
@@ -250,6 +256,26 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 		t.Fatalf("public admission lost accounting: calls=%d batch=%+v err=%v", modelCalls.Load(), batch, err)
 	}
 	if !unknownShell {
+		budget := admission.NewBudget(ledger)
+		if _, err := budget.Reserve(context.Background(), batch.TaskOwnerID, created.Data.ID, "unresolved-after-turn", 103); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := budget.MarkUnknown(context.Background(), batch.TaskOwnerID, "unresolved-after-turn"); err != nil {
+			t.Fatal(err)
+		}
+		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
+		cursor := rejected.Data.EventCount
+		request(http.MethodPost, path+"/messages", map[string]any{"requestId": "blocked-usage", "expectedSeq": cursor, "content": "keep this draft until usage is reconciled"}, nil, http.StatusConflict)
+		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
+		if rejected.Data.EventCount != cursor || modelCalls.Load() != wantCalls {
+			t.Fatal("unknown usage refusal persisted a new turn or called the provider")
+		}
+		// A previously accepted request remains readable even after admission changes.
+		request(http.MethodPost, path+"/messages", map[string]any{"requestId": "edit", "expectedSeq": 0, "content": "exercise the isolated copy"}, &accepted, http.StatusAccepted)
+		retained, err := budget.Inspect(context.Background(), batch.TaskOwnerID)
+		if err != nil || !retained.UnknownUsage || retained.ReservedTokens != 103 || retained.UsedTokens != batch.UsedTokens {
+			t.Fatal("idempotent delivery cleared unknown usage or changed confirmed consumption")
+		}
 		ids, err := ledger.SessionIDs(context.Background())
 		if err != nil {
 			t.Fatal(err)

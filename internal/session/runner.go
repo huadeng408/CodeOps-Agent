@@ -698,6 +698,11 @@ func (r *SessionRunner) SubmitMessage(ctx context.Context, command SubmitMessage
 			if int64(len(events)) != command.ExpectedSeq {
 				return RunView{}, fmt.Errorf("%w: session=%s expected=%d actual=%d", ErrSequenceConflict, command.SessionID, command.ExpectedSeq, len(events))
 			}
+			if r.options.Workspace != nil {
+				if _, err := r.options.Workspace(ctx, command.OwnerID, command.SessionID); err != nil {
+					return RunView{}, err
+				}
+			}
 			_, err = r.workbench.ledger.AppendSurface(ctx, command.SessionID, command.ExpectedSeq, userMessageEventType, messagePayload{
 				Author: "user", Content: command.Content, RequestID: command.RequestID,
 			}, SurfaceOperation{Op: "append"})
