@@ -94,8 +94,9 @@ def _resolve_cwd(project_root: str | Path, working_dir: str | Path) -> Path | No
 
 def _run_git(cwd: Path, *args: str) -> str | None:
     try:
+        # Keep Git's stat refresh from rewriting the Harness-pinned index.
         completed = subprocess.run(
-            ["git", *args],
+            ["git", "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
             cwd=str(cwd),
             check=False,
             capture_output=True,

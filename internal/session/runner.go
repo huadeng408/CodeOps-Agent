@@ -2297,7 +2297,8 @@ func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	if r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause)) == nil {
-		r.commitSessionMemory(ctx, key)
+		// Reflection has its own deadline and still stops on runner shutdown.
+		r.commitSessionMemory(r.ctx, key)
 	}
 }
 
