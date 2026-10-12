@@ -37,8 +37,8 @@ from missing provider fields and does not calculate money from a model name.
 
 ## Model invocation migration
 
-Engineering status: **IMPLEMENTED** for the Ledger module and default CLI /
-full-stack invocation boundary; **BLOCKED** for Issue #3's complete product
+Engineering status: **IMPLEMENTED** for the Ledger module and CLI /
+full-stack / local-core invocation boundary; **BLOCKED** for Issue #3's complete product
 acceptance. The Go CLI and full-stack continuation client always issue transient,
 actor-bound gRPC capabilities. Python uses its existing
 OpenAI/Anthropic payload adapters, while Go owns credentials, HTTP dispatch,
@@ -77,18 +77,25 @@ streaming is a remaining product migration item.
 
 The existing authenticated capabilities endpoint now exposes a read-only batch
 projection and specific model/sandbox prerequisites in the approved right
-sidebar. A read creates no batch facts. The local-core profile still refuses
-model continuation. Legacy standalone Python callers remain available outside
+sidebar. A read creates no batch facts. Local-core attaches continuation only
+with a configured provider, approved OpenSandbox prerequisites and a healthy
+orchestrator at `CODE_AGENT_ORCHESTRATOR_ADDR` (default loopback port 50051).
+Its Context and tools use the Go-prepared Task Workspace; Memory keeps the
+original repository namespace. Each local-core gateway attempt checks the retained
+workspace, tool outcomes and runtime before reserving tokens. Ledger-recorded
+Go edits can continue; missing or unknown tool results require reconciliation.
+Legacy standalone Python callers remain available outside
 required mode; their calls are not claimed to be part of this metered batch.
 Default-boundary checks: [2026-10-12 evidence](evidence/model-default-admission-2026-10-12.md).
+Local-core checks: [workspace admission evidence](evidence/model-local-workspace-2026-10-12.md).
 
 CLI `/clear` completes a settled root task before creating the next Session;
 live scopes, open runs and unfinished agents refuse completion. Ending a
 process leaves the task available for explicit resume, while `/budget` reports
 its Session ID. The cumulative allowance never resets on task completion.
 
-Remaining: local-core model enablement, controlled secret injection/approved
-sandbox, task-slot completion across HTTP/product lifecycles, fully metered
+Remaining: real-provider local-core acceptance and controlled process startup,
+task-slot completion across HTTP/product lifecycles, fully metered
 retry/reconciliation, production CLI/HTTP model recovery and complete trace
 backend readback. Keep #3 open until those criteria have fresh evidence.
 

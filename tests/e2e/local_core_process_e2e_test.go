@@ -11,12 +11,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,6 +108,65 @@ func TestProductionLocalCoreTokenAdmissionProjection(t *testing.T) {
 	_, state, id, used, reserved = read()
 	if state != "blocked" || id != batch.ID || used != 0 || reserved != 103 {
 		t.Fatal("product restart reset the held reservation")
+	}
+}
+
+func TestProductionLocalCoreConfiguredProviderRequiresApprovedRuntime(t *testing.T) {
+	fixture := startProductionLocalCore(t)
+	var modelCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		modelCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+	fixture.stop(t)
+	fixture.environment = append(fixture.environment, "LLM_PROVIDER=openai", "OPENAI_API_KEY=fixture-authority", "OPENAI_MODEL=fixture-model", "OPENAI_BASE_URL="+upstream.URL,
+		"CODE_AGENT_MODEL_INPUT_LIMIT=100", "CODE_AGENT_MODEL_OUTPUT_LIMIT=3")
+	fixture.start(t)
+	fixture.authenticate(t)
+	response, err := fixture.client.Get(fixture.base + "/api/v1/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capabilities struct {
+		Data map[string]struct{ State, Reason string }
+	}
+	err = json.NewDecoder(response.Body).Decode(&capabilities)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || capabilities.Data["provider"].State != "unknown" || capabilities.Data["sandbox"].State != "blocked" || capabilities.Data["execution"].State != "blocked" {
+		t.Fatal("configured credentials bypassed sandbox admission")
+	}
+	response, err = fixture.client.Post(fixture.base+"/api/v1/sessions", "application/json", strings.NewReader(`{"projectName":"core","title":"blocked draft"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct{ Data session.SessionView }
+	err = json.NewDecoder(response.Body).Decode(&created)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatal("could not create the blocked session")
+	}
+	body, _ := json.Marshal(map[string]any{"requestId": "blocked-model", "expectedSeq": created.Data.EventCount, "content": "keep this draft"})
+	response, err = fixture.client.Post(fixture.base+"/api/v1/sessions/"+created.Data.ID+"/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("missing runtime accepted a model message: %d", response.StatusCode)
+	}
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(fixture.dir, "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	view, err := session.NewWorkbench(ledger, nil).Get(context.Background(), created.Data.UserID, created.Data.ID)
+	if err != nil || view.EventCount != created.Data.EventCount {
+		t.Fatal("refusal consumed the message cursor")
+	}
+	batch, err := admission.NewBudget(ledger).Inspect(context.Background(), created.Data.UserID)
+	if err != nil || batch.ID != "" || batch.ReservedTokens != 0 || batch.UsedTokens != 0 || modelCalls.Load() != 0 {
+		t.Fatal("refusal dispatched or reserved a model attempt")
 	}
 }
 

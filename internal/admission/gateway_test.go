@@ -16,12 +16,51 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/admission"
 	"code-agent/internal/identity"
+	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
+
+func TestGatewayRefusesUnadmittedTaskBeforeReservationOrHTTP(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	budget := admission.NewBudget(ledger)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":8,"completion_tokens":3}}`))
+	}))
+	defer upstream.Close()
+	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
+		Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+	runtime := sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: t.TempDir()})
+	gateway.SetTaskAdmission(func(ctx context.Context, _ string) error { return runtime.Ready(ctx) })
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	binding, release, err := gateway.Bind(7, "task-a", "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	response, err := gateway.Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: "call-a",
+		PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+	if err != nil || response.GetErrorCode() != "task_prerequisites_missing" || calls.Load() != 0 {
+		t.Fatalf("unadmitted task reached paid transport: %s / calls=%d / %v", response.GetErrorCode(), calls.Load(), err)
+	}
+	batch, err := budget.Inspect(ctx, 7)
+	if err != nil || batch.ID != "" || batch.UsedTokens != 0 || batch.ReservedTokens != 0 {
+		t.Fatalf("runtime refusal created billing facts: %+v %v", batch, err)
+	}
+}
 
 func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
 	ctx := context.Background()

@@ -58,6 +58,12 @@ type TaskWorkspaceView struct {
 	Toolchain           string              `json:"toolchain"`
 }
 
+// TaskModelWorkspace is a Harness-only execution context, never an HTTP root.
+type TaskModelWorkspace struct {
+	WorkingDir            string
+	DependencyOperationID string
+}
+
 type taskPreparePayload struct {
 	RequestID     string                 `json:"request_id"`
 	Task          worktree.TaskWorkspace `json:"task"`
@@ -74,6 +80,93 @@ func (t *TaskWorkspaces) Inspect(ctx context.Context, ownerID uint, sessionID st
 		return TaskWorkspaceView{}, err
 	}
 	return t.project(ctx, snapshot.Events, view)
+}
+
+func (t *TaskWorkspaces) ModelWorkspace(ctx context.Context, owner uint, id string) (TaskModelWorkspace, error) {
+	return t.modelWorkspace(ctx, owner, id, "")
+}
+
+// ToolWorkspace admits only the current Go-dispatched call while its result is pending.
+func (t *TaskWorkspaces) ToolWorkspace(ctx context.Context, owner uint, id, callID string) (TaskModelWorkspace, error) {
+	if callID == "" {
+		return TaskModelWorkspace{}, ErrInvalidSessionInput
+	}
+	return t.modelWorkspace(ctx, owner, id, callID)
+}
+
+func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, currentToolID string) (TaskModelWorkspace, error) {
+	snapshot, sessionView, err := t.read(ctx, owner, id)
+	if err != nil {
+		return TaskModelWorkspace{}, err
+	}
+	view, err := t.project(ctx, snapshot.Events, sessionView)
+	if err != nil {
+		return TaskModelWorkspace{}, err
+	}
+	if !view.Available || view.State != "prepared" || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
+		view.Test != nil && view.Test.State == "unknown" && !view.Test.Stopped {
+		return TaskModelWorkspace{}, ErrSessionStateConflict
+	}
+	if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
+		return TaskModelWorkspace{}, err
+	}
+	workspace := TaskModelWorkspace{WorkingDir: filepath.Join(t.storage, view.WorkspaceID)}
+	if view.Dependency != nil {
+		workspace.DependencyOperationID = view.Dependency.OperationID
+	}
+	return workspace, nil
+}
+
+func taskToolOutcomesKnown(events []Event, currentToolID string) error {
+	pending := map[string]toolCallPayload{}
+	dispatched := map[string]bool{}
+	prepared := false
+	for _, event := range events {
+		if event.Type == taskPreparedEvent {
+			prepared = true
+		}
+		if !prepared {
+			continue
+		}
+		switch event.Type {
+		case commitPendingEventType, toolDispatchedType:
+			var call toolCallPayload
+			if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" {
+				return ErrEventIntegrity
+			}
+			key := invocationHistoryKey(call.RunID, call.ToolCallID)
+			pending[key] = call
+			if event.Type == toolDispatchedType {
+				dispatched[key] = true
+			}
+		case "tool/result":
+			var result toolResultPayload
+			if json.Unmarshal(event.Payload, &result) != nil || result.OutcomeUnknown {
+				return ErrSessionStateConflict
+			}
+			delete(pending, invocationHistoryKey(result.RunID, result.ToolCallID))
+		case toolUnknownEventType:
+			return ErrSessionStateConflict
+		}
+	}
+	admittedCurrent := false
+	for key, call := range pending {
+		if currentToolID == "" || call.ToolCallID != currentToolID || !dispatched[key] {
+			return ErrSessionStateConflict
+		}
+		if admittedCurrent {
+			return ErrSessionStateConflict
+		}
+		run, err := projectRun(events, call.RunID)
+		if err != nil || run.terminal || run.view.Status != RunRunning || run.view.LeaseUntil == nil || !run.view.LeaseUntil.After(time.Now()) {
+			return ErrSessionStateConflict
+		}
+		admittedCurrent = true
+	}
+	if currentToolID != "" && !admittedCurrent {
+		return ErrSessionStateConflict
+	}
+	return nil
 }
 
 func (t *TaskWorkspaces) Prepare(ctx context.Context, ownerID uint, sessionID string, expectedSeq int64, requestID string) (result TaskWorkspaceView, resultErr error) {
@@ -248,11 +341,82 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 		view.Reason = "preparation failed; retained lease requires reconciliation"
 	case time.Now().After(payload.Task.LeaseExpiresAt):
 		view.State, view.Reason = "blocked", "preparation lease expired; retained workspace requires reconciliation"
-	case t.manager.VerifyTask(ctx, t.storage, payload.Task) != nil:
-		view.State, view.Reason = "blocked", "task copy or Git registration changed; retained workspace requires reconciliation"
+	case t.verifyTask(ctx, payload.Task, events) != nil:
+		view.State, view.Reason = "blocked", "task copy, Git registration or retained tool outcome requires reconciliation"
 	}
 	view.DependencyAvailable = view.Available && view.State == "prepared" && view.Toolchain == "python" && view.Dependency == nil && view.Test == nil
 	return view, nil
+}
+
+func (t *TaskWorkspaces) verifyTask(ctx context.Context, task worktree.TaskWorkspace, events []Event) error {
+	type dispatchProof struct {
+		seq int64
+		toolCallPayload
+	}
+	type resultProof struct {
+		seq int64
+		toolResultPayload
+	}
+	dispatched := map[string]dispatchProof{}
+	results := map[string]resultProof{}
+	prepared := false
+	for _, event := range events {
+		if event.Type == taskPreparedEvent {
+			prepared = true
+		}
+		if !prepared {
+			continue
+		}
+		switch event.Type {
+		case toolDispatchedType, toolUnknownEventType:
+			var call toolCallPayload
+			if json.Unmarshal(event.Payload, &call) != nil {
+				return ErrEventIntegrity
+			}
+			key := call.RunID + "\x00" + call.ToolCallID
+			if event.Type == toolUnknownEventType {
+				return ErrSessionStateConflict
+			}
+			if _, exists := dispatched[key]; exists {
+				return ErrEventIntegrity
+			}
+			dispatched[key] = dispatchProof{event.Seq, call}
+		case "tool/result":
+			var result toolResultPayload
+			if json.Unmarshal(event.Payload, &result) != nil {
+				return ErrEventIntegrity
+			}
+			if result.OutcomeUnknown {
+				return ErrSessionStateConflict
+			}
+			key := result.RunID + "\x00" + result.ToolCallID
+			if _, exists := results[key]; exists {
+				return ErrEventIntegrity
+			}
+			results[key] = resultProof{event.Seq, result}
+		}
+	}
+	changes := []worktree.TaskFileChange{}
+	prepared = false
+	for _, event := range events {
+		if event.Type == taskPreparedEvent {
+			prepared = true
+		}
+		if !prepared || event.Type != codeModifiedEventType {
+			continue
+		}
+		var change codeModificationPayload
+		if json.Unmarshal(event.Payload, &change) != nil || validateCodeModificationPayload(change) != nil || change.BeforeSHA256 != hashCodeState(change.Before) || change.AfterSHA256 != hashCodeState(change.After) || change.DiffSHA256 != hashCodeTransition(change.Before, change.After) {
+			return ErrEventIntegrity
+		}
+		key := change.RunID + "\x00" + change.ToolCallID
+		result, exists := results[key]
+		if !exists || result.seq <= event.Seq || result.Error != "" || result.ExitCode != 0 || result.OutcomeUnknown || result.ToolName != change.ToolName || dispatched[key].ToolName != change.ToolName || dispatched[key].seq >= event.Seq {
+			return ErrSessionStateConflict
+		}
+		changes = append(changes, worktree.TaskFileChange{Path: change.Path, Before: change.Before, After: change.After, Operation: change.Operation})
+	}
+	return t.manager.VerifyTask(ctx, t.storage, task, changes...)
 }
 
 func taskPreparation(events []Event) (*taskPreparePayload, string, error) {

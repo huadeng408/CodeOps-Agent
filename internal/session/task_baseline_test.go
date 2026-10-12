@@ -18,6 +18,64 @@ type baselineNotification func(string)
 
 func (notify baselineNotification) Notify(id string) { notify(id) }
 
+func TestTaskModelWorkspaceRefusesUnadmittedRuntime(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows task preparation contract")
+	}
+	ctx := context.Background()
+	repo, storage := t.TempDir(), t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@example.test"}} {
+		if err := exec.Command("git", append([]string{"-C", repo}, args...)...).Run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.test/admission\n\ngo 1.20\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "fixture"}} {
+		if err := exec.Command("git", append([]string{"-C", repo}, args...)...).Run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "model admission", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := session.NewTaskWorkspaces(workbench, func(context.Context) (uint, error) { return 7, nil }, repo, storage)
+	prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
+	if err != nil || prepared.State != "prepared" {
+		t.Fatalf("prepare: %+v %v", prepared, err)
+	}
+	budget := admission.NewBudget(ledger)
+	runner := sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage})
+	tasks.WithBaselineRuntime(session.TaskBaselineRuntime{Runner: runner, Ready: runner.Ready,
+		Acquire: func(ctx context.Context, owner uint, id string) error {
+			_, err := budget.AcquireTask(ctx, owner, id)
+			return err
+		},
+		Finish: func(ctx context.Context, owner uint, id string) error {
+			_, err := budget.FinishTask(ctx, owner, id)
+			return err
+		},
+	})
+	if workspace, err := tasks.ModelWorkspace(ctx, 7, created.ID); err == nil || workspace.WorkingDir != "" {
+		t.Fatal("missing pin/credentials admitted a model workspace")
+	}
+	if _, err := tasks.ModelWorkspace(ctx, 8, created.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatal("model workspace disclosed a foreign owner's preparation")
+	}
+	batch, err := budget.Inspect(ctx, 7)
+	if err != nil || batch.ID != "" || batch.ReservedTokens != 0 || batch.UsedTokens != 0 {
+		t.Fatalf("refused workspace created admission facts: %+v %v", batch, err)
+	}
+}
+
 func TestTaskBaselineDeletionBeforeAdmissionDoesNotAcquireTask(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows task preparation contract")

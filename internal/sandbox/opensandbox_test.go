@@ -25,6 +25,8 @@ import (
 	"code-agent/internal/cli"
 	appconfig "code-agent/internal/config"
 	"code-agent/internal/hooks"
+	"code-agent/internal/identity"
+	"code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"code-agent/internal/tools"
@@ -509,7 +511,8 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						t.Fatalf("prepare: %+v %v", view, err)
 					}
 					budget := admission.NewBudget(ledger)
-					profile := session.TaskBaselineRuntime{Runner: sandbox.NewOpenSandboxRunner(config), Acquire: func(ctx context.Context, owner uint, id string) error {
+					modelRuntime := sandbox.NewOpenSandboxRunner(config)
+					profile := session.TaskBaselineRuntime{Runner: modelRuntime, Ready: modelRuntime.Ready, Acquire: func(ctx context.Context, owner uint, id string) error {
 						_, err := budget.AcquireTask(ctx, owner, id)
 						return err
 					}, Finish: func(ctx context.Context, owner uint, id string) error {
@@ -517,12 +520,65 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						return err
 					}}
 					ledgerTasks.WithBaselineRuntime(profile)
+					modelWorkspace, err := ledgerTasks.ModelWorkspace(context.Background(), 7, ledgerSessionID)
+					if err != nil || modelWorkspace.WorkingDir == repo || !strings.HasPrefix(modelWorkspace.WorkingDir, root+string(os.PathSeparator)) || modelWorkspace.DependencyOperationID != "" {
+						t.Fatalf("admitted model did not receive the isolated copy: %+v %v", modelWorkspace, err)
+					}
+					listener, err := net.Listen("tcp", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					captured := make(chan *codeagentpb.UserInput, 1)
+					transport := grpc.NewServer()
+					codeagentpb.RegisterOrchestratorServer(transport, workspaceOrchestrator{captured: captured})
+					go transport.Serve(listener)
+					defer transport.Stop()
+					client, err := orchestrator.NewClient(listener.Addr().String())
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer client.Close()
+					actor, err := identity.Default().BindSession(ledgerSessionID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					runner := session.NewSessionRunner(workbench, client, nil, session.SessionRunnerOptions{Workspace: ledgerTasks.ModelWorkspace})
+					run, err := runner.SubmitMessage(context.Background(), session.SubmitMessageCommand{RequestID: "model-workspace", SessionID: ledgerSessionID, OwnerID: 7, ExpectedSeq: 3, Content: "inspect the task copy", Actor: actor})
+					if err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case input := <-captured:
+						if input.WorkingDir != modelWorkspace.WorkingDir || input.ContextEnvelope == nil || !input.HarnessManaged {
+							t.Fatal("Runner forwarded the original repository or omitted its admitted Context")
+						}
+					case <-time.After(5 * time.Second):
+						t.Fatal("admitted workspace did not reach the external transport")
+					}
+					for attempt := 0; attempt < 500; attempt++ {
+						view, err := workbench.Get(context.Background(), 7, ledgerSessionID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if view.Run != nil && view.Run.RunID == run.RunID && view.Run.Status == session.RunCompleted {
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if err := runner.Close(); err != nil {
+						t.Fatal(err)
+					}
+					current, err := workbench.Get(context.Background(), 7, ledgerSessionID)
+					if err != nil || current.Run == nil || current.Run.Status != session.RunCompleted {
+						t.Fatalf("model workspace run failed: %+v %v", current.Run, err)
+					}
+					baselineSeq := int64(current.EventCount)
 					objects[sidecarID] = sidecarFixture
 					if err := writeObjects(); err != nil {
 						t.Fatal(err)
 					}
-					view, err := ledgerTasks.RunBaseline(context.Background(), 7, ledgerSessionID, 3, "baseline")
-					if err != nil || view.Test == nil || view.Test.State != "unknown" || view.Test.Output != "partial failure\n" || view.Test.ExitCode != nil || view.EventCount != 5 {
+					view, err := ledgerTasks.RunBaseline(context.Background(), 7, ledgerSessionID, baselineSeq, "baseline")
+					if err != nil || view.Test == nil || view.Test.State != "unknown" || view.Test.Output != "partial failure\n" || view.Test.ExitCode != nil || view.EventCount != int(baselineSeq+2) {
 						t.Fatalf("stopped execution became success or lost partial output: %+v %v", view, err)
 					}
 					encoded, _ := json.Marshal(view.Test)
@@ -539,6 +595,15 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					againJSON, _ := json.Marshal(again.Test)
 					if err != nil || string(againJSON) != string(encoded) || created != 2 || executed != 2 || deleted != 2 {
 						t.Fatalf("reopen replayed unknown execution: %+v lifecycle=%d/%d/%d %v", again, created, executed, deleted, err)
+					}
+					if _, err := reopened.ModelWorkspace(context.Background(), 7, ledgerSessionID); err != nil {
+						t.Fatalf("confirmed stopped baseline prevented model review: %v", err)
+					}
+					if _, err := ledger.Append(context.Background(), ledgerSessionID, int64(again.EventCount), "tool/dispatched", map[string]any{"run_id": "interrupted-run", "tool_call_id": "missing-result", "tool_name": "Bash"}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := reopened.ModelWorkspace(context.Background(), 7, ledgerSessionID); !errors.Is(err, session.ErrSessionStateConflict) {
+						t.Fatal("missing shell result did not block the next model attempt")
 					}
 				}
 				if scenario == "oversized event" && !result.Truncated {
@@ -624,6 +689,20 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			}
 		})
 	}
+}
+
+type workspaceOrchestrator struct {
+	codeagentpb.UnimplementedOrchestratorServer
+	captured chan *codeagentpb.UserInput
+}
+
+func (fixture workspaceOrchestrator) Converse(stream grpc.BidiStreamingServer[codeagentpb.HarnessMessage, codeagentpb.OrchestratorMessage]) error {
+	message, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	fixture.captured <- message.GetUserInput()
+	return stream.Send(&codeagentpb.OrchestratorMessage{Payload: &codeagentpb.OrchestratorMessage_Done{Done: &codeagentpb.Done{Success: true, Message: "inspected"}}})
 }
 
 type failedReadTransport struct {

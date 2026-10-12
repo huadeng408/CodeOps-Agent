@@ -14,7 +14,9 @@ import (
 	"code-agent/internal/admission"
 	"code-agent/internal/handler"
 	"code-agent/internal/localidentity"
+	"code-agent/internal/memory"
 	"code-agent/internal/middleware"
+	harnessorch "code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/serverconfig"
 	"code-agent/internal/service"
@@ -67,9 +69,6 @@ func runLocalCore(cfg serverconfig.Config) error {
 		}
 		defer assets.Close()
 	}
-	router.GET("/healthz", healthzHandlerWithContinuation(func() string { return "disabled" }, func() session.ContinuationSupervisorStatus {
-		return session.ContinuationSupervisorStatus{LastHealthError: "execution prerequisites are not admitted"}
-	}))
 	api := router.Group("/api/v1")
 	registerUserRoutes(api, users, jwtManager)
 	optionalUnavailable := func(c *gin.Context) {
@@ -80,9 +79,11 @@ func runLocalCore(cfg serverconfig.Config) error {
 		api.Any(prefix+"/*path", middleware.AuthMiddleware(jwtManager, users), optionalUnavailable)
 	}
 	var tasks session.TaskWorkspaceModule
+	var workspaces *session.TaskWorkspaces
 	var taskRuntime *sandbox.OpenSandboxRunner
+	var taskConfig sandbox.Config
 	if cfg.Harness.RepositoryRoot != "" && cfg.Harness.TaskWorkspaceRoot != "" {
-		workspaces := session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
+		workspaces = session.NewTaskWorkspaces(workbench, identity.OwnerID, cfg.Harness.RepositoryRoot, cfg.Harness.TaskWorkspaceRoot)
 		if os.Getenv("CODE_AGENT_TASK_RUNTIME") == "opensandbox" {
 			toolchain := os.Getenv("CODE_AGENT_TASK_TOOLCHAIN")
 			if toolchain == "" {
@@ -99,7 +100,8 @@ func runLocalCore(cfg serverconfig.Config) error {
 					return err
 				}
 			}
-			taskRuntime = sandbox.NewOpenSandboxRunner(sandbox.Config{Backend: sandbox.BackendOpenSandbox, TrustRoot: cfg.Harness.TaskWorkspaceRoot, Toolchain: toolchain, Image: os.Getenv("CODE_AGENT_TASK_IMAGE"), OpenSandboxManifest: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST"), OpenSandboxManifestSHA256: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST_SHA256")})
+			taskConfig = sandbox.Config{Backend: sandbox.BackendOpenSandbox, TrustRoot: cfg.Harness.TaskWorkspaceRoot, Toolchain: toolchain, Image: os.Getenv("CODE_AGENT_TASK_IMAGE"), OpenSandboxManifest: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST"), OpenSandboxManifestSHA256: os.Getenv("CODE_AGENT_OPENSANDBOX_MANIFEST_SHA256")}
+			taskRuntime = sandbox.NewOpenSandboxRunner(taskConfig)
 			budget := admission.NewBudget(ledger)
 			workspaces.WithBaselineRuntime(session.TaskBaselineRuntime{Toolchain: toolchain, Runner: taskRuntime, Ready: taskRuntime.Ready,
 				Acquire: func(ctx context.Context, owner uint, id string) error {
@@ -114,7 +116,57 @@ func runLocalCore(cfg serverconfig.Config) error {
 		}
 		tasks = workspaces
 	}
-	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: session.NewContinuationSlot()}).register(router, api, users, jwtManager)
+	provider := admission.ProviderFromEnv()
+	gateway := admission.NewGateway(admission.NewBudget(ledger), provider)
+	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
+		if workspaces == nil {
+			return session.ErrContinuationUnavailable
+		}
+		owner, err := identity.OwnerID(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = workspaces.ModelWorkspace(ctx, owner, id)
+		return err
+	})
+	if err := gateway.Start(); err != nil {
+		return errors.New("model admission initialization unavailable")
+	}
+	defer gateway.Close()
+	continuation := session.NewContinuationSlot()
+	executors := newContinuationToolExecutors(cfg.Harness.TaskWorkspaceRoot)
+	executors.sandbox = newLazySandboxRunner(taskConfig)
+	executors.taskWorkspaces, executors.taskOwner = workspaces, identity.OwnerID
+	executors.SetTracer(telemetry)
+	defer executors.Close()
+	target := strings.TrimSpace(os.Getenv("CODE_AGENT_ORCHESTRATOR_ADDR"))
+	if target == "" {
+		target = "127.0.0.1:50051"
+	}
+	supervisor := session.NewContinuationSupervisor(continuation, 5*time.Second, func(ctx context.Context) (session.ContinuationModule, error) {
+		if provider.Validate() != nil || taskRuntime == nil || taskRuntime.Ready(ctx) != nil {
+			return nil, session.ErrContinuationUnavailable
+		}
+		client, err := harnessorch.NewClient(target)
+		if err != nil {
+			return nil, session.ErrContinuationUnavailable
+		}
+		client.SetTracer(telemetry)
+		client.SetModelScopeFactory(gateway.BindActor)
+		memories := memory.NewLedgerMemory(ledger, client.ReflectMemory)
+		memories.SetTracer(telemetry)
+		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: workspaces.ModelWorkspace})
+		return &managedContinuation{runner: runner, client: client}, nil
+	})
+	supervisor.Start(context.Background())
+	defer supervisor.Close()
+	router.GET("/healthz", healthzHandlerWithContinuation(func() string {
+		if continuation.Available() {
+			return "connected"
+		}
+		return "disabled"
+	}, supervisor.Status))
+	(sessionHTTP{workbench: workbench, hub: hub, tickets: tickets, tasks: tasks, continuation: continuation}).register(router, api, users, jwtManager)
 	api.GET("/capabilities", middleware.AuthMiddleware(jwtManager, users), func(c *gin.Context) {
 		capabilities := map[string]CapabilityStatus{
 			"identity":  {State: "ready", Reason: "local persistent authentication"},
@@ -132,6 +184,9 @@ func runLocalCore(cfg serverconfig.Config) error {
 			} else {
 				capabilities["sandbox"] = CapabilityStatus{State: "blocked", Reason: "approved OpenSandbox prerequisites are unavailable"}
 			}
+		}
+		if provider.Validate() == nil && continuation.Available() && capabilities["sandbox"].State == "ready" && capabilities["budget"].Tokens != nil && capabilities["budget"].State != "blocked" {
+			capabilities["execution"] = CapabilityStatus{State: "ready", Reason: "Go model admission and approved task runtime are attached"}
 		}
 		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": capabilities})
 	})

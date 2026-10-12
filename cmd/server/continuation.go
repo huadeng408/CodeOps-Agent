@@ -13,6 +13,7 @@ import (
 	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
+	"code-agent/internal/session"
 	"code-agent/internal/skills"
 	"code-agent/internal/telemetry/genai"
 	"code-agent/internal/tools"
@@ -50,13 +51,15 @@ func configureContinuationSkills(executor *tools.Executor, root string) error {
 // continuationToolExecutors keeps mutable Executor cwd/job state scoped to a
 // durable Session instead of sharing one process-global working directory.
 type continuationToolExecutors struct {
-	root    string
-	mu      sync.Mutex
-	items   map[string]*tools.Executor
-	sandbox *lazySandboxRunner
-	tracer  genai.Tracer
-	mcp     *mcp.Manager
-	mcps    map[string]*mcp.Manager
+	root           string
+	mu             sync.Mutex
+	items          map[string]*tools.Executor
+	sandbox        *lazySandboxRunner
+	tracer         genai.Tracer
+	mcp            *mcp.Manager
+	mcps           map[string]*mcp.Manager
+	taskWorkspaces *session.TaskWorkspaces
+	taskOwner      func(context.Context) (uint, error)
 }
 
 // lazySandboxRunner keeps server startup and read-only sessions responsive
@@ -139,6 +142,18 @@ func (m *continuationToolExecutors) Execute(ctx context.Context, actor identity.
 }
 
 func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ identity.Actor, sessionID, workingDir string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	dependency := ""
+	if m.taskWorkspaces != nil {
+		owner, err := m.taskOwner(ctx)
+		if err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "task workspace admission unavailable", ExitCode: 1}
+		}
+		workspace, err := m.taskWorkspaces.ToolWorkspace(ctx, owner, sessionID, call.ID)
+		if err != nil || filepath.Clean(workingDir) != filepath.Clean(workspace.WorkingDir) {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "task workspace admission unavailable", ExitCode: 1}
+		}
+		dependency = workspace.DependencyOperationID
+	}
 	executor, err := m.executor(ctx, sessionID, workingDir)
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: err.Error(), ExitCode: 1}
@@ -157,8 +172,9 @@ func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ i
 	}
 	result, execErr := executor.Execute(ctx, tools.ToolRequest{
 		Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
-		OperationID: call.OperationID,
-		MCPServer:   call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
+		OperationID:           call.OperationID,
+		DependencyOperationID: dependency,
+		MCPServer:             call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
 	})
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
 	out.RuntimeID, out.Stopped, out.OutcomeUnknown = result.RuntimeID, result.Stopped, result.OutcomeUnknown
@@ -186,7 +202,7 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 		dir = m.root
 	}
 	trustRoot := m.root
-	if strings.HasPrefix(sessionID, "agent-") {
+	if strings.HasPrefix(sessionID, "agent-") || m.taskWorkspaces != nil {
 		trustRoot = dir
 	}
 	executor := tools.NewExecutor(trustRoot)

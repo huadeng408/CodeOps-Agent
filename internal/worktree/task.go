@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -25,6 +26,11 @@ type TaskWorkspace struct {
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
 	Baseline       Baseline  `json:"baseline"`
 	IndexSHA256    string    `json:"index_sha256,omitempty"`
+}
+
+// TaskFileChange is a completed Go file effect reconstructed from the Ledger.
+type TaskFileChange struct {
+	Path, Before, After, Operation string
 }
 
 func (m *Manager) PlanTask(ctx context.Context) (TaskWorkspace, error) {
@@ -277,13 +283,55 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 }
 
 // VerifyTask validates the explicit Harness-owned linked metadata relation and
-// the copied baseline. It never promotes a partial or modified copy to ready.
-func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorkspace) error {
+// the copied baseline and optional completed Ledger changes. Unrecorded effects
+// and partial preparations remain unavailable.
+func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorkspace, changes ...TaskFileChange) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := task.Validate(); err != nil {
 		return err
+	}
+	files := append([]BaselineFile(nil), task.Baseline.Files...)
+	for _, change := range changes {
+		if validateBaselinePath(change.Path) != nil || len(change.After) > maxBaselineFileBytes || taskCredentialPattern.MatchString(change.After) {
+			return errors.New("unsafe recorded task change")
+		}
+		if _, reason := baselineExclusion(change.Path); reason != "" {
+			return errors.New("excluded path in recorded task change")
+		}
+		index := -1
+		for i, item := range files {
+			if sameBaselinePath(item.Path, change.Path) {
+				if item.Path != change.Path || item.PublicTestFixture {
+					return errors.New("recorded change aliases a task path or approved fixture")
+				}
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			if change.Operation != "Write" || change.Before != "" || len(files) >= maxBaselineFiles {
+				return errors.New("new task file lacks a recorded creation")
+			}
+			files = append(files, BaselineFile{Path: change.Path})
+			index = len(files) - 1
+		}
+		item := &files[index]
+		if item.Exists && (item.SHA256 != baselineDigest([]byte(change.Before)) || item.Size != int64(len(change.Before))) || !item.Exists && (change.Before != "" || change.Operation != "Write") {
+			return errors.New("recorded task change does not follow the preceding file state")
+		}
+		switch change.Operation {
+		case "Write":
+			item.Mode = 0644
+			if runtime.GOOS == "windows" {
+				item.Mode = 0666
+			}
+		case "Edit", "NotebookEdit":
+		default:
+			return errors.New("unsupported recorded task change")
+		}
+		item.Exists, item.SHA256, item.Size = true, baselineDigest([]byte(change.After)), int64(len(change.After))
 	}
 	m.mu.Lock()
 	fixtures := m.publicFixtures
@@ -339,7 +387,7 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 	if err != nil || !exists || task.IndexSHA256 == "" || baselineDigest(index) != task.IndexSHA256 {
 		return errors.New("task Git index does not match prepared lease")
 	}
-	for _, item := range task.Baseline.Files {
+	for _, item := range files {
 		data, exists, err := readBaselineFile(destination, item.Path, maxBaselineFileBytes)
 		if err != nil || !matchesTaskFile(item, data, exists) {
 			return errors.New("task copy does not match recorded baseline")
@@ -360,7 +408,7 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 		}
 	}
 	admitted := map[string]bool{".git": true}
-	for _, item := range task.Baseline.Files {
+	for _, item := range files {
 		if item.Exists {
 			admitted[item.Path] = true
 			for dir := filepath.ToSlash(filepath.Dir(item.Path)); dir != "."; dir = filepath.ToSlash(filepath.Dir(dir)) {

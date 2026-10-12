@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"code-agent/internal/safety"
+	"code-agent/internal/tools"
 	"code-agent/internal/worktree"
 )
 
@@ -108,5 +111,79 @@ func TestTaskWorkspaceRequiresHostApprovalAndPreservesInterruptedIntent(t *testi
 	}
 	if _, err := os.Lstat(filepath.Join(storage, plan.LeaseID)); !os.IsNotExist(err) {
 		t.Fatal("interrupted intent created a new checkout")
+	}
+}
+
+func TestTaskWorkspaceContinuesOnlyAfterRecordedGoEdits(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first native Git directory pin contract")
+	}
+	ctx := context.Background()
+	repo, storage := taskWorkspaceRepository(t), t.TempDir()
+	ledger := openWorkbenchTestLedger(t)
+	w := NewWorkbench(ledger, nil)
+	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "edit copy", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage)
+	prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
+	if err != nil || prepared.State != "prepared" {
+		t.Fatalf("prepare: %+v %v", prepared, err)
+	}
+	executor := tools.NewExecutor(filepath.Join(storage, prepared.WorkspaceID))
+	defer executor.Close()
+	seq := int64(prepared.EventCount)
+	appendFact := func(kind string, payload any) {
+		t.Helper()
+		if _, err := ledger.Append(ctx, created.ID, seq, kind, payload); err != nil {
+			t.Fatal(err)
+		}
+		seq++
+	}
+	for index, path := range []string{"main.go", "src/new.go", "main.go"} {
+		callID := fmt.Sprintf("edit-%d", index)
+		appendFact("tool/dispatched", map[string]any{"run_id": "run", "tool_call_id": callID, "tool_name": "Write"})
+		result, err := executor.Execute(ctx, tools.ToolRequest{Name: "Write", Arguments: map[string]any{"path": path, "content": fmt.Sprintf("change %d", index)}})
+		if err != nil || result.ExitCode != 0 || len(result.Changes) != 1 {
+			t.Fatalf("Go Write failed: %+v %v", result, err)
+		}
+		change := result.Changes[0]
+		appendFact("code/modified", map[string]any{
+			"run_id": "run", "tool_call_id": callID, "tool_name": "Write", "operation": "Write", "summary": "Go Write",
+			"path": change.Path, "before": change.Before, "after": change.After,
+			"before_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte(change.Before))),
+			"after_sha256":  fmt.Sprintf("%x", sha256.Sum256([]byte(change.After))),
+			"diff_sha256":   fmt.Sprintf("%x", sha256.Sum256([]byte(change.Before+"\x00"+change.After))),
+		})
+		view, err := tasks.Inspect(ctx, 7, created.ID)
+		if err != nil || view.State != "blocked" {
+			t.Fatal("unconfirmed file effect was admitted")
+		}
+		appendFact("tool/result", map[string]any{"run_id": "run", "tool_call_id": callID, "tool_name": "Write", "exit_code": 0})
+		view, err = NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).Inspect(ctx, 7, created.ID)
+		if err != nil || view.State != "prepared" {
+			t.Fatalf("recorded Go edit cannot continue after restart: %+v %v", view, err)
+		}
+	}
+	original, err := os.ReadFile(filepath.Join(repo, "main.go"))
+	if err != nil || string(original) != "dirty" {
+		t.Fatal("task edit changed the original repository")
+	}
+	if err := os.WriteFile(filepath.Join(storage, prepared.WorkspaceID, "src", "new.go"), []byte("external change"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	view, err := tasks.Inspect(ctx, 7, created.ID)
+	if err != nil || view.State != "blocked" {
+		t.Fatal("external edit was admitted as a recorded Go edit")
+	}
+	if err := os.WriteFile(filepath.Join(storage, prepared.WorkspaceID, "src", "new.go"), []byte("change 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	appendFact("tool/dispatched", map[string]any{"run_id": "run", "tool_call_id": "shell", "tool_name": "Bash"})
+	appendFact("tool/result", map[string]any{"run_id": "run", "tool_call_id": "shell", "tool_name": "Bash", "exit_code": 126, "outcome_unknown": true, "stopped": true})
+	view, err = tasks.Inspect(ctx, 7, created.ID)
+	if err != nil || view.State != "blocked" {
+		t.Fatal("unknown shell outcome was admitted because it produced no file change")
 	}
 }

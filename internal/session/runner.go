@@ -212,6 +212,8 @@ type SessionRunnerOptions struct {
 	AgentLifecycle orchestrator.AgentLifecycleHandler
 	Memory         SessionMemory
 	AgentWorkspace func(context.Context, AgentWorkspaceRequest) (string, error)
+	// Workspace resolves Go-admitted task paths before Context or model work.
+	Workspace func(context.Context, uint, string) (TaskModelWorkspace, error)
 	// AgentToolBinding resolves dynamic tools before delegation and again before
 	// every child call. Static Agent Card tools remain local policy.
 	AgentToolBinding func(string) (AgentToolBinding, bool)
@@ -1524,14 +1526,21 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		Actor: projection.actor, History: history, State: planTodo,
 		HarnessManaged: true,
 	}
-	if workingDir != "" {
-		request.ContextEnvelope, err = buildContextEnvelope(workingDir, events)
+	if err := r.agentRequest(events, &request); err != nil {
+		return orchestrator.ConversationRequest{}, err
+	}
+	if r.options.Workspace != nil {
+		workspace, err := r.options.Workspace(ctx, projectionOwner(events), key.sessionID)
 		if err != nil {
 			return orchestrator.ConversationRequest{}, err
 		}
+		request.WorkingDir = workspace.WorkingDir
 	}
-	if err := r.agentRequest(events, &request); err != nil {
-		return orchestrator.ConversationRequest{}, err
+	if request.WorkingDir != "" {
+		request.ContextEnvelope, err = buildContextEnvelope(request.WorkingDir, events)
+		if err != nil {
+			return orchestrator.ConversationRequest{}, err
+		}
 	}
 	if request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
 		request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)

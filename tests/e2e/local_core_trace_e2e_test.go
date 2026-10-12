@@ -52,6 +52,7 @@ func TestProductionLocalCoreExportsWorkspacePreparationTrace(t *testing.T) {
 	}))
 	defer receiver.Close()
 	fixture := startProductionLocalCore(t)
+	fixture.client.Timeout = 10 * time.Second
 	fixture.stop(t)
 	repository, storage := t.TempDir(), t.TempDir()
 	seedSpawnGitRepo(t, repository)

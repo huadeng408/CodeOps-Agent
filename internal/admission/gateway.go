@@ -42,14 +42,15 @@ type modelScope struct {
 // provider payload using its existing model-policy adapters.
 type Gateway struct {
 	pb.UnimplementedModelGatewayServer
-	budget   *Budget
-	provider ProviderConfig
-	mu       sync.Mutex
-	scopes   map[[32]byte]modelScope
-	server   *grpc.Server
-	listener net.Listener
-	address  string
-	http     *http.Client
+	budget        *Budget
+	provider      ProviderConfig
+	mu            sync.Mutex
+	scopes        map[[32]byte]modelScope
+	server        *grpc.Server
+	listener      net.Listener
+	address       string
+	http          *http.Client
+	taskAdmission func(context.Context, string) error
 }
 
 func NewGateway(budget *Budget, provider ProviderConfig) *Gateway {
@@ -57,6 +58,13 @@ func NewGateway(budget *Budget, provider ProviderConfig) *Gateway {
 		Timeout:       60 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("provider redirects are not admitted") },
 	}}
+}
+
+// SetTaskAdmission is configured by Go; the capability's Ledger root supplies the task ID.
+func (gateway *Gateway) SetTaskAdmission(check func(context.Context, string) error) {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	gateway.taskAdmission = check
 }
 
 func (gateway *Gateway) Start() error {
@@ -173,6 +181,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	}
 	gateway.mu.Lock()
 	scope, found := gateway.scopes[sha256.Sum256(request.Capability)]
+	checkTask := gateway.taskAdmission
 	gateway.mu.Unlock()
 	if !found {
 		return nil, status.Error(codes.Unauthenticated, "model capability unavailable")
@@ -233,6 +242,10 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid model payload")
+	}
+	if checkTask != nil && checkTask(ctx, scope.taskID) != nil {
+		result.ErrorCode = "task_prerequisites_missing"
+		return result, nil
 	}
 	// Initial product concurrency is one across the canonical Ledger. An
 	// abandoned reservation therefore fences dispatch even after a crash.
