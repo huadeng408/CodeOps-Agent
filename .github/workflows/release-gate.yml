@@ -20,8 +20,8 @@ jobs:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, Node 24
         with:
-          # The release gate accepts a receipt produced on the immediate
-          # parent when the current commit only promotes curated evidence.
+          # The release gate accepts receipts from runtime-equivalent ancestors
+          # after explanatory documentation or curated evidence changes.
           # Keep history available so that source-pin validation is identical
           # locally and on the hosted runner.
           fetch-depth: 0

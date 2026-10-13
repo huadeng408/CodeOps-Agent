@@ -211,6 +211,18 @@ def _passing_receipts(repo: Path, sha: str) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "receipts"], cwd=repo, check=True)
 
 
+def test_release_gate_rejects_missing_lane_receipts(tmp_path: Path) -> None:
+    repo, _ = _git_repo(tmp_path)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert report.status is GateStatus.BLOCKED
+    assert report.exit_code == 3
+    lanes = [check for check in report.checks if check.name.startswith("evidence.")]
+    assert len(lanes) == 7
+    assert all(check.status == "BLOCKED" for check in lanes)
+
+
 def test_release_gate_requires_current_head_and_clean_tree(tmp_path: Path, monkeypatch) -> None:
     repo, sha = _git_repo(tmp_path)
     _passing_receipts(repo, sha)
@@ -263,7 +275,7 @@ def test_release_gate_accepts_receipt_commit_bound_to_its_source_parent(tmp_path
 def test_release_gate_keeps_receipts_across_explanatory_document_commits(tmp_path: Path) -> None:
     repo, source_sha = _git_repo(tmp_path)
     _passing_receipts(repo, source_sha)
-    for path in ("README.md", "docs/usage.md"):
+    for path in ("README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/usage.md"):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("Explanatory documentation only.\n", encoding="utf-8")

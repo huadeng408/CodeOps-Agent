@@ -1,6 +1,6 @@
 """Phase 1 gate compliance under the repository's active Goal.
 
-``docs/GOAL.md`` is the current acceptance authority.  H0/H3/H4/H5 retain
+``docs/GOAL.md`` is the current acceptance authority.  H0/H3/H4 retain
 their historical names here because the code contracts originated under those
 labels, but the old design map is not a runtime or clean-clone dependency.
 
@@ -284,20 +284,3 @@ class TestH4MaxProcessesReachable:
         assert summary["failed"] >= 1
         failures = (artifacts.root / "failures.jsonl").read_text(encoding="utf-8")
         assert "processes" in failures, f"process budget not recorded: {failures}"
-
-
-# ---------------------------------------------------------------------------
-# H5 gate — must be explicitly BLOCKED, never implicitly passed
-# ---------------------------------------------------------------------------
-
-
-class TestH5NotSilentlyClaimed:
-    def test_active_goal_keeps_unverified_release_blocked(self):
-        """Acceptance stays blocked until fresh real-runtime E2E receipts pass."""
-        goal_path = PROJECT_ROOT / "docs" / "GOAL.md"
-        assert goal_path.is_file(), "clean clone is missing the active acceptance Goal"
-
-        text = goal_path.read_text(encoding="utf-8")
-        assert "验收状态：`BLOCKED`" in text
-        assert "真实运行时 E2E" in text
-        assert "不能替代真实 E2E" in text

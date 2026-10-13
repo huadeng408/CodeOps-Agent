@@ -1362,14 +1362,17 @@ def test_relevant_memory_is_added_to_llm_prompt(monkeypatch, tmp_path) -> None:
         server.stop(grace=0)
 
 
-def test_agent_md_is_included_in_system_prompt(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("instruction_name", ["AGENTS.md", "AGENT.md"])
+def test_agent_md_is_included_in_system_prompt(monkeypatch, tmp_path, instruction_name) -> None:
     project_root = tmp_path / "project"
     working_dir = project_root / "subdir"
     working_dir.mkdir(parents=True)
-    (project_root / "AGENT.md").write_text(
+    (project_root / instruction_name).write_text(
         "Project rule: prefer concise answers.\n",
         encoding="utf-8",
     )
+    if instruction_name == "AGENTS.md":
+        (project_root / "AGENT.md").write_text("Legacy entry must not replace canonical rules.\n", encoding="utf-8")
     (working_dir / "AGENT.md").write_text(
         "Subdir rule: preserve layout.\n",
         encoding="utf-8",
@@ -1412,6 +1415,7 @@ def test_agent_md_is_included_in_system_prompt(monkeypatch, tmp_path) -> None:
             system_prompt = app.llm.requests[0].messages[0].content
             assert "Project rule: prefer concise answers." in system_prompt
             assert "Subdir rule: preserve layout." in system_prompt
+            assert "Legacy entry must not replace canonical rules." not in system_prompt
     finally:
         server.stop(grace=0)
 

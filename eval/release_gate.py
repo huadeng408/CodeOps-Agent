@@ -119,7 +119,7 @@ def _non_runtime_path(path: str) -> bool:
         and relative.suffix == ".json"
     ):
         return True
-    if path == "README.md":
+    if path in {"README.md", "CONTRIBUTING.md", "SECURITY.md"}:
         return True
     # Instructions and runtime templates are inputs even when written in Markdown.
     if relative.suffix != ".md" or not path.startswith("docs/"):

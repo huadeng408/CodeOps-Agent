@@ -1,0 +1,80 @@
+# CodeOps-Agent Goal
+
+执行状态：`ACTIVE`。当前 Windows 产品 milestone 和完整发布目标尚待验收。
+各任务按声明范围分别记录单测、集成、产品与发布结果；工作约定见
+[AGENTS.md](../AGENTS.md)。
+完整发布验收状态：`BLOCKED`。发布所需的真实运行时 E2E 和七条 lane 证据仍待齐备；
+单测和集成不能替代真实 E2E。该状态只描述完整发布，普通任务按其声明范围验收。
+
+## 当前目标
+
+正式规格：[Windows 真实代码任务闭环，milestone 1](https://github.com/huadeng408/CodeOps-Agent/issues/1)。
+先完成本机单用户 Windows 产品，Linux 源码 CI 和官方评测保留。
+任务与依赖以 [GitHub Issues](https://github.com/huadeng408/CodeOps-Agent/issues) 为准，
+[正式任务导航](refactor-tickets.md)供查找。
+
+- 一键启动基础代码 Agent，鉴权、历史和能力状态独立于 optional RAG／对象存储／远程索引；缺执行前提时副作用明确受阻。
+- Go 从允许的当前工作副本准备隔离 Task Workspace，包含未提交改动和新源文件，排除凭据与生成目录，保留原仓库和 index。
+- 展示 Code Change Proposal、diff 和真实测试结果；用户确认后由 Go 核对原基线再应用。并发变化、部分执行及未知结果保留并对账。
+- 使用固定版本任务环境；Go 在受控准备阶段从批准源获取依赖，任务执行默认离线。
+- 初批真实 API 使用服务商已设置的 100,000,000-token 硬上限，初期同时运行一个代码任务。重试、反思、子调用计入同一持久批次；本地保留已确认用量、未知 usage 和原预留，计量缺口不阻塞新的独立调用，费用独立记录。
+- 冻结两个公开仓库任务：Go 修复与 Python 功能各一个，每个至少 10 轮有意义的真实浏览器对话；另验取消、进程故障恢复、旧会话重开、重启后空新会话记忆召回和并发冲突。
+- 真实反思由 Go 校验并经 Ledger/CAS 写回；默认同用户、同仓库跨会话检索，跨仓库须显式选择或晋升。产品 Go/Python/tool Trace 从真实后端读回。
+
+## 当前缺口
+
+| 范围 | 仍需完成的验收 |
+| --- | --- |
+| #3 调用入场与预算 | 默认浏览器入口的真实前台读取、自动计量及关联 Trace 已验证；发送拒绝原因与草稿恢复已通过前端 fixture 浏览器验证。后台反思的 unknown 预留保留为计量缺口，可后补用量，不要求逐笔用户批准或阻塞独立调用。仍需完整代码修改闭环、完整故障恢复及 provider 重试／自动用量补齐；工程和计量记录不代替完整产品验收 |
+| #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
+| 模型代码任务与提案 | 受控 Go 示例已贯通真实模型、隔离修改与冻结提案测试；仍需公开仓库问答、Go／Python 完整任务、受批准应用和结果对账 |
+| 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
+| Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
+| 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
+
+当前凭据、沙箱和后端前提在具体运行准备时核对；旧环境错误不作为本机当前事实。
+首批源码、输入、model/image pin、预算和场景分母在执行前冻结，保留失败与部分结果。
+
+## 证据链接
+
+以下链接保存各自声明范围、当轮源码、命令、分母、失败及收据；需要追溯时读取。
+
+- 本机核心启动与历史：[范围证据](evidence/local-core-2026-10-09.md)。
+- Token 批次：[接口与缺口](token-budget.md)、[接入证据](evidence/token-gateway-2026-10-10.md)、[默认边界验证](evidence/model-default-admission-2026-10-12.md)。
+- 本机模型工作区准入：[范围证据](evidence/model-local-workspace-2026-10-12.md)。
+- 代码任务显式结束：[HTTP／CLI 结束边界与右侧入口证据](evidence/model-task-finish-2026-10-12.md)。
+- 模型占用恢复：[真实进程退出、Linux namespace 与生产 HTTP 边界证据](evidence/model-scope-recovery-2026-10-12.md)。
+- 可结算有界重试：[Go／Python 计量、退避和 Ledger 拒绝边界证据](evidence/model-accounted-retry-2026-10-12.md)。
+- 新消息准入：[草稿保留、幂等与真实运行／人工零用量对账记录](evidence/model-message-preflight-2026-10-12.md)。
+- 默认模型读取：[反思期限、只读 Git 上下文、真实读取链与未结算反思](evidence/model-runtime-read-2026-10-12.md)。
+- 发送入口恢复：[具体拒绝原因、草稿与同请求恢复的前端范围证据](evidence/model-entry-recovery-2026-10-13.md)。
+- 歧义模型用量：[重复计费字段拒绝、完整预留与后续派发阻断证据](evidence/model-ambiguous-usage-2026-10-13.md)。
+- 重试等待字段：[重复 Retry-After 停止自动重试与已结算用量保留证据](evidence/model-retry-after-fields-2026-10-13.md)。
+- 重试字段数量：[split-date／空字段拒绝及上轮覆盖缺口的纠正证据](evidence/model-retry-after-arity-2026-10-13.md)。
+- 真实 Go 提案与预算续行：[受控产品演示、完整失败分母、冻结输入与原仓库保护证据](evidence/model-proposal-budget-2026-10-13.md)。
+- Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
+- Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
+- OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
+- OpenSandbox Runner／任务槽：[基础接口证据](evidence/opensandbox-foundation-2026-10-11.md)。
+- OpenSandbox 本地构建镜像：[身份校验证据](evidence/opensandbox-image-pins-2026-10-12.md)；后续 Docker 归组与执行核对见[分组范围证据](evidence/docker-grouping-2026-10-13.md)。
+- OpenSandbox Go 产品基线：[实际部署、浏览器、故障／重开和 Trace 证据](evidence/opensandbox-product-2026-10-12.md)。
+- OpenSandbox Python 产品基线：[固定依赖准备、离线完整测试、保护／重开和 Trace 证据](evidence/opensandbox-python-2026-10-12.md)。
+- OpenSandbox 取消、故障恢复与 CLI：[范围证据、完整分母和不可变收据](evidence/opensandbox-lifecycle-2026-10-12.md)。
+- Agent 取消终态：[Go 竞态修复证据](evidence/agent-cancellation-2026-10-12.md)；完整 runtime 取消仍按对应票验收。
+- Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
+- 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。
+- 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
+
+## 长期能力与发布目标
+
+| 专项 | 当前目标 |
+| --- | --- |
+| 可扩展 Agent Loop | 在同等模块范围，以现有 2 天级基线对照插件接入达到数小时级；记录实际接入工时 |
+| 多 Agent／Workflow | 8 Worker、200 个长任务、30 次真实进程故障，恢复率至少 98.5%；checkpoint 为 Go Ledger 投影 |
+| Context／Memory | P0／P1／P2 按需加载；同任务、同模型、同预算对照，输入 token 降幅至少 60% 且质量不回退 |
+| Skills | 至少 40 个可运行 Skill，在锁定的 1,000 案例上至少 948 项正确 |
+| 官方代码评测 | 固定预算及官方 scorer；SWE 锁定 20 项至少 18 项通过，对照固定 8/20 基线 |
+| 其他产品验收 | 200 assistant-turn／compaction、浏览器 reconnect、CLI／HTTP／Git 恢复、多模态 RAG 和真实评测数据仍保留其完整专项验收 |
+
+完整发布契约与七条 receipt lane 见 [release-gate.md](release-gate.md)，指标与分母保留。
+单测、集成、产品验证和发布合格分别记录；任务完成不自动代表整个产品或发布合格。

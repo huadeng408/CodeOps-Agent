@@ -165,10 +165,12 @@ exit never implies zero consumption or invents a provider usage response.
 [confirmed holder recovery checks](evidence/model-scope-recovery-2026-10-12.md)
 describe their separate scopes.
 
-Remaining: real-provider local-core acceptance and controlled process startup,
-complete task-slot recovery across process faults and product lifecycles, fully metered
-real-provider retries and usage reconciliation, production CLI/HTTP model recovery and complete trace
-backend readback. Keep #3 open until those criteria have fresh evidence.
+Issue #3 still needs its complete attempt denominator for real-provider retries,
+reflection/child-call accounting, process restart and draft recovery. Retained
+unknown usage remains an accounting gap that can be settled later.
+Full coding tasks, product fault recovery, reflection writeback, cross-session
+recall and complete Trace readback are accepted under their own later tickets,
+not implicit dependencies of #3. Current scope evidence is linked from the Goal.
 
 ## Reproducible checks
 
@@ -183,29 +185,9 @@ slots, duplicate dispatch, unknown usage, violated bounds, task completion and
 contradictory facts. The subprocess helper is skipped in the parent process
 and executed by its parent tests.
 
-## Provider preflight boundary
+## 运行证据
 
-The approved profile passed a read-only, authenticated BeeAPI model-catalog
-check on 2026-10-09; the configured model was present. The catalog supplied no
-context or output-limit metadata. The profile omits an explicit output limit;
-the existing Anthropic adapter has a default and can raise it for thinking.
-Those configuration values do not by themselves prove the relay's complete
-billing contract. No paid call was made during this preflight.
-
-The upstream model page publishes a context window, while the relay supports
-multiple provider groups. Bind the selected relay/adapter contract before
-turning that upstream value into a dispatch allowance, and validate actual
-usage after a bounded call. References:
-[upstream model](https://docs.x.ai/developers/models/grok-4.6),
-[BeeAPI setup](https://beeapi.dev/docs/01-quick-start/quickstart).
-
-On 2026-10-10 a bounded real-provider probe made five calls through the Go
-gateway: foreground, reflection proposals, compaction, a Workflow worker and
-a fresh Python process. The first run settled 15,130 tokens and an independent
-Go process recovered the same batch and consumption. It used an explicit
-500,000 input ceiling derived from the upstream model page and 2,048 output
-tokens. This is a configured contract assumption plus observed usage for those
-calls; it is not proof of all relay groups or untested cache/reasoning variants.
-All repeated paid probes use the same canonical verification Ledger.
-The receipt remains BLOCKED for full acceptance because trace backend readback
-and production code-task/browser model flows are outside this probe.
+当前计量契约按本文及 [AGENTS.md](../AGENTS.md) 执行，具体调用与完整尝试分母见
+[GOAL.md 的证据链接](GOAL.md#证据链接)。2026-10-09／10 的 catalog 与五次独立探针
+保留在 [历史原文](archive/policy-cleanup-2026-10-14/docs--token-budget.md#provider-preflight-boundary)，
+其旧用量和 Trace 缺口只描述当次范围。

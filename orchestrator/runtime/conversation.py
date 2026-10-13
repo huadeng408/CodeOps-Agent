@@ -2868,11 +2868,11 @@ class ConversationRunner:
         if self.harness_managed:
             return (
                 "Project instructions are Harness-controlled metadata. "
-                "Use the authorized Read tool for AGENT.md when it is listed "
+                "Use the authorized Read tool for AGENTS.md (or legacy AGENT.md) when it is listed "
                 "as a P2 candidate; use the authorized Read tool to load raw content."
             )
         content = load_agent_instructions(self.project_root, self.working_dir)
-        return content or "_No AGENT.md instructions found._"
+        return content or "_No project instructions found._"
 
     def _capabilities_context(self) -> str:
         lines = [

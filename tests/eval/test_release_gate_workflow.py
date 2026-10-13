@@ -54,8 +54,8 @@ def test_release_gate_is_manual_only() -> None:
     assert any(step.get("run") == "python -m eval.release_gate --json" for step in job["steps"])
 
 
-def test_release_gate_checkout_fetches_history_for_parent_bound_receipts() -> None:
-    """The hosted gate must resolve the source commit immediately before a receipt commit."""
+def test_release_gate_checkout_fetches_history_for_runtime_equivalent_receipts() -> None:
+    """The hosted gate must resolve runtime-equivalent source ancestors."""
 
     repository_root = Path(__file__).resolve().parents[2]
     lines = (repository_root / ".github" / "workflows" / "release-gate.yml").read_text(

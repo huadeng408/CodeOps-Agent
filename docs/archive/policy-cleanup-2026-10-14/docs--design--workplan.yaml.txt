@@ -1,0 +1,46 @@
+schema_version: 1
+tasks:
+  - id: repository-cleanup
+    title: Archive stale local experiments and remove misleading acceptance history
+    owner: main
+    status: IMPLEMENTED
+    blocked_by: []
+    read_set:
+      - .scratch/repository-cleanup/map.md
+      - AGENT.md
+      - docs/GOAL.md
+      - docs/repository-cleanup-2026-10-09.md
+      - .github/workflows/release-gate.yml
+    write_set:
+      - docs/GOAL.md
+      - docs/archive/INDEX.md
+      - docs/repository-cleanup-2026-10-09.md
+      - docs/design/workplan.yaml
+      - .github/workflows/release-gate.yml
+    acceptance:
+      - archive bytes match the pre-cleanup SHA-256 manifest
+      - current runtime and release thresholds remain intact
+      - relevant workflow and evidence regressions pass
+    evidence_required: [source_sha, manifest, command, exit_code]
+  - id: windows-coding-tickets
+    title: Publish approved vertical tickets for formal spec issue 1
+    owner: main
+    status: IMPLEMENTED
+    blocked_by: [repository-cleanup]
+    read_set:
+      - .scratch/matt-refactor/map.md
+      - .scratch/matt-refactor/spec.md
+      - docs/refactor-plan.md
+      - CONTEXT.md
+      - docs/GOAL.md
+    write_set:
+      - .scratch/matt-refactor/map.md
+      - docs/design/workplan.yaml
+      - .scratch/matt-refactor/issues
+      - docs/refactor-tickets.md
+    acceptance:
+      - all stories and acceptance groups map to independently demonstrable slices
+      - dependency graph is acyclic and genuine
+      - full drafts are reviewed and approved before GitHub publication
+      - 18 unique issues and local mirrors plus 32 native dependencies match remote readback
+    evidence_required: [parent_issue, draft_packet, coverage, approval]

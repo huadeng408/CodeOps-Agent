@@ -1,49 +1,36 @@
 # Windows 代码产品任务导航
 
 正式规格：[milestone 1，Issue #1](https://github.com/huadeng408/CodeOps-Agent/issues/1)。
-18 张纵向任务及 32 条阻塞依赖已按用户批准的拆解发布，分流标签为 `ready-for-agent`。
-任务实现状态仍为 `DESIGNED`；runtime 与发布结论以 [GOAL.md](GOAL.md) 和对应收据为准。
+实现状态、负责人和依赖以 GitHub Issues 为准；选择已满足阻塞条件的开放任务。
+验证范围和当前缺口见 [GOAL.md](GOAL.md)，工作与前端选择约定见 [AGENTS.md](../AGENTS.md)。
 
-标题、负责人、当前状态和依赖以 GitHub 为准；下表是 2026-10-09 发布时的导航快照。
-每张 Issue 包含完整验收、验证、复用和回退条件。父规格 #1 的正文、状态及标签保留。
-
-| 草案编号 | 正式任务 | 发布时 Blocked by |
-| --- | --- | --- |
-| 01 | [#2：无外部服务的安全本机启动与历史查看](https://github.com/huadeng408/CodeOps-Agent/issues/2) | 无 |
-| 02 | [#3：真实调用前置检查与持久化 1 亿 token 批次上限](https://github.com/huadeng408/CodeOps-Agent/issues/3) | [#2](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
-| 03 | [#4：从当前工作副本准备隔离任务并查看基线](https://github.com/huadeng408/CodeOps-Agent/issues/4) | [#2](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
-| 04 | [#5：真实仓库问答贯通 provider 扩展点与 P0/P1/P2](https://github.com/huadeng408/CodeOps-Agent/issues/5) | [#3](https://github.com/huadeng408/CodeOps-Agent/issues/3)、[#4](https://github.com/huadeng408/CodeOps-Agent/issues/4) |
-| 05 | [#6：在批准环境准备依赖并运行 Go/Python 基线测试](https://github.com/huadeng408/CodeOps-Agent/issues/6) | [#4](https://github.com/huadeng408/CodeOps-Agent/issues/4) |
-| 06 | [#7：真实 Go 修复生成可审查提案和项目测试结果](https://github.com/huadeng408/CodeOps-Agent/issues/7) | [#5](https://github.com/huadeng408/CodeOps-Agent/issues/5)、[#6](https://github.com/huadeng408/CodeOps-Agent/issues/6) |
-| 07 | [#8：确认或拒绝单文件提案且应用恰好一次](https://github.com/huadeng408/CodeOps-Agent/issues/8) | [#7](https://github.com/huadeng408/CodeOps-Agent/issues/7) |
-| 08 | [#9：准确预览和应用新增、删除、重命名及多文件修改](https://github.com/huadeng408/CodeOps-Agent/issues/9) | [#8](https://github.com/huadeng408/CodeOps-Agent/issues/8) |
-| 09 | [#10：并发冲突与应用中断后的保留和对账](https://github.com/huadeng408/CodeOps-Agent/issues/10) | [#9](https://github.com/huadeng408/CodeOps-Agent/issues/9) |
-| 10 | [#11：一个 MCP 工具贯通模型调用、Go 授权和结果展示](https://github.com/huadeng408/CodeOps-Agent/issues/11) | [#5](https://github.com/huadeng408/CodeOps-Agent/issues/5)、[#6](https://github.com/huadeng408/CodeOps-Agent/issues/6) |
-| 11 | [#12：取消真实代码任务并停止其受管资源](https://github.com/huadeng408/CodeOps-Agent/issues/12) | [#7](https://github.com/huadeng408/CodeOps-Agent/issues/7) |
-| 12 | [#13：代码进程故障恢复与 Go/Python 重启后重开旧会话](https://github.com/huadeng408/CodeOps-Agent/issues/13) | [#7](https://github.com/huadeng408/CodeOps-Agent/issues/7) |
-| 13 | [#14：真实反思写回并在重启后的空新会话召回](https://github.com/huadeng408/CodeOps-Agent/issues/14) | [#13](https://github.com/huadeng408/CodeOps-Agent/issues/13) |
-| 14 | [#15：成功代码任务完整 Trace 在真实后端读回](https://github.com/huadeng408/CodeOps-Agent/issues/15) | [#7](https://github.com/huadeng408/CodeOps-Agent/issues/7) |
-| 15 | [#16：脱离开发者 PATH 的 Windows 一键 EXE 交付](https://github.com/huadeng408/CodeOps-Agent/issues/16) | [#5](https://github.com/huadeng408/CodeOps-Agent/issues/5)、[#6](https://github.com/huadeng408/CodeOps-Agent/issues/6) |
-| 16 | [#17：公开 Go 修复的至少十轮真实浏览器验收](https://github.com/huadeng408/CodeOps-Agent/issues/17) | [#10](https://github.com/huadeng408/CodeOps-Agent/issues/10)、[#11](https://github.com/huadeng408/CodeOps-Agent/issues/11)、[#12](https://github.com/huadeng408/CodeOps-Agent/issues/12)、[#14](https://github.com/huadeng408/CodeOps-Agent/issues/14)、[#15](https://github.com/huadeng408/CodeOps-Agent/issues/15)、[#16](https://github.com/huadeng408/CodeOps-Agent/issues/16) |
-| 17 | [#18：公开 Python 功能的至少十轮真实浏览器验收](https://github.com/huadeng408/CodeOps-Agent/issues/18) | [#10](https://github.com/huadeng408/CodeOps-Agent/issues/10)、[#11](https://github.com/huadeng408/CodeOps-Agent/issues/11)、[#12](https://github.com/huadeng408/CodeOps-Agent/issues/12)、[#14](https://github.com/huadeng408/CodeOps-Agent/issues/14)、[#15](https://github.com/huadeng408/CodeOps-Agent/issues/15)、[#16](https://github.com/huadeng408/CodeOps-Agent/issues/16) |
-| 18 | [#19：五类恢复场景与首批产品完整验收对账](https://github.com/huadeng408/CodeOps-Agent/issues/19) | [#17](https://github.com/huadeng408/CodeOps-Agent/issues/17)、[#18](https://github.com/huadeng408/CodeOps-Agent/issues/18) |
-
-从 [#2：独立启动与鉴权历史](https://github.com/huadeng408/CodeOps-Agent/issues/2) 开始；
-后续选择阻塞任务已完成、且尚未领取的 Issue。取消、重启和 trace 分支按实际依赖推进。
-两项真实验收共享已批准批次，执行侧保持一次一个代码任务；依赖图不额外制造串行关系。
-
-本地每张任务的投影位于 `.scratch/matt-refactor/issues/`，保留实际 Issue 链接和工作笔记，
-不另立任务权威。完整长期门槛继续独立推进，发布任务卡不构成产品完成或 runtime 验证。
-
-## 已批准的 OpenSandbox 接入票
-
-以下三票是 #6 的原生子任务，均为 `DESIGNED`；GitHub 原生依赖与正文一致。
-
-| 正式任务 | Blocked by |
+| 草案编号 | 正式任务 |
 | --- | --- |
-| [#21：从产品入口运行真实 Go 基线](https://github.com/huadeng408/CodeOps-Agent/issues/21) | 无新增阻塞；沿用已完成的 #4 |
-| [#22：Go 准备已批准的 pytz，离线运行完整 Python 基线](https://github.com/huadeng408/CodeOps-Agent/issues/22) | #21 |
-| [#23：取消、故障重开与 CLI 共用执行契约](https://github.com/huadeng408/CodeOps-Agent/issues/23) | #21、#22 |
+| 01 | [#2：无外部服务的安全本机启动与历史查看](https://github.com/huadeng408/CodeOps-Agent/issues/2) |
+| 02 | [#3：真实调用前置检查与持久化 1 亿 token 批次上限](https://github.com/huadeng408/CodeOps-Agent/issues/3) |
+| 03 | [#4：从当前工作副本准备隔离任务并查看基线](https://github.com/huadeng408/CodeOps-Agent/issues/4) |
+| 04 | [#5：真实仓库问答贯通 provider 扩展点与 P0/P1/P2](https://github.com/huadeng408/CodeOps-Agent/issues/5) |
+| 05 | [#6：在批准环境准备依赖并运行 Go/Python 基线测试](https://github.com/huadeng408/CodeOps-Agent/issues/6) |
+| 06 | [#7：真实 Go 修复生成可审查提案和项目测试结果](https://github.com/huadeng408/CodeOps-Agent/issues/7) |
+| 07 | [#8：确认或拒绝单文件提案且应用恰好一次](https://github.com/huadeng408/CodeOps-Agent/issues/8) |
+| 08 | [#9：准确预览和应用新增、删除、重命名及多文件修改](https://github.com/huadeng408/CodeOps-Agent/issues/9) |
+| 09 | [#10：并发冲突与应用中断后的保留和对账](https://github.com/huadeng408/CodeOps-Agent/issues/10) |
+| 10 | [#11：一个 MCP 工具贯通模型调用、Go 授权和结果展示](https://github.com/huadeng408/CodeOps-Agent/issues/11) |
+| 11 | [#12：取消真实代码任务并停止其受管资源](https://github.com/huadeng408/CodeOps-Agent/issues/12) |
+| 12 | [#13：代码进程故障恢复与 Go/Python 重启后重开旧会话](https://github.com/huadeng408/CodeOps-Agent/issues/13) |
+| 13 | [#14：真实反思写回并在重启后的空新会话召回](https://github.com/huadeng408/CodeOps-Agent/issues/14) |
+| 14 | [#15：成功代码任务完整 Trace 在真实后端读回](https://github.com/huadeng408/CodeOps-Agent/issues/15) |
+| 15 | [#16：脱离开发者 PATH 的 Windows 一键 EXE 交付](https://github.com/huadeng408/CodeOps-Agent/issues/16) |
+| 16 | [#17：公开 Go 修复的至少十轮真实浏览器验收](https://github.com/huadeng408/CodeOps-Agent/issues/17) |
+| 17 | [#18：公开 Python 功能的至少十轮真实浏览器验收](https://github.com/huadeng408/CodeOps-Agent/issues/18) |
+| 18 | [#19：五类恢复场景与首批产品完整验收对账](https://github.com/huadeng408/CodeOps-Agent/issues/19) |
 
-沿用用户已选的 A 右侧测试卡片，以及真实浏览器产品入口和公开 Runner／Task Workspace 测试接缝。
-原 #6 的完整验收保持；子票发布不代表其 runtime 已通过。
+## OpenSandbox 接入
+
+[#21：Go 基线](https://github.com/huadeng408/CodeOps-Agent/issues/21)、
+[#22：Python 离线基线](https://github.com/huadeng408/CodeOps-Agent/issues/22)、
+[#23：取消、故障重开与 CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 是 #6 的子任务。
+当前采用 OpenSandbox，沿用已选 A 右侧测试卡片；各票的范围证据从 Goal 进入。
+
+发布时任务与依赖快照保留在 [历史原文](archive/policy-cleanup-2026-10-14/docs--refactor-tickets.md)，
+其 `DESIGNED` 状态描述发布时情况。[归档清单](archive/policy-cleanup-2026-10-14/manifest.json)保存原文校验值。

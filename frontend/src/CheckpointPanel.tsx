@@ -205,12 +205,12 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
     }
   };
 
-  const handleContinue = async (checkpoint: SessionCheckpoint, forceNewRequestId = false) => {
+  const handleContinue = async (checkpointHash: string, forceNewRequestId = false) => {
     if (busy || continuationInFlightRef.current || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true) return;
     continuationInFlightRef.current = true;
     setBusy(true);
     setError('');
-    const requestKey = `${session.id}:${checkpoint.hash}`;
+    const requestKey = `${session.id}:${checkpointHash}`;
     const storageKey = `continuation-request:${requestKey}`;
     let requestId = forceNewRequestId ? '' : requestIds.current.get(requestKey) || readLocalStorage(storageKey) || '';
     if (!requestId) {
@@ -219,7 +219,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
       writeLocalStorage(storageKey, requestId);
     }
     try {
-      await api.continueSession(session.id, session.eventCount, checkpoint.hash, requestId);
+      await api.continueSession(session.id, session.eventCount, checkpointHash, requestId);
     } catch (cause) {
       setError(cause instanceof ApiError && cause.status === 409
         ? '会话已更新，请刷新后重试'
@@ -241,12 +241,11 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
 
   const handleRetryRun = async (run: SessionRun) => {
     if (run.status !== 'failed' || busy || session.status !== 'paused') return;
-    const checkpoint = checkpoints.find((item) => item.hash === run.checkpointHash);
-    if (!checkpoint) {
-      setError('找不到该运行对应的检查点，请刷新恢复清单');
+    if (!run.checkpointHash) {
+      setError('该运行缺少恢复锚点，请刷新恢复清单');
       return;
     }
-    await handleContinue(checkpoint, true);
+    await handleContinue(run.checkpointHash, true);
   };
 
   const handleRefreshRun = async (run: SessionRun) => {
@@ -363,7 +362,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
                 <button className="subtle-btn" type="button" onClick={() => void handleRestore(checkpoint)} disabled={busy}>
                   恢复
                 </button>
-                <button className="subtle-btn" type="button" onClick={() => void handleContinue(checkpoint)} disabled={busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true}>
+                <button className="subtle-btn" type="button" onClick={() => void handleContinue(checkpoint.hash)} disabled={busy || session.status !== 'paused' || !continuationHealthKnown || continuationHealth?.attached !== true}>
                   {!continuationHealthKnown ? '检查编排器...' : continuationHealth?.attached !== true ? '编排器恢复中...' : session.run?.checkpointHash === checkpoint.hash && (session.run.status === 'running' || session.run.status === 'queued') ? '运行中' : session.run?.checkpointHash === checkpoint.hash && session.run.status === 'failed' ? '重试' : '继续'}
                 </button>
               </div>

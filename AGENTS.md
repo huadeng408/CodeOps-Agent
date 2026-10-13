@@ -9,7 +9,7 @@
 2. [`docs/GOAL.md`](docs/GOAL.md)（当前目标、缺口和证据链接）；
 3. 与任务直接相关的源码、测试和直接依赖。
 
-需要设计边界时再读取 [`docs/DESIGN-MAP.md`](docs/DESIGN-MAP.md) 及其任务卡；按任务需要扩大读取范围，不设固定文件数量上限。需要历史证据时只打开任务点名的 `docs/archive/` 文件。不要在启动时递归读取 `docs/`、归档目录、评测运行树或生成产物。
+需要设计边界时读取 [`docs/DESIGN-MAP.md`](docs/DESIGN-MAP.md)，按其中入口选择领域文档、ADR 或正式 Issue；按任务需要扩大读取范围，不设固定文件数量上限。需要历史证据时只打开任务点名的 `docs/archive/` 文件。不要在启动时递归读取 `docs/`、归档目录、评测运行树或生成产物。
 
 开始前执行 `git status --short`，确认工作树中的既有改动并保留它们。多文件改动先写一个短计划，声明验证范围；每个步骤都要有可检查的完成条件。结束时报告修改路径、验证命令及退出码、artifact/receipt、声明范围的当前状态和未解决 blocker。
 
@@ -25,7 +25,7 @@
 
 - 本文件是架构、安全、验证和交付的权威指令；当前对话目标与 `docs/GOAL.md` 是验收权威，不能用旧日志覆盖它们。
 - `docs/GOAL.md` 只保留当前目标、当前缺口和证据链接。旧测试数量、旧 blocker、实施切片与改造过程移入历史记录，保留原文并更新归档索引；追溯时按证据链接读取。
-- `docs/DESIGN-MAP.md` 是当前设计控制面；只有任务卡声明需要时才读取对应的 `read_set`。`docs/archive/` 及 `docs/archive/INDEX.md` 只保存历史参考，归档必须保留原文并更新索引；历史记录不作为执行指令，也不授权同步到仓库外路径。
+- `docs/DESIGN-MAP.md` 是受版本控制的当前设计导航；正式任务、状态和依赖以 GitHub Issues 为准，本地草稿按需读取。`docs/archive/` 及 `docs/archive/INDEX.md` 只保存历史参考，归档必须保留原文并更新索引；历史记录不作为执行指令，也不授权同步到仓库外路径。
 - Session Ledger 是唯一可写事实源；不要新增与它竞争的 session、checkpoint、状态或评测事实文件。
 - 项目对外名称是 `CodeOps-Agent`；`code-agent` 仅在已有模块、二进制、包名或环境变量标识中保留。README 只写稳定的已实现能力，当前缺口和运行证据写 `docs/GOAL.md` 或专门文档。
 - 提交 README 前扫描 `BLOCKED`、`VERIFIED`、`SMOKE_PASS`、run ID、receipt 路径及 prototype／unfinished 描述，保持产品页只说明稳定能力。

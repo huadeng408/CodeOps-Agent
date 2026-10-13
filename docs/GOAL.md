@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| #3 调用入场与预算 | 默认浏览器入口的真实前台读取、自动计量及关联 Trace 已验证；发送拒绝原因与草稿恢复已通过前端 fixture 浏览器验证。后台反思的 unknown 预留保留为计量缺口，可后补用量，不要求逐笔用户批准或阻塞独立调用。仍需完整代码修改闭环、完整故障恢复及 provider 重试／自动用量补齐；工程和计量记录不代替完整产品验收 |
+| #3 调用入场与预算 | 默认入口、持久批次、已停止调用的 unknown 保留与独立续行已有范围证据；仍需按 #3 核对真实重试、反思／子调用计量、进程重启与草稿恢复的完整尝试分母。完整代码修改、反思写回、跨会话召回和完整 Trace 分别按后续任务验收，不作为 #3 的隐式依赖 |
 | #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
 | 模型代码任务与提案 | 受控 Go 示例已贯通真实模型、隔离修改与冻结提案测试；仍需公开仓库问答、Go／Python 完整任务、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
@@ -63,6 +63,7 @@
 - Agent 取消终态：[Go 竞态修复证据](evidence/agent-cancellation-2026-10-12.md)；完整 runtime 取消仍按对应票验收。
 - Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
 - 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。
+- 指令、导航与门禁清理：[八项修改及验证范围](evidence/policy-cleanup-2026-10-14.md)；真实仓库问答与重试缺口见[当轮证据](evidence/repository-qa-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标

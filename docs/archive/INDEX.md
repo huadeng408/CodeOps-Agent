@@ -1,8 +1,27 @@
 # Archive index
 
-This tree is historical context, not an execution entry. New conversations read `AGENT.md` and `docs/GOAL.md`. Open a file below only when tracing a specific receipt.
+This tree is historical context, not an execution entry. New conversations read `AGENTS.md` and `docs/GOAL.md`. Open a file below only when tracing a specific receipt.
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
+
+## Policy and navigation cleanup — 2026-10-14
+
+Twelve originals are retained byte-for-byte in [policy-cleanup-2026-10-14/](policy-cleanup-2026-10-14/).
+The [manifest](policy-cleanup-2026-10-14/manifest.json) records each original path, archive path, byte count and SHA-256.
+This curated packet is tracked; it contains documents and retired navigation source, not runtime or model output.
+
+| Originals | Historical scope |
+| --- | --- |
+| Design Map, `state.yaml`, `workplan.yaml`, checker and its test | Local draft navigation dependent on ignored scratch paths; retired checker source has a `.txt` suffix |
+| Goal and task navigation | Before the acceptance-scope correction; old task status is a dated snapshot |
+| Refactor plan and sandbox comparison | Original implementation starting point and candidate recommendation, before OpenSandbox was approved |
+| Phoenix runbook | 2026-08-04 import and service conditions, without current execution authority |
+| Token budget and 2026-10-09 cleanup audit | Old probe counts, blockers and cleanup process; current contracts remain at their active entries |
+
+Current navigation is [DESIGN-MAP.md](../DESIGN-MAP.md); task states and dependencies come from GitHub Issues.
+Restore an original only to an explicitly selected path after checking its manifest hash; preserve any newer content.
+Four unused machine-local LFS hooks were separately retained under `.scratch/repository-qa-20261014/local-lfs-hooks/`.
+Their local manifest permits restoration without changing other hooks or Git configuration.
 
 ## Cleanup snapshot — 2026-10-09
 

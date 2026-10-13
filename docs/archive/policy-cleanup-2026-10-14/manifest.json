@@ -1,0 +1,74 @@
+[
+  {
+    "source": "docs/DESIGN-MAP.md",
+    "archive": "docs--DESIGN-MAP.md",
+    "bytes": 1866,
+    "sha256": "dbd6599525e163612e8585cb724596fd3089f843da275163554291615091a9de"
+  },
+  {
+    "source": "docs/GOAL.md",
+    "archive": "docs--GOAL.md",
+    "bytes": 8447,
+    "sha256": "2efd67b7a3814ef356314ae8d57f969c3b924379f8179774c329c833cb83bef6"
+  },
+  {
+    "source": "docs/refactor-tickets.md",
+    "archive": "docs--refactor-tickets.md",
+    "bytes": 6316,
+    "sha256": "1bd472af22679876409425804195950735a3b88826806646810484b20fa9381f"
+  },
+  {
+    "source": "docs/refactor-plan.md",
+    "archive": "docs--refactor-plan.md",
+    "bytes": 13514,
+    "sha256": "495352a29454487dfa3486290be992f78baa0b3c43666f4817aa01b9778121bb"
+  },
+  {
+    "source": "docs/sandbox-options-2026-10-11.md",
+    "archive": "docs--sandbox-options-2026-10-11.md",
+    "bytes": 7516,
+    "sha256": "9b2e6267d6a5d11aa7982d7cef7bda74f5e4c1fdffffaa5d5c37475313eeb28c"
+  },
+  {
+    "source": "docs/observability-phoenix-live-trace-runbook.md",
+    "archive": "docs--observability-phoenix-live-trace-runbook.md",
+    "bytes": 14879,
+    "sha256": "a49025fae6baede38a0659771c82cf92c0c468b44a70b2830f84207942c5f1c3"
+  },
+  {
+    "source": "docs/token-budget.md",
+    "archive": "docs--token-budget.md",
+    "bytes": 13681,
+    "sha256": "fd9845c5319f95ee80d0d2ab23212bb8682660796f5d4a9a8778b0685c816853"
+  },
+  {
+    "source": "docs/repository-cleanup-2026-10-09.md",
+    "archive": "docs--repository-cleanup-2026-10-09.md",
+    "bytes": 6616,
+    "sha256": "def4eae3341cb2268b222ad5f23fe0af43db2587dcb69805abcb06f62284c757"
+  },
+  {
+    "source": "docs/design/state.yaml",
+    "archive": "docs--design--state.yaml.txt",
+    "bytes": 1171,
+    "sha256": "219cab8c09d7beb9539f1576bd1913a4658d945c5ed1797d6721461186a0487a"
+  },
+  {
+    "source": "docs/design/workplan.yaml",
+    "archive": "docs--design--workplan.yaml.txt",
+    "bytes": 1708,
+    "sha256": "22a36646135e40a4a52aa4d9dabf328cd2b66ad265280ef57800d7ec71d70249"
+  },
+  {
+    "source": "scripts/design_map/check.py",
+    "archive": "scripts--design_map--check.py.txt",
+    "bytes": 1842,
+    "sha256": "eebb5926f63ce4a70bc1a0fc574af9aa26bdf005404e239d43b56357b716ba5e"
+  },
+  {
+    "source": "tests/test_design_map_read_set.py",
+    "archive": "tests--test_design_map_read_set.py.txt",
+    "bytes": 1470,
+    "sha256": "acdc322e287343f553c8e0e9e389ab70350a29bf4c3990891f961c0592d84ced"
+  }
+]

@@ -43,3 +43,6 @@ eval/benchmark_data/terminalbench/** -text
 deployments/opensandbox/**/*.sh text eol=lf
 deployments/opensandbox/**/Dockerfile text eol=lf
 deployments/opensandbox/**/*.patch -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+
+# Retired policy/navigation originals retain their manifest-pinned bytes.
+docs/archive/policy-cleanup-2026-10-14/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

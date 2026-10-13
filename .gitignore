@@ -219,7 +219,6 @@ internal/cli/.agent/
 
 # Design-map migration and session notes are local working material. The
 # active Goal and docs/GOAL.md remain the source of truth.
-/scripts/design_map/
 /eval/swebench_work/proxy_patch.py
 /eval/swebench_work/run_tau2bench_10.py
 /eval/swebench_work/run_tau2bench_v2.py
@@ -231,6 +230,7 @@ internal/cli/.agent/
 # active goal or public source of truth. The live Goal stays at docs/GOAL.md.
 # Archive INDEX plus promoted receipts may be tracked; dumps stay local.
 /docs/DESIGN-MAP*.md
+!/docs/DESIGN-MAP.md
 /docs/HANDOFF-*.md
 /docs/PROGRESS-*.md
 /docs/interview-verified-*.md

@@ -54,7 +54,11 @@ func buildContextEnvelope(workingDir string, events []Event) (*codeagentpb.Conte
 	if err != nil {
 		return nil, err
 	}
-	for _, relative := range contextEventPaths(events) {
+	instructionName := "AGENTS.md"
+	if _, err := root.Lstat(instructionName); errors.Is(err, os.ErrNotExist) {
+		instructionName = "AGENT.md"
+	}
+	for _, relative := range contextEventPaths(events, instructionName) {
 		if len(envelope.P1) >= maxContextNodes {
 			break
 		}
@@ -166,7 +170,7 @@ func contextPathHasLink(root *os.Root, relative string) bool {
 	return false
 }
 
-func contextEventPaths(events []Event) []string {
+func contextEventPaths(events []Event, instructionName string) []string {
 	seen := make(map[string]bool)
 	paths := make([]string, 0, maxContextNodes)
 	add := func(raw string) {
@@ -179,7 +183,7 @@ func contextEventPaths(events []Event) []string {
 	}
 	// Project instructions are metadata-only here. The model must use the
 	// Harness-authorized Read tool before their contents enter context.
-	add("AGENT.md")
+	add(instructionName)
 	for _, event := range events {
 		switch event.Type {
 		case codeModifiedEventType:

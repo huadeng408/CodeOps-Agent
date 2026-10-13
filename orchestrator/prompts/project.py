@@ -11,12 +11,10 @@ def load_agent_instructions(
 ) -> str:
     paths: list[Path] = []
 
-    home_agent = Path.home() / ".agent" / "AGENT.md"
-    if home_agent.exists():
-        paths.append(home_agent)
-
-    for directory in _instruction_directories(project_root, working_dir):
-        path = directory / "AGENT.md"
+    for directory in [Path.home() / ".agent", *_instruction_directories(project_root, working_dir)]:
+        path = directory / "AGENTS.md"
+        if not path.exists():
+            path = directory / "AGENT.md"
         if path.exists() and path not in paths:
             paths.append(path)
 

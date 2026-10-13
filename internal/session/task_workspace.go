@@ -154,22 +154,29 @@ func taskToolOutcomesKnown(events []Event, currentToolID string) error {
 			return ErrSessionStateConflict
 		}
 	}
+	current := toolCallPayload{}
 	admittedCurrent := false
 	for key, call := range pending {
-		if currentToolID == "" || call.ToolCallID != currentToolID || !dispatched[key] {
-			return ErrSessionStateConflict
+		if call.ToolCallID == currentToolID {
+			if admittedCurrent || !dispatched[key] {
+				return ErrSessionStateConflict
+			}
+			current, admittedCurrent = call, true
 		}
-		if admittedCurrent {
+	}
+	if currentToolID != "" && !admittedCurrent {
+		return ErrSessionStateConflict
+	}
+	for _, call := range pending {
+		// Parallel reads have no file effects to reconcile; mutations still fence every other call.
+		if !admittedCurrent || call.RunID != current.RunID ||
+			call.ToolCallID != currentToolID && (!isReadOnlyTool(current.ToolName) || !isReadOnlyTool(call.ToolName)) {
 			return ErrSessionStateConflict
 		}
 		run, err := projectRun(events, call.RunID)
 		if err != nil || run.terminal || run.view.Status != RunRunning || run.view.LeaseUntil == nil || !run.view.LeaseUntil.After(time.Now()) {
 			return ErrSessionStateConflict
 		}
-		admittedCurrent = true
-	}
-	if currentToolID != "" && !admittedCurrent {
-		return ErrSessionStateConflict
 	}
 	return nil
 }
