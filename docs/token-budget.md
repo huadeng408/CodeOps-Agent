@@ -78,7 +78,10 @@ When a response has complete bounded usage, Go durably settles that attempt
 before any retry. Only such accounted 429/5xx responses permit up to three
 attempts, with one/two-second backoff and a valid Retry-After of at most ten
 seconds. An excessive or malformed delay stops retries rather than retrying
-earlier than requested. Authentication and other HTTP errors are not retried.
+earlier than requested. Repeated Retry-After field lines also stop automatic retries,
+including identical values; a single HTTP-date retains its normal handling.
+[Repeated field checks](evidence/model-retry-after-fields-2026-10-13.md).
+Authentication and other HTTP errors are not retried.
 
 Each retry gets a new Go call ID and a same-Ledger `retry_of` link. Replay and
 CAS require a settled transient parent, unchanged owner/task/bound/purpose,

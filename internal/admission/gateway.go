@@ -383,7 +383,8 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		result.InputTokens, result.OutputTokens, result.CachedInputTokens = usage.input, usage.output, usage.cached
 		if response.StatusCode != http.StatusOK {
 			result.ErrorCode = failure
-			return result, response.Header.Get("Retry-After")
+			// Retry-After is not a list: retain all field lines so duplicates fail parsing.
+			return result, strings.Join(response.Header.Values("Retry-After"), ", ")
 		}
 		// Canonical JSON exposes escaped echoes before they cross into Python.
 		var decoded any

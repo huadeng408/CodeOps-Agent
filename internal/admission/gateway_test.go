@@ -266,21 +266,28 @@ func TestGatewayRetriesOnlyAfterErrorUsageSettles(t *testing.T) {
 
 func TestGatewayRetainsRetryBoundaries(t *testing.T) {
 	for _, scenario := range []struct {
-		name, retryAfter, code string
-		status, attempts       int
-		used, reserved         int64
-		unknown                bool
+		name             string
+		retryAfter       []string
+		code             string
+		status, attempts int
+		used, reserved   int64
+		unknown          bool
 	}{
-		{"exhausted 429", "", "provider_rate_limited", 429, 3, 24, 0, false},
-		{"exhausted 503", "", "provider_transient", 503, 3, 24, 0, false},
-		{"authentication", "", "provider_authentication", 401, 1, 8, 0, false},
-		{"unsupported HTTP status", "", "provider_http_unknown", 600, 1, 0, 103, true},
-		{"excessive delay", "11", "provider_rate_limited", 429, 1, 8, 0, false},
-		{"malformed delay", "invalid", "provider_rate_limited", 429, 1, 8, 0, false},
-		{"signed delay", "+1", "provider_rate_limited", 429, 1, 8, 0, false},
-		{"unknown retry usage", "", "provider_rate_limited_unknown", 429, 2, 8, 103, true},
-		{"retry output violation", "", "provider_bound_violated", 429, 2, 8, 103, true},
-		{"revoked binding", "", "model_gateway_unavailable", 429, 1, 8, 0, false},
+		{"exhausted 429", nil, "provider_rate_limited", 429, 3, 24, 0, false},
+		{"exhausted 503", nil, "provider_transient", 503, 3, 24, 0, false},
+		{"authentication", nil, "provider_authentication", 401, 1, 8, 0, false},
+		{"unsupported HTTP status", nil, "provider_http_unknown", 600, 1, 0, 103, true},
+		{"excessive delay", []string{"11"}, "provider_rate_limited", 429, 1, 8, 0, false},
+		{"malformed delay", []string{"invalid"}, "provider_rate_limited", 429, 1, 8, 0, false},
+		{"signed delay", []string{"+1"}, "provider_rate_limited", 429, 1, 8, 0, false},
+		{"conflicting repeated delay", []string{"0", "11"}, "provider_rate_limited", 429, 1, 8, 0, false},
+		{"repeated date delay", []string{"Thu, 01 Jan 1970 00:00:00 GMT", "11"}, "provider_transient", 503, 1, 8, 0, false},
+		{"repeated identical delay", []string{"0", "0"}, "provider_rate_limited", 429, 1, 8, 0, false},
+		{"single zero delay", []string{"0"}, "provider_rate_limited", 429, 3, 24, 0, false},
+		{"single date delay", []string{"Thu, 01 Jan 1970 00:00:00 GMT"}, "provider_transient", 503, 3, 24, 0, false},
+		{"unknown retry usage", nil, "provider_rate_limited_unknown", 429, 2, 8, 103, true},
+		{"retry output violation", nil, "provider_bound_violated", 429, 2, 8, 103, true},
+		{"revoked binding", nil, "model_gateway_unavailable", 429, 1, 8, 0, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -299,7 +306,9 @@ func TestGatewayRetainsRetryBoundaries(t *testing.T) {
 				if scenario.name == "revoked binding" {
 					(<-releaseHolder)()
 				}
-				w.Header().Set("Retry-After", scenario.retryAfter)
+				for _, value := range scenario.retryAfter {
+					w.Header().Add("Retry-After", value)
+				}
 				w.WriteHeader(scenario.status)
 				if scenario.name == "unknown retry usage" && attempt == 2 {
 					fmt.Fprint(w, `{"error":"fixture-only"}`)
