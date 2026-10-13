@@ -19,8 +19,8 @@ const session = {
 const events = [], attempts = [], sockets = new Set();
 const pageErrors = [];
 page.on('pageerror', (error) => pageErrors.push(error.message));
-const checks = { ten_turns: false, reload: false, concurrent_retry: false, unavailable_draft: false, no_page_errors: false };
-let race = false, unavailable = false, accepted = 0, failed = true;
+const checks = { ten_turns: false, reload: false, concurrent_retry: false, unavailable_draft: false, unresolved_usage: false, busy_task: false, state_conflict: false, no_page_errors: false };
+let race = false, unavailable = false, unresolved = false, busyTask = false, stateConflict = false, accepted = 0, failed = true;
 const addEvent = (type, author, content) => events.push({
   id: 'event-' + session.eventCount, seq: session.eventCount++,
   sessionId: session.id, type, author, content,
@@ -45,8 +45,11 @@ try {
       const body = request.postDataJSON();
       attempts.push(body);
       if (unavailable) return route.fulfill({ status: 503, json: { message: 'fixture unavailable' } });
+      if (unresolved) return route.fulfill({ status: 409, json: { message: 'verification usage requires reconciliation' } });
+      if (busyTask) return route.fulfill({ status: 409, json: { message: 'verification batch already has another task' } });
+      if (stateConflict) return route.fulfill({ status: 409, json: { message: 'session state conflict' } });
       if (race) { race = false; addEvent('memory/catalog-updated', 'system', 'fixture concurrent event'); }
-      if (body.expectedSeq !== session.eventCount) return route.fulfill({ status: 409, json: { message: 'fixture sequence conflict' } });
+      if (body.expectedSeq !== session.eventCount) return route.fulfill({ status: 409, json: { message: 'session event sequence conflict: session=cursor-fixture expected=' + body.expectedSeq + ' actual=' + session.eventCount } });
       accepted++;
       addEvent('user/message', 'user', body.content);
       addEvent('assistant/message', 'assistant', 'Fixture reply ' + accepted);
@@ -93,11 +96,66 @@ try {
   assert.equal(attempts[12].requestId, attempts[13].requestId);
   assert.equal(accepted, 12);
   checks.unavailable_draft = true;
+  unresolved = true;
+  const cursorBeforeRejection = session.eventCount;
+  await composer.fill('Draft waiting for usage reconciliation');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('alert').waitFor();
+  await page.waitForFunction(() => !document.querySelector('button.send-btn')?.disabled);
+  assert.equal(attempts.length, 15, 'unresolved usage must not automatically resend');
+  assert.equal(session.eventCount, cursorBeforeRejection, 'denied message advanced the cursor');
+  assert.match(await page.getByRole('alert').innerText(), /用量尚未确认.*对账/);
+  assert.equal(await composer.inputValue(), 'Draft waiting for usage reconciliation');
+  const rejectedRequest = attempts[14];
+  await page.screenshot({ path: resolve(output, 'unresolved-usage.png'), fullPage: true });
+  unresolved = false;
+  await page.getByRole('button', { name: '重试发送', exact: true }).click();
+  await page.getByText('Fixture reply 13', { exact: true }).waitFor();
+  assert.equal(attempts.length, 16);
+  assert.equal(attempts[15].requestId, rejectedRequest.requestId);
+  assert.equal(attempts[15].content, rejectedRequest.content);
+  checks.unresolved_usage = true;
+  busyTask = true;
+  const cursorBeforeBusy = session.eventCount;
+  await composer.fill('Draft waiting for the other code task');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('alert').waitFor();
+  await page.waitForFunction(() => !document.querySelector('button.send-btn')?.disabled);
+  assert.equal(attempts.length, 17, 'another task must not trigger automatic resend');
+  assert.equal(session.eventCount, cursorBeforeBusy);
+  assert.match(await page.getByRole('alert').innerText(), /其他代码任务.*结束/);
+  assert.equal(await composer.inputValue(), 'Draft waiting for the other code task');
+  await page.screenshot({ path: resolve(output, 'busy-task.png'), fullPage: true });
+  busyTask = false;
+  await page.getByRole('button', { name: '重试发送', exact: true }).click();
+  await page.getByText('Fixture reply 14', { exact: true }).waitFor();
+  assert.equal(attempts.length, 18);
+  assert.equal(attempts[17].requestId, attempts[16].requestId);
+  assert.equal(attempts[17].content, attempts[16].content);
+  checks.busy_task = true;
+  stateConflict = true;
+  const cursorBeforeStateConflict = session.eventCount;
+  await composer.fill('Draft waiting for session state recovery');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('alert').waitFor();
+  await page.waitForFunction(() => !document.querySelector('button.send-btn')?.disabled);
+  assert.equal(attempts.length, 19, 'state conflict must not automatically resend');
+  assert.equal(session.eventCount, cursorBeforeStateConflict);
+  assert.match(await page.getByRole('alert').innerText(), /session state conflict.*草稿已保留.*任务与工作区/);
+  assert.equal(await composer.inputValue(), 'Draft waiting for session state recovery');
+  await page.screenshot({ path: resolve(output, 'state-conflict.png'), fullPage: true });
+  stateConflict = false;
+  await page.getByRole('button', { name: '重试发送', exact: true }).click();
+  await page.getByText('Fixture reply 15', { exact: true }).waitFor();
+  assert.equal(attempts.length, 20);
+  assert.equal(attempts[19].requestId, attempts[18].requestId);
+  assert.equal(attempts[19].content, attempts[18].content);
+  checks.state_conflict = true;
   assert.deepEqual(pageErrors, []);
   checks.no_page_errors = true;
   await page.screenshot({ path: resolve(output, 'passed.png'), fullPage: true });
   failed = false;
-  console.log('PASS: 10 browser fixture turns, reload, bounded 409 retry, 503 draft recovery');
+  console.log('PASS: 10 browser fixture turns, reload, bounded cursor retry, 503/unknown-usage/busy-task/state-conflict draft recovery');
 } catch (error) {
   await page.screenshot({ path: resolve(output, 'failed.png'), fullPage: true });
   throw error;
@@ -106,7 +164,7 @@ try {
     evidence_type: 'fixture-browser-ui-regression', provider_backed: false, trace_id: null,
     git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
     source_dirty: Boolean(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()),
-    exit_code: failed ? 1 : 0, turns_planned: 12,
+    exit_code: failed ? 1 : 0, turns_planned: 15,
     accepted, attempted: attempts.length, checks,
     passed: Object.values(checks).filter(Boolean).length, total: Object.keys(checks).length,
   }, null, 2));

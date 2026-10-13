@@ -39,7 +39,7 @@ test('send failure explains that a network outage is recoverable', () => {
 
 test('send failure gives actionable messages for conflict and server errors', () => {
   assert.equal(
-    sendFailureMessage({ status: 409, message: 'conflict' }),
+    sendFailureMessage(Object.assign(new Error('session event sequence conflict'), { status: 409 })),
     '会话已被其他操作更新，消息已保留；请重试发送',
   );
   assert.equal(

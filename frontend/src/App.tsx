@@ -8,7 +8,7 @@ import { CapabilityPanel } from './CapabilityPanel';
 import { TaskWorkspacePanel } from './TaskWorkspacePanel';
 import { LoginPage } from './LoginPage';
 import { createContinuationRequestId } from './continuationRequest';
-import { retryPendingMessage, sendFailureMessage } from './sendRetry';
+import { isSequenceConflict, retryPendingMessage, sendFailureMessage } from './sendRetry';
 import { compactionPresentation, isCompactionEvent } from './compactionPresentation';
 import { mergeSessionEvents } from './eventMerge';
 import { groupProgressByMessage, hideGroupedProgress } from './progressGrouping';
@@ -469,10 +469,8 @@ function App() {
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
       await refreshSelected();
     } catch (cause) {
-      // A user message is idempotent by requestId, so one automatic retry is
-      // safe after refreshing the canonical ledger cursor. Other operations
-      // continue to require an explicit retry/approval.
-      if (cause instanceof ApiError && cause.status === 409) {
+      // Refresh and retry only a stale cursor; admission failures need recovery.
+      if (isSequenceConflict(cause)) {
         try {
           await retryPendingMessage(
             { sessionId: selectedSession.id, content, requestId },
