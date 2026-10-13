@@ -18,7 +18,7 @@ class ModelGatewayError(RuntimeError):
     def __init__(self, code: str):
         if code not in {
             "model_prerequisites_missing", "task_prerequisites_missing", "model_gateway_binding_invalid", "model_gateway_unavailable",
-            "model_gateway_response_invalid", "provider_request_invalid", "provider_transport_unknown",
+            "model_gateway_response_invalid", "provider_request_invalid", "provider_transport_unknown", "provider_timeout_unknown",
             "provider_response_unknown", "provider_http_unknown", "provider_rate_limited_unknown",
             "provider_transient_unknown", "provider_authentication_unknown", "provider_usage_unknown",
             "provider_http", "provider_rate_limited", "provider_transient", "provider_authentication",

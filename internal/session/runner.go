@@ -2329,6 +2329,10 @@ func publicRunErrorCode(cause error) string {
 		return "provider_bound_violated"
 	case strings.Contains(message, "provider_usage_unknown"):
 		return "provider_usage_unknown"
+	case strings.Contains(message, "provider_transport_unknown"):
+		return "provider_transport_unknown"
+	case strings.Contains(message, "provider_timeout_unknown"):
+		return "provider_timeout_unknown"
 	case strings.Contains(message, "task_prerequisites_missing"):
 		return "task_prerequisites_missing"
 	case strings.Contains(message, "provider_authentication_error"):
@@ -2373,6 +2377,10 @@ func publicRunError(cause error) string {
 		return "model usage exceeded the admitted bounds; check provider configuration"
 	case "provider_usage_unknown":
 		return "model usage is unknown; the original reservation is retained"
+	case "provider_transport_unknown":
+		return "model transport failed; usage is unknown; the original reservation is retained"
+	case "provider_timeout_unknown":
+		return "model request timed out; usage is unknown; the original reservation is retained"
 	case "task_prerequisites_missing":
 		return "task execution prerequisites are unavailable; check the workspace and runtime"
 	}

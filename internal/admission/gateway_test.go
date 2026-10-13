@@ -877,7 +877,7 @@ func TestGatewayRefusesProviderHostedToolsBeforeReservation(t *testing.T) {
 }
 
 func TestGatewayBlocksUnconfirmedAttempts(t *testing.T) {
-	for _, scenario := range []string{"missing_bound", "rate_limit", "canceled", "bound_violation", "duplicate"} {
+	for _, scenario := range []string{"missing_bound", "rate_limit", "canceled", "deadline", "body_deadline", "bound_violation", "duplicate"} {
 		t.Run(scenario, func(t *testing.T) {
 			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 			if err != nil {
@@ -889,9 +889,13 @@ func TestGatewayBlocksUnconfirmedAttempts(t *testing.T) {
 			var calls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				if scenario == "canceled" {
+				if scenario == "canceled" || scenario == "deadline" || scenario == "body_deadline" {
 					_, _ = io.Copy(io.Discard, r.Body)
 					close(started)
+					if scenario == "body_deadline" {
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+					}
 					<-r.Context().Done()
 					return
 				}
@@ -940,7 +944,7 @@ func TestGatewayBlocksUnconfirmedAttempts(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[string]string{"missing_bound": "model_prerequisites_missing", "rate_limit": "provider_rate_limited_unknown",
-				"canceled": "provider_transport_unknown", "bound_violation": "provider_bound_violated", "duplicate": ""}[scenario]
+				"canceled": "provider_transport_unknown", "deadline": "provider_timeout_unknown", "body_deadline": "provider_timeout_unknown", "bound_violation": "provider_bound_violated", "duplicate": ""}[scenario]
 			if response.ErrorCode != want {
 				t.Fatalf("classification %s, want %s", response.ErrorCode, want)
 			}

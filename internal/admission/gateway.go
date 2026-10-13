@@ -374,6 +374,10 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		response, err := gateway.http.Do(upstream)
 		if err != nil {
 			result.ErrorCode = "provider_transport_unknown"
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				result.ErrorCode = "provider_timeout_unknown"
+			}
 			return result, nil
 		}
 		defer response.Body.Close()
@@ -385,6 +389,10 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		data, err := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
 		if err != nil || len(data) > 16<<20 {
 			result.ErrorCode = "provider_response_unknown"
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				result.ErrorCode = "provider_timeout_unknown"
+			}
 			return result, nil
 		}
 		failure := "provider_http"
