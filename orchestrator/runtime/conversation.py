@@ -512,7 +512,22 @@ class ConversationRunner:
             if expected_surface_sha256 != requested_surface_sha256:
                 raise ValueError("checkpoint surface sha256 does not match request")
         if resume and requested_ledger_checksum:
-            if expected_ledger_seq != requested_ledger_seq or expected_ledger_checksum != requested_ledger_checksum:
+            # Go verifies the append-only Ledger; continuation/lease facts advance its head.
+            admitted_advance = (
+                self.harness_managed
+                and getattr(self.llm, "harness_admitted", False)
+                and type(metadata.get("ledger_seq")) is int
+                and metadata["ledger_seq"] >= 0
+                and len(expected_ledger_checksum) == 64
+                and all(char in "0123456789abcdef" for char in expected_ledger_checksum)
+                and len(requested_ledger_checksum) == 64
+                and all(char in "0123456789abcdef" for char in requested_ledger_checksum)
+                and requested_ledger_seq > expected_ledger_seq
+            )
+            if not admitted_advance and (
+                expected_ledger_seq != requested_ledger_seq
+                or expected_ledger_checksum != requested_ledger_checksum
+            ):
                 raise ValueError("checkpoint ledger identity does not match request")
         elif (
             expected_history_digest

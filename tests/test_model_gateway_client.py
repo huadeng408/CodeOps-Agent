@@ -156,3 +156,85 @@ def test_memory_reflection_uses_harness_gateway(tmp_path, monkeypatch, gateway_e
         server.stop(0).wait()
         model_server.stop(0).wait()
         app.close()
+
+
+@pytest.mark.parametrize("head_seq,head_checksum,surface,predecessor,checkpoint_seq,resumed_run_id,success", [
+    (8, "d" * 64, "surface:unchanged", "run:original", 6, "run:retry", True),
+    (8, "d" * 64, "surface:unchanged", "", 6, "run:original", True),
+    (5, "d" * 64, "surface:unchanged", "run:original", 6, "run:retry", False),
+    (6, "d" * 64, "surface:unchanged", "run:original", 6, "run:retry", False),
+    (8, "d" * 64, "surface:foreign", "run:original", 6, "run:retry", False),
+    (8, "d" * 64, "surface:unchanged", "run:foreign", 6, "run:retry", False),
+    (8, "invalid", "surface:unchanged", "run:original", 6, "run:retry", False),
+    (8, "d" * 64, "surface:unchanged", "run:original", "missing", "run:retry", False),
+    (8, "d" * 64, "surface:unchanged", "run:original", -1, "run:retry", False),
+    (8, "d" * 64, "surface:unchanged", "run:original", None, "run:retry", False),
+    (8, "d" * 64, "surface:unchanged", "run:original", True, "run:retry", False),
+])
+def test_conversation_retries_failed_run_with_fresh_harness_binding(
+    tmp_path, monkeypatch, head_seq, head_checksum, surface, predecessor, checkpoint_seq, resumed_run_id, success
+):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", "required")
+    monkeypatch.setenv("CODE_AGENT_REQUIRE_HARNESS_WORKTREE", "1")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    working_dir = tmp_path / "lease-fixture"
+    working_dir.mkdir()
+    app = OrchestratorServer(ServerConfig(project_root=str(tmp_path), working_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")))
+    calls = []
+
+    class Service(rpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            calls.append(request)
+            if len(calls) == 1:
+                return pb.ModelCallResponse(error_code="provider_bound_violated", cost_status="unknown")
+            return pb.ModelCallResponse(payload_json=json.dumps({"model": "fixture-model", "content": [{"type": "text", "text": "recovered"}]}).encode(),
+                                        input_tokens=17, output_tokens=3, cost_status="unknown")
+
+    model_server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_ModelGatewayServicer_to_server(Service(), model_server)
+    model_port = model_server.add_insecure_port("127.0.0.1:0")
+    model_server.start()
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = rpc.OrchestratorStub(channel)
+            request = pb.UserInput(text="read the repository", session_id="session-retry", harness_managed=True, working_dir=str(working_dir),
+                actor=pb.ActorContext(schema_version=1, actor_id="fixture", subject="fixture", tenant_id="fixture", roles=["USER"], session_id="session-retry"),
+                model_gateway=pb.ModelGatewayBinding(schema_version=1, address=f"127.0.0.1:{model_port}", capability=b"a" * 32, protocol="anthropic", model="fixture-model"))
+            request.context_envelope.CopyFrom(pb.ContextEnvelope(schema_version=1, ledger_seq=6, ledger_checksum="c" * 64,
+                events=[pb.ContextEventSummary(seq=6, type="session/run-leased", checksum="c" * 64)]))
+            first = list(stub.Converse(iter([pb.HarnessMessage(user_input=request)]), timeout=10,
+                metadata=(("x-code-agent-run-id", "run:original"), ("x-code-agent-resume", "true"),
+                          ("x-code-agent-surface-sha256", "surface:unchanged"))))
+            assert first[-1].done.error_code == "provider_bound_violated"
+            if checkpoint_seq != 6:
+                checkpoint = app.graph.get_checkpoint("session-retry")
+                assert checkpoint is not None
+                if checkpoint_seq == "missing":
+                    checkpoint.metadata.pop("ledger_seq")
+                else:
+                    checkpoint.metadata["ledger_seq"] = checkpoint_seq
+                app.graph.write_checkpoint(checkpoint, thread_id="session-retry")
+            request.model_gateway.capability = b"b" * 32
+            request.context_envelope.CopyFrom(pb.ContextEnvelope(schema_version=1, ledger_seq=head_seq, ledger_checksum=head_checksum,
+                events=[] if head_checksum == "invalid" else [pb.ContextEventSummary(seq=head_seq, type="session/run-leased", checksum=head_checksum)]))
+            retried = list(stub.Converse(iter([pb.HarnessMessage(user_input=request)]), timeout=10,
+                metadata=(("x-code-agent-run-id", resumed_run_id), ("x-code-agent-resume", "true"),
+                          ("x-code-agent-surface-sha256", surface), ("x-code-agent-retry-of-run-id", predecessor))))
+        if success:
+            assert retried[-1].done.success, retried[-1].done.error_code
+            assert len(calls) == 2 and calls[1].capability == b"b" * 32
+            assert "recovered" == "".join(item.text.text for item in retried if item.HasField("text"))
+        else:
+            assert not retried[-1].done.success
+            assert retried[-1].done.error_code == "provider_runtime_error"
+            assert len(calls) == 1
+    finally:
+        server.stop(0).wait()
+        model_server.stop(0).wait()
+        app.close()
