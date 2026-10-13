@@ -71,6 +71,7 @@
 - 工具轮次上限：[具体失败分类、无工具收尾与缓存展示的公开协议回归](evidence/model-round-limit-2026-10-14.md)。
 - 真实问答续行：[原问题、409 冲突、获准续行的完整失败分母与同批次保护证据](evidence/repository-qa-continuation-2026-10-14.md)。
 - 模型传输失败分类：[Go timeout／unknown 预留、失败投影及 Python 协议接缝证据](evidence/model-gateway-classification-2026-10-14.md)。
+- 真实失败分类与恢复：[工具轮次／timeout、启动草稿恢复、代理续行与全部失败分母](evidence/repository-qa-classified-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标
