@@ -23,5 +23,13 @@ func ProviderFromEnv() ProviderConfig {
 	}
 	input, _ := strconv.ParseInt(os.Getenv("CODE_AGENT_MODEL_INPUT_LIMIT"), 10, 64)
 	output, _ := strconv.ParseInt(os.Getenv("CODE_AGENT_MODEL_OUTPUT_LIMIT"), 10, 64)
-	return ProviderConfig{Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output}
+	total := int64(0)
+	if raw := os.Getenv("CODE_AGENT_MODEL_TOTAL_LIMIT"); raw != "" {
+		var err error
+		total, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			total = -1
+		}
+	}
+	return ProviderConfig{Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output, TotalLimit: total}
 }

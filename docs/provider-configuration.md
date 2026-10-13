@@ -1,5 +1,11 @@
 # Replaceable Provider Configuration
 
+The Go-managed CLI and product model entry use the Go process environment and
+the [token-batch contract](token-budget.md#model-invocation-migration), including
+the optional complete accounting bound. Required-mode Python cannot load a
+credential file or dispatch directly. The file-loader instructions below are
+for standalone Python callers outside that controlled entry.
+
 Set `CODE_AGENT_PROVIDER_CONFIG` to a local file before starting
 `python -m orchestrator.server`. Set `CODE_AGENT_PROVIDER_PROFILE` to select a
 named profile, or a 1-based profile number for legacy notes. Restart the Python

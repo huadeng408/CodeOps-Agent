@@ -141,6 +141,98 @@ func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
 	}
 }
 
+func TestGatewayUsesExplicitTotalBoundSeparatelyFromAnswerLength(t *testing.T) {
+	for _, scenario := range []struct {
+		name, total, code       string
+		input, output, reserved int64
+	}{
+		{"separate total", "120", "", 8, 12, 120},
+		{"provider hard ceiling", "100000000", "", 8, 12, 100000000},
+		{"legacy component ceiling", "", "provider_bound_violated", 8, 12, 103},
+		{"total exceeded", "120", "provider_bound_violated", 8, 113, 120},
+		{"input exceeded", "120", "provider_bound_violated", 101, 12, 120},
+		{"invalid total", "invalid", "model_prerequisites_missing", 8, 12, 0},
+		{"negative total", "-1", "model_prerequisites_missing", 8, 12, 0},
+		{"insufficient total", "102", "model_prerequisites_missing", 8, 12, 0},
+		{"unauthorized total", "100000001", "model_prerequisites_missing", 8, 12, 0},
+		{"overflow total", "9223372036854775808", "model_prerequisites_missing", 8, 12, 0},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			for name, value := range map[string]string{
+				"LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "fixture-provider-authority",
+				"ANTHROPIC_MODEL": "fixture-model", "CODE_AGENT_MODEL_INPUT_LIMIT": "100",
+				"CODE_AGENT_MODEL_OUTPUT_LIMIT": "3", "CODE_AGENT_MODEL_TOTAL_LIMIT": scenario.total,
+			} {
+				t.Setenv(name, value)
+			}
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			budget := admission.NewBudget(ledger)
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				batch, err := budget.Inspect(r.Context(), 7)
+				if err != nil || batch.ReservedTokens != scenario.reserved || batch.UsedTokens != 0 {
+					t.Error("total bound was not durably reserved before dispatch")
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				if payload["max_tokens"] != float64(3) || payload["max_completion_tokens"] != nil {
+					t.Error("accounting bound changed the answer-length request")
+				}
+				fmt.Fprintf(w, `{"model":"fixture-model","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":%d,"cache_read_input_tokens":5,"cache_creation_input_tokens":1,"output_tokens":%d}}`, scenario.input-6, scenario.output)
+			}))
+			defer upstream.Close()
+			t.Setenv("ANTHROPIC_BASE_URL", upstream.URL)
+			gateway := admission.NewGateway(budget, admission.ProviderFromEnv())
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer gateway.Close()
+			binding, release, err := gateway.Bind(7, "task-total", "session-total")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			conn, err := grpc.NewClient(binding.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			response, err := pb.NewModelGatewayClient(conn).Invoke(ctx, &pb.ModelCallRequest{
+				Capability: binding.Capability, CallId: "call-total",
+				PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}],"max_tokens":999}`),
+			})
+			if err != nil || response.GetErrorCode() != scenario.code {
+				t.Fatalf("bounded billed output was refused: %v / %s", err, response.GetErrorCode())
+			}
+			batch, err := budget.Inspect(ctx, 7)
+			if scenario.code != "" {
+				wantCalls := int32(1)
+				if scenario.code == "model_prerequisites_missing" {
+					wantCalls = 0
+				}
+				if err != nil || batch.UsedTokens != 0 || batch.ReservedTokens != scenario.reserved || calls.Load() != wantCalls || batch.UnknownUsage != (scenario.code == "provider_bound_violated") {
+					t.Fatalf("refusal changed accounting or dispatched unexpectedly: %+v / calls=%d / %v", batch, calls.Load(), err)
+				}
+				return
+			}
+			if response.InputTokens != 8 || response.OutputTokens != 12 || response.CachedInputTokens != 5 || binding.OutputLimit != 3 {
+				t.Fatal("request length or complete usage changed")
+			}
+			if err != nil || batch.UsedTokens != 20 || batch.ReservedTokens != 0 || calls.Load() != 1 {
+				t.Fatalf("complete usage was not settled once: %+v / %v", batch, err)
+			}
+		})
+	}
+}
+
 func TestGatewayRejectsAmbiguousProviderUsage(t *testing.T) {
 	for _, scenario := range []struct {
 		name, protocol, response, code string

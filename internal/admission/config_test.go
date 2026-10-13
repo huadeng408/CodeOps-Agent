@@ -14,6 +14,7 @@ func TestProviderProfileRequiresExplicitBounds(t *testing.T) {
 	t.Setenv("ANTHROPIC_MODEL", "fixture-model")
 	t.Setenv("CODE_AGENT_MODEL_INPUT_LIMIT", "")
 	t.Setenv("CODE_AGENT_MODEL_OUTPUT_LIMIT", "invalid")
+	t.Setenv("CODE_AGENT_MODEL_TOTAL_LIMIT", "")
 	config := admission.ProviderFromEnv()
 	if config.Protocol != "anthropic" || config.APIKey != "fixture-provider-authority" || config.InputLimit != 0 || config.OutputLimit != 0 {
 		t.Fatal("legacy provider defaults invented an admitted bound")
@@ -25,7 +26,7 @@ func TestProviderProfileRequiresExplicitBounds(t *testing.T) {
 	t.Setenv("CODE_AGENT_MODEL_INPUT_LIMIT", "100")
 	t.Setenv("CODE_AGENT_MODEL_OUTPUT_LIMIT", "3")
 	config = admission.ProviderFromEnv()
-	if config.Protocol != "openai" || config.APIKey != "fixture-openai-authority" || config.InputLimit != 100 || config.OutputLimit != 3 {
+	if config.Protocol != "openai" || config.APIKey != "fixture-openai-authority" || config.InputLimit != 100 || config.OutputLimit != 3 || config.TotalLimit != 0 {
 		t.Fatal("explicit profile did not reach the Go transport")
 	}
 }

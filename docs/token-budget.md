@@ -63,6 +63,22 @@ setting. Required mode skips dotenv/provider-file loading and direct client
 construction. Harness-managed Converse requests also refuse a missing binding
 when an external Python server was started outside required mode.
 
+If the provider's request output cap limits the visible answer rather than all
+billed output, configure `CODE_AGENT_MODEL_TOTAL_LIMIT` in the Go process from a
+confirmed total bound, such as the user's approved provider hard quota. It must
+cover the input plus requested answer caps and be no greater than 100,000,000.
+Go reserves that total before dispatch and checks complete billed input/output
+against it; the input bound and actual request output cap remain enforced.
+An absent or zero total retains the original strict input/output accounting
+bounds. Invalid, negative, overflowing or insufficient totals refuse dispatch.
+The model payload cannot supply or change this Go-owned setting.
+
+This is a total accounting bound, not a claim about a model's fixed output limit
+or a new allowance per call. The provider still enforces the same cumulative
+batch quota. Existing failures, reservations and violated bounds are not
+reinterpreted when a new profile is used. Unknown reservations can therefore be
+conservative; their sum is not a provider balance readback.
+
 The gateway admits **one active local upstream attempt** across the canonical
 Ledger, within the permitted aggregate range of 1–10. An unmarked reservation
 still fences dispatch after a process crash; a terminal unknown accounting fact

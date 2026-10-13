@@ -34,6 +34,7 @@ type ProviderConfig struct {
 	APIKey      string
 	InputLimit  int64
 	OutputLimit int64
+	TotalLimit  int64 // Optional accounting bound when the answer cap excludes reasoning.
 }
 
 type modelScope struct {
@@ -346,7 +347,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			return result, nil
 		}
 		// A live attempt fences dispatch across the canonical Ledger; terminal unknown usage is audited.
-		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.InputLimit+config.OutputLimit, 1, purpose, retryOf, scope.id); err != nil {
+		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.tokenLimit(), 1, purpose, retryOf, scope.id); err != nil {
 			result.ErrorCode = admissionErrorCode(err)
 			return result, nil
 		}
@@ -402,7 +403,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			}
 			return result, nil
 		}
-		if usage.input > config.InputLimit || usage.output > config.OutputLimit {
+		if usage.input > config.InputLimit || (config.TotalLimit == 0 && usage.output > config.OutputLimit) || usage.input+usage.output > config.tokenLimit() {
 			result.ErrorCode = "provider_bound_violated"
 			auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -505,7 +506,17 @@ func (config ProviderConfig) Validate() error {
 	if config.InputLimit <= 0 || config.OutputLimit <= 0 || config.InputLimit > VerificationTokenLimit-config.OutputLimit {
 		return ErrInvalidAdmission
 	}
+	if config.TotalLimit < 0 || config.TotalLimit > VerificationTokenLimit || (config.TotalLimit > 0 && config.TotalLimit < config.InputLimit+config.OutputLimit) {
+		return ErrInvalidAdmission
+	}
 	return nil
+}
+
+func (config ProviderConfig) tokenLimit() int64 {
+	if config.TotalLimit > 0 {
+		return config.TotalLimit
+	}
+	return config.InputLimit + config.OutputLimit
 }
 
 func providerEndpoint(config ProviderConfig) (string, error) {
