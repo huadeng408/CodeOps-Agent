@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -206,6 +207,15 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 		trustRoot = dir
 	}
 	executor := tools.NewExecutor(trustRoot)
+	if m.taskWorkspaces != nil {
+		// Retained tool output is Harness data, outside the verified task inventory.
+		spill, err := newTaskSpillStore(m.root, fmt.Sprintf("%x", sha256.Sum256([]byte(key))))
+		if err != nil {
+			_ = executor.Close()
+			return nil, fmt.Errorf("configure task spill storage: %w", err)
+		}
+		executor.SetSpillStore(spill)
+	}
 	// All continuation executors share the same lazy, isolated runner. The
 	// runner's trust root is the parent workspace, so child worktrees remain
 	// confined without probing Docker once per session.

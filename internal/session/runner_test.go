@@ -759,6 +759,65 @@ func TestSessionRunnerFailureWritesOneTerminalAndReturnsSessionToPaused(t *testi
 	}
 }
 
+func TestSessionRunnerRetainsSafeModelFailureClassification(t *testing.T) {
+	for _, scenario := range []struct {
+		code    string
+		message string
+		cause   error
+	}{
+		{"provider_bound_violated", "model usage exceeded the admitted bounds; check provider configuration", nil},
+		{"provider_usage_unknown", "model usage is unknown; the original reservation is retained", nil},
+		{"task_prerequisites_missing", "task execution prerequisites are unavailable; check the workspace and runtime", nil},
+		{"event_integrity", "agent continuation failed", fmt.Errorf("%w: continuation surface contains an unexpected provider_usage_unknown event: fixture-secret-value", ErrEventIntegrity)},
+		{"continuation_runtime_error", "context compaction could not be persisted; task stopped", fmt.Errorf("%w: provider_bound_violated fixture-secret-value", orchestrator.ErrCompactionPersistence)},
+	} {
+		t.Run(scenario.code, func(t *testing.T) {
+			ctx := context.Background()
+			ledger := openWorkbenchTestLedger(t)
+			workbench, created, checkpoint := pausedSessionWithCheckpoint(t, ledger)
+			cause := scenario.cause
+			if cause == nil {
+				cause = fmt.Errorf("%w: %s: fixture-secret-value", orchestrator.ErrConversationFailed, scenario.code)
+			}
+			conversation := &recordingConversationAdapter{err: cause}
+			runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{WorkerID: "worker-model-failure", LeaseDuration: time.Second})
+			t.Cleanup(func() { _ = runner.Close() })
+			accepted, err := runner.RequestContinuation(ctx, ContinueCommand{
+				RequestID: "model-failure", SessionID: created.ID, OwnerID: 7,
+				CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal := waitForRunStatus(t, runner, created.ID, accepted.RunID, RunFailed)
+			if terminal.Error != scenario.message {
+				t.Fatalf("model failure = %q, want %q", terminal.Error, scenario.message)
+			}
+			snapshot, err := ReadVerifiedSnapshot(ctx, ledger, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, event := range snapshot.Events {
+				if strings.Contains(string(event.Payload), "fixture-secret-value") {
+					t.Fatal("provider exception escaped into the Ledger")
+				}
+				if event.Type == "execution_result" {
+					var result struct {
+						ErrorCode string `json:"error_code"`
+					}
+					if json.Unmarshal(event.Payload, &result) == nil && result.ErrorCode == scenario.code {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Fatal("safe model failure classification was lost")
+			}
+		})
+	}
+}
+
 func TestSessionRunnerSkillFailureContinuesWithSameRetryLineage(t *testing.T) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)

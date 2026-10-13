@@ -2317,12 +2317,20 @@ func publicRunErrorCode(cause error) string {
 	switch {
 	case errors.Is(cause, ErrEventIntegrity):
 		return "event_integrity"
+	case errors.Is(cause, orchestrator.ErrCompactionPersistence):
+		return "continuation_runtime_error"
 	case strings.Contains(message, "rpc_deadline_exceeded"):
 		return "deadline_exceeded"
 	case strings.Contains(message, "rpc_unavailable"):
 		return "orchestrator_connection_error"
 	case strings.Contains(message, "rpc_cancelled"), orchestrator.IsCanceledError(cause):
 		return "conversation_canceled"
+	case strings.Contains(message, "provider_bound_violated"):
+		return "provider_bound_violated"
+	case strings.Contains(message, "provider_usage_unknown"):
+		return "provider_usage_unknown"
+	case strings.Contains(message, "task_prerequisites_missing"):
+		return "task_prerequisites_missing"
 	case strings.Contains(message, "provider_authentication_error"):
 		return "provider_authentication_error"
 	case strings.Contains(message, "provider_transport_error"):
@@ -2357,10 +2365,19 @@ func publicRunError(cause error) string {
 	if cause == nil {
 		return "agent continuation failed"
 	}
+	if errors.Is(cause, orchestrator.ErrCompactionPersistence) {
+		return "context compaction could not be persisted; task stopped"
+	}
+	switch publicRunErrorCode(cause) {
+	case "provider_bound_violated":
+		return "model usage exceeded the admitted bounds; check provider configuration"
+	case "provider_usage_unknown":
+		return "model usage is unknown; the original reservation is retained"
+	case "task_prerequisites_missing":
+		return "task execution prerequisites are unavailable; check the workspace and runtime"
+	}
 	message := strings.ToLower(cause.Error())
 	switch {
-	case errors.Is(cause, orchestrator.ErrCompactionPersistence):
-		return "context compaction could not be persisted; task stopped"
 	case strings.Contains(message, "rpc_deadline_exceeded"):
 		return "model request timed out; retry this task"
 	case strings.Contains(message, "rpc_cancelled"), orchestrator.IsCanceledError(cause):

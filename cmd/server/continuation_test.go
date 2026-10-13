@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,139 @@ import (
 
 type absoluteEditConversation struct {
 	path string
+}
+
+type spillReadConversation struct {
+	tasks         *session.TaskWorkspaces
+	cacheRejected bool
+}
+
+func (a spillReadConversation) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	result := handlers.Tool(ctx, orchestrator.ToolCall{ID: "long-read", Name: "Read", ParametersJSON: `{"path":"large.go"}`})
+	if a.cacheRejected {
+		if result.ExitCode == 0 || !strings.Contains(result.Error, "reparse point") {
+			return orchestrator.ConversationResult{}, fmt.Errorf("unsafe cache was not refused: %+v", result)
+		}
+		return orchestrator.ConversationResult{Success: true, Message: "unsafe cache refused"}, nil
+	}
+	if result.Error != "" || result.ExitCode != 0 || !result.Truncated {
+		return orchestrator.ConversationResult{}, fmt.Errorf("long Read did not produce a retained preview: %+v", result)
+	}
+	if _, err := a.tasks.ModelWorkspace(ctx, 7, request.SessionID); err != nil {
+		return orchestrator.ConversationResult{}, fmt.Errorf("readonly spill invalidated model admission: %w", err)
+	}
+	start := strings.Index(result.Output, "spill://")
+	if start < 0 || len(result.Output) < start+len("spill://")+64 {
+		return orchestrator.ConversationResult{}, fmt.Errorf("retained Read has no opaque locator")
+	}
+	locator := result.Output[start : start+len("spill://")+64]
+	spilled := handlers.Tool(ctx, orchestrator.ToolCall{ID: "spill-read", Name: "ReadSpill", ParametersJSON: fmt.Sprintf(`{"locator":%q,"start":302,"limit":1}`, locator)})
+	if spilled.Error != "" || spilled.ExitCode != 0 || !strings.Contains(spilled.Output, "// line 300") {
+		return orchestrator.ConversationResult{}, fmt.Errorf("bounded retained Read failed: %+v", spilled)
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "readonly output retained"}, nil
+}
+
+func TestContinuationLongReadPreservesPreparedTaskWorkspace(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first native Git directory pin contract")
+	}
+	for _, scenario := range []string{"retained read", "junction refused"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			repo, storage := t.TempDir(), t.TempDir()
+			var content strings.Builder
+			content.WriteString("package main\n")
+			for line := 1; line <= 400; line++ {
+				fmt.Fprintf(&content, "// line %d\n", line)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "large.go"), []byte(content.String()), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"init", "-q"}, {"config", "user.name", "fixture"}, {"config", "user.email", "fixture@example.test"}, {"add", "large.go"}, {"commit", "-qm", "fixture"}} {
+				if output, err := exec.Command("git", append([]string{"-c", "core.hooksPath=", "-C", repo}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("prepare Git fixture: %v %s", err, output)
+				}
+			}
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "sessions.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ledger.Close() })
+			workbench := session.NewWorkbench(ledger, nil)
+			created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "long read", "", repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executors := newContinuationToolExecutors(storage)
+			t.Cleanup(func() { _ = executors.Close() })
+			owner := func(context.Context) (uint, error) { return 7, nil }
+			tasks := session.NewTaskWorkspaces(workbench, owner, repo, storage).WithBaselineRuntime(session.TaskBaselineRuntime{
+				Toolchain: "go", Runner: executors.sandbox,
+				Ready:   func(context.Context) error { return nil },
+				Acquire: func(context.Context, uint, string) error { return nil },
+				Finish:  func(context.Context, uint, string) error { return nil },
+			})
+			prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare-read")
+			if err != nil || prepared.State != "prepared" {
+				t.Fatalf("prepare: %+v %v", prepared, err)
+			}
+			executors.taskWorkspaces, executors.taskOwner = tasks, owner
+			cacheRejected := scenario == "junction refused"
+			external := ""
+			if cacheRejected {
+				external = t.TempDir()
+				if err := os.WriteFile(filepath.Join(external, "marker.txt"), []byte("outside task storage"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				junction := filepath.Join(storage, ".runtime")
+				if output, err := exec.Command("cmd", "/c", "mklink", "/J", junction, external).CombinedOutput(); err != nil {
+					t.Fatalf("prepare junction fixture: %v %s", err, output)
+				}
+				t.Cleanup(func() { _ = os.Remove(junction) })
+			}
+			runner := session.NewSessionRunner(workbench, spillReadConversation{tasks: tasks, cacheRejected: cacheRejected}, executors, session.SessionRunnerOptions{
+				WorkerID: "read-spill-test", Workspace: tasks.ModelWorkspace,
+			})
+			t.Cleanup(func() { _ = runner.Close() })
+			actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "test", TenantID: "org:test", Roles: []string{"USER"}}
+			accepted, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "read-spill", SessionID: created.ID, OwnerID: 7,
+				ExpectedSeq: int64(prepared.EventCount), Content: "read the large file", Actor: actor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				view, err := runner.Run(ctx, created.ID, accepted.RunID)
+				if err == nil && (view.Status == session.RunCompleted || view.Status == session.RunFailed) {
+					if view.Status != session.RunCompleted {
+						workspace, _ := tasks.Inspect(ctx, 7, created.ID)
+						_, cacheErr := os.Lstat(filepath.Join(storage, prepared.WorkspaceID, ".runtime", "spill"))
+						t.Fatalf("readonly run failed: %+v; workspace=%s; cache_in_task=%v", view, workspace.State, cacheErr == nil)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("readonly run did not finish")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			view, err := tasks.Inspect(ctx, 7, created.ID)
+			if err != nil || view.State != "prepared" {
+				t.Fatalf("readonly inventory changed: %+v %v", view, err)
+			}
+			if _, err := os.Lstat(filepath.Join(storage, prepared.WorkspaceID, ".runtime")); !os.IsNotExist(err) {
+				t.Fatal("readonly tool cache entered the task tree")
+			}
+			if cacheRejected {
+				entries, err := os.ReadDir(external)
+				marker, readErr := os.ReadFile(filepath.Join(external, "marker.txt"))
+				if err != nil || readErr != nil || len(entries) != 1 || string(marker) != "outside task storage" {
+					t.Fatal("rejected junction changed external data")
+				}
+			}
+		})
+	}
 }
 
 func (a absoluteEditConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {

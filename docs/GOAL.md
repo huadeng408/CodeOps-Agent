@@ -64,6 +64,7 @@
 - Windows Docker 启动恢复：[范围证据](evidence/docker-startup-2026-10-10.md)。
 - 工作指令与验收约束：[范围证据](evidence/instruction-policy-2026-10-11.md)。
 - 指令、导航与门禁清理：[八项修改及验证范围](evidence/policy-cleanup-2026-10-14.md)；真实仓库问答与重试缺口见[当轮证据](evidence/repository-qa-2026-10-14.md)。
+- 仓库只读缓存与错误分类：[外部私有缓存、完整运行分母及当前问答／重试缺口](evidence/repository-spill-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标
