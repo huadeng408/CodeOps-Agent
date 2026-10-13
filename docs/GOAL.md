@@ -56,7 +56,7 @@
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
 - OpenSandbox Runner／任务槽：[基础接口证据](evidence/opensandbox-foundation-2026-10-11.md)。
-- OpenSandbox 本地构建镜像：[身份校验证据](evidence/opensandbox-image-pins-2026-10-12.md)。
+- OpenSandbox 本地构建镜像：[身份校验证据](evidence/opensandbox-image-pins-2026-10-12.md)；后续 Docker 归组与执行核对见[分组范围证据](evidence/docker-grouping-2026-10-13.md)。
 - OpenSandbox Go 产品基线：[实际部署、浏览器、故障／重开和 Trace 证据](evidence/opensandbox-product-2026-10-12.md)。
 - OpenSandbox Python 产品基线：[固定依赖准备、离线完整测试、保护／重开和 Trace 证据](evidence/opensandbox-python-2026-10-12.md)。
 - OpenSandbox 取消、故障恢复与 CLI：[范围证据、完整分母和不可变收据](evidence/opensandbox-lifecycle-2026-10-12.md)。

@@ -82,6 +82,13 @@ def runtime_environment(environment):
         reject()
     return environment + ["EXECD_ACCESS_TOKEN=" + token]
 
+def grouped_labels(labels, purpose):
+    return {
+        **labels, "com.docker.compose.project": "localcode",
+        "com.docker.compose.service": "opensandbox-" + purpose,
+        "codeops.owner": "CodeOps-Agent", "codeops.purpose": purpose,
+    }
+
 def verify_prebaked_runtime(service, container):
     image = service.docker_client.images.get(container.attrs["Config"]["Image"])
     labels = image.attrs["Config"].get("Labels") or {}

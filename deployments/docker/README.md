@@ -17,17 +17,20 @@ Docker Desktop 的容器统一属于 Compose project `localcode`，用 service �
 配置和构建输入放 `.local/profiles/` 与 `.local/builds/`，运行日志和收据放
 `.local/logs/` 与 `.local/receipts/`，新增 bind 数据放 `.local/data/`。
 `.local/` 整体忽略，凭据只从进程环境或已批准 secret manager 注入。
-Session Ledger 继续使用唯一的规范存储，不因 Docker 整理复制或重建账本。
+Session Ledger 和既有 Task Workspace 存储根保持原身份，不因 Docker 整理复制或重建。
 
 新增临时容器必须有明确的 owner、purpose、run/operation identity 和已知停止后的
 回收方式。优先 Compose；必要的受控 Docker API／CLI 创建也必须在创建时加入
 固定 project/service 分组标签，构建与运行物料仍使用本目录。缺少分组和生命周期
 声明时先修正启动入口，再创建容器。
+普通 Docker 和 WSL Docker Runner 的共用命令同样固定 project `localcode`、
+service `sandbox`，记录 owner/purpose，保留原有精确资源生命周期。
 
-已部署 OpenSandbox 的策略是镜像内不可变内容，客户端追加任意 metadata 会被
-旧策略拒绝。后续控制镜像升级须由可信 server 给 task／egress 设置固定分组标签，
-完成原有 pin 与隔离验证后再启用；不能通过放宽请求 metadata 来绕过策略。
-在此之前，旧服务只保留其已有资源，不通过它新增未分组沙箱。
+OpenSandbox 的策略是镜像内不可变内容，客户端不能追加分组 metadata。
+当前配方由可信 server 给 task／egress 设置固定 project/service、owner/purpose 标签；
+Go 核对控制镜像的分组能力标记和控制服务，在执行前再核对两个实际成员。
+按[部署契约](../../docs/opensandbox-local.md)重建并核验 pin 后启用，旧镜像仅补
+容器标签仍被拒绝。旧服务保留已有资源，不通过它新增未分组沙箱。
 
 历史根 Compose 和 `deployments/opensandbox/` 等构建配方作为兼容输入保留。
 本次规则只约束后续资源；现有容器、volume、批准 manifest、镜像 pin、数据和

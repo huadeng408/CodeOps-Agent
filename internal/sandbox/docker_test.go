@@ -34,6 +34,10 @@ func TestBuildDockerCommandEnforcesIsolationForLinux(t *testing.T) {
 	for _, want := range []string{
 		"run --rm --init",
 		"--pull never",
+		"--label com.docker.compose.project=localcode",
+		"--label com.docker.compose.service=sandbox",
+		"--label codeops.owner=CodeOps-Agent",
+		"--label codeops.purpose=task",
 		"--network none",
 		"--read-only",
 		"--cap-drop ALL",

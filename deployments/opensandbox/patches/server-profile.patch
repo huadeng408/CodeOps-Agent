@@ -30,7 +30,7 @@ index d70fe6c4..37f2b150 100644
  from docker.errors import DockerException, ImageNotFound
  from docker.types import DeviceRequest
  from fastapi import HTTPException, status
-+from opensandbox_server.codeops_profile import ensure_local_image, runtime_environment
++from opensandbox_server.codeops_profile import ensure_local_image, runtime_environment, grouped_labels
  
  from opensandbox_server.extensions import (
      apply_access_renew_extend_seconds_to_mapping,
@@ -103,7 +103,7 @@ index d70fe6c4..37f2b150 100644
              environment.append("EXECD_INIT=1")
          environment.append(f"OPENSANDBOX_ID={sandbox_id}")
 -        return labels, environment
-+        return labels, runtime_environment(environment)
++        return grouped_labels(labels, "task"), runtime_environment(environment)
  
      def _resolve_image_auth(
          self, request: CreateSandboxRequest, sandbox_id: str
@@ -355,7 +355,7 @@ index 147c640a..d6e14d1b 100644
  from requests.exceptions import RequestException
  from docker.errors import DockerException, NotFound as DockerNotFound
  from fastapi import HTTPException, status
-+from opensandbox_server.codeops_profile import PROFILE
++from opensandbox_server.codeops_profile import PROFILE, grouped_labels
  
  from opensandbox_server.api.schema import Endpoint, NetworkPolicy
  from opensandbox_server.services.constants import (
@@ -397,7 +397,7 @@ index 147c640a..d6e14d1b 100644
          sidecar_name = f"sandbox-egress-{sandbox_id}"
          sidecar_labels = {
              EGRESS_SIDECAR_LABEL: sandbox_id,
-+            **(operation_metadata or {}),
++            **grouped_labels(operation_metadata or {}, "egress"),
          }
  
          # Ensure sidecar image is available before create/start.

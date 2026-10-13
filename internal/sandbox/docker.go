@@ -272,6 +272,10 @@ func buildDockerRunArgs(config Config, workspaceSource, containerDir string, req
 	args := []string{
 		"docker", "run", "--rm", "--init",
 		"--pull", "never",
+		"--label", "com.docker.compose.project=localcode",
+		"--label", "com.docker.compose.service=sandbox",
+		"--label", "codeops.owner=CodeOps-Agent",
+		"--label", "codeops.purpose=task",
 		"--network", "none",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=" + config.TmpfsSize,

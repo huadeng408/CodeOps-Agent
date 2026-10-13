@@ -421,6 +421,9 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 		return errors.New("approved runtime server identity is unavailable")
 	}
 	labels := server.Config.Labels
+	if !openSandboxGrouped(labels, "opensandbox-"+r.config.Toolchain) {
+		return errors.New("runtime control plane is outside the localcode Docker group")
+	}
 	toolchain := labels["codeops.opensandbox.toolchain"]
 	if toolchain == "" {
 		toolchain = "go"
@@ -450,9 +453,17 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 	if len(server.Mounts) != 2 || !socket || !workspace || server.Config.WorkingDir != "/app" || len(server.Config.Entrypoint) != 0 || strings.Join(server.Config.Cmd, "\x00") != "python\x00-m\x00uvicorn\x00opensandbox_server.main:app\x00--host\x000.0.0.0\x00--port\x008080\x00--no-access-log" {
 		return errors.New("runtime control plane inputs differ from approval")
 	}
-	var image struct{ Config struct{ Env []string } }
+	var image struct {
+		Config struct {
+			Env    []string
+			Labels map[string]string
+		}
+	}
 	if r.inspect(ctx, &image, "image", "inspect", manifest.ServerImage) != nil {
 		return errors.New("approved runtime image configuration is unavailable")
+	}
+	if image.Config.Labels["codeops.docker.project"] != "localcode" {
+		return errors.New("approved runtime image does not enforce Docker grouping")
 	}
 	expected, actual := map[string]string{}, map[string]string{}
 	for index, entries := range [][]string{image.Config.Env, server.Config.Env} {
@@ -482,6 +493,10 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 	return nil
 }
 
+func openSandboxGrouped(labels map[string]string, service string) bool {
+	return labels["com.docker.compose.project"] == "localcode" && labels["com.docker.compose.service"] == service
+}
+
 func openSandboxHostPath(path string) string {
 	if runtime.GOOS == "windows" && len(path) > 2 && path[1] == ':' {
 		return "/run/desktop/mnt/host/" + strings.ToLower(path[:1]) + strings.ReplaceAll(path[2:], `\`, "/")
@@ -504,7 +519,7 @@ func (r *OpenSandboxRunner) imagePresent(ctx context.Context, pin string) bool {
 }
 
 func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandboxManifest, task openSandboxContainer, id, workspace, dependency string, memory int64) error {
-	if task.Config.Labels["opensandbox.io/volume-managed-by"] != "" || task.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 {
+	if !openSandboxGrouped(task.Config.Labels, "opensandbox-task") || task.Config.Labels["opensandbox.io/volume-managed-by"] != "" || task.Config.Labels["codeops.opensandbox.policy_sha256"] != manifest.PolicySHA256 {
 		return ErrSandboxUnavailable
 	}
 	host := task.HostConfig
@@ -550,7 +565,7 @@ func (r *OpenSandboxRunner) verifyTask(ctx context.Context, manifest openSandbox
 	}
 	sidecarID := strings.TrimPrefix(host.NetworkMode, "container:")
 	var sidecar openSandboxContainer
-	if sidecarID == host.NetworkMode || !openSandboxHex(sidecarID, 64) || r.inspect(ctx, &sidecar, "inspect", sidecarID) != nil || sidecar.ID != sidecarID || sidecar.Config.Image != manifest.EgressImage || !sidecar.State.Running || sidecar.Config.Labels["opensandbox.io/egress-sidecar-for"] != id || !openSandboxContains(sidecar.Config.Env, "OPENSANDBOX_EGRESS_MODE=dns+nft") {
+	if sidecarID == host.NetworkMode || !openSandboxHex(sidecarID, 64) || r.inspect(ctx, &sidecar, "inspect", sidecarID) != nil || sidecar.ID != sidecarID || sidecar.Config.Image != manifest.EgressImage || !sidecar.State.Running || !openSandboxGrouped(sidecar.Config.Labels, "opensandbox-egress") || sidecar.Config.Labels["opensandbox.io/egress-sidecar-for"] != id || !openSandboxContains(sidecar.Config.Env, "OPENSANDBOX_EGRESS_MODE=dns+nft") {
 		return ErrSandboxUnavailable
 	}
 	var server openSandboxContainer

@@ -8,6 +8,11 @@ OpenSandbox Runner。Session Ledger 保存结果；OpenSandbox 的 SQLite 只保
 
 ## 构建输入
 
+新增构建目录、非秘密配置、启动入口和收据统一放在
+[`deployments/docker/`](../deployments/docker/README.md) 下；Dockerfile 和上游补丁
+继续复用本目录的版本化配方，旧构建输入与收据保留。既有 Task Workspace 存储根
+按原身份使用，不借归组复制或迁移 Ledger／任务数据。
+
 上游固定为 [OpenSandbox f89eff24](https://github.com/opensandbox-group/OpenSandbox/tree/f89eff24bbd15ae1c37a47769f7667849e679be0)，
 Apache-2.0。在独立副本应用 `deployments/opensandbox/patches/` 中的两个补丁；
 从仓库根目录指定 Git patch 的目标前缀，避免在嵌套 checkout 内静默跳过补丁。
@@ -57,6 +62,9 @@ Apache-2.0。在独立副本应用 `deployments/opensandbox/patches/` 中的两�
 四个 `codeops.opensandbox.*` 标签绑定 source SHA、policy SHA、execd image 和
 egress image；Python 部署另带 `codeops.opensandbox.toolchain=python`，省略该标签
 只兼容 Go。启动时使用 `--security-opt no-new-privileges=true`，与 Go 核验的实际输入一致。
+控制服务归入 Compose project `localcode`，service 为 `opensandbox-go` 或
+`opensandbox-python`。新控制镜像必须带不可变标签 `codeops.docker.project=localcode`；
+Go 在创建前核对镜像与控制服务分组，旧镜像仅补容器标签也不能准入。
 API key 与 execd token 只通过进程环境传入：
 `OPENSANDBOX_SERVER_API_KEY`、`CODEOPS_EXECD_ACCESS_TOKEN`；execd token 是
 64 位小写十六进制。保存容器物理 ID，记录每项实际限制并核验。
@@ -108,6 +116,12 @@ pytest／coverage／mypy 开发工具检查。
 scratch。egress sidecar 采用 dns+nft 与 IPv4／IPv6 全拒绝策略。Go 核对实际镜像、
 只读 mount、资源限制、控制平面启动输入和 sidecar 所有权。删除请求携带已记录的
 物理 task／sidecar／operation ID，重绑或无法确认的资源保留供核验。
+
+可信服务在创建时固定 task／egress 的 project `localcode` 和 service
+`opensandbox-task`／`opensandbox-egress`，另记录 owner `CodeOps-Agent` 与
+purpose `task`／`egress`。请求 metadata 仍仅接受 operation ID 和 policy SHA，
+客户端不能修改分组。Go 在执行前复验两个实际成员；分组标签不授予删除权限，
+停止仍按原有物理身份、operation 和 policy 核验，历史资源的对账边界不改变。
 
 冻结 chi `9b9fb55def404397748a9fc7e044efe9db1d618e` 的正常 HTTP/2 测试需要两份
 已公开的 TLS 测试夹具。Go 启动策略只准入这个提交下 `testdata/cert.pem` 的

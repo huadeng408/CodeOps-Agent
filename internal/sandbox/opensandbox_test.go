@@ -72,7 +72,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"changed frozen input", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"changed frozen input", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -106,13 +106,14 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				serverID: map[string]any{"Id": serverID, "Config": map[string]any{"Image": serverImage, "Labels": map[string]string{
 					"codeops.opensandbox.source_sha": "f89eff24bbd15ae1c37a47769f7667849e679be0", "codeops.opensandbox.policy_sha256": policy,
 					"codeops.opensandbox.execd_image": execdImage, "codeops.opensandbox.egress_image": egressImage,
+					"com.docker.compose.project": "localcode", "com.docker.compose.service": "opensandbox-go",
 				}, "WorkingDir": "/app", "Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml", "OPENSANDBOX_SERVER_API_KEY=fixture-lifecycle", "CODEOPS_EXECD_ACCESS_TOKEN=fixture-execd"}, "Cmd": []string{"python", "-m", "uvicorn", "opensandbox_server.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"}}, "State": map[string]any{"Running": true},
 					"HostConfig": map[string]any{"ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "codeops-network", "Memory": 512 << 20, "NanoCpus": 2000000000, "PidsLimit": 128, "Tmpfs": map[string]string{"/run/codeops-control": "rw,noexec,nosuid,nodev,size=64m", "/tmp": "rw,noexec,nosuid,nodev,size=64m"}},
 					"Mounts":     []map[string]any{{"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": true}, {"Type": "bind", "Source": serverRoot, "Destination": serverRoot, "RW": false}}},
 				sidecarID: map[string]any{"Id": sidecarID, "Config": map[string]any{"Image": egressImage, "Env": []string{"OPENSANDBOX_EGRESS_MODE=dns+nft"}, "Labels": map[string]string{"opensandbox.io/egress-sidecar-for": sandboxID, "codeops.operation_id": strings.Repeat("7", 64), "codeops.opensandbox.policy_sha256": policy}}, "State": map[string]any{"Running": true},
 					"HostConfig": map[string]any{"ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "CapAdd": []string{"NET_ADMIN"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "codeops-network", "Memory": 256 << 20, "NanoCpus": 1000000000, "PidsLimit": 64, "Tmpfs": map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}}},
 				taskImage:   map[string]any{"RepoDigests": []string{taskImage}},
-				serverImage: map[string]any{"RepoDigests": []string{serverImage}, "Config": map[string]any{"Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml"}}},
+				serverImage: map[string]any{"RepoDigests": []string{serverImage}, "Config": map[string]any{"Labels": map[string]string{"codeops.docker.project": "localcode"}, "Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml"}}},
 				execdImage:  map[string]any{"RepoDigests": []string{execdImage}},
 				egressImage: map[string]any{"RepoDigests": []string{egressImage}},
 			}
@@ -121,6 +122,18 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			}
 			if scenario == "approved Python prerequisites" || strings.HasPrefix(scenario, "Python ") {
 				objects[serverID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["codeops.opensandbox.toolchain"] = "python"
+				objects[serverID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["com.docker.compose.service"] = "opensandbox-python"
+			}
+			objects[sidecarID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["com.docker.compose.project"] = "localcode"
+			objects[sidecarID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["com.docker.compose.service"] = "opensandbox-egress"
+			if scenario == "foreign group egress" {
+				objects[sidecarID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)["com.docker.compose.project"] = "other-project"
+			}
+			if scenario == "server ungrouped" {
+				delete(objects[serverID].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string), "com.docker.compose.project")
+			}
+			if scenario == "server legacy grouping image" {
+				delete(objects[serverImage].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string), "codeops.docker.project")
 			}
 			if scenario == "server working directory" {
 				objects[serverID].(map[string]any)["Config"].(map[string]any)["WorkingDir"] = serverRoot
@@ -215,6 +228,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						return
 					}
 					labels := body.Metadata
+					if len(labels) != 2 {
+						t.Error("client added metadata outside the strict runtime contract")
+					}
 					if cliLedger != nil {
 						if _, ok, err := cliLedger.ResumeLatest(r.Context()); err != nil || !ok {
 							t.Error("CLI intent absent before Hook creation")
@@ -244,6 +260,11 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						t.Error("runtime effect did not use the caller's persisted operation identity")
 					}
 					labels["opensandbox.io/id"] = sandboxID
+					labels["com.docker.compose.project"] = "localcode"
+					labels["com.docker.compose.service"] = "opensandbox-task"
+					if scenario == "ungrouped task" {
+						delete(labels, "com.docker.compose.project")
+					}
 					objects["sandbox-"+sandboxID] = map[string]any{"Id": containerID, "Config": map[string]any{"Image": taskImage, "Labels": labels}, "State": map[string]any{"Running": true},
 						"HostConfig": map[string]any{"ReadonlyRootfs": true, "Privileged": false, "CapDrop": []string{"ALL"}, "CapAdd": []string{"SETUID", "SETGID"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "container:" + sidecarID, "Memory": 1 << 30, "NanoCpus": 2000000000, "PidsLimit": 128, "Tmpfs": map[string]string{"/run/codeops": "rw,exec,nosuid,nodev,size=512m,mode=1777", "/tmp": "rw,noexec,nosuid,nodev,size=64m"}},
 						"Mounts":     []map[string]any{{"Type": "bind", "Source": body.Volumes[0].Host.Path, "Destination": "/workspace", "RW": false}}}
@@ -501,7 +522,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				if scenario == "unsupported managed volume" {
 					wantExecuted = 0
 				}
-				if scenario == "writable root" || scenario == "stricter scratch limit" || scenario == "privileged egress" {
+				if scenario == "writable root" || scenario == "stricter scratch limit" || scenario == "privileged egress" || scenario == "ungrouped task" || scenario == "foreign group egress" {
 					wantExecuted, wantError = 0, sandbox.ErrSandboxUnavailable
 				}
 				if !errors.Is(err, wantError) || result.ExitCode != 126 || created != 1 || executed != wantExecuted || deleted != wantDeleted || !strings.Contains(result.RuntimeID, containerID) {
