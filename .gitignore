@@ -261,3 +261,6 @@ internal/cli/.agent/
 
 # Local provider credentials; only the placeholder example is tracked.
 /configs/provider.local.*
+
+# Machine-local Docker build inputs, configuration, data and receipts.
+/deployments/docker/.local/

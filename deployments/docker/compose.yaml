@@ -1,0 +1,6 @@
+name: localcode
+
+# Preserve the existing project/volume namespace while centralizing new entry points.
+include:
+  - path: ../../docker-compose.yml
+    project_directory: ../..

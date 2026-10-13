@@ -75,6 +75,7 @@ Git SHA 用于追溯；收据是否仍适用还须核对其范围内实际参与
 
 ## 本地运行约定
 
+- Docker：新增资源的配置、启动和本机物料统一由 [`deployments/docker/`](deployments/docker/README.md) 管理，容器固定归入 Compose project `localcode`，按 service／run identity 分层；创建前先读该目录约定，确认分组与停止后回收方式。已有未分组容器、数据、pin 和历史证据按原身份保留，迁移或删除另按明确范围执行。
 - Docker Desktop 可以隐藏启动以准备 Docker 测试；不删除已有容器、volume、索引或业务数据。
 - Go/Python 的常用入口由 `Makefile`、`pyproject.toml` 和各目录测试配置定义；优先使用这些入口，不在文档中复制易漂移的依赖版本。
 - Windows Docker 测试先 dot-source `scripts/rag-agent-e2e-runtime.ps1` 并调用 `Wait-DockerDaemonReady`；不要在单个脚本中另写 readiness 探针，也不要删除容器、volume、索引或业务数据。
