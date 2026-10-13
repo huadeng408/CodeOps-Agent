@@ -50,6 +50,7 @@
 - 发送入口恢复：[具体拒绝原因、草稿与同请求恢复的前端范围证据](evidence/model-entry-recovery-2026-10-13.md)。
 - 歧义模型用量：[重复计费字段拒绝、完整预留与后续派发阻断证据](evidence/model-ambiguous-usage-2026-10-13.md)。
 - 重试等待字段：[重复 Retry-After 停止自动重试与已结算用量保留证据](evidence/model-retry-after-fields-2026-10-13.md)。
+- 重试字段数量：[split-date／空字段拒绝及上轮覆盖缺口的纠正证据](evidence/model-retry-after-arity-2026-10-13.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

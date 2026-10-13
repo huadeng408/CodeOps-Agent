@@ -4,11 +4,16 @@
 `IMPLEMENTED`；Linux 合成 HTTP／公开 Gateway.Invoke 与临时 SQLite 重开
 回归范围 `VERIFIED`。完整模型产品验收仍 `BLOCKED`，Issue 保持 open。
 
+本记录保存 `7fb49daf` 的原始测试输入和收据。后续发现 split-date 拼接及
+显式空字段未覆盖，两项新增 RED 保留；最终修正见
+[字段数量与空值证据](model-retry-after-arity-2026-10-13.md)。本记录不证明
+这些后来发现的反例已通过，原成功结果不代替后续源码验证。
+
 ## 行为与契约
 
 原网关通过 Header.Get 只读取第一条 Retry-After。合成 429 响应同时给出
-0 与 11 秒时，旧行为忽略第二条并发出三次请求。现在保留全部 field lines，
-交给既有单值解析器；重复字段停止当前调用的自动重试，保留 429／503
+0 与 11 秒时，旧行为忽略第二条并发出三次请求。该轮拼接全部 field lines
+交给既有单值解析器；所测完整重复字段停止当前调用的自动重试，保留 429／503
 分类和已经持久结算的用量。单字段秒数、HTTP-date 和无 header 的既有
 有界重试继续有效。unknown usage 仍先保留完整预留并阻断，不因 header
 变化变成零消耗或允许重试。
@@ -17,7 +22,7 @@
 将 Retry-After 定义为单个 HTTP-date 或 delay-seconds；
 [§5.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.3) 限制发送方
 重复非列表字段。拒绝重复字段是本项目的 fail-closed 重试政策选择，
-不声称 RFC 要求客户端必须采用该策略；即使重复值相同也停止自动重试。
+不声称 RFC 要求客户端必须采用该策略；所测相同重复值也停止自动重试。
 
 ## 验证与审查
 

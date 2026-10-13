@@ -290,11 +290,11 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid model payload")
 	}
-	invokeAttempt := func(callID, retryOf string) (*pb.ModelCallResponse, string) {
+	invokeAttempt := func(callID, retryOf string) (*pb.ModelCallResponse, []string) {
 		result := &pb.ModelCallResponse{CostStatus: "unknown"}
 		if ctx.Err() != nil {
 			result.ErrorCode = "provider_retry_canceled"
-			return result, ""
+			return result, nil
 		}
 		gateway.mu.Lock()
 		bound, active := gateway.scopes[digest]
@@ -302,16 +302,16 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		gateway.mu.Unlock()
 		if !active || bound != scope {
 			result.ErrorCode = "model_gateway_unavailable"
-			return result, ""
+			return result, nil
 		}
 		if checkTask != nil && checkTask(ctx, scope.taskID) != nil {
 			result.ErrorCode = "task_prerequisites_missing"
-			return result, ""
+			return result, nil
 		}
 		// An unresolved attempt fences dispatch across the canonical Ledger.
 		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.InputLimit+config.OutputLimit, 1, purpose, retryOf); err != nil {
 			result.ErrorCode = admissionErrorCode(err)
-			return result, ""
+			return result, nil
 		}
 		confirmed := false
 		defer func() {
@@ -324,7 +324,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			result.ErrorCode = "provider_request_invalid"
-			return result, ""
+			return result, nil
 		}
 		upstream.Header.Set("Content-Type", "application/json")
 		if config.Protocol == "anthropic" {
@@ -336,18 +336,18 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		response, err := gateway.http.Do(upstream)
 		if err != nil {
 			result.ErrorCode = "provider_transport_unknown"
-			return result, ""
+			return result, nil
 		}
 		defer response.Body.Close()
 		result.HttpStatus = int32(response.StatusCode)
 		if response.StatusCode < 100 || response.StatusCode > 599 {
 			result.ErrorCode = "provider_http_unknown"
-			return result, ""
+			return result, nil
 		}
 		data, err := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
 		if err != nil || len(data) > 16<<20 {
 			result.ErrorCode = "provider_response_unknown"
-			return result, ""
+			return result, nil
 		}
 		failure := "provider_http"
 		if response.StatusCode == http.StatusTooManyRequests {
@@ -363,28 +363,27 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			if response.StatusCode != http.StatusOK {
 				result.ErrorCode = failure + "_unknown"
 			}
-			return result, ""
+			return result, nil
 		}
 		if usage.input > config.InputLimit || usage.output > config.OutputLimit {
 			result.ErrorCode = "provider_bound_violated"
 			auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_, _ = gateway.budget.markUnknown(auditCtx, scope.owner, callID, usage.input+usage.output, true)
-			return result, ""
+			return result, nil
 		}
 		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if _, err := gateway.budget.settle(auditCtx, scope.owner, callID, usage.input+usage.output,
 			budgetFact{InputTokens: usage.input, OutputTokens: usage.output, CachedTokens: usage.cached, CostStatus: "unknown", HTTPStatus: result.HttpStatus}); err != nil {
 			result.ErrorCode = "provider_settlement_unknown"
-			return result, ""
+			return result, nil
 		}
 		confirmed = true
 		result.InputTokens, result.OutputTokens, result.CachedInputTokens = usage.input, usage.output, usage.cached
 		if response.StatusCode != http.StatusOK {
 			result.ErrorCode = failure
-			// Retry-After is not a list: retain all field lines so duplicates fail parsing.
-			return result, strings.Join(response.Header.Values("Retry-After"), ", ")
+			return result, response.Header.Values("Retry-After")
 		}
 		// Canonical JSON exposes escaped echoes before they cross into Python.
 		var decoded any
@@ -392,16 +391,16 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		decoder.UseNumber()
 		if decoder.Decode(&decoded) != nil {
 			result.ErrorCode = "provider_response_unknown"
-			return result, ""
+			return result, nil
 		}
 		canonical, err := json.Marshal(decoded)
 		if err != nil {
 			result.ErrorCode = "provider_response_unknown"
-			return result, ""
+			return result, nil
 		}
 		encodedKey, _ := json.Marshal(config.APIKey)
 		result.PayloadJson = bytes.ReplaceAll(canonical, encodedKey[1:len(encodedKey)-1], []byte("<redacted>"))
-		return result, ""
+		return result, nil
 	}
 	callID, retryOf := request.CallId, ""
 	var total tokenUsage
@@ -440,10 +439,15 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	return result, nil
 }
 
-func retryAfterDelay(value string, now time.Time) (time.Duration, bool) {
-	if value == "" {
+func retryAfterDelay(values []string, now time.Time) (time.Duration, bool) {
+	// Retry-After is a single value; joining field lines can synthesize an HTTP-date.
+	if len(values) > 1 {
+		return 0, false
+	}
+	if len(values) == 0 {
 		return 0, true
 	}
+	value := values[0]
 	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
 		if seconds > 10 {
 			return 0, false
