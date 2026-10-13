@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,18 +28,44 @@ import (
 // This opt-in uses the approved live OpenSandbox profile. Only model HTTP and
 // orchestrator transport are external fixtures; all Harness modules are real.
 func TestProductionLocalCoreModelUsesRecordedTaskCopy(t *testing.T) {
-	testProductionLocalCoreModelTaskCopy(t, false)
+	testProductionLocalCoreModelTaskCopy(t, false, false)
 }
 
 func TestProductionLocalCoreModelRejectsUnknownShellOutcome(t *testing.T) {
-	testProductionLocalCoreModelTaskCopy(t, true)
+	testProductionLocalCoreModelTaskCopy(t, true, false)
 }
 
-func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
+func TestProductionLocalCoreGoFixProducesTestedProposal(t *testing.T) {
+	testProductionLocalCoreModelTaskCopy(t, false, true)
+}
+
+func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal bool) {
 	if runtime.GOOS != "windows" || os.Getenv("CODE_AGENT_RUN_LOCAL_MODEL_WORKSPACE_E2E") != "1" {
 		t.Skip("requires the approved Windows OpenSandbox integration profile")
 	}
 	repository, storage := os.Getenv("CODE_AGENT_REPOSITORY_ROOT"), os.Getenv("CODE_AGENT_TASK_WORKSPACE_ROOT")
+	if proposal {
+		repository = t.TempDir()
+		for _, args := range [][]string{{"init"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@example.test"}} {
+			if output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("fixture Git: %s %v", output, err)
+			}
+		}
+		for path, content := range map[string]string{
+			"go.mod":       "module example.test/codeops-proposal\n\ngo 1.20\n",
+			"calc.go":      "package calc\n\nfunc Add(left, right int) int { return left - right }\n",
+			"calc_test.go": "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) { if got := Add(2, 3); got != 5 { t.Fatalf(\"Add(2, 3) = %d, want 5\", got) } }\n",
+		} {
+			if err := os.WriteFile(filepath.Join(repository, path), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, args := range [][]string{{"add", "."}, {"commit", "-m", "fixture"}} {
+			if output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("fixture commit: %s %v", output, err)
+			}
+		}
+	}
 	baseline, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
 	if err != nil {
 		t.Fatal("approved source baseline unavailable")
@@ -73,6 +100,9 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 		}()
 	}
 	fixture.client.Timeout = 10 * time.Second
+	if proposal {
+		fixture.client.Timeout = 180 * time.Second
+	}
 	var modelCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer fixture-authority" {
@@ -91,7 +121,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 	transport := grpc.NewServer()
 	captured := make(chan *pb.UserInput, 1)
 	failures := make(chan error, 1)
-	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell})
+	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell, proposal: proposal})
 	go transport.Serve(listener)
 	defer transport.Stop()
 	fixture.stop(t)
@@ -116,7 +146,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 		"CODE_AGENT_MODEL_INPUT_LIMIT=100", "CODE_AGENT_MODEL_OUTPUT_LIMIT=3")
 	fixture.start(t)
 	fixture.authenticate(t)
-	request := func(method, path string, payload, target any, expected int) {
+	request := func(method, path string, payload, target any, expected int) int {
 		t.Helper()
 		body, _ := json.Marshal(payload)
 		req, err := http.NewRequest(method, fixture.base+path, bytes.NewReader(body))
@@ -129,12 +159,15 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 			t.Fatal(err)
 		}
 		defer response.Body.Close()
-		if response.StatusCode != expected {
-			t.Fatalf("%s %s = %d, want %d", method, path, response.StatusCode, expected)
+		if expected != 0 && response.StatusCode != expected || expected == 0 && response.StatusCode != http.StatusOK && response.StatusCode != http.StatusConflict {
+			var failure struct{ Message string }
+			_ = json.NewDecoder(response.Body).Decode(&failure)
+			t.Fatalf("%s %s = %d, want %d (%s)", method, path, response.StatusCode, expected, failure.Message)
 		}
 		if target != nil && json.NewDecoder(response.Body).Decode(target) != nil {
 			t.Fatal("invalid product response")
 		}
+		return response.StatusCode
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for {
@@ -163,6 +196,12 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 	request(http.MethodPost, path+"/task-workspace/prepare", map[string]any{"requestId": "prepare", "expectedSeq": created.Data.EventCount}, &prepared, http.StatusOK)
 	if prepared.Data.State != "prepared" {
 		t.Fatal("approved copy was not prepared")
+	}
+	if proposal {
+		request(http.MethodPost, path+"/task-workspace/test", map[string]any{"requestId": "red-baseline", "expectedSeq": prepared.Data.EventCount}, &prepared, http.StatusOK)
+		if prepared.Data.Test == nil || prepared.Data.Test.State != "failed" || prepared.Data.Test.ExitCode == nil || *prepared.Data.Test.ExitCode == 0 {
+			t.Fatal("original Go bug did not retain a failing real baseline")
+		}
 	}
 	var accepted struct{ Data session.RunView }
 	request(http.MethodPost, path+"/messages", map[string]any{"requestId": "edit", "expectedSeq": prepared.Data.EventCount, "content": "exercise the isolated copy"}, &accepted, http.StatusAccepted)
@@ -205,8 +244,12 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 	if input.WorkingDir != copyRoot || !input.HarnessManaged || input.ContextEnvelope == nil || input.ModelGateway == nil {
 		t.Fatal("public continuation bypassed the admitted task Context")
 	}
-	data, err := os.ReadFile(filepath.Join(copyRoot, "codeops-integration.txt"))
-	if err != nil || string(data) != "after" {
+	changedPath, expectedContent := "codeops-integration.txt", "after"
+	if proposal {
+		changedPath, expectedContent = "calc.go", "package calc\n\nfunc Add(left, right int) int { return left + right }\n"
+	}
+	data, err := os.ReadFile(filepath.Join(copyRoot, changedPath))
+	if err != nil || string(data) != expectedContent {
 		t.Fatal("Go edits did not reach the isolated copy")
 	}
 	request(http.MethodGet, path+"/task-workspace", nil, &prepared, http.StatusOK)
@@ -220,6 +263,55 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 	after, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
 	if err != nil || after.Checksum != baseline.Checksum {
 		t.Fatal("model tools changed the original repository or index")
+	}
+	if proposal {
+		var generated struct {
+			Data struct {
+				EventCount int `json:"eventCount"`
+				Proposal   struct {
+					ID, SessionID, WorkspaceID, BaselineChecksum, FinalStateSHA256, State string
+					Files                                                                 []struct {
+						Path, Diff                string
+						BeforeExists, AfterExists bool
+					}
+					Test struct {
+						State, InputSHA256, RuntimeID string
+						ExitCode                      *int
+						Stopped                       bool
+					}
+				}
+			}
+		}
+		for attempt := range 3 {
+			request(http.MethodGet, path+"/task-workspace", nil, &prepared, http.StatusOK)
+			if request(http.MethodPost, path+"/task-workspace/proposal", map[string]any{"requestId": "review-fix", "expectedSeq": prepared.Data.EventCount}, &generated, 0) == http.StatusOK {
+				break
+			}
+			t.Logf("proposal cursor changed at attempt %d; refreshing with the same request identity", attempt+1)
+		}
+		got := generated.Data.Proposal
+		if len(got.ID) != 64 || got.SessionID != created.Data.ID || got.WorkspaceID != prepared.Data.WorkspaceID || got.BaselineChecksum != baseline.Checksum || len(got.FinalStateSHA256) != 64 || got.State != "ready" {
+			t.Fatalf("proposal is not bound to the reviewed task: %+v", got)
+		}
+		if len(got.Files) != 1 || got.Files[0].Path != "calc.go" || !got.Files[0].BeforeExists || !got.Files[0].AfterExists || !strings.Contains(got.Files[0].Diff, "-func Add(left, right int) int { return left - right }") || !strings.Contains(got.Files[0].Diff, "+func Add(left, right int) int { return left + right }") {
+			t.Fatal("proposal lacks an accurate diff against the initial working copy")
+		}
+		if got.Test.State != "passed" || got.Test.ExitCode == nil || *got.Test.ExitCode != 0 || got.Test.InputSHA256 != got.FinalStateSHA256 || got.Test.RuntimeID == "" || !got.Test.Stopped {
+			t.Fatal("proposal test does not prove the final frozen input")
+		}
+		var reopened = generated
+		request(http.MethodGet, path+"/task-workspace", nil, &reopened, http.StatusOK)
+		if reopened.Data.Proposal.ID != got.ID {
+			t.Fatal("refresh lost the retained proposal")
+		}
+		request(http.MethodPost, path+"/task-workspace/proposal", map[string]any{"requestId": "review-fix", "expectedSeq": 0}, &reopened, http.StatusOK)
+		if reopened.Data.EventCount != generated.Data.EventCount || reopened.Data.Proposal.ID != got.ID {
+			t.Fatal("idempotent proposal delivery repeated execution")
+		}
+		after, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
+		if err != nil || after.Checksum != baseline.Checksum {
+			t.Fatal("proposal generation or viewing applied the original repository")
+		}
 	}
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(fixture.dir, "sessions.sqlite"))
 	if err != nil {
@@ -260,21 +352,74 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell bool) {
 		if _, err := budget.Reserve(context.Background(), batch.TaskOwnerID, created.Data.ID, "unresolved-after-turn", 103); err != nil {
 			t.Fatal(err)
 		}
+		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
+		cursor := rejected.Data.EventCount
+		request(http.MethodPost, path+"/messages", map[string]any{"requestId": "blocked-active-call", "expectedSeq": cursor, "content": "keep this draft while the call is active"}, nil, http.StatusConflict)
+		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
+		if rejected.Data.EventCount != cursor || modelCalls.Load() != wantCalls {
+			t.Fatal("active-call refusal persisted a new turn or called the provider")
+		}
 		if _, err := budget.MarkUnknown(context.Background(), batch.TaskOwnerID, "unresolved-after-turn"); err != nil {
 			t.Fatal(err)
 		}
-		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
-		cursor := rejected.Data.EventCount
-		request(http.MethodPost, path+"/messages", map[string]any{"requestId": "blocked-usage", "expectedSeq": cursor, "content": "keep this draft until usage is reconciled"}, nil, http.StatusConflict)
-		request(http.MethodGet, path, nil, &rejected, http.StatusOK)
-		if rejected.Data.EventCount != cursor || modelCalls.Load() != wantCalls {
-			t.Fatal("unknown usage refusal persisted a new turn or called the provider")
+		var usageCapabilities struct {
+			Data struct {
+				Budget struct{ State, Reason string }
+			}
+		}
+		request(http.MethodGet, "/api/v1/capabilities", nil, &usageCapabilities, http.StatusOK)
+		if usageCapabilities.Data.Budget.State != "ready" || usageCapabilities.Data.Budget.Reason != "provider enforces budget; some usage is unconfirmed" {
+			t.Fatal("terminal unknown accounting blocked product readiness")
 		}
 		// A previously accepted request remains readable even after admission changes.
 		request(http.MethodPost, path+"/messages", map[string]any{"requestId": "edit", "expectedSeq": 0, "content": "exercise the isolated copy"}, &accepted, http.StatusAccepted)
 		retained, err := budget.Inspect(context.Background(), batch.TaskOwnerID)
 		if err != nil || !retained.UnknownUsage || retained.ReservedTokens != 103 || retained.UsedTokens != batch.UsedTokens {
 			t.Fatal("idempotent delivery cleared unknown usage or changed confirmed consumption")
+		}
+		if proposal {
+			var regenerated struct {
+				Data struct {
+					EventCount int
+					Proposal   struct{ ID, State string }
+				}
+			}
+			for attempt := range 3 {
+				request(http.MethodGet, path+"/task-workspace", nil, &prepared, http.StatusOK)
+				if request(http.MethodPost, path+"/task-workspace/proposal", map[string]any{"requestId": "review-again", "expectedSeq": prepared.Data.EventCount}, &regenerated, 0) == http.StatusOK {
+					break
+				}
+				t.Logf("regeneration cursor changed at attempt %d; retaining the request identity", attempt+1)
+			}
+			if regenerated.Data.Proposal.State != "ready" {
+				t.Fatal("explicit regeneration did not retain a tested proposal")
+			}
+			var retried = regenerated
+			request(http.MethodPost, path+"/task-workspace/proposal", map[string]any{"requestId": "review-fix", "expectedSeq": regenerated.Data.EventCount}, &retried, http.StatusOK)
+			if retried.Data.EventCount != regenerated.Data.EventCount || retried.Data.Proposal != regenerated.Data.Proposal {
+				t.Fatal("retrying a historic request re-executed or replaced the latest proposal")
+			}
+			snapshot, err := session.ReadVerifiedSnapshot(context.Background(), ledger, created.Data.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var changed map[string]any
+			for _, event := range snapshot.Events {
+				if event.Type == "workspace/proposal-outcome" {
+					if err := json.Unmarshal(event.Payload, &changed); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if changed == nil {
+				t.Fatal("completed proposal is missing")
+			}
+			files := changed["view"].(map[string]any)["files"].([]any)
+			files[0].(map[string]any)["diff"] = "unreviewed content unrelated to the tested input"
+			if _, err := ledger.Append(context.Background(), created.Data.ID, int64(len(snapshot.Events)), "workspace/proposal-outcome", changed); err != nil {
+				t.Fatal(err)
+			}
+			request(http.MethodGet, path+"/task-workspace", nil, nil, http.StatusInternalServerError)
 		}
 		ids, err := ledger.SessionIDs(context.Background())
 		if err != nil {
@@ -308,6 +453,7 @@ type localWorkspaceTransport struct {
 	captured     chan *pb.UserInput
 	failures     chan error
 	unknownShell bool
+	proposal     bool
 }
 
 func (localWorkspaceTransport) Health(context.Context, *pb.Empty) (*pb.HealthResponse, error) {
@@ -344,6 +490,12 @@ func (fixture localWorkspaceTransport) Converse(stream grpc.BidiStreamingServer[
 	if fixture.unknownShell {
 		calls[2].ParametersJson = `{"command":"sleep 20; go test ./... -count=1","timeout_seconds":15}`
 	}
+	wantModule := "github.com/go-chi/chi/v5"
+	if fixture.proposal {
+		calls[0].ParametersJson = `{"path":"calc.go","content":"package calc\n\nfunc Add(left, right int) int { return left - right }\n"}`
+		calls[1].ParametersJson = `{"path":"calc.go","old":"return left - right","new":"return left + right"}`
+		wantModule = "example.test/codeops-proposal"
+	}
 	for index := range 4 {
 		payload, _ := json.Marshal(map[string]any{"model": binding.Model, "messages": []map[string]string{{"role": "user", "content": "public transport fixture"}}})
 		response, err := model.Invoke(stream.Context(), &pb.ModelCallRequest{Capability: binding.Capability, CallId: fmt.Sprintf("call-%s-%d", input.SessionId, index), PayloadJson: payload, Purpose: "foreground"})
@@ -374,7 +526,7 @@ func (fixture localWorkspaceTransport) Converse(stream grpc.BidiStreamingServer[
 					}
 					break
 				}
-				if result.ExitCode != 0 || result.Error != "" || result.Truncated || index == 2 && !strings.Contains(result.Output, "github.com/go-chi/chi/v5") {
+				if result.ExitCode != 0 || result.Error != "" || result.Truncated || index == 2 && !strings.Contains(result.Output, wantModule) {
 					return fmt.Errorf("isolated tool %s failed: exit=%d truncated=%t error=%q output=%q", calls[index].ToolName, result.ExitCode, result.Truncated, result.Error, result.Output)
 				}
 				break

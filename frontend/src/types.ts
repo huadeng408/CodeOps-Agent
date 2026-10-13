@@ -44,6 +44,40 @@ export interface TaskWorkspace {
 		reason?: string;
 	};
   testReason?: string;
+  proposalAvailable?: boolean;
+  proposalReason?: string;
+  proposal?: {
+    id: string;
+    sessionId: string;
+    workspaceId: string;
+    baselineChecksum: string;
+    sourceEventChecksum: string;
+    finalStateSHA256: string;
+    state: 'ready' | 'failed' | 'blocked' | 'unknown' | 'stale';
+    files: Array<{
+      path: string;
+      beforeExists: boolean;
+      afterExists: boolean;
+      beforeSha256: string;
+      afterSha256: string;
+      beforeMode: number;
+      afterMode: number;
+      diff: string;
+    }>;
+    test: {
+      state: 'passed' | 'failed' | 'blocked' | 'unknown';
+      command: string[];
+      inputSHA256: string;
+      archiveSHA256: string;
+      modeTransform: 'readonly-v1';
+      runtimeId?: string;
+      exitCode?: number;
+      output: string;
+      truncated: boolean;
+      stopped?: boolean;
+      reason?: string;
+    };
+  };
   test?: {
     state: 'passed' | 'failed' | 'blocked' | 'unknown';
     command: string[];

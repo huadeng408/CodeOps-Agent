@@ -201,8 +201,8 @@ func TestCLIRestartClearRetainsUnknownModelReservation(t *testing.T) {
 	if err := cli.NewApp(cfg, strings.NewReader("/resume "+previous.ID+"\n/clear\n"), &output, io.Discard).Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(output.String(), "session cleared") || !strings.Contains(output.String(), "task cannot finish") {
-		t.Fatal("clear reported success for an unresolved model task")
+	if !strings.Contains(output.String(), "session cleared") || strings.Contains(output.String(), "task cannot finish") {
+		t.Fatal("terminal unknown usage prevented clearing a stopped task")
 	}
 	reopened := session.NewSQLiteEventStore(cfg.SessionDBPath)
 	defer reopened.Close()
@@ -211,7 +211,7 @@ func TestCLIRestartClearRetainsUnknownModelReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := admission.NewBudget(ledger).Inspect(context.Background(), 7)
-	if err != nil || after.ID != before.ID || after.TaskID != previous.ID || !after.UnknownUsage || after.ReservedTokens != 103 || after.UsedTokens != 0 {
+	if err != nil || after.ID != before.ID || after.TaskID != "" || !after.UnknownUsage || after.ReservedTokens != 103 || after.UsedTokens != 0 {
 		t.Fatalf("clear/reset erased the interrupted reservation: %+v %v", after, err)
 	}
 }

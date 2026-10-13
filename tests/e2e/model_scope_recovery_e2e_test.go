@@ -122,9 +122,6 @@ func TestProductionLocalCoreRecoversStoppedModelScopeHolder(t *testing.T) {
 			fixture.stop(t)
 			fixture.start(t)
 			expected := http.StatusOK
-			if unknown {
-				expected = http.StatusConflict
-			}
 			request(http.MethodPost, finish, map[string]any{}, nil, expected)
 			request(http.MethodPost, finish, map[string]any{}, nil, expected)
 			after, err := budget.Inspect(ctx, profile.Data.ID)
@@ -132,7 +129,7 @@ func TestProductionLocalCoreRecoversStoppedModelScopeHolder(t *testing.T) {
 				t.Fatal("HTTP recovery replaced the batch or invented a monetary cost")
 			}
 			if unknown {
-				if after != before || after.UsedTokens != 0 || after.ReservedTokens != 103 || !after.UnknownUsage {
+				if after.UsedTokens != 0 || after.ReservedTokens != 103 || !after.UnknownUsage || after.TaskID != "" {
 					t.Fatal("holder exit or HTTP restart cleared unknown usage")
 				}
 			} else if after.UsedTokens != 11 || after.ReservedTokens != 0 || after.TaskID != "" || after.UnknownUsage {

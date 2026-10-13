@@ -18,12 +18,15 @@ const reasons: Record<string, string> = {
   'local task runtime is not attached': '启用已批准的隔离执行环境后才能修改或运行代码。',
   'token Ledger is unavailable; restore it before calling a model': '无法读取额度账本，恢复账本后才能调用模型。',
   'persistent token admission; price unknown': '累计额度跨进程保留；当前费用未知。',
+  'provider enforces budget; local usage is audited': '预算上限由服务商执行，本地记录已确认用量；费用未知。',
+  'provider enforces budget; some usage is unconfirmed': '部分调用用量尚未确认，记录已保留；可以继续，预算上限由服务商执行。',
+  'a model attempt is still active; wait or recover its execution': '模型调用仍在执行，请等待完成；进程中断后需先恢复执行状态。',
   'token usage is unknown; reconcile retained reservations': '用量未知，预留继续保留；对账后才能继续。',
   'a model attempt is unresolved; wait or reconcile after restart': '有未结算调用；等待完成，重启后仍未结算则需对账。',
   'token batch is exhausted': '本批次 token 额度已耗尽，不能新增调用。',
   'token batch initializes on the first admitted call': '首次获准调用时创建持久批次，随后重启不会重置余额。',
   'verification batch already has another task': '任务仍有活动调用，或批次正被其他任务占用；等待完成后重新核验。',
-  'verification usage requires reconciliation': '有未结算或未知用量，预留继续保留；对账后才能结束任务。',
+  'verification usage requires reconciliation': '模型调用仍在执行或执行状态尚未恢复；确认停止后才能结束任务，用量记录会保留。',
   'session state conflict': '任务仍在运行或工具尚未确认停止；等待完成或对账后再结束。',
 };
 
@@ -94,16 +97,16 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
         <div><strong>{label}</strong><p>{reason}</p>
           {key === 'budget' && hasTokens && <p>
             {tokens.batch_id && `批次 ${tokens.batch_id.slice(0, 8)}。`}
-            已用 {tokens.used.toLocaleString()} / {tokens.limit.toLocaleString()} tokens，预留 {tokens.reserved.toLocaleString()}。费用{tokens.cost_status === 'unknown' ? '未知' : '待核对'}。
+            已确认 {tokens.used.toLocaleString()} tokens，批准上限 {tokens.limit.toLocaleString()}，原预留估计 {tokens.reserved.toLocaleString()}。费用{tokens.cost_status === 'unknown' ? '未知' : '待核对'}。
           </p>}
         </div>
         <span className={`capability-state ${state}`}>{state.toUpperCase()}</span>
       </div>;
     })}
     {taskId && taskId === session?.id && <button className="primary-btn capability-refresh" type="button" aria-label="结束代码任务"
-      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || (capabilities?.budget?.tokens?.reserved || 0) > 0 || session.run?.status === 'queued' || session.run?.status === 'running'}
+      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || session.run?.status === 'queued' || session.run?.status === 'running'}
       onClick={() => void finishTask()}>{finishing ? '结束中…' : '结束代码任务'}</button>}
-    {finishedTask && finishedTask === session?.id && <p role="status">代码任务已结束。历史和累计额度保留；新建会话后仍按剩余额度准入。</p>}
+    {finishedTask && finishedTask === session?.id && <p role="status">代码任务已结束。历史和用量记录保留；后续调用仍受服务商预算上限约束。</p>}
     {finishError && finishError.taskId === session?.id && <p className="capability-error" role="status">{finishError.message}</p>}
     {error && <p className="capability-error" role="status">{error}</p>}
     <button className="primary-btn capability-refresh" type="button" aria-label="重新检查能力" disabled={checking} onClick={() => void refresh()}>{checking ? '检查中…' : '重新检查能力'}</button>

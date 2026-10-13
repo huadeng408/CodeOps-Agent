@@ -33,6 +33,7 @@ type Batch struct {
 	TaskOwnerID    uint
 	UnknownUsage   bool
 	CostStatus     string
+	ActiveCalls    int
 }
 
 type Budget struct{ ledger session.EventLog }
@@ -70,6 +71,7 @@ type call struct {
 	attempt       int
 	retried       bool
 	httpStatus    int32
+	process       *scopeProcess
 }
 
 type projection struct {
@@ -83,7 +85,8 @@ type projection struct {
 func (state projection) outstanding() int {
 	total := 0
 	for _, request := range state.calls {
-		if !request.settled {
+		// Unknown is a completed local attempt with incomplete accounting, not a live relay slot.
+		if !request.settled && !request.unknown {
 			total++
 		}
 	}
@@ -187,15 +190,15 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			delete(state.scopes, fact.ScopeID)
 		case "admission/task_started":
-			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.TaskID) || state.TaskID != "" || state.unknownUsage() || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.CallID != "" || fact.Tokens != 0 {
+			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.TaskID) || state.TaskID != "" || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.CallID != "" || fact.Tokens != 0 {
 				return state, session.ErrEventIntegrity
 			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
 		case "admission/call_reserved":
-			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.unknownUsage() || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
+			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
 			}
-			if _, exists := state.calls[fact.CallID]; exists || (state.TaskID != "" && (state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID)) || state.outstanding() >= RelayConcurrencyLimit || fact.Tokens > state.LimitTokens-state.UsedTokens-state.ReservedTokens {
+			if _, exists := state.calls[fact.CallID]; exists || (state.TaskID != "" && (state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID)) || state.outstanding() >= RelayConcurrencyLimit {
 				return state, session.ErrEventIntegrity
 			}
 			depth, err := state.retryDepth(fact)
@@ -207,8 +210,16 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 				parent.retried = true
 				state.calls[fact.RetryOf] = parent
 			}
+			var process *scopeProcess
+			if fact.ScopeID != "" {
+				bound, exists := state.scopes[fact.ScopeID]
+				if !exists || bound.OwnerID != fact.OwnerID || bound.TaskID != fact.TaskID || bound.Process == nil {
+					return state, session.ErrEventIntegrity
+				}
+				process = bound.Process
+			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
-			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens, purpose: fact.Purpose, attempt: depth}
+			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens, purpose: fact.Purpose, attempt: depth, process: process}
 			state.ReservedTokens += fact.Tokens
 		case "admission/call_settled":
 			request, exists := state.calls[fact.CallID]
@@ -243,6 +254,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 		state.seq++
 	}
 	state.UnknownUsage = state.unknownUsage()
+	state.ActiveCalls = state.outstanding()
 	return state, nil
 }
 
@@ -320,9 +332,6 @@ func (budget *Budget) recoverScopes(ctx context.Context, owner uint, taskID stri
 		if err != nil {
 			return err
 		}
-		if state.outstanding() != 0 {
-			return ErrUsageUnknown
-		}
 		fact := budgetFact{OwnerID: owner, TaskID: taskID}
 		for id, bound := range state.scopes {
 			if bound.OwnerID != owner || bound.TaskID != taskID {
@@ -332,6 +341,25 @@ func (budget *Budget) recoverScopes(ctx context.Context, owner uint, taskID stri
 				return ErrTaskBusy
 			}
 			fact.RecoveredScopes = append(fact.RecoveredScopes, recoveredScope{ID: id, Process: *bound.Process})
+		}
+		if state.outstanding() != 0 {
+			for _, request := range state.calls {
+				if request.settled || request.unknown {
+					continue
+				}
+				if request.owner != owner || request.taskID != taskID || request.process == nil || !request.process.confirmedStopped() {
+					return ErrUsageUnknown
+				}
+			}
+			for id, request := range state.calls {
+				if request.settled || request.unknown {
+					continue
+				}
+				if _, err := budget.MarkUnknown(ctx, owner, id); err != nil {
+					return err
+				}
+			}
+			continue
 		}
 		if len(fact.RecoveredScopes) == 0 {
 			return nil
@@ -359,9 +387,6 @@ func (budget *Budget) AcquireTask(ctx context.Context, owner uint, taskID string
 		if err != nil {
 			return Batch{}, err
 		}
-		if state.UnknownUsage {
-			return state.Batch, ErrUsageUnknown
-		}
 		if state.closedTasks[taskKey(owner, taskID)] {
 			return state.Batch, ErrTaskClosed
 		}
@@ -385,24 +410,21 @@ func (budget *Budget) AcquireTask(ctx context.Context, owner uint, taskID string
 }
 
 func (budget *Budget) Reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64) (Batch, error) {
-	return budget.reserve(ctx, owner, taskID, callID, tokens, RelayConcurrencyLimit, "", "")
+	return budget.reserve(ctx, owner, taskID, callID, tokens, RelayConcurrencyLimit, "", "", "")
 }
 
-func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64, concurrency int, purpose, retryOf string) (Batch, error) {
+func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID string, tokens int64, concurrency int, purpose, retryOf, scopeID string) (Batch, error) {
 	if !validID(taskID) || !validID(callID) || tokens <= 0 || tokens > VerificationTokenLimit {
 		return Batch{}, ErrInvalidAdmission
 	}
 	if _, err := budget.Open(ctx, owner); err != nil {
 		return Batch{}, err
 	}
-	fact := budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens, Purpose: purpose, RetryOf: retryOf}
+	fact := budgetFact{OwnerID: owner, TaskID: taskID, CallID: callID, Tokens: tokens, Purpose: purpose, RetryOf: retryOf, ScopeID: scopeID}
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {
 			return Batch{}, err
-		}
-		if state.UnknownUsage {
-			return state.Batch, ErrUsageUnknown
 		}
 		if previous, exists := state.calls[callID]; exists {
 			if previous.owner != owner || previous.taskID != taskID || previous.reserved != tokens {
@@ -416,15 +438,19 @@ func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID st
 		if _, err := state.retryDepth(fact); err != nil {
 			return state.Batch, err
 		}
+		if scopeID != "" {
+			bound, exists := state.scopes[scopeID]
+			if !exists || bound.OwnerID != owner || bound.TaskID != taskID || bound.Process == nil {
+				return state.Batch, ErrInvalidAdmission
+			}
+		}
 		if state.TaskID != "" && (state.TaskID != taskID || state.TaskOwnerID != owner) {
 			return state.Batch, ErrTaskBusy
 		}
 		if state.outstanding() >= concurrency {
 			return state.Batch, ErrRelayBusy
 		}
-		if tokens > state.LimitTokens-state.UsedTokens-state.ReservedTokens {
-			return state.Batch, ErrBudgetExhausted
-		}
+		// The approved provider enforces the budget; reservations remain audit estimates.
 		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", fact)
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
@@ -509,8 +535,8 @@ func (budget *Budget) markUnknown(ctx context.Context, owner uint, callID string
 	return Batch{}, session.ErrSequenceConflict
 }
 
-// FinishTask releases the task slot only after every foreground, retry and
-// auxiliary call has been reconciled. It never resets the batch allowance.
+// FinishTask releases a stopped task while preserving known and unknown usage.
+// Live requests and process scopes remain fenced; completion never settles usage.
 func (budget *Budget) FinishTask(ctx context.Context, owner uint, taskID string) (Batch, error) {
 	if !validID(taskID) {
 		return Batch{}, ErrInvalidAdmission

@@ -178,6 +178,43 @@ func actorOwner(actor identity.Actor) uint {
 	return owner
 }
 
+// BindExistingTask fences non-model execution inside an already admitted task.
+// The caller must first authorize the public Session owner and repository.
+func (gateway *Gateway) BindExistingTask(ctx context.Context, owner uint, taskID string) (func() error, error) {
+	if gateway.budget == nil || owner == 0 || !validID(taskID) {
+		return nil, ErrInvalidAdmission
+	}
+	state, err := gateway.budget.read(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if state.ActiveCalls != 0 {
+		return nil, ErrUsageUnknown
+	}
+	if state.TaskID != taskID || state.TaskOwnerID == 0 {
+		return nil, ErrTaskBusy
+	}
+	binding, release, err := gateway.Bind(state.TaskOwnerID, taskID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(binding.Capability)
+	scopeID := hex.EncodeToString(digest[:])
+	return func() error {
+		release()
+		checkCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		current, err := gateway.budget.read(checkCtx, state.TaskOwnerID)
+		if err != nil {
+			return err
+		}
+		if _, held := current.scopes[scopeID]; held {
+			return ErrTaskBusy
+		}
+		return nil
+	}, nil
+}
+
 // FinishTask is an explicit operator action, never a per-turn or restart reset.
 func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) error {
 	if gateway.budget == nil || actor.Validate() != nil {
@@ -207,7 +244,7 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 	if state.closedTasks[taskKey(actorOwner(actor), root)] {
 		return nil
 	}
-	if state.taskHasScopes(actorOwner(actor), root) {
+	if state.taskHasScopes(actorOwner(actor), root) || state.outstanding() != 0 {
 		if err := gateway.budget.recoverScopes(ctx, actorOwner(actor), root); err != nil {
 			return err
 		}
@@ -308,8 +345,8 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			result.ErrorCode = "task_prerequisites_missing"
 			return result, nil
 		}
-		// An unresolved attempt fences dispatch across the canonical Ledger.
-		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.InputLimit+config.OutputLimit, 1, purpose, retryOf); err != nil {
+		// A live attempt fences dispatch across the canonical Ledger; terminal unknown usage is audited.
+		if _, err := gateway.budget.reserve(ctx, scope.owner, scope.taskID, callID, config.InputLimit+config.OutputLimit, 1, purpose, retryOf, scope.id); err != nil {
 			result.ErrorCode = admissionErrorCode(err)
 			return result, nil
 		}

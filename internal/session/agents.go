@@ -526,6 +526,13 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 		}
 		current := actor
 		current.SessionID = id
+		proposal, proposalErr := taskProposal(snapshot.Events)
+		if proposalErr != nil {
+			return proposalErr
+		}
+		if proposal != nil && !proposal.View.Test.Stopped {
+			return ErrSessionStateConflict
+		}
 		owner, _, err := agentParent(snapshot.Events, current)
 		if err != nil {
 			return err

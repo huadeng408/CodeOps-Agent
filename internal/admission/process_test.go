@@ -61,12 +61,12 @@ func TestBudgetAcrossIndependentProcesses(t *testing.T) {
 		t.Fatalf("second process: %v\n%s", err, secondOutput)
 	}
 	recovered := resultFromProcess(t, secondOutput)
-	if recovered.Batch.ID != seed.Batch.ID || recovered.Batch.UsedTokens != 20_000_000 || recovered.Batch.ReservedTokens != 0 || recovered.Rejection != "budget_exhausted" {
-		t.Fatal("independent process reset the allowance or admitted an over-budget call")
+	if recovered.Batch.ID != seed.Batch.ID || recovered.Batch.UsedTokens != 20_000_000 || recovered.Batch.ReservedTokens != 90_000_000 || !recovered.Admitted {
+		t.Fatal("independent process lost accounting or imposed a second provider budget")
 	}
 }
 
-func TestConcurrentProcessesCannotOverspend(t *testing.T) {
+func TestConcurrentProcessesPreserveEveryAuditReservation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	root := t.TempDir()
@@ -126,8 +126,8 @@ func TestConcurrentProcessesCannotOverspend(t *testing.T) {
 			rejected++
 		}
 	}
-	if admitted != 1 || rejected != 1 {
-		t.Fatalf("admitted %d, budget rejections %d; want 1 each", admitted, rejected)
+	if admitted != 2 || rejected != 0 {
+		t.Fatalf("admitted %d, budget rejections %d; provider quota must govern both requests", admitted, rejected)
 	}
 	ledger, err = session.OpenSQLiteEventLog(path)
 	if err != nil {
@@ -135,8 +135,8 @@ func TestConcurrentProcessesCannotOverspend(t *testing.T) {
 	}
 	defer ledger.Close()
 	batch, err := admission.NewBudget(ledger).Open(ctx, 7)
-	if err != nil || batch.ReservedTokens != 60_000_000 || batch.UsedTokens != 0 {
-		t.Fatal("concurrent reservations were lost or exceeded the allowance")
+	if err != nil || batch.ReservedTokens != 120_000_000 || batch.UsedTokens != 0 || batch.ActiveCalls != 2 {
+		t.Fatal("concurrent reservations or active relay slots were lost")
 	}
 }
 

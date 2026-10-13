@@ -88,6 +88,8 @@ func DefaultConfig() Config {
 type Request struct {
 	Workspace  string
 	WorkingDir string
+	// FrozenInput is a Harness-only closed source archive for proposal tests.
+	FrozenInput *FrozenInput
 	// OperationID is persisted by the Harness before a remote runtime effect.
 	OperationID string
 	// DependencyOperationID names the retained, approved pytz artifact under TrustRoot.
@@ -106,6 +108,8 @@ type Result struct {
 	ExitCode  int
 	Truncated bool
 	RuntimeID string
+	// InputSHA256 binds a known test outcome to the verified frozen source state.
+	InputSHA256 string
 	// Stopped confirms exact owned resource cleanup independently of the command outcome.
 	Stopped bool
 }

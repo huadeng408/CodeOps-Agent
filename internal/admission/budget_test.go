@@ -12,7 +12,7 @@ import (
 	"code-agent/internal/session"
 )
 
-func TestUnknownUsageRetainsReservationAndBlocksAdmission(t *testing.T) {
+func TestUnknownUsageRetainsAuditWithoutBlockingIndependentCalls(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 	if err != nil {
@@ -31,11 +31,17 @@ func TestUnknownUsageRetainsReservationAndBlocksAdmission(t *testing.T) {
 	if err != nil || !batch.UnknownUsage || batch.ReservedTokens != 50_000_000 || batch.UsedTokens != 0 {
 		t.Fatal("unconfirmed usage was released or reported as confirmed consumption")
 	}
-	if _, err := recovered.Reserve(ctx, 7, "task-a", "call-b", 1); !errors.Is(err, admission.ErrUsageUnknown) {
-		t.Fatalf("unknown usage admitted another call: %v", err)
+	if _, err := recovered.Reserve(ctx, 7, "task-a", "call-a", 50_000_000); !errors.Is(err, admission.ErrCallReserved) {
+		t.Fatalf("unknown call authorized a duplicate dispatch: %v", err)
+	}
+	if _, err := recovered.Reserve(ctx, 7, "task-a", "call-b", 1); err != nil {
+		t.Fatalf("completed unknown usage blocked an independent call: %v", err)
+	}
+	if _, err := recovered.Settle(ctx, 7, "call-b", 1); err != nil {
+		t.Fatal(err)
 	}
 	batch, err = recovered.Settle(ctx, 7, "call-a", 20_000_000)
-	if err != nil || batch.UnknownUsage || batch.ReservedTokens != 0 || batch.UsedTokens != 20_000_000 {
+	if err != nil || batch.UnknownUsage || batch.ReservedTokens != 0 || batch.UsedTokens != 20_000_001 {
 		t.Fatal("confirmed reconciliation did not preserve actual consumption")
 	}
 }
@@ -96,8 +102,8 @@ func TestVerificationBudgetSurvivesRestart(t *testing.T) {
 	if err != nil || restored.ID != batch.ID || restored.UsedTokens != 20_000_000 || restored.ReservedTokens != 0 {
 		t.Fatalf("restart reset or lost the batch: %v", err)
 	}
-	if _, err := budget.Reserve(ctx, 7, "task-a", "call-b", 90_000_000); err == nil {
-		t.Fatal("restarted budget admitted more than its remaining tokens")
+	if next, err := budget.Reserve(ctx, 7, "task-a", "call-b", 90_000_000); err != nil || next.UsedTokens != 20_000_000 || next.ReservedTokens != 90_000_000 {
+		t.Fatal("restart reset accounting or treated an estimate as the provider budget")
 	}
 }
 
@@ -233,10 +239,7 @@ func TestTaskReleasePreservesConsumptionAndRejectsLateCalls(t *testing.T) {
 	if _, err := recovered.Reserve(ctx, 7, "task-a", "late-call", 1); !errors.Is(err, admission.ErrTaskClosed) {
 		t.Fatal("late auxiliary call reopened a completed task")
 	}
-	if _, err := recovered.Reserve(ctx, 8, "task-b", "call-b", 90_000_000); !errors.Is(err, admission.ErrBudgetExhausted) {
-		t.Fatal("next task received a new allowance")
-	}
-	if _, err := recovered.Reserve(ctx, 8, "task-b", "call-b", 80_000_000); err != nil {
+	if next, err := recovered.Reserve(ctx, 8, "task-b", "call-b", 90_000_000); err != nil || next.UsedTokens != 20_000_000 || next.LimitTokens != 100_000_000 {
 		t.Fatal(err)
 	}
 	batch, err := recovered.FinishTask(ctx, 7, "task-a")
@@ -271,7 +274,7 @@ func TestInvalidAdmissionDoesNotCreateAllowance(t *testing.T) {
 	}
 }
 
-func TestUsageBeyondReservationBlocksFurtherCalls(t *testing.T) {
+func TestUsageBeyondReservationRetainsViolationForLaterAccounting(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 	if err != nil {
@@ -289,15 +292,15 @@ func TestUsageBeyondReservationBlocksFurtherCalls(t *testing.T) {
 	if err != nil || !batch.UnknownUsage || batch.ReservedTokens != 10 {
 		t.Fatal("violated upper bound discarded its reservation")
 	}
-	if _, err := budget.Reserve(ctx, 7, "task-a", "call-b", 1); !errors.Is(err, admission.ErrUsageUnknown) {
-		t.Fatal("violated upper bound still admitted further calls")
+	if _, err := budget.Reserve(ctx, 7, "task-a", "call-b", 1); err != nil {
+		t.Fatal("terminal accounting uncertainty blocked an independent call")
 	}
 	if _, err := budget.Settle(ctx, 7, "call-a", 10); !errors.Is(err, admission.ErrUsageUnknown) {
 		t.Fatal("smaller settlement silently erased a recorded bound violation")
 	}
 }
 
-func TestReplayRejectsAdmissionAfterUnknownUsage(t *testing.T) {
+func TestReplayRejectsDuplicateAdmissionAfterUnknownUsage(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 	if err != nil {
@@ -322,7 +325,7 @@ func TestReplayRejectsAdmissionAfterUnknownUsage(t *testing.T) {
 	// A valid hash chain is insufficient when an imported writer violated
 	// the admission state machine. Replay must reject the contradictory fact.
 	if _, err := ledger.Append(ctx, ids[0], int64(len(events)), "admission/call_reserved", map[string]any{
-		"owner_id": 7, "task_id": "task-a", "call_id": "call-b", "tokens": 1,
+		"owner_id": 7, "task_id": "task-a", "call_id": "call-a", "tokens": 10,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -1,9 +1,12 @@
 # Verification token batch
 
 The authorized batch limit is **100,000,000 input plus output tokens**. This
-replaces the earlier CNY100 limit. The cap is an allowance, not a target to
-consume. Prices and currency conversion remain independent accounting data;
-an unknown price must not be recorded as zero.
+replaces the earlier CNY100 limit. The provider enforces this approved hard
+limit; local reservations are audit estimates, not a second spending gate.
+Prices and currency conversion remain independent accounting data;
+an unknown price must not be recorded as zero. The current provider-quota
+continuation and stopped-process recovery checks, including retained failures,
+are recorded in [2026-10-13 evidence](evidence/model-proposal-budget-2026-10-13.md).
 
 ## Current implementation
 
@@ -16,16 +19,17 @@ module.
 
 - The batch identity and cumulative allowance survive process restart.
 - Only one task can hold the batch slot, including across different owners.
-  At most ten unsettled calls can hold relay slots within that task.
+  At most ten active local calls can hold relay slots within that task.
 - Each upstream attempt needs a new call ID and a confirmed token upper bound.
   A duplicate reservation refuses another dispatch. A repeated identical
   settlement does not count consumption again.
-- Missing usage preserves the complete reservation and blocks further calls.
-  Confirmed usage can reconcile a missing response. Reported usage above its
-  reservation records a bound violation and stays blocked; a smaller later
-  settlement cannot silently erase that observation.
-- A task can release its slot only after all its calls settle. Completion
-  preserves the used allowance; a delayed auxiliary call cannot reopen it.
+- Missing usage preserves the original reservation and unknown status without
+  blocking independent calls after the local attempt ends. Confirmed usage can
+  later settle that call. A bound violation remains recorded and cannot be erased
+  by a smaller settlement; accounting uncertainty is not converted into zero.
+- A stopped task can release its slot while retaining unknown usage. Active
+  calls and process scopes still prevent completion. A delayed auxiliary call
+  cannot reopen a finished task; later settlement does not alter task identity.
 - The authenticated owner must match when settling or completing a task.
   Ledger replay checks both the hash chain and admission transitions.
 
@@ -59,18 +63,21 @@ setting. Required mode skips dotenv/provider-file loading and direct client
 construction. Harness-managed Converse requests also refuse a missing binding
 when an external Python server was started outside required mode.
 
-The gateway admits **one unresolved upstream call** across the canonical
-Ledger, within the permitted aggregate range of 1–10. This preserves a fence
-after a process crash or failed unknown-outcome append. It overrides output
+The gateway admits **one active local upstream attempt** across the canonical
+Ledger, within the permitted aggregate range of 1–10. An unmarked reservation
+still fences dispatch after a process crash; a terminal unknown accounting fact
+does not occupy a relay slot. It overrides output
 limits, refuses provider-hosted tools and redirects, and normalizes OpenAI
 prompt/completion totals or Anthropic input + cache creation/read totals once.
 OpenAI uses `max_completion_tokens`, which includes reasoning output under its
 [API contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 Compatible relays must support that contract; there is no silent parameter downgrade.
 
-Transport failures and responses without attributable usage retain the whole
-reservation and return a distinct, nonretryable blocked classification. An
+Transport failures and responses without attributable usage retain the original
+reservation and return a distinct, nonretryable error for that attempt. An
 unknown 429/5xx is never assumed to cost zero and is not automatically retried.
+The next independent request does not require operator settlement or approval;
+the provider's authorized hard quota remains the spending limit.
 Duplicate accounting fields, including escaped names that decode to the same
 field, follow this unknown path; unrelated metadata retains its existing handling.
 [Ambiguous usage checks](evidence/model-ambiguous-usage-2026-10-13.md).
@@ -118,7 +125,7 @@ required mode; their calls are not claimed to be part of this metered batch.
 Default-boundary checks: [2026-10-12 evidence](evidence/model-default-admission-2026-10-12.md).
 Local-core checks: [workspace admission evidence](evidence/model-local-workspace-2026-10-12.md).
 
-CLI `/clear` completes a settled root task before creating the next Session;
+CLI `/clear` completes a stopped root task before creating the next Session;
 live scopes, open runs and unfinished agents refuse completion. Ending a
 process leaves the task available for explicit resume, while `/budget` reports
 its Session ID. The cumulative allowance never resets on task completion.
@@ -128,8 +135,8 @@ completion boundary in the selected sidebar. The owner must match the root;
 foreign/deleted Sessions refuse access. Repeated completion, including after
 HTTP restart, preserves the batch and does not release a later task. Explicitly
 ending an unused root records a zero-token completion and prevents rebinding.
-An exhausted but fully settled task can still be ended; its allowance stays
-exhausted. Missing tool outcomes and unconfirmed tool/Hook stops in ordinary
+Unknown model accounting can remain after task completion; its original facts
+and reservations stay available. Missing tool outcomes and unconfirmed tool/Hook stops in ordinary
 or legacy CLI histories refuse completion without rewriting those outcomes.
 
 Model scope bindings and releases are lifecycle facts in the same admission
@@ -149,8 +156,11 @@ An alive holder, legacy fact without process metadata, different host or
 unavailable OS proof continues to refuse completion. Linux additionally
 requires a confirmed proc PID view and matching PID/user namespace identity;
 unsupported platforms refuse new bindings. A failed release append while its
-holder is still alive remains fenced. Outstanding or unknown model usage is
-not reconciled by holder exit and keeps its complete reservation.
+holder is still alive remains fenced. New Gateway reservations retain their
+scope's process provenance. Confirmed holder exit can mark an interrupted call
+terminal-unknown, preserving its original reservation without settling tokens.
+Legacy reservations without attributable process proof stay fenced; holder
+exit never implies zero consumption or invents a provider usage response.
 [Completion checks](evidence/model-task-finish-2026-10-12.md) and
 [confirmed holder recovery checks](evidence/model-scope-recovery-2026-10-12.md)
 describe their separate scopes.

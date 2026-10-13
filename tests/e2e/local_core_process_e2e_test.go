@@ -100,13 +100,13 @@ func TestProductionLocalCoreTokenAdmissionProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, state, id, used, reserved := read()
-	if state != "blocked" || id != batch.ID || used != 0 || reserved != 103 {
+	if state != "ready" || id != batch.ID || used != 0 || reserved != 103 {
 		t.Fatal("unconfirmed reservation was hidden from the product")
 	}
 	fixture.stop(t)
 	fixture.start(t)
 	_, state, id, used, reserved = read()
-	if state != "blocked" || id != batch.ID || used != 0 || reserved != 103 {
+	if state != "ready" || id != batch.ID || used != 0 || reserved != 103 {
 		t.Fatal("product restart reset the held reservation")
 	}
 }

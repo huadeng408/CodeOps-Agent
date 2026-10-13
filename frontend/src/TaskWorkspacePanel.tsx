@@ -30,6 +30,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
   const [view, setView] = useState<TaskWorkspace | null>(null);
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [proposing, setProposing] = useState(false);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [fileLimit, setFileLimit] = useState(200);
@@ -37,6 +38,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
   const requestId = useRef('');
   const testRequestId = useRef('');
   const dependencyRequestId = useRef('');
+  const proposalRequestId = useRef('');
   const refresh = useCallback(async () => {
     request.current?.abort();
     const controller = new AbortController();
@@ -45,6 +47,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     setBusy(true); setError(''); setView(null);
     try {
       const data = await api.getTaskWorkspace(sessionId, controller.signal);
+      if (data.proposal && data.proposal.sessionId !== sessionId) throw new Error('proposal session mismatch');
       if (!controller.signal.aborted && request.current === controller) setView(data);
     } catch {
       if (request.current === controller) setError('无法核验工作区，请恢复服务后重新检查。');
@@ -130,6 +133,39 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
   };
 
   const state = busy ? 'unknown' : view?.state || 'unknown';
+  const generateProposal = async () => {
+    if (!view?.proposalAvailable || busy || view.proposal && (!view.proposal.test.stopped || !['stale', 'failed', 'blocked'].includes(view.proposal.state))) return;
+    const controller = new AbortController();
+    request.current?.abort(); request.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 180_000);
+    const storageKey = `task-proposal-request:${sessionId}`;
+    try {
+      if (view.proposal) proposalRequestId.current = createContinuationRequestId();
+      else try { proposalRequestId.current = localStorage.getItem(storageKey) || proposalRequestId.current; } catch { /* Ledger retains the proposal request. */ }
+      proposalRequestId.current ||= createContinuationRequestId();
+      try { localStorage.setItem(storageKey, proposalRequestId.current); } catch { /* Same request remains in memory. */ }
+      setBusy(true); setProposing(true); setError('');
+      const data = await api.generateTaskProposal(sessionId, view.eventCount, proposalRequestId.current, controller.signal);
+      if (data.proposal && data.proposal.sessionId !== sessionId) throw new Error('proposal session mismatch');
+      if (!controller.signal.aborted && request.current === controller) { setView(data); await onChanged(); }
+    } catch {
+      if (request.current === controller) {
+        setView(null);
+        setError('无法确认提案结果，请重新检查；原请求和执行记录保留，避免重复运行。');
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (request.current === controller) { setBusy(false); setProposing(false); }
+    }
+  };
+  const proposal = view?.proposal;
+  const boundTest = proposal && /^[a-f0-9]{64}$/.test(proposal.test.inputSHA256)
+    && proposal.test.inputSHA256 === proposal.finalStateSHA256 && /^[a-f0-9]{64}$/.test(proposal.test.archiveSHA256)
+    && proposal.test.modeTransform === 'readonly-v1' && proposal.test.stopped === true && !proposal.test.truncated;
+  const proposalTestState = !proposal ? 'unknown' : !boundTest ? 'unknown'
+    : proposal.state === 'ready' && proposal.test.state === 'passed' && proposal.test.exitCode === 0 ? 'passed'
+    : proposal.test.state === 'failed' && proposal.test.exitCode !== undefined && proposal.test.exitCode !== 0 ? 'failed'
+    : proposal.test.state === 'blocked' ? 'blocked' : 'unknown';
   return <section className="task-workspace-panel" aria-label="隔离工作区">
     <div className="task-workspace-heading"><h2>隔离工作区</h2><span className={`capability-state ${state === 'prepared' ? 'ready' : state === 'unprepared' ? 'unknown' : state}`}>{busy ? '核验中' : labels[state]}</span></div>
     <p className="workspace-description">{view?.reason ? reasons[view.reason] || view.reason : view?.state === 'prepared' ? '当前工作副本已复制，原仓库和已有改动保留。' : '将允许的当前文件作为任务起点。'}</p>
@@ -170,6 +206,33 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
         <p className="workspace-description">{view?.testReason ? reasons[view.testReason] || view.testReason : `在已准备的隔离工作区运行完整 ${view?.toolchain === 'python' ? 'Python' : 'Go'} 基线。`}</p>
         {view?.testAvailable && <button className="primary-btn" type="button" disabled={busy || view.state !== 'prepared'} onClick={() => void runBaseline()}>运行 {view.toolchain === 'python' ? 'Python' : 'Go'} 基线</button>}
       </>}
+    </section>
+    <section className="task-baseline-card" aria-label="代码修改提案">
+      <div className="task-workspace-heading"><h3>代码修改提案</h3><span role="status">{proposing ? '正在生成并测试' : proposal ? { ready: '可审查', failed: '测试失败', blocked: '需处理', unknown: '待核验', stale: '已变化，需核验' }[proposal.state] : '尚未生成'}</span></div>
+      {proposal ? <>
+        <dl className="task-workspace-facts">
+          <div><dt>提案</dt><dd>{proposal.id}</dd></div>
+          <div><dt>隔离标识</dt><dd>{proposal.workspaceId}</dd></div>
+          <div><dt>原基线</dt><dd>{proposal.baselineChecksum}</dd></div>
+          <div><dt>来源事件</dt><dd>{proposal.sourceEventChecksum}</dd></div>
+          <div><dt>最终状态 SHA-256</dt><dd>{proposal.finalStateSHA256}</dd></div>
+        </dl>
+        {proposal.files.map(file => <details key={file.path}>
+          <summary>{file.path}</summary>
+          <p className="workspace-description">{file.beforeExists ? `原 SHA-256：${file.beforeSha256} · 模式 ${file.beforeMode.toString(8)}` : '原文件不存在'}<br />{file.afterExists ? `修改后 SHA-256：${file.afterSha256} · 模式 ${file.afterMode.toString(8)}` : '修改后已删除'}</p>
+          <pre className="task-baseline-output" tabIndex={0} aria-label={`${file.path} 修改 diff`}>{file.diff}</pre>
+        </details>)}
+        <p>修改后测试：<span role="status">{{ passed: '通过', failed: '失败', blocked: '需处理', unknown: '待核验' }[proposalTestState]}</span></p>
+        {!boundTest && <p className="workspace-description">测试与最终状态的绑定或停止状态尚未确认；请先核验，不能作为通过证据。</p>}
+        <p><code>{proposal.test.command.join(' ')}</code></p>
+        <p>退出码：{proposal.test.exitCode ?? '待核验'}{proposal.test.truncated ? ' · 输出已截断' : ' · 输出未截断'}</p>
+        <p className="workspace-description">测试输入：{proposal.test.inputSHA256 || '待核验'}</p>
+        <p className="workspace-description">归档 SHA-256：{proposal.test.archiveSHA256 || '待核验'}</p>
+        <p className="workspace-description">文件模式变换：{proposal.test.modeTransform || '待核验'}</p>
+        {proposal.test.reason && <p className="workspace-description">{reasons[proposal.test.reason] || proposal.test.reason}</p>}
+        <pre className="task-baseline-output" tabIndex={0} aria-label="提案测试输出">{proposal.test.output || '暂无可确认的输出。'}</pre>
+      </> : <p className="workspace-description">{view?.proposalReason ? reasons[view.proposalReason] || view.proposalReason : '任务完成后，冻结隔离修改并测试；原仓库保留。'}</p>}
+      {view?.proposalAvailable && (!proposal || proposal.test.stopped && ['stale', 'failed', 'blocked'].includes(proposal.state)) && <button className="primary-btn" type="button" disabled={busy} onClick={() => void generateProposal()}>{proposal ? '重新生成并测试提案' : '生成并测试提案'}</button>}
     </section>
     <div className="task-workspace-actions">
       {view?.available && view.state === 'unprepared' && <button className="primary-btn" type="button" disabled={busy} onClick={() => void prepare()}>准备隔离工作区</button>}

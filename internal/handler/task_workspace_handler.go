@@ -22,6 +22,7 @@ func (h *TaskWorkspaceHandler) Inspect(c *gin.Context)           { h.handle(c, "
 func (h *TaskWorkspaceHandler) Prepare(c *gin.Context)           { h.handle(c, "prepare") }
 func (h *TaskWorkspaceHandler) RunBaseline(c *gin.Context)       { h.handle(c, "test") }
 func (h *TaskWorkspaceHandler) PrepareDependency(c *gin.Context) { h.handle(c, "dependency") }
+func (h *TaskWorkspaceHandler) GenerateProposal(c *gin.Context)  { h.handle(c, "proposal") }
 
 func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 	owner, err := authenticatedOwner(c)
@@ -55,7 +56,9 @@ func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 			writeSessionError(c, session.ErrInvalidSessionInput, "invalid workspace request")
 			return
 		}
-		if action == "test" {
+		if action == "proposal" {
+			view, err = h.tasks.GenerateProposal(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
+		} else if action == "test" {
 			view, err = h.tasks.RunBaseline(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
 		} else if action == "dependency" {
 			view, err = h.tasks.PrepareDependency(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)

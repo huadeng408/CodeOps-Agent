@@ -166,7 +166,14 @@ func TestGatewayRejectsAmbiguousProviderUsage(t *testing.T) {
 			budget := admission.NewBudget(ledger)
 			var calls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				calls.Add(1)
+				if calls.Add(1) > 1 {
+					if scenario.protocol == "anthropic" {
+						fmt.Fprint(w, `{"usage":{"input_tokens":8,"output_tokens":3}}`)
+					} else {
+						fmt.Fprint(w, `{"usage":{"prompt_tokens":8,"completion_tokens":3}}`)
+					}
+					return
+				}
 				w.WriteHeader(scenario.status)
 				fmt.Fprint(w, scenario.response)
 			}))
@@ -200,8 +207,12 @@ func TestGatewayRejectsAmbiguousProviderUsage(t *testing.T) {
 			}
 			request.CallId = "following-call"
 			response, err = client.Invoke(ctx, request)
-			if err != nil || response.GetErrorCode() != "token_usage_unknown" || calls.Load() != 1 {
-				t.Fatalf("unresolved usage admitted another provider request: code=%s calls=%d err=%v", response.GetErrorCode(), calls.Load(), err)
+			if err != nil || response.GetErrorCode() != "" || calls.Load() != 2 {
+				t.Fatalf("terminal unknown usage blocked a distinct provider request: code=%s calls=%d err=%v", response.GetErrorCode(), calls.Load(), err)
+			}
+			batch, err = budget.Inspect(ctx, 7)
+			if err != nil || batch.UsedTokens != 11 || batch.ReservedTokens != 103 || !batch.UnknownUsage || batch.ActiveCalls != 0 {
+				t.Fatalf("independent success erased or fabricated the unknown usage: %+v err=%v", batch, err)
 			}
 		})
 	}
@@ -636,7 +647,10 @@ func TestGatewayRefusesMissingAuthorityAndRetainsMissingUsage(t *testing.T) {
 	budget := admission.NewBudget(ledger)
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		if calls.Add(1) > 1 {
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":8,"completion_tokens":3}}`)
+			return
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"missing usage"}}]}`))
 	}))
 	defer upstream.Close()
@@ -675,8 +689,12 @@ func TestGatewayRefusesMissingAuthorityAndRetainsMissingUsage(t *testing.T) {
 	}
 	request.CallId = "call-b"
 	result, err = client.Invoke(ctx, request)
-	if err != nil || result.GetErrorCode() != "token_usage_unknown" || calls.Load() != 1 {
-		t.Fatal("unknown usage admitted another upstream call")
+	if err != nil || result.GetErrorCode() != "" || calls.Load() != 2 {
+		t.Fatal("terminal unknown usage blocked another upstream call")
+	}
+	batch, err = budget.Inspect(ctx, 7)
+	if err != nil || batch.UsedTokens != 11 || !batch.UnknownUsage || batch.ReservedTokens != 103 {
+		t.Fatal("independent call erased the unknown attempt or fabricated its usage")
 	}
 	release()
 	if _, err := client.Invoke(ctx, request); status.Code(err) != codes.Unauthenticated {

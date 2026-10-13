@@ -116,9 +116,6 @@ func TestTaskDependencyRetainsRefusalsAndUnknownAdmissionAfterRestart(t *testing
 			}
 			view, err := tasks.PrepareDependency(ctx, 7, created.ID, 3, "dependency")
 			wantWorkspace, wantDependency := "prepared", "blocked"
-			if scenario == "unknown admission and changed source" {
-				wantDependency = "unknown"
-			}
 			if err != nil || view.State != wantWorkspace || view.EventCount != 5 {
 				t.Fatalf("dependency failure was lost: %+v %v", view, err)
 			}
@@ -140,8 +137,8 @@ func TestTaskDependencyRetainsRefusalsAndUnknownAdmissionAfterRestart(t *testing
 			}
 			batch, err := budget.Inspect(ctx, 7)
 			if scenario == "unknown admission and changed source" {
-				if err != nil || batch.TaskID != decoded.Dependency.OperationID || batch.ReservedTokens != 1 || !batch.UnknownUsage {
-					t.Fatalf("unknown admission was released: %+v %v", batch, err)
+				if err != nil || batch.TaskID != "" || batch.ReservedTokens != 1 || !batch.UnknownUsage || batch.UsedTokens != 0 {
+					t.Fatalf("stopped dependency lost retained unknown accounting: %+v %v", batch, err)
 				}
 				return
 			}

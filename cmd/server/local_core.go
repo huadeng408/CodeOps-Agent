@@ -127,7 +127,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 		if err != nil {
 			return session.TaskModelWorkspace{}, err
 		}
-		if batch.UnknownUsage || batch.ReservedTokens != 0 {
+		if batch.ActiveCalls != 0 {
 			return session.TaskModelWorkspace{}, admission.ErrUsageUnknown
 		}
 		if batch.TaskID != "" && batch.TaskID != id {
@@ -150,6 +150,10 @@ func runLocalCore(cfg serverconfig.Config) error {
 		return errors.New("model admission initialization unavailable")
 	}
 	defer gateway.Close()
+	if workspaces != nil {
+		// The existing task scope fences proposal testing without another model call.
+		workspaces.WithProposalScope(gateway.BindExistingTask)
+	}
 	continuation := session.NewContinuationSlot()
 	executors := newContinuationToolExecutors(cfg.Harness.TaskWorkspaceRoot)
 	executors.sandbox = newLazySandboxRunner(taskConfig)
@@ -232,7 +236,7 @@ func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog,
 		capabilities["budget"] = CapabilityStatus{State: "unknown", Reason: "token Ledger is unavailable; restore it before calling a model"}
 		return
 	}
-	budget := CapabilityStatus{State: "ready", Reason: "persistent token admission; price unknown", Tokens: &TokenBatchStatus{
+	budget := CapabilityStatus{State: "ready", Reason: "provider enforces budget; local usage is audited", Tokens: &TokenBatchStatus{
 		BatchID: batch.ID, Limit: batch.LimitTokens, Used: batch.UsedTokens, Reserved: batch.ReservedTokens, CostStatus: batch.CostStatus,
 	}}
 	if batch.TaskID != "" {
@@ -241,12 +245,10 @@ func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog,
 		}
 	}
 	switch {
+	case batch.ActiveCalls > 0:
+		budget.State, budget.Reason = "blocked", "a model attempt is still active; wait or recover its execution"
 	case batch.UnknownUsage:
-		budget.State, budget.Reason = "blocked", "token usage is unknown; reconcile retained reservations"
-	case batch.ReservedTokens > 0:
-		budget.State, budget.Reason = "blocked", "a model attempt is unresolved; wait or reconcile after restart"
-	case batch.UsedTokens >= batch.LimitTokens:
-		budget.State, budget.Reason = "blocked", "token batch is exhausted"
+		budget.Reason = "provider enforces budget; some usage is unconfirmed"
 	case batch.ID == "":
 		budget.State, budget.Reason = "unknown", "token batch initializes on the first admitted call"
 	}

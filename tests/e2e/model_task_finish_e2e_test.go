@@ -146,10 +146,10 @@ func TestProductionLocalCoreFinishesOwnedTaskWithoutResettingBatch(t *testing.T)
 	if err != nil || result.ErrorCode != "provider_usage_unknown" {
 		t.Fatal("missing usage was not retained")
 	}
-	request(http.MethodPost, "/api/v1/sessions/"+created.Data.ID+"/task/finish", map[string]any{}, nil, http.StatusConflict)
+	request(http.MethodPost, "/api/v1/sessions/"+created.Data.ID+"/task/finish", map[string]any{}, nil, http.StatusOK)
 	request(http.MethodPost, finish, map[string]any{}, nil, http.StatusOK)
 	retained, err := budget.Inspect(context.Background(), profile.Data.ID)
-	if err != nil || retained.ID != before.ID || retained.UsedTokens != 22 || retained.ReservedTokens != 103 || !retained.UnknownUsage || retained.TaskID != created.Data.ID {
+	if err != nil || retained.ID != before.ID || retained.UsedTokens != 22 || retained.ReservedTokens != 103 || !retained.UnknownUsage || retained.TaskID != "" {
 		t.Fatal("finish action cleared an unknown usage reservation")
 	}
 }

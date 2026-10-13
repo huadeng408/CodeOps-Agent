@@ -147,12 +147,52 @@ func TestStoppedScopeHolderCannotReconcileUnknownModelUsage(t *testing.T) {
 		t.Fatal("fixture unknown usage was not retained")
 	}
 	gateway := admission.NewGateway(budget, admission.ProviderConfig{})
-	if err := gateway.FinishTask(ctx, actor); !errors.Is(err, admission.ErrUsageUnknown) {
-		t.Fatalf("holder stop was mistaken for provider reconciliation: %v", err)
+	if err := gateway.FinishTask(ctx, actor); err != nil {
+		t.Fatalf("terminal unknown usage prevented stopped-holder recovery: %v", err)
 	}
 	after, err := budget.Inspect(ctx, 7)
-	if err != nil || after != before {
+	if err != nil || after.ID != before.ID || after.UsedTokens != before.UsedTokens || after.ReservedTokens != before.ReservedTokens || !after.UnknownUsage || after.TaskID != "" || after.CostStatus != "unknown" {
 		t.Fatal("stopped holder recovery changed unknown usage or its complete reservation")
+	}
+}
+
+func TestStoppedScopeHolderRetainsCrashReservationAsUnknown(t *testing.T) {
+	for _, scenario := range []string{"retained", "released"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			created, err := session.NewWorkbench(ledger, nil).Create(ctx, 7, "fixture", "crash before accounting", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor, err := identity.Default().BindSession(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODE_AGENT_SCOPE_TEST_CRASH_WINDOW", scenario)
+			command := startModelScopeHolder(t, ctx, ledger.Path, created.ID, false)
+			budget := admission.NewBudget(ledger)
+			before, err := budget.Inspect(ctx, 7)
+			if err != nil || before.ActiveCalls != 1 || before.UnknownUsage || before.ReservedTokens != 103 {
+				t.Fatal("the fixture did not reserve an active call before crashing")
+			}
+			if err := command.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = command.Wait()
+			if err := admission.NewGateway(budget, admission.ProviderConfig{}).FinishTask(ctx, actor); err != nil {
+				t.Fatalf("a confirmed stopped holder permanently fenced its interrupted call: %v", err)
+			}
+			after, err := budget.Inspect(ctx, 7)
+			if err != nil || after.ID != before.ID || after.ActiveCalls != 0 || after.TaskID != "" || after.UsedTokens != 0 || after.ReservedTokens != 103 || !after.UnknownUsage || after.CostStatus != "unknown" {
+				t.Fatalf("crash recovery discarded or invented model usage: %+v err=%v", after, err)
+			}
+		})
 	}
 }
 
@@ -324,7 +364,16 @@ func TestModelScopeProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var releaseDuringCall func()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if scenario := os.Getenv("CODE_AGENT_SCOPE_TEST_CRASH_WINDOW"); scenario != "" {
+			if scenario == "released" {
+				releaseDuringCall()
+			}
+			fmt.Println("SCOPE_READY")
+			<-r.Context().Done()
+			return
+		}
 		if os.Getenv("CODE_AGENT_SCOPE_TEST_USAGE_UNKNOWN") == "1" {
 			fmt.Fprint(w, `{"choices":[{"message":{"content":"unattributed"}}]}`)
 			return
@@ -343,6 +392,7 @@ func TestModelScopeProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
+	releaseDuringCall = release
 	result, err := gateway.Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: "scope-fixture-call",
 		PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"fixture"}]}`)})
 	expected := ""

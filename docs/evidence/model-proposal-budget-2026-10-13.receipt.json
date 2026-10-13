@@ -1,0 +1,102 @@
+{
+  "scope": "controlled Go bug: real provider, Go/Python, offline OpenSandbox and authenticated Chromium proposal; provider-hard-quota continuation",
+  "original_git_sha": "61ff61fde3709b58726f65658e056da5bdd87874",
+  "runtime_sources_sha256": "7bad939ea5264d8c00add03209c2103e35514d1c340387d5c1d5b9dec78a48bb",
+  "runtime_source_files": 394,
+  "current_runtime_binding_verified": true,
+  "server_binary_sha256": "3f98b155008e37b53796b6a85fa77daf3c4e5b2b0ee82cc4a85e1e9e825346a6",
+  "assets_sha256": {
+    "index.html": "ba95f15705b06e5d1e4598e99d50626951009299f07c8dfbbd8c219b8bac3264",
+    "assets/index-CoxDLLvf.css": "6a4a72fc4e224f060cb303b2f6e7b7ff1d0c41e8225abcacd72e3264b6a2a5f5",
+    "assets/index-_YbyWl9z.js": "cd225f22c860850adc423a971d4c9553accc7bf89e8a8f6796d204a55c5eba1e"
+  },
+  "provider": "BeeAPI / Anthropic adapter",
+  "model": "grok-4.6",
+  "manifest_sha256": "63b635fcdb66f5ac4859a960054534d2020641c90dfd6ca6c38c75ef2fcc2f2f",
+  "task_image": "sha256:c35ffc50ff2d4e97ea90f973b29836945912397204592a0b06a0b6fbbba59b58",
+  "batch_id": "02cfc8d9c93975b3ea63f27cc0a3331d",
+  "known_tokens_added": 60477,
+  "known_tokens_before": 22526,
+  "known_tokens_after": 83003,
+  "unknown_reservations_before": 502048,
+  "unknown_reservations_after": 2008192,
+  "provider_attempts": {
+    "total": 8,
+    "settled": 5,
+    "unknown": 3,
+    "foreground_total": 6,
+    "foreground_unknown": 1,
+    "reflection_total": 2,
+    "reflection_unknown": 2
+  },
+  "foreground_turns": {
+    "total": 2,
+    "completed": 1,
+    "failed": 1
+  },
+  "cost_status": "unknown",
+  "task_slot_released": true,
+  "active_calls": 0,
+  "scenario_checks": {
+    "stopped-prior-task-finish-preserves-unknown": true,
+    "workspace-preparation": true,
+    "failing-baseline": true,
+    "real-model-go-edit-and-test": true,
+    "proposal-bound-test": true,
+    "browser-diff-and-refresh": true,
+    "confirmed-usage-plus-unknown-retained": true,
+    "original-repo-preserved": true
+  },
+  "session_id": "8e0c9521ed572c3e45ba48224773676b",
+  "proposal_id": "2755e501773e69d408a5710688b523f05ac92b2532d39872502d32cd03578c59",
+  "frozen_input_sha256": "2b92bfecef8004e43a5c0b815f403110678c725b483b91a063170ce661709512",
+  "archive_sha256": "fd9f3fc6f5295dbdab6f1319fef764f7f2f7a835add972f57ebf3e4b06a6abee",
+  "baseline_exit_code": 1,
+  "proposal_test_exit_code": 0,
+  "original_repository_preserved": true,
+  "go_full": {
+    "pass": 1516,
+    "skip": 72
+  },
+  "python_full": {
+    "passed": 2483,
+    "skipped": 17,
+    "warnings": 3
+  },
+  "frontend_unit": {
+    "passed": 12,
+    "failed": 0,
+    "skipped": 0
+  },
+  "go_vet_exit_code": 0,
+  "frontend_build_exit_code": 0,
+  "http_core": {
+    "passed_test_events": 12,
+    "failed": 0,
+    "skipped": 0
+  },
+  "automation_observation_errors": [
+    "v1 driver stdin closed before scenario work; zero provider calls",
+    "v2 prepare response matcher timeout; subsequent public Inspect confirmed the original preparation succeeded"
+  ],
+  "unverified": [
+    "public repository ten-turn Go/Python denominator",
+    "real reflection writeback",
+    "complete trace readback (span export timeouts retained)",
+    "frozen test cleanup-unknown negative scenario",
+    "complete release contract"
+  ],
+  "artifacts_sha256": {
+    ".scratch/model-proposal-live-v1/inputs-v2.json": "aabbcf4498f3cc631b69df7525e6a16d758264869a448fe3ae438c2597e5c81e",
+    ".scratch/model-proposal-live-v1/browser-commands-v2.json": "1d4697296fbb1f644041f88a79c122822065d97e64105f0684b16b8466782abf",
+    ".scratch/model-proposal-live-v1/budget-before.json": "a42b460baf32d34e4782d200859a11ecd6ee46f3c68c5ea1033331dc30616a9d",
+    ".scratch/model-proposal-live-v1/budget-after-turn1.json": "8d5ac16f1aa0144d93804c4de4284f2a3e1fb129e1ac805c7c037775631537fa",
+    ".scratch/model-proposal-live-v1/ledger-after-finish.json": "4b58d5f5abe2dc050e410752675a09ec50d65e29362d0451766dfce96ce28b91",
+    ".scratch/model-proposal-live-v1/workspace-after-refresh.json": "aaf02ac373291650aa3678334da8a4804aef95b1f39a6f21e603e678af429a12",
+    ".scratch/model-proposal-live-v1/proposal-response-v2.json": "aaf02ac373291650aa3678334da8a4804aef95b1f39a6f21e603e678af429a12",
+    ".scratch/model-proposal-live-v1/baseline-red.png": "34a411f0dbcdafd4d00ddee91fd0fd0332bcc68642773b153c3e29d56200487a",
+    ".scratch/model-proposal-live-v1/proposal-ready.png": "60e85971ff0e44e1988889d71c0d60e510e0aa53003735a34614de9e78c1393d",
+    ".scratch/model-proposal-live-v1/go-v2-1.log": "85ee16fee7556c69f64918436a7060282fc152686a5bf2139130b84df0b61743",
+    ".scratch/model-proposal-live-v1/python-v2-1.log": "01dcd4b22d28a03663d046d2ededc4c82c9ceb64cb5a298e33070c2bd216419b"
+  }
+}

@@ -30,6 +30,7 @@ type TaskBaselineRuntime struct {
 	Runner           sandbox.Runner
 	Ready            func(context.Context) error
 	Acquire, Finish  func(context.Context, uint, string) error
+	BeginProposal    func(context.Context, uint, string) (func() error, error)
 }
 
 type TaskBaselineView struct {
@@ -56,6 +57,13 @@ type taskBaselinePayload struct {
 // WithBaselineRuntime is configured once by the local Harness, never by HTTP.
 func (t *TaskWorkspaces) WithBaselineRuntime(profile TaskBaselineRuntime) *TaskWorkspaces {
 	t.baselineRuntime = &profile
+	return t
+}
+
+func (t *TaskWorkspaces) WithProposalScope(begin func(context.Context, uint, string) (func() error, error)) *TaskWorkspaces {
+	if t.baselineRuntime != nil {
+		t.baselineRuntime.BeginProposal = begin
+	}
 	return t
 }
 

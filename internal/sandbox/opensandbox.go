@@ -129,6 +129,19 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	if r.config.Toolchain == "python" && request.Program == "git" {
 		return result, fmt.Errorf("%w: Git is not supported by the approved Python task profile", ErrSandboxUnavailable)
 	}
+	if request.FrozenInput != nil {
+		input := *request.FrozenInput
+		input.Files = append([]InputFile(nil), input.Files...)
+		request.FrozenInput = &input
+		if r.config.Toolchain != "go" {
+			return result, fmt.Errorf("%w: frozen input requires the approved Go profile", ErrSandboxUnavailable)
+		}
+		release, err := pinFrozenInput(ctx, r.config.TrustRoot, request)
+		if err != nil {
+			return result, fmt.Errorf("%w: %s", ErrSandboxUnavailable, err)
+		}
+		defer release()
+	}
 	dependency := ""
 	if r.config.Toolchain == "python" && request.DependencyOperationID == "" {
 		return result, fmt.Errorf("%w: approved Python dependency identity is required", ErrSandboxUnavailable)
@@ -171,9 +184,14 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 			return result, errors.New("sandbox argv contains NUL")
 		}
 	}
-	cwd, err := ContainerWorkingDir(request.Workspace, request.WorkingDir)
-	if err != nil {
-		return result, err
+	cwd := ""
+	if request.FrozenInput != nil {
+		cwd = "/run/codeops/input-" + request.OperationID
+	} else {
+		cwd, err = ContainerWorkingDir(request.Workspace, request.WorkingDir)
+		if err != nil {
+			return result, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -232,6 +250,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		defer stop()
 		if err := r.remove(cleanupCtx, manifest, created.ID, operation, container); err != nil {
 			result.ExitCode = 126
+			result.InputSHA256 = ""
 			resultErr = errors.Join(resultErr, fmt.Errorf("%w: OpenSandbox termination is unconfirmed; reconcile the retained resource identity", ErrSandboxOutcomeUnknown))
 		} else {
 			result.Stopped = true
@@ -243,8 +262,30 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	if !strings.EqualFold(created.Status.State, "Running") || r.verifyTask(ctx, manifest, container, created.ID, workspace, dependency, memory) != nil {
 		return result, fmt.Errorf("%w: OpenSandbox task isolation is not confirmed", ErrSandboxUnavailable)
 	}
-	command := map[string]any{"argv": argv, "cwd": cwd, "uid": 65534, "gid": 65534, "timeout": 120000, "envs": r.environment()}
-	stream, err := r.call(ctx, manifest, http.MethodPost, "/sandboxes/"+created.ID+"/proxy/44772/command", command)
+	if request.FrozenInput != nil {
+		// Bootstrap only unpacks verified regular source files; model code first runs as nobody.
+		bootstrap := "set -eu; printf '%s  /workspace\\n' '" + request.FrozenInput.ArchiveSHA256 + "' | sha256sum -c -; mkdir '" + cwd + "'; tar --no-same-owner -xf /workspace -C '" + cwd + "'; find '" + cwd + "' -type d -exec chmod 0555 {} +"
+		prepared, err := r.execute(ctx, manifest, created.ID, []string{"sh", "-c", bootstrap}, "/run/codeops", 0)
+		result.Output, result.Truncated = prepared.Output, prepared.Truncated
+		if err != nil || prepared.ExitCode != 0 || prepared.Truncated {
+			if err == nil {
+				err = fmt.Errorf("%w: frozen input bootstrap failed", ErrSandboxUnavailable)
+			}
+			return result, err
+		}
+	}
+	executed, err := r.execute(ctx, manifest, created.ID, argv, cwd, 65534)
+	result.Output, result.Truncated, result.ExitCode = executed.Output, executed.Truncated, executed.ExitCode
+	if err == nil && request.FrozenInput != nil {
+		result.InputSHA256 = request.FrozenInput.SourceSHA256
+	}
+	return result, err
+}
+
+func (r *OpenSandboxRunner) execute(ctx context.Context, manifest openSandboxManifest, id string, argv []string, cwd string, uid int) (result Result, resultErr error) {
+	result.ExitCode = 126
+	command := map[string]any{"argv": argv, "cwd": cwd, "uid": uid, "gid": uid, "timeout": 120000, "envs": r.environment()}
+	stream, err := r.call(ctx, manifest, http.MethodPost, "/sandboxes/"+id+"/proxy/44772/command", command)
 	if err != nil {
 		return result, ErrSandboxOutcomeUnknown
 	}
@@ -261,7 +302,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		return result, err
 	}
 	// The pinned execd stream's terminal event does not contain an exit code.
-	status, err := r.call(ctx, manifest, http.MethodGet, "/sandboxes/"+created.ID+"/proxy/44772/command/status/"+url.PathEscape(executionID), nil)
+	status, err := r.call(ctx, manifest, http.MethodGet, "/sandboxes/"+id+"/proxy/44772/command/status/"+url.PathEscape(executionID), nil)
 	if err != nil {
 		return result, ErrSandboxOutcomeUnknown
 	}
