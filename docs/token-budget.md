@@ -71,6 +71,9 @@ Compatible relays must support that contract; there is no silent parameter downg
 Transport failures and responses without attributable usage retain the whole
 reservation and return a distinct, nonretryable blocked classification. An
 unknown 429/5xx is never assumed to cost zero and is not automatically retried.
+Duplicate accounting fields, including escaped names that decode to the same
+field, follow this unknown path; unrelated metadata retains its existing handling.
+[Ambiguous usage checks](evidence/model-ambiguous-usage-2026-10-13.md).
 When a response has complete bounded usage, Go durably settles that attempt
 before any retry. Only such accounted 429/5xx responses permit up to three
 attempts, with one/two-second backoff and a valid Retry-After of at most ten

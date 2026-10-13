@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -492,15 +493,53 @@ func providerEndpoint(config ProviderConfig) (string, error) {
 
 type tokenUsage struct{ input, output, cached int64 }
 
-func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
-	var response struct {
-		Usage map[string]json.RawMessage `json:"usage"`
+func accountingJSONFields(data []byte, uniqueNames ...string) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, ErrUsageUnknown
 	}
-	if err := json.Unmarshal(data, &response); err != nil || response.Usage == nil {
+	fields := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, ErrUsageUnknown
+		}
+		if _, duplicate := fields[name]; duplicate && slices.Contains(uniqueNames, name) {
+			return nil, ErrUsageUnknown
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, ErrUsageUnknown
+		}
+		fields[name] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, ErrUsageUnknown
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return nil, ErrUsageUnknown
+	}
+	return fields, nil
+}
+
+func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
+	// Duplicate accounting fields cannot establish usage, even when a later value is smaller.
+	response, err := accountingJSONFields(data, "usage")
+	if err != nil {
+		return tokenUsage{}, ErrUsageUnknown
+	}
+	uniqueNames := []string{"prompt_tokens", "completion_tokens", "prompt_tokens_details"}
+	if protocol == "anthropic" {
+		uniqueNames = []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}
+	}
+	usage, err := accountingJSONFields(response["usage"], uniqueNames...)
+	if err != nil {
 		return tokenUsage{}, ErrUsageUnknown
 	}
 	read := func(name string) (int64, error) {
-		raw, found := response.Usage[name]
+		raw, found := usage[name]
 		if !found || bytes.Equal(raw, []byte("null")) {
 			return 0, ErrUsageUnknown
 		}
@@ -518,13 +557,13 @@ func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
 		}
 		cached, creation := int64(0), int64(0)
 		var err error
-		if _, ok := response.Usage["cache_read_input_tokens"]; ok {
+		if _, ok := usage["cache_read_input_tokens"]; ok {
 			cached, err = read("cache_read_input_tokens")
 			if err != nil {
 				return tokenUsage{}, err
 			}
 		}
-		if _, ok := response.Usage["cache_creation_input_tokens"]; ok {
+		if _, ok := usage["cache_creation_input_tokens"]; ok {
 			creation, err = read("cache_creation_input_tokens")
 			if err != nil {
 				return tokenUsage{}, err
@@ -543,16 +582,20 @@ func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
 	if inErr != nil || outErr != nil {
 		return tokenUsage{}, ErrUsageUnknown
 	}
-	var details struct {
-		Cached int64 `json:"cached_tokens"`
+	var cached int64
+	if raw, ok := usage["prompt_tokens_details"]; ok && !bytes.Equal(raw, []byte("null")) {
+		details, err := accountingJSONFields(raw, "cached_tokens")
+		if err != nil {
+			return tokenUsage{}, ErrUsageUnknown
+		}
+		if raw, ok := details["cached_tokens"]; ok && json.Unmarshal(raw, &cached) != nil {
+			return tokenUsage{}, ErrUsageUnknown
+		}
 	}
-	if raw, ok := response.Usage["prompt_tokens_details"]; ok && json.Unmarshal(raw, &details) != nil {
+	if cached < 0 || cached > input {
 		return tokenUsage{}, ErrUsageUnknown
 	}
-	if details.Cached < 0 || details.Cached > input {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	return tokenUsage{input: input, output: output, cached: details.Cached}, nil
+	return tokenUsage{input: input, output: output, cached: cached}, nil
 }
 
 func admissionErrorCode(err error) string {

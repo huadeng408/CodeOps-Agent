@@ -96,7 +96,8 @@ func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
 			t.Error("model request bypassed the Go output bound")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"model":"fixture-model","choices":[{"message":{"content":"\u0066ixture-provider-authority"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}}`))
+		// Repeated metadata and counters from another protocol do not affect OpenAI usage.
+		_, _ = w.Write([]byte(`{"id":"first","id":"last","model":"fixture-model","choices":[{"message":{"content":"\u0066ixture-provider-authority"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"input_tokens":9,"input_tokens":0,"prompt_tokens_details":{"cached_tokens":4,"fixture":"first","fixture":"last"},"completion_tokens_details":{"reasoning_tokens":2}}}`))
 	}))
 	defer upstream.Close()
 	gateway := admission.NewGateway(budget, admission.ProviderConfig{
@@ -137,6 +138,72 @@ func TestGatewayReservesBeforeUpstreamAndCountsUsageOnce(t *testing.T) {
 	batch, err := budget.Open(ctx, 7)
 	if err != nil || batch.UsedTokens != 11 || batch.ReservedTokens != 0 || batch.CostStatus != "unknown" {
 		t.Fatal("usage was not settled through the canonical Ledger")
+	}
+}
+
+func TestGatewayRejectsAmbiguousProviderUsage(t *testing.T) {
+	for _, scenario := range []struct {
+		name, protocol, response, code string
+		status                         int
+	}{
+		{"duplicate usage", "openai", `{"usage":{"prompt_tokens":8,"completion_tokens":3},"usage":{"prompt_tokens":0,"completion_tokens":0}}`, "provider_usage_unknown", http.StatusOK},
+		{"duplicate input", "openai", `{"usage":{"prompt_tokens":8,"prompt_tokens":0,"completion_tokens":3}}`, "provider_usage_unknown", http.StatusOK},
+		{"escaped duplicate output", "openai", `{"usage":{"prompt_tokens":8,"completion_tokens":3,"completion\u005ftokens":0}}`, "provider_usage_unknown", http.StatusOK},
+		{"duplicate cache detail", "openai", `{"usage":{"prompt_tokens":8,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4,"cached_tokens":0}}}`, "provider_usage_unknown", http.StatusOK},
+		{"rate limited duplicate usage", "openai", `{"usage":{"prompt_tokens":8,"completion_tokens":0},"usage":{"prompt_tokens":0,"completion_tokens":0}}`, "provider_rate_limited_unknown", http.StatusTooManyRequests},
+		{"transient duplicate output", "openai", `{"usage":{"prompt_tokens":8,"completion_tokens":3,"completion_tokens":0}}`, "provider_transient_unknown", http.StatusServiceUnavailable},
+		{"anthropic duplicate input", "anthropic", `{"usage":{"input_tokens":8,"input_tokens":0,"output_tokens":3}}`, "provider_usage_unknown", http.StatusOK},
+		{"anthropic duplicate cache read", "anthropic", `{"usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_read_input_tokens":0}}`, "provider_usage_unknown", http.StatusOK},
+		{"anthropic duplicate cache creation", "anthropic", `{"usage":{"input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":5,"cache_creation_input_tokens":0}}`, "provider_usage_unknown", http.StatusOK},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			budget := admission.NewBudget(ledger)
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(scenario.status)
+				fmt.Fprint(w, scenario.response)
+			}))
+			defer upstream.Close()
+			gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: scenario.protocol, BaseURL: upstream.URL,
+				Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer gateway.Close()
+			binding, release, err := gateway.Bind(7, "ambiguous-task", "ambiguous-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			conn, err := grpc.NewClient(binding.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			client := pb.NewModelGatewayClient(conn)
+			request := &pb.ModelCallRequest{Capability: binding.Capability, CallId: "ambiguous-call",
+				PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)}
+			response, err := client.Invoke(ctx, request)
+			if err != nil || response.GetErrorCode() != scenario.code || response.GetHttpStatus() != int32(scenario.status) {
+				t.Fatalf("ambiguous provider usage was accepted: code=%s err=%v", response.GetErrorCode(), err)
+			}
+			batch, err := budget.Inspect(ctx, 7)
+			if err != nil || batch.UsedTokens != 0 || batch.ReservedTokens != 103 || !batch.UnknownUsage {
+				t.Fatalf("ambiguous usage released or settled its reservation: %+v err=%v", batch, err)
+			}
+			request.CallId = "following-call"
+			response, err = client.Invoke(ctx, request)
+			if err != nil || response.GetErrorCode() != "token_usage_unknown" || calls.Load() != 1 {
+				t.Fatalf("unresolved usage admitted another provider request: code=%s calls=%d err=%v", response.GetErrorCode(), calls.Load(), err)
+			}
+		})
 	}
 }
 
@@ -618,7 +685,8 @@ func TestGatewayCountsAnthropicCacheCreationAndReadOnce(t *testing.T) {
 		if r.Header.Get("x-api-key") != "fixture-provider-authority" {
 			t.Error("missing Go-owned credential")
 		}
-		_, _ = w.Write([]byte(`{"model":"fixture-model","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":8,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`))
+		// OpenAI counters are not part of the Anthropic accounting contract.
+		_, _ = w.Write([]byte(`{"model":"fixture-model","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":8,"output_tokens":3,"prompt_tokens":9,"prompt_tokens":0,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`))
 	}))
 	defer upstream.Close()
 	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "anthropic", BaseURL: upstream.URL,
