@@ -768,6 +768,7 @@ func TestSessionRunnerRetainsSafeModelFailureClassification(t *testing.T) {
 		{"provider_bound_violated", "model usage exceeded the admitted bounds; check provider configuration", nil},
 		{"provider_usage_unknown", "model usage is unknown; the original reservation is retained", nil},
 		{"task_prerequisites_missing", "task execution prerequisites are unavailable; check the workspace and runtime", nil},
+		{"tool_round_limit", "tool round limit reached; retry this task", nil},
 		{"event_integrity", "agent continuation failed", fmt.Errorf("%w: continuation surface contains an unexpected provider_usage_unknown event: fixture-secret-value", ErrEventIntegrity)},
 		{"continuation_runtime_error", "context compaction could not be persisted; task stopped", fmt.Errorf("%w: provider_bound_violated fixture-secret-value", orchestrator.ErrCompactionPersistence)},
 	} {

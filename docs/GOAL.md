@@ -68,6 +68,7 @@
 - 模型失败后的续行恢复：[Go 准入 head 前移、公开 gRPC 回归与 provider 契约边界](evidence/model-continuation-2026-10-14.md)。
 - 请求长度与完整计费上界：[可选 Go 总量 profile、旧限制保留与源码验证](evidence/model-total-limit-2026-10-14.md)。
 - 真实仓库两轮只读问答：[第一问完成、第二问失败、八项场景分母与同批次计量](evidence/repository-qa-product-2026-10-14.md)。
+- 工具轮次上限：[具体失败分类、无工具收尾与缓存展示的公开协议回归](evidence/model-round-limit-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标

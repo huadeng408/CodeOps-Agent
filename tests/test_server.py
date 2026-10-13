@@ -857,11 +857,11 @@ class ToolLimitFakeLLM:
                         arguments_json='{"pattern":"**/*.py"}',
                     )
                 ],
-                usage=Usage(input_tokens=10, output_tokens=2),
+                usage=Usage(input_tokens=10, output_tokens=2, cached_input_tokens=2),
             )
         return ChatResponse(
             text="Partial result: gathered file listings but stopped before completion.",
-            usage=Usage(input_tokens=20, output_tokens=8),
+            usage=Usage(input_tokens=20, output_tokens=8, cached_input_tokens=3),
         )
 
 
@@ -2006,7 +2006,9 @@ def test_repeated_tool_failures_emit_recovery_guidance(monkeypatch, tmp_path) ->
 
 
 def test_tool_round_limit_gets_final_no_tool_summary(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
     app = OrchestratorServer(ServerConfig(memory_dir=str(tmp_path)))
     app.llm = ToolLimitFakeLLM()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
@@ -2040,7 +2042,12 @@ def test_tool_round_limit_gets_final_no_tool_summary(monkeypatch, tmp_path) -> N
             assert "Tool round limit reached." not in text
             assert "Partial result: gathered file listings" in text
             assert responses[-2].session_meta.turn == 7
+            assert responses[-2].session_meta.cached_tokens == 15
+            assert responses[-2].session_meta.tokens_in == 80
+            assert responses[-2].session_meta.tokens_out == 20
             assert responses[-1].done.success is False
+            assert responses[-1].done.error_code == "tool_round_limit"
+            assert responses[-1].done.retryable is True
             assert len(app.llm.requests) == 7
             assert app.llm.requests[-1].tools == []
             assert "Tool round limit reached" in app.llm.requests[-1].messages[-1].content

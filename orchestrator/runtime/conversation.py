@@ -2166,6 +2166,7 @@ class ConversationRunner:
         )
         total_tokens_in += response.usage.input_tokens
         total_tokens_out += response.usage.output_tokens
+        total_cached_tokens += response.usage.cached_input_tokens
         response_cost = self._estimate_cost(
             getattr(self.llm, "model", ""),
             response.usage.input_tokens,
@@ -2190,6 +2191,8 @@ class ConversationRunner:
             "tool_round_limit",
             turn=final_turn,
             response=response.text,
+            error_code="tool_round_limit",
+            retryable=True,
         )
 
     def _fallback_conversation(
