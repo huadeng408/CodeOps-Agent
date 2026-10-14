@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import grpc
@@ -9,11 +10,89 @@ import pytest
 
 from codeagent import orchestrator_pb2 as pb
 from codeagent import orchestrator_pb2_grpc as rpc
-from orchestrator.llm.client import ChatMessage, ChatRequest
+from orchestrator.llm.client import ChatMessage, ChatRequest, RequestInterrupted
 from orchestrator.llm.gateway import HarnessModelClient
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 from orchestrator.workflows.models import WorkerSpec
 from orchestrator.workflows.providers import ProviderWorkerExecutor
+
+
+@pytest.mark.parametrize("rpc_timeout,minimum,maximum", [(0, 60, 66), (210, 205, 212), (570, 565, 572), (1830, 1825, 1840)])
+def test_harness_model_client_uses_go_issued_rpc_deadline(rpc_timeout, minimum, maximum):
+    deadlines = []
+
+    class Service(rpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            deadlines.append(context.time_remaining())
+            return pb.ModelCallResponse(payload_json=json.dumps({
+                "model": "fixture-model", "choices": [{"message": {"content": "ok"}}],
+            }).encode(), cost_status="unknown")
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_ModelGatewayServicer_to_server(Service(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    client = HarnessModelClient(pb.ModelGatewayBinding(
+        schema_version=1, address=f"127.0.0.1:{port}", capability=b"a" * 32,
+        protocol="openai", model="fixture-model", rpc_timeout_seconds=rpc_timeout,
+    ))
+    try:
+        response = asyncio.run(client.chat(ChatRequest(
+            model="fixture-model", messages=[ChatMessage("user", "hello")],
+        )))
+        assert response.text == "ok"
+        # gRPC rounds longer wire deadlines up to seconds or tens of seconds.
+        assert len(deadlines) == 1 and minimum <= deadlines[0] <= maximum
+    finally:
+        client.close()
+        server.stop(0).wait()
+
+
+def test_harness_model_client_rejects_unbounded_rpc_deadline():
+    from orchestrator.llm.gateway import ModelGatewayError
+
+    with pytest.raises(ModelGatewayError, match="model_gateway_binding_invalid"):
+        HarnessModelClient(pb.ModelGatewayBinding(
+            schema_version=1, address="127.0.0.1:1", capability=b"a" * 32,
+            protocol="openai", model="fixture-model", rpc_timeout_seconds=1831,
+        ))
+
+
+def test_harness_model_client_can_cancel_long_admitted_rpc():
+    started, stopped, cancel = threading.Event(), threading.Event(), threading.Event()
+
+    class Service(rpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            context.add_callback(stopped.set)
+            started.set()
+            stopped.wait(3)
+            return pb.ModelCallResponse(error_code="provider_transport_unknown")
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_ModelGatewayServicer_to_server(Service(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    client = HarnessModelClient(pb.ModelGatewayBinding(
+        schema_version=1, address=f"127.0.0.1:{port}", capability=b"a" * 32,
+        protocol="openai", model="fixture-model", rpc_timeout_seconds=570,
+    ))
+
+    def cancel_running_request():
+        started.wait(2)
+        cancel.set()
+
+    interrupter = threading.Thread(target=cancel_running_request)
+    interrupter.start()
+    try:
+        with pytest.raises(RequestInterrupted):
+            asyncio.run(client.chat(ChatRequest(
+                model="fixture-model", messages=[ChatMessage("user", "hello")], cancel_event=cancel,
+            )))
+        assert started.is_set() and stopped.wait(2)
+    finally:
+        client.close()
+        server.stop(0).wait()
+        interrupter.join(2)
 
 
 def test_harness_model_client_uses_go_transport_and_normalized_usage():

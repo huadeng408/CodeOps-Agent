@@ -24,6 +24,9 @@ message ModelGatewayBinding {
   string protocol = 4;
   string model = 5;
   int64 output_limit = 6;
+  // Go-issued wait limit covering transport attempts and bounded backoff.
+  // Zero preserves the legacy client's 65-second wait.
+  uint32 rpc_timeout_seconds = 7;
 }
 
 message ModelCallRequest {

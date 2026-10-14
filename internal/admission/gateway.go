@@ -28,14 +28,17 @@ import (
 )
 
 type ProviderConfig struct {
-	Protocol    string
-	BaseURL     string
-	Model       string
-	APIKey      string
-	InputLimit  int64
-	OutputLimit int64
-	TotalLimit  int64 // Optional accounting bound when the answer cap excludes reasoning.
+	Protocol              string
+	BaseURL               string
+	Model                 string
+	APIKey                string
+	InputLimit            int64
+	OutputLimit           int64
+	TotalLimit            int64 // Optional accounting bound when the answer cap excludes reasoning.
+	RequestTimeoutSeconds int64 // Zero retains the default request deadline.
 }
+
+const modelRetryDelayLimitSeconds = 10
 
 type modelScope struct {
 	owner  uint
@@ -60,7 +63,7 @@ type Gateway struct {
 
 func NewGateway(budget *Budget, provider ProviderConfig) *Gateway {
 	return &Gateway{budget: budget, provider: provider, scopes: make(map[[32]byte]modelScope), http: &http.Client{
-		Timeout:       60 * time.Second,
+		Timeout:       provider.requestTimeout(),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("provider redirects are not admitted") },
 	}}
 }
@@ -150,7 +153,8 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 		}
 	}
 	return &pb.ModelGatewayBinding{SchemaVersion: 1, Address: gateway.address, Capability: capability,
-		Protocol: gateway.provider.Protocol, Model: gateway.provider.Model, OutputLimit: gateway.provider.OutputLimit}, release, nil
+		Protocol: gateway.provider.Protocol, Model: gateway.provider.Model, OutputLimit: gateway.provider.OutputLimit,
+		RpcTimeoutSeconds: uint32(gateway.provider.invocationTimeout()/time.Second) + 10}, release, nil
 }
 
 // BindActor accepts only the Harness-validated actor, never model-supplied identity.
@@ -278,6 +282,17 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		result.ErrorCode = "model_prerequisites_missing"
 		return result, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, config.invocationTimeout())
+	defer cancel()
+	finalizationDeadline, _ := ctx.Deadline()
+	finalizationDeadline = finalizationDeadline.Add(5 * time.Second)
+	newAuditContext := func() (context.Context, context.CancelFunc) {
+		deadline := time.Now().Add(5 * time.Second)
+		if finalizationDeadline.Before(deadline) {
+			deadline = finalizationDeadline
+		}
+		return context.WithDeadline(context.Background(), deadline)
+	}
 	if !validID(request.CallId) || len(request.PayloadJson) > 8<<20 {
 		return nil, status.Error(codes.InvalidArgument, "invalid model request")
 	}
@@ -354,7 +369,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		confirmed := false
 		defer func() {
 			if !confirmed {
-				auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				auditCtx, cancel := newAuditContext()
 				defer cancel()
 				_, _ = gateway.budget.MarkUnknown(auditCtx, scope.owner, callID)
 			}
@@ -413,12 +428,12 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		}
 		if usage.input > config.InputLimit || (config.TotalLimit == 0 && usage.output > config.OutputLimit) || usage.input+usage.output > config.tokenLimit() {
 			result.ErrorCode = "provider_bound_violated"
-			auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			auditCtx, cancel := newAuditContext()
 			defer cancel()
 			_, _ = gateway.budget.markUnknown(auditCtx, scope.owner, callID, usage.input+usage.output, true)
 			return result, nil
 		}
-		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		auditCtx, cancel := newAuditContext()
 		defer cancel()
 		if _, err := gateway.budget.settle(auditCtx, scope.owner, callID, usage.input+usage.output,
 			budgetFact{InputTokens: usage.input, OutputTokens: usage.output, CachedTokens: usage.cached, CostStatus: "unknown", HTTPStatus: result.HttpStatus}); err != nil {
@@ -495,13 +510,13 @@ func retryAfterDelay(values []string, now time.Time) (time.Duration, bool) {
 	}
 	value := values[0]
 	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
-		if seconds > 10 {
+		if seconds > modelRetryDelayLimitSeconds {
 			return 0, false
 		}
 		return time.Duration(seconds) * time.Second, true
 	}
 	date, err := http.ParseTime(value)
-	if err != nil || date.Sub(now) > 10*time.Second {
+	if err != nil || date.Sub(now) > modelRetryDelayLimitSeconds*time.Second {
 		return 0, false
 	}
 	return max(0, date.Sub(now)), true
@@ -517,7 +532,21 @@ func (config ProviderConfig) Validate() error {
 	if config.TotalLimit < 0 || config.TotalLimit > VerificationTokenLimit || (config.TotalLimit > 0 && config.TotalLimit < config.InputLimit+config.OutputLimit) {
 		return ErrInvalidAdmission
 	}
+	if config.RequestTimeoutSeconds < 0 || config.RequestTimeoutSeconds > 600 {
+		return ErrInvalidAdmission
+	}
 	return nil
+}
+
+func (config ProviderConfig) requestTimeout() time.Duration {
+	if config.RequestTimeoutSeconds <= 0 || config.RequestTimeoutSeconds > 600 {
+		return 60 * time.Second
+	}
+	return time.Duration(config.RequestTimeoutSeconds) * time.Second
+}
+
+func (config ProviderConfig) invocationTimeout() time.Duration {
+	return modelAttemptLimit*config.requestTimeout() + (modelAttemptLimit-1)*modelRetryDelayLimitSeconds*time.Second
 }
 
 func (config ProviderConfig) tokenLimit() int64 {

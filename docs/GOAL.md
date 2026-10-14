@@ -76,6 +76,7 @@
 - 有界续行的真实仓库验证：[实际游标推进、第一问质量缺口、第二问失败与完整调用分母](evidence/continuation-product-2026-10-14.md)。
 - 续行入场与工作区续租：[入队前拒绝、当前游标、活跃反思占用及同一保留工作区的 Go／HTTP 回归](evidence/continuation-admission-2026-10-14.md)。
 - 准入恢复后的真实浏览器验证：[两问回答、过期续租、独立补问失败与任务结束恢复的完整分母](evidence/continuation-recovery-product-2026-10-14.md)。
+- Go 控制的模型期限：[可选请求 profile、RPC 重试上界与取消／unknown 的协议范围证据](evidence/model-deadline-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标

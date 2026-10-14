@@ -44,11 +44,13 @@ class HarnessModelClient(LLMClient):
         if (binding.schema_version != 1 or host != "127.0.0.1"
                 or not port.isdigit() or not 0 < int(port) < 65536
                 or len(binding.capability) != 32 or not binding.model
-                or binding.protocol not in {"openai", "anthropic"}):
+                or binding.protocol not in {"openai", "anthropic"}
+                or binding.rpc_timeout_seconds > 1830):
             raise ModelGatewayError("model_gateway_binding_invalid")
         self.model = binding.model
         self.protocol = binding.protocol
         self._capability = bytes(binding.capability)
+        self._rpc_timeout_seconds = binding.rpc_timeout_seconds or 65
         self._channel = grpc.insecure_channel(binding.address, options=[
             ("grpc.max_send_message_length", 8 << 20),
             ("grpc.max_receive_message_length", 16 << 20),
@@ -76,7 +78,7 @@ class HarnessModelClient(LLMClient):
         call = pb.ModelCallRequest(capability=self._capability, call_id=uuid.uuid4().hex,
                                    payload_json=json.dumps(payload).encode(),
                                    purpose=request.purpose or "foreground")
-        future = self._stub.Invoke.future(call, timeout=65)
+        future = self._stub.Invoke.future(call, timeout=self._rpc_timeout_seconds)
         try:
             while True:
                 if cancel is not None and cancel.is_set():

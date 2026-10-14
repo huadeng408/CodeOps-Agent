@@ -73,6 +73,26 @@ An absent or zero total retains the original strict input/output accounting
 bounds. Invalid, negative, overflowing or insufficient totals refuse dispatch.
 The model payload cannot supply or change this Go-owned setting.
 
+An optional Go-only `CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS` profile sets the
+upstream request deadline in whole seconds from 1 to 600. An absent setting keeps
+60 seconds; zero, malformed, negative, overflowing or excessive environment
+values refuse dispatch. The Go transport/retry context is bounded across the
+existing three attempts and two permitted waits of at most ten seconds. Terminal
+settlement and unknown auditing share an absolute deadline at most five seconds
+after that context; a failed settlement does not start another full audit window.
+Go adds another five seconds for the RPC response and issues the complete wait
+as `ModelGatewayBinding.rpc_timeout_seconds`; Python
+uses the binding rather than a separate provider/environment deadline. The
+default profile therefore has a 200-second work window and 210-second RPC
+wait. A 180-second request profile has a 560-second work window and 570-second
+RPC wait. Earlier caller cancellation or parent deadlines still take precedence.
+Legacy bindings with a zero RPC field keep their original 65-second wait;
+bindings above the maximum 1,830-second RPC profile are rejected.
+
+Changing a deadline does not authorize another attempt or release an unknown
+reservation. The prior failed attempts and their frozen inputs remain unchanged;
+longer provider profiles need their own actual product evidence.
+
 This is a total accounting bound, not a claim about a model's fixed output limit
 or a new allowance per call. The provider still enforces the same cumulative
 batch quota. Existing failures, reservations and violated bounds are not
@@ -118,9 +138,9 @@ provider independently. An invalid HTTP status is rejected before settlement
 and preserves the reservation without poisoning the Ledger.
 
 Canceling backoff adds no undispatched reservation. Canceling an in-flight
-attempt still preserves its unknown outcome. Python retains its existing
-65-second invocation deadline, so slow retries may exhaust that deadline;
-the timeout does not authorize another attempt or clear pending usage.
+attempt still preserves its unknown outcome. Python uses the Go-issued RPC
+deadline; only a legacy binding with a zero deadline field retains the original
+65-second wait. A timeout does not authorize another attempt or clear pending usage.
 These are transport/accounting contracts. Real relay error responses do not
 necessarily supply attributable usage; missing usage still requires separate
 reconciliation. [Accounted retry checks](evidence/model-accounted-retry-2026-10-12.md).

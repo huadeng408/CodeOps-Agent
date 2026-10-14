@@ -31,5 +31,13 @@ func ProviderFromEnv() ProviderConfig {
 			total = -1
 		}
 	}
-	return ProviderConfig{Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output, TotalLimit: total}
+	requestTimeout := int64(0)
+	if raw := os.Getenv("CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS"); raw != "" {
+		var err error
+		requestTimeout, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || requestTimeout <= 0 {
+			requestTimeout = -1
+		}
+	}
+	return ProviderConfig{Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output, TotalLimit: total, RequestTimeoutSeconds: requestTimeout}
 }
