@@ -41,9 +41,13 @@ type ProviderConfig struct {
 const modelRetryDelayLimitSeconds = 10
 
 type modelScope struct {
-	owner  uint
-	taskID string
-	id     string
+	owner     uint
+	taskID    string
+	sessionID string
+	id        string
+	ctx       context.Context
+	stop      context.CancelFunc
+	calls     *sync.WaitGroup
 }
 
 // Gateway owns upstream transport and accounting; Python supplies the
@@ -112,12 +116,83 @@ func (gateway *Gateway) Close() {
 }
 
 func (gateway *Gateway) releaseScope(scope modelScope) {
-	if gateway.budget != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// A failed append retains the cross-process fence for explicit recovery.
-		_ = gateway.budget.recordScope(ctx, scope.owner, scope.taskID, scope.id, "admission/scope_released")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = gateway.stopScope(ctx, scope)
+}
+
+func (gateway *Gateway) stopScope(ctx context.Context, scope modelScope) error {
+	scope.stop()
+	done := make(chan struct{})
+	go func() { scope.calls.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+	if gateway.budget != nil {
+		// A failed append retains the cross-process fence for explicit recovery.
+		return gateway.budget.recordScope(ctx, scope.owner, scope.taskID, scope.id, "admission/scope_released")
+	}
+	return nil
+}
+
+// StopRunCalls revokes the canceled root run (or one child Session) and waits
+// for its Go transports/accounting to stop; it neither finishes nor resets budget.
+func (gateway *Gateway) StopRunCalls(ctx context.Context, command session.CancelRunCommand) error {
+	actor := command.Actor
+	if gateway.budget == nil || actor.Validate() != nil {
+		return ErrInvalidAdmission
+	}
+	if command.SessionID != actor.SessionID || command.RunID == "" {
+		return ErrInvalidAdmission
+	}
+	root, err := session.ModelTaskRoot(ctx, gateway.budget.ledger, actor)
+	if err != nil {
+		return err
+	}
+	owner := actorOwner(actor)
+	gateway.mu.Lock()
+	view, err := session.NewWorkbench(gateway.budget.ledger, nil).Get(ctx, command.OwnerID, actor.SessionID)
+	if err != nil {
+		gateway.mu.Unlock()
+		return err
+	}
+	if view.Run == nil || view.Run.RunID != command.RunID || view.Run.Status == session.RunCanceled || view.Run.Status == session.RunCompleted || view.Run.Status == session.RunFailed {
+		gateway.mu.Unlock()
+		return nil
+	}
+	if view.Run.Status != session.RunCanceling {
+		gateway.mu.Unlock()
+		return ErrInvalidAdmission
+	}
+	scopes := []modelScope{}
+	for capability, scope := range gateway.scopes {
+		if scope.owner == owner && scope.taskID == root && (root == actor.SessionID || scope.sessionID == actor.SessionID) {
+			delete(gateway.scopes, capability)
+			scope.stop()
+			scopes = append(scopes, scope)
+		}
+	}
+	gateway.mu.Unlock()
+	for _, scope := range scopes {
+		if err := gateway.stopScope(ctx, scope); err != nil {
+			return err
+		}
+	}
+	state, err := gateway.budget.read(ctx, owner)
+	if err != nil {
+		return err
+	}
+	if root == actor.SessionID && state.taskHasScopes(owner, root) {
+		return ErrTaskBusy
+	}
+	for _, call := range state.calls {
+		if root == actor.SessionID && call.taskID == root && !call.settled && !call.unknown {
+			return ErrTaskBusy
+		}
+	}
+	return nil
 }
 
 func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGatewayBinding, func(), error) {
@@ -129,10 +204,12 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 		return nil, nil, err
 	}
 	digest := sha256.Sum256(capability)
-	scope := modelScope{owner: owner, taskID: taskID, id: hex.EncodeToString(digest[:])}
+	scopeCtx, stopScope := context.WithCancel(context.Background())
+	scope := modelScope{owner: owner, taskID: taskID, sessionID: sessionID, id: hex.EncodeToString(digest[:]), ctx: scopeCtx, stop: stopScope, calls: &sync.WaitGroup{}}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	if gateway.address == "" {
+		stopScope()
 		return nil, nil, errors.New("model gateway unavailable")
 	}
 	if gateway.budget != nil {
@@ -140,15 +217,19 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 		err := gateway.budget.recordScope(ctx, owner, taskID, scope.id, session.VerificationAdmissionScopeBoundEventType)
 		cancel()
 		if err != nil {
+			stopScope()
 			return nil, nil, err
 		}
 	}
 	gateway.scopes[digest] = scope
 	release := func() {
 		gateway.mu.Lock()
-		defer gateway.mu.Unlock()
-		if _, exists := gateway.scopes[digest]; exists {
+		_, exists := gateway.scopes[digest]
+		if exists {
 			delete(gateway.scopes, digest)
+		}
+		gateway.mu.Unlock()
+		if exists {
 			gateway.releaseScope(scope)
 		}
 	}
@@ -270,11 +351,15 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	digest := sha256.Sum256(request.Capability)
 	gateway.mu.Lock()
 	scope, found := gateway.scopes[digest]
+	if found {
+		scope.calls.Add(1)
+	}
 	checkTask := gateway.taskAdmission
 	gateway.mu.Unlock()
 	if !found {
 		return nil, status.Error(codes.Unauthenticated, "model capability unavailable")
 	}
+	defer scope.calls.Done()
 	result := &pb.ModelCallResponse{CostStatus: "unknown"}
 	config := gateway.provider
 	endpoint, err := providerEndpoint(config)
@@ -284,6 +369,8 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	}
 	ctx, cancel := context.WithTimeout(ctx, config.invocationTimeout())
 	defer cancel()
+	stopScopeWatch := context.AfterFunc(scope.ctx, cancel)
+	defer stopScopeWatch()
 	finalizationDeadline, _ := ctx.Deadline()
 	finalizationDeadline = finalizationDeadline.Add(5 * time.Second)
 	newAuditContext := func() (context.Context, context.CancelFunc) {
@@ -353,7 +440,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		bound, active := gateway.scopes[digest]
 		checkTask = gateway.taskAdmission
 		gateway.mu.Unlock()
-		if !active || bound != scope {
+		if !active || bound.id != scope.id {
 			result.ErrorCode = "model_gateway_unavailable"
 			return result, nil
 		}

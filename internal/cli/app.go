@@ -271,7 +271,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		if app.orchestrator != nil {
 			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
-				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog,
+				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog, CancelModelCalls: app.modelGateway.StopRunCalls,
 				AgentLifecycle: app.handleAgentLifecycle,
 				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 					binding, ok := mcpManager.ResolveBinding(name)

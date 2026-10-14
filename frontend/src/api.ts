@@ -72,6 +72,11 @@ class ApiClient {
     await this.request('POST', `/sessions/${encodeURIComponent(sessionId)}/task/finish`, { body: {} });
   }
 
+  async cancelRun(sessionId: string, runId: string, requestId: string): Promise<SessionRun> {
+    const result = await this.request<SessionRun>('POST', `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`, { body: { requestId } });
+    return result.data;
+  }
+
   async logout(): Promise<void> {
     await this.request('POST', '/users/logout', { body: {} });
   }

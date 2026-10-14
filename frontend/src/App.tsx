@@ -191,6 +191,7 @@ function App() {
   const [isDarkTheme, setIsDarkTheme] = useState(() => readLocalStorage('theme') !== 'light');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [cancelingRun, setCancelingRun] = useState('');
   const [error, setError] = useState('');
   const [pendingRetry, setPendingRetry] = useState<{ sessionId: string; content: string; requestId: string } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -235,6 +236,10 @@ function App() {
   useEffect(() => {
     if (selectedSession) setStatusDraft(selectedSession.status);
   }, [selectedSession?.id, selectedSession?.status]);
+
+  useEffect(() => {
+    setMessage(selectedSession ? readLocalStorage(`codeops:draft:${selectedSession.id}`) || '' : '');
+  }, [selectedSession?.id]);
 
   const syncSessions = useCallback(async (preferredID?: string) => {
     const data = await api.listSessions();
@@ -467,6 +472,7 @@ function App() {
       setPendingRetry(null);
       setMessage('');
       removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
+      removeLocalStorage(`codeops:draft:${selectedSession.id}`);
       await refreshSelected();
     } catch (cause) {
       // Refresh and retry only a stale cursor; admission failures need recovery.
@@ -485,6 +491,7 @@ function App() {
           setPendingRetry(null);
           setMessage('');
           removeLocalStorage(sessionMessageRequestKey(selectedSession.id));
+          removeLocalStorage(`codeops:draft:${selectedSession.id}`);
           await refreshSelected();
           return;
         } catch (retryCause) {
@@ -520,6 +527,7 @@ function App() {
       setPendingRetry(null);
       setMessage('');
       removeLocalStorage(sessionMessageRequestKey(pending.sessionId));
+      removeLocalStorage(`codeops:draft:${pending.sessionId}`);
       await refreshSelected();
     } catch (cause) {
       setMessage(pending.content);
@@ -557,6 +565,27 @@ function App() {
       setBusy(false);
     }
   };
+
+  const handleCancelRun = async () => {
+    const current = selectedSession;
+    if (!current?.run || cancelingRun || !['queued', 'running', 'canceling'].includes(current.run.status)) return;
+    const storageKey = `codeops:cancel-request:${current.run.runId}`;
+    const requestId = readLocalStorage(storageKey) || createContinuationRequestId();
+    writeLocalStorage(storageKey, requestId);
+    setCancelingRun(current.run.runId);
+    setError('');
+    try {
+      await api.cancelRun(current.id, current.run.runId, requestId);
+      await syncSessions();
+      setRefreshKey(value => value + 1);
+    } catch (cause) {
+      setError(errorMessage(cause, '取消请求未确认，请重新核验'));
+    } finally {
+      setCancelingRun('');
+    }
+  };
+
+  const runActive = selectedSession?.run && ['queued', 'running', 'canceling'].includes(selectedSession.run.status);
 
   const handleLogout = async () => {
     setBusy(true);
@@ -656,12 +685,14 @@ function App() {
         {error && <div className="global-error" role="alert">{error}{pendingRetry && selectedSession?.id === pendingRetry.sessionId && <button className="subtle-btn retry-message-btn" type="button" onClick={() => void handleRetryMessage()} disabled={busy}>{busy ? '重试中...' : '重试发送'}</button>}</div>}
         {selectedSession?.run?.status === 'failed' && <div className="global-error" role="alert">{selectedSession.run.error || '任务执行失败'}。<button className="subtle-btn retry-message-btn" type="button" onClick={() => void handleContinueSession()} disabled={busy || !continuationHealthKnown || continuationHealth?.attached !== true}>{busy ? '继续中...' : '继续此任务'}</button></div>}
         {(selectedSession?.run?.status === 'queued' || selectedSession?.run?.status === 'running') && <div className="stream-status" role="status">{selectedSession.run.status === 'queued' ? '任务排队中...' : '正在处理，请稍候...'}</div>}
+        {selectedSession?.run?.status === 'canceling' && <div className="stream-status" role="status">{selectedSession.run.cancellationState === 'unknown' ? '已请求取消，停止结果未确认，需核验受管资源。已有成果和历史保留。' : '已请求取消，正在停止任务资源…'}</div>}
+        {selectedSession?.run?.status === 'canceled' && <div className="stream-status" role="status">{selectedSession.run.cancellationState === 'stopped' ? '代码任务已取消，受管资源已停止。已有成果和历史保留。' : '代码任务已取消，部分停止结果仍需核验。已有成果和历史保留。'}</div>}
         <div className="message-list" ref={messageListRef}>
           {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} activeRun={selectedSession.run} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
-          <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <div className="composer-footer"><div className="composer-meta"><span>＋ 附加文件</span><span><strong>权限</strong> 工具调用按需审批</span><span><strong>执行</strong> {capabilities?.execution?.state === 'ready' ? '运行条件可用' : capabilities?.execution?.state === 'blocked' ? '前提未满足' : '状态待确认'}</span></div><div className="composer-hint">Enter 发送 · Shift+Enter 换行</div><button className="send-btn" type="submit" aria-label="发送" disabled={!selectedSession || busy || selectedSession.run?.status === 'queued' || selectedSession.run?.status === 'running' || !message.trim()}>{busy ? '…' : '↑'}</button></div>
+          <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy} value={message} onChange={(event) => { setMessage(event.target.value); if (selectedSession) writeLocalStorage(`codeops:draft:${selectedSession.id}`, event.target.value); }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!runActive) event.currentTarget.form?.requestSubmit(); } }} />
+          <div className="composer-footer"><div className="composer-meta"><span>＋ 附加文件</span><span><strong>权限</strong> 工具调用按需审批</span><span><strong>执行</strong> {capabilities?.execution?.state === 'ready' ? '运行条件可用' : capabilities?.execution?.state === 'blocked' ? '前提未满足' : '状态待确认'}</span></div><div className="composer-hint">Enter 发送 · Shift+Enter 换行</div>{runActive && <button className="subtle-btn" type="button" aria-label="取消代码任务" disabled={Boolean(cancelingRun) || selectedSession?.run?.status === 'canceling'} onClick={() => void handleCancelRun()}>{cancelingRun || selectedSession?.run?.status === 'canceling' ? '正在停止…' : '取消任务'}</button>}<button className="send-btn" type="submit" aria-label="发送" disabled={!selectedSession || busy || Boolean(runActive) || !message.trim()}>{busy ? '…' : '↑'}</button></div>
         </form>
       </main>
 
@@ -703,7 +734,7 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
   const runLabel = session.run?.status === 'queued' ? '排队中'
     : session.run?.status === 'running' ? '运行中'
       : session.run?.status === 'completed' ? '已完成'
-        : session.run?.status === 'failed' ? '失败' : '';
+        : session.run?.status === 'failed' ? '失败' : session.run?.status === 'canceling' ? '正在停止' : session.run?.status === 'canceled' ? '已取消' : '';
   return <div className="session-status">
     {session.planTodo && <details className="plan-todo-panel" open={session.status === 'running' || session.status === 'queued'}>
       <summary>任务进度 <span className="plan-todo-revision">v{session.planTodo.revision}</span></summary>

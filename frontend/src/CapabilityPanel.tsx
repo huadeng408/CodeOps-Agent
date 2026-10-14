@@ -106,7 +106,7 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
       </div>;
     })}
     {taskId && taskId === session?.id && <button className="primary-btn capability-refresh" type="button" aria-label="结束代码任务"
-      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || session.run?.status === 'queued' || session.run?.status === 'running'}
+      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || session.run?.status === 'queued' || session.run?.status === 'running' || session.run?.status === 'canceling'}
       onClick={() => void finishTask()}>{finishing ? '结束中…' : '结束代码任务'}</button>}
     {finishedTask && finishedTask === session?.id && <p role="status">代码任务已结束。历史和用量记录保留；后续调用仍受服务商预算上限约束。</p>}
     {finishError && finishError.taskId === session?.id && <p className="capability-error" role="status">{finishError.message}</p>}

@@ -103,6 +103,7 @@ func (routes sessionHTTP) register(r *gin.Engine, apiV1 *gin.RouterGroup, userSe
 		sessions.GET("/:id/events", eventHandler.ListEvents)
 		sessions.POST("/:id/events", eventHandler.CreateEvent)
 		sessions.POST("/:id/messages", eventHandler.SubmitMessage)
+		sessions.POST("/:id/runs/:runId/cancel", eventHandler.CancelRun)
 		sessions.GET("/:id/checkpoints", eventHandler.ListCheckpoints)
 		sessions.POST("/:id/checkpoints", eventHandler.CreateCheckpoint)
 		sessions.POST("/:id/restore/:hash", eventHandler.RestoreCheckpoint)

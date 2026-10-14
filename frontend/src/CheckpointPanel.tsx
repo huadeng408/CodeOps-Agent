@@ -105,8 +105,8 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
   }, [session.id]);
 
   useEffect(() => {
-    const historyHasActiveRun = runHistory.some((run) => run.status === 'queued' || run.status === 'running');
-    const sessionHasActiveRun = session.run?.status === 'queued' || session.run?.status === 'running';
+    const historyHasActiveRun = runHistory.some((run) => run.status === 'queued' || run.status === 'running' || run.status === 'canceling');
+    const sessionHasActiveRun = session.run?.status === 'queued' || session.run?.status === 'running' || session.run?.status === 'canceling';
     if (!sessionHasActiveRun && !historyHasActiveRun) return undefined;
     const timer = window.setInterval(() => { void onChanged(); }, 1000);
     return () => window.clearInterval(timer);
@@ -124,7 +124,7 @@ export function CheckpointPanel({ session, refreshKey, onChanged, onRunChanged, 
   const latestRecovery = [...events].reverse().find((event) => event.type === 'session/rewind' || event.type === 'session/continued');
   const latestRecoveryType = manifest?.latestRecovery?.type ?? latestRecovery?.type;
   const visibleRunHistory = runHistory.filter((run) => {
-    if (runFilter === 'active') return run.status === 'queued' || run.status === 'running';
+    if (runFilter === 'active') return run.status === 'queued' || run.status === 'running' || run.status === 'canceling';
     if (runFilter === 'failed') return run.status === 'failed';
     if (runFilter === 'completed') return run.status === 'completed';
     return true;

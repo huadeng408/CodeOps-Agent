@@ -26,7 +26,7 @@
 | 范围 | 仍需完成的验收 |
 | --- | --- |
 | 模型代码任务与提案 | #7–#10 的提案、批准、文件生命周期及应用中断核验已按各自范围验证；仍需 Go／Python 完整真实模型任务与多轮浏览器验收 |
-| 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
+| 恢复与 Memory | #12 取消已按所属资源/unknown/留存范围验证；仍需 #13 产品进程故障恢复、真实反思写回、重启后的空新会话召回及来源边界 |
 | Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
@@ -55,6 +55,7 @@
 - #9 文件生命周期：[四类文件修改、逐项 Ledger／部分失败及实际产品批准证据](evidence/file-lifecycle-2026-10-15.md)。
 - #10 应用中断与并发保护：[逐项核验、完整中断分母、生产浏览器与新基线再次批准证据](evidence/application-recovery-2026-10-15.md)。
 - #11 仓库 MCP：[固定只读能力、Go 授权／停用边界及真实模型与浏览器证据](evidence/mcp-product-2026-10-15.md)。
+- #12 代码任务取消：[Go fence、资源归属、provider/tool/approval 实际取消与结果留存证据](evidence/task-cancellation-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

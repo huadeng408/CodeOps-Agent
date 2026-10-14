@@ -108,7 +108,7 @@ func (w *Workbench) DecideToolApproval(ctx context.Context, ownerID uint, sessio
 			}
 			return eventToView(*approval.decisionEvent)
 		}
-		if run.terminal {
+		if run.terminal || run.cancelRequest != nil {
 			return EventView{}, fmt.Errorf("%w: run is already terminal", ErrSessionStateConflict)
 		}
 		payload := *approval.pending

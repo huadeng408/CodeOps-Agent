@@ -200,6 +200,45 @@ func (h *EventHandler) SubmitMessage(c *gin.Context) {
 	writeSessionData(c, http.StatusAccepted, run)
 }
 
+func (h *EventHandler) CancelRun(c *gin.Context) {
+	owner, err := authenticatedOwner(c)
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	if _, err := h.workbench.Get(c.Request.Context(), owner, c.Param("id")); err != nil {
+		writeSessionError(c, err, "failed to cancel run")
+		return
+	}
+	var request struct {
+		RequestID string `json:"requestId"`
+	}
+	if c.Request.Body == nil || c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.RequestID) == "" {
+		writeSessionError(c, session.ErrInvalidSessionInput, "requestId is required")
+		return
+	}
+	actor, err := authenticatedActor(c, c.Param("id"))
+	if err != nil {
+		writeSessionError(c, err, "authentication required")
+		return
+	}
+	module := h.continuationSnapshot()
+	if h.slot != nil {
+		module = h.slot
+	}
+	cancellation, ok := module.(session.RunCancellationModule)
+	if !ok {
+		writeSessionError(c, session.ErrContinuationUnavailable, "failed to cancel run")
+		return
+	}
+	run, err := cancellation.CancelRun(c.Request.Context(), session.CancelRunCommand{RequestID: request.RequestID, SessionID: c.Param("id"), RunID: c.Param("runId"), OwnerID: owner, Actor: actor})
+	if err != nil {
+		writeSessionError(c, err, "failed to cancel run", h.workbench)
+		return
+	}
+	writeSessionData(c, http.StatusAccepted, run)
+}
+
 func (h *EventHandler) ListCheckpoints(c *gin.Context) {
 	owner, err := authenticatedOwner(c)
 	if err != nil {

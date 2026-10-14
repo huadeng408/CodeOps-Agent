@@ -118,7 +118,7 @@ export interface PlanTodo {
   }>;
 }
 
-export type SessionRunStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type SessionRunStatus = 'queued' | 'running' | 'canceling' | 'canceled' | 'completed' | 'failed';
 
 export interface SessionRun {
   sessionId: string;
@@ -134,6 +134,7 @@ export interface SessionRun {
   error?: string;
   retryOfRunId?: string;
   retryOfRunIds?: string[];
+  cancellationState?: 'requested' | 'stopped' | 'unknown';
 }
 
 export interface SessionEvent {

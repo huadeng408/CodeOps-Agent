@@ -178,8 +178,12 @@ func TestStoppedScopeHolderRetainsCrashReservationAsUnknown(t *testing.T) {
 			command := startModelScopeHolder(t, ctx, ledger.Path, created.ID, false)
 			budget := admission.NewBudget(ledger)
 			before, err := budget.Inspect(ctx, 7)
-			if err != nil || before.ActiveCalls != 1 || before.UnknownUsage || before.ReservedTokens != 103 {
-				t.Fatal("the fixture did not reserve an active call before crashing")
+			wantActive, wantUnknown := 1, false
+			if scenario == "released" {
+				wantActive, wantUnknown = 0, true
+			}
+			if err != nil || before.ActiveCalls != wantActive || before.UnknownUsage != wantUnknown || before.ReservedTokens != 103 {
+				t.Fatalf("fixture cancellation/crash boundary changed: %+v %v", before, err)
 			}
 			if err := command.Process.Kill(); err != nil {
 				t.Fatal(err)
@@ -398,6 +402,9 @@ func TestModelScopeProcessHelper(t *testing.T) {
 	expected := ""
 	if os.Getenv("CODE_AGENT_SCOPE_TEST_USAGE_UNKNOWN") == "1" {
 		expected = "provider_usage_unknown"
+	}
+	if os.Getenv("CODE_AGENT_SCOPE_TEST_CRASH_WINDOW") == "released" {
+		expected = "provider_transport_unknown"
 	}
 	if err != nil || result.ErrorCode != expected {
 		t.Fatal("scope fixture call did not settle")

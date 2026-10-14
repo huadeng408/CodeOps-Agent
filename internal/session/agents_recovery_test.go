@@ -193,7 +193,7 @@ func TestIndependentAgentRecoveryCompletesCancellationFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, run := range runs {
-		if !run.terminal || run.view.Status != RunCanceled {
+		if run.view.Status != RunCanceled && run.view.Status != RunCanceling {
 			t.Fatal("cancellation crash left a runnable child")
 		}
 	}

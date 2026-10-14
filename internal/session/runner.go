@@ -134,19 +134,20 @@ type SubmitMessageCommand struct {
 }
 
 type RunView struct {
-	SessionID      string     `json:"sessionId"`
-	RunID          string     `json:"runId"`
-	RequestID      string     `json:"requestId"`
-	Status         RunStatus  `json:"status"`
-	Attempt        int        `json:"attempt"`
-	WorkerID       string     `json:"workerId,omitempty"`
-	CheckpointHash string     `json:"checkpointHash"`
-	LeaseUntil     *time.Time `json:"leaseUntil,omitempty"`
-	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	CompletedAt    *time.Time `json:"completedAt,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	RetryOfRunID   string     `json:"retryOfRunId,omitempty"`
-	RetryOfRunIDs  []string   `json:"retryOfRunIds,omitempty"`
+	SessionID         string     `json:"sessionId"`
+	RunID             string     `json:"runId"`
+	RequestID         string     `json:"requestId"`
+	Status            RunStatus  `json:"status"`
+	Attempt           int        `json:"attempt"`
+	WorkerID          string     `json:"workerId,omitempty"`
+	CheckpointHash    string     `json:"checkpointHash"`
+	LeaseUntil        *time.Time `json:"leaseUntil,omitempty"`
+	StartedAt         *time.Time `json:"startedAt,omitempty"`
+	CompletedAt       *time.Time `json:"completedAt,omitempty"`
+	Error             string     `json:"error,omitempty"`
+	RetryOfRunID      string     `json:"retryOfRunId,omitempty"`
+	RetryOfRunIDs     []string   `json:"retryOfRunIds,omitempty"`
+	CancellationState string     `json:"cancellationState,omitempty"`
 }
 
 // ContinuationModule is the small transport-facing interface of the deep
@@ -218,6 +219,7 @@ type SessionRunnerOptions struct {
 	// every child call. Static Agent Card tools remain local policy.
 	AgentToolBinding func(string) (AgentToolBinding, bool)
 	MCPCatalog       func() *codeagentpb.MCPToolCatalog
+	CancelModelCalls func(context.Context, CancelRunCommand) error
 	AgentApproval    func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
 	AgentWorkerCount int
 	Tracer           genai.Tracer
@@ -234,7 +236,10 @@ type SessionRunner struct {
 	agentQueue      chan runKey
 	memoryQueue     chan runKey
 	agentMu         sync.Mutex
-	activeAgentRuns map[runKey]context.CancelFunc
+	activeAgentRuns map[runKey]*runExecution
+	cancelingRuns   map[runKey]bool
+	cancelOwnerID   string
+	ownedLeases     map[string]bool
 	// agentLifecycleMu serializes callback-plus-acknowledgement so concurrent
 	// terminal observers cannot clean the same managed workspace twice.
 	agentLifecycleMu sync.Mutex
@@ -257,6 +262,12 @@ type runKey struct {
 	memoryRecovery bool
 }
 
+type runExecution struct {
+	stop    context.CancelFunc
+	done    chan struct{}
+	leaseID string
+}
+
 type runLeasePayload struct {
 	RunID      string    `json:"run_id"`
 	RequestID  string    `json:"request_id"`
@@ -267,11 +278,12 @@ type runLeasePayload struct {
 }
 
 type runTerminalPayload struct {
-	RunID     string `json:"run_id"`
-	RequestID string `json:"request_id"`
-	LeaseID   string `json:"lease_id"`
-	Attempt   int    `json:"attempt"`
-	Error     string `json:"error,omitempty"`
+	RunID             string `json:"run_id"`
+	RequestID         string `json:"request_id"`
+	LeaseID           string `json:"lease_id"`
+	Attempt           int    `json:"attempt"`
+	Error             string `json:"error,omitempty"`
+	CancellationState string `json:"cancellation_state,omitempty"`
 }
 
 type toolCallPayload struct {
@@ -491,15 +503,16 @@ func planTodoPayloadFromUpdates(events []Event, runID string, plan *codeagentpb.
 }
 
 type runProjection struct {
-	view         RunView
-	leaseID      string
-	inputEvent   string
-	surfaceHash  string
-	targetSeq    int64
-	actor        identity.Actor
-	terminal     bool
-	order        int64
-	createdOrder int64
+	view          RunView
+	leaseID       string
+	inputEvent    string
+	surfaceHash   string
+	targetSeq     int64
+	actor         identity.Actor
+	terminal      bool
+	order         int64
+	createdOrder  int64
+	cancelRequest *runCancelPayload
 }
 
 func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, tools ToolExecutionAdapter, options SessionRunnerOptions) *SessionRunner {
@@ -539,10 +552,11 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 		options.Now = time.Now
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	cancelOwnerID, _ := newEventID()
 	runner := &SessionRunner{
 		workbench: workbench, conversation: conversation, tools: tools, options: options,
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}), queuedContexts: make(map[runKey]context.Context),
-		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]context.CancelFunc),
+		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]*runExecution), cancelOwnerID: cancelOwnerID, ownedLeases: make(map[string]bool),
 		memoryQueue: make(chan runKey, options.QueueSize),
 	}
 	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount + 1)
@@ -600,6 +614,11 @@ func (r *SessionRunner) requestContinuation(ctx context.Context, command Continu
 		}
 		r.enqueue(ctx, runKey{sessionID: command.SessionID, runID: existing.view.RunID}, time.Time{})
 		return existing.view, nil
+	}
+	if active, projectErr := hasActiveRun(events); projectErr != nil {
+		return RunView{}, projectErr
+	} else if active {
+		return RunView{}, fmt.Errorf("%w: another session run is active or requires stop confirmation", ErrSessionStateConflict)
 	}
 	current, err := reduceSessionView(events)
 	if err != nil {
@@ -817,7 +836,7 @@ func hasActiveRun(events []Event) (bool, error) {
 		return false, err
 	}
 	for _, run := range runs {
-		if !run.terminal {
+		if !run.terminal || run.view.Status == RunCanceled && run.view.CancellationState == "unknown" {
 			return true, nil
 		}
 	}
@@ -1125,6 +1144,29 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	stopRunnerCancel := context.AfterFunc(r.ctx, cancelExecution)
 	defer stopRunnerCancel()
 	defer cancelExecution()
+	r.agentMu.Lock()
+	if r.activeAgentRuns[key] != nil {
+		r.agentMu.Unlock()
+		return
+	}
+	execution := &runExecution{stop: cancelExecution, done: make(chan struct{})}
+	r.activeAgentRuns[key] = execution
+	r.agentMu.Unlock()
+	defer func() {
+		defer close(execution.done)
+		if executionCtx.Err() != nil && r.ctx.Err() == nil {
+			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if events, err := r.workbench.ledger.Events(ctx, key.sessionID); err == nil {
+				if run, err := projectRun(events, key.runID); err == nil && run.cancelRequest != nil && !run.terminal {
+					r.finishCancellation(key)
+				}
+			}
+		}
+		r.agentMu.Lock()
+		delete(r.activeAgentRuns, key)
+		r.agentMu.Unlock()
+	}()
 	traceCtx = executionCtx
 	events, err := r.workbench.ledger.Events(traceCtx, key.sessionID)
 	if err != nil {
@@ -1138,6 +1180,9 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		return
 	}
 	if run.terminal {
+		if run.cancelRequest != nil {
+			return
+		}
 		view, err := reduceSessionView(events)
 		if err == nil && view.Status != "deleted" && view.Run != nil && view.Run.RunID == key.runID {
 			r.completeAgentTurn(traceCtx, key)
@@ -1145,8 +1190,20 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		}
 		return
 	}
+	if run.cancelRequest != nil {
+		if run.view.LeaseUntil != nil && run.view.LeaseUntil.After(r.now()) {
+			r.enqueue(traceCtx, key, *run.view.LeaseUntil)
+			return
+		}
+		r.finishCancellation(key)
+		return
+	}
 	completionCtx := traceCtx
-	defer func() { r.completeAgentTurn(completionCtx, key) }()
+	defer func() {
+		ctx, stop := context.WithTimeout(context.WithoutCancel(completionCtx), 5*time.Second)
+		defer stop()
+		r.completeAgentTurn(ctx, key)
+	}()
 	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
 	defer stopWatching()
 	lease, waitUntil, err := r.claim(traceCtx, key)
@@ -1157,6 +1214,10 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		r.enqueue(traceCtx, key, waitUntil)
 		return
 	}
+	r.agentMu.Lock()
+	execution.leaseID = lease.LeaseID
+	r.ownedLeases[lease.LeaseID] = true
+	r.agentMu.Unlock()
 	spanName := "agent.main"
 	agentName := "main"
 	if strings.HasPrefix(key.sessionID, "agent-") {
@@ -1183,12 +1244,6 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	}
 	runCtx, cancel := context.WithCancel(traceCtx)
 	defer cancel()
-	if strings.HasPrefix(key.sessionID, "agent-") {
-		r.agentMu.Lock()
-		r.activeAgentRuns[key] = cancel
-		r.agentMu.Unlock()
-		defer func() { r.agentMu.Lock(); delete(r.activeAgentRuns, key); r.agentMu.Unlock() }()
-	}
 	heartbeatDone := make(chan struct{})
 	heartbeatErr := make(chan error, 1)
 	go r.heartbeat(runCtx, key, lease, deletions, heartbeatDone, cancel, heartbeatErr)
@@ -1274,6 +1329,12 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 			runErr = fmt.Errorf("session run heartbeat failed: %w", heartbeatFailure)
 		}
 	default:
+	}
+	if current, err := r.workbench.ledger.Events(postRunCtx, key.sessionID); err == nil {
+		if run, err := projectRun(current, key.runID); err == nil && run.cancelRequest != nil {
+			r.finishCancellation(key)
+			return
+		}
 	}
 	// A graceful server shutdown is not a terminal Agent outcome. Leave the
 	// durable lease non-terminal so the next process can claim it after expiry
@@ -1382,6 +1443,9 @@ func (r *SessionRunner) claim(ctx context.Context, key runKey) (runLeasePayload,
 		}
 		if projection.terminal {
 			return runLeasePayload{}, time.Time{}, ErrLeaseLost
+		}
+		if projection.cancelRequest != nil {
+			return runLeasePayload{}, time.Time{}, ErrRunCancelRequested
 		}
 		if projection.view.LeaseUntil != nil && projection.view.LeaseUntil.After(r.now()) {
 			return runLeasePayload{}, *projection.view.LeaseUntil, nil
@@ -1719,6 +1783,9 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool ledger unavailable", ExitCode: 1}, true
 	}
+	if run, err := projectRun(events, key.runID); err != nil || run.terminal || run.cancelRequest != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: ErrRunCancelRequested.Error(), ExitCode: 1}, false
+	}
 	policyAllowed, delegatedBinding, policyErr := agentToolPolicy(events, call.Name)
 	if policyErr != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
@@ -1899,6 +1966,10 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	} else {
 		result = r.tools.Execute(ctx, actor, key.sessionID, call)
 	}
+	// A dispatched result is an observed fact even when the user canceled the
+	// transport. This context permits auditing only, never another effect.
+	ctx, stopAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer stopAudit()
 	result.ToolCallID = call.ID
 	result.ToolName = call.Name
 	for _, modification := range codeModificationPayloads(result, key.runID) {
@@ -2143,6 +2214,9 @@ func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lea
 		if projection.terminal || projection.leaseID != lease.LeaseID {
 			return ErrLeaseLost
 		}
+		if projection.cancelRequest != nil && (eventType == "tool/call" || eventType == "assistant/message") {
+			return ErrRunCancelRequested
+		}
 		_, err = r.workbench.ledger.AppendSurface(ctx, key.sessionID, int64(len(events)), eventType, payload, SurfaceOperation{Op: "append"})
 		if err == nil {
 			r.workbench.signal(key.sessionID)
@@ -2179,6 +2253,9 @@ func (r *SessionRunner) appendLeasedFactEvent(ctx context.Context, key runKey, l
 		}
 		if projection.terminal || projection.leaseID != leaseID {
 			return Event{}, ErrLeaseLost
+		}
+		if projection.cancelRequest != nil && (eventType == runHeartbeatEventType || eventType == toolDispatchedType || eventType == commitPendingEventType || eventType == runCompletedEventType || eventType == runFailedEventType) {
+			return Event{}, ErrRunCancelRequested
 		}
 		appended, err := r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), eventType, payload)
 		if err == nil {
@@ -2315,6 +2392,12 @@ func (r *SessionRunner) closePendingCommits(ctx context.Context, key runKey, lea
 func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if events, err := r.workbench.ledger.Events(ctx, key.sessionID); err == nil {
+		if run, err := projectRun(events, key.runID); err == nil && run.cancelRequest != nil {
+			r.finishCancellation(key)
+			return
+		}
+	}
 	_ = r.appendLeasedFact(ctx, key, lease.LeaseID, "execution_result", map[string]any{
 		"status":     "run_failed",
 		"error_code": publicRunErrorCode(cause),
@@ -2554,8 +2637,34 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			}
 			leaseUntil := payload.LeaseUntil
 			run.view.Status, run.view.Attempt, run.view.WorkerID, run.view.LeaseUntil = RunRunning, payload.Attempt, payload.WorkerID, &leaseUntil
+			if run.cancelRequest != nil {
+				run.view.Status = RunCanceling
+			}
 			run.leaseID = payload.LeaseID
 			run.order = event.Seq
+			runs[payload.RunID] = run
+		case runCancelRequestedEventType:
+			var payload runCancelPayload
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return nil, ErrEventIntegrity
+			}
+			run, exists := runs[payload.RunID]
+			if !exists || run.terminal || run.cancelRequest != nil || strings.TrimSpace(payload.RequestID) == "" || payload.Actor.Validate() != nil || payload.Actor.ScopeKey() != run.actor.ScopeKey() {
+				return nil, ErrEventIntegrity
+			}
+			run.cancelRequest = &payload
+			run.view.Status, run.view.CancellationState = RunCanceling, "requested"
+			runs[payload.RunID] = run
+		case runCancelUnconfirmedEventType:
+			var payload runCancelPayload
+			if json.Unmarshal(event.Payload, &payload) != nil {
+				return nil, ErrEventIntegrity
+			}
+			run, exists := runs[payload.RunID]
+			if !exists || run.terminal || run.cancelRequest == nil || payload.RequestID != run.cancelRequest.RequestID || payload.CleanupOwner != run.cancelRequest.CleanupOwner || payload.Actor.Validate() != nil || payload.Actor.ScopeKey() != run.cancelRequest.Actor.ScopeKey() {
+				return nil, ErrEventIntegrity
+			}
+			run.view.CancellationState = "unknown"
 			runs[payload.RunID] = run
 		case runCompletedEventType, runFailedEventType, runCanceledEventType:
 			var payload runTerminalPayload
@@ -2572,6 +2681,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 				run.view.Status = RunCompleted
 			} else if event.Type == runCanceledEventType {
 				run.view.Status = RunCanceled
+				run.view.CancellationState = payload.CancellationState
 			} else {
 				run.view.Status, run.view.Error = RunFailed, payload.Error
 			}

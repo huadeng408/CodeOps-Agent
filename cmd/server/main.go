@@ -81,6 +81,17 @@ func (m *managedContinuation) SubmitMessage(ctx context.Context, cmd session.Sub
 	return m.runner.SubmitMessage(ctx, cmd)
 }
 
+func (m *managedContinuation) CancelRun(ctx context.Context, cmd session.CancelRunCommand) (session.RunView, error) {
+	if m == nil || m.runner == nil {
+		return session.RunView{}, session.ErrContinuationUnavailable
+	}
+	cancellation, ok := m.runner.(session.RunCancellationModule)
+	if !ok {
+		return session.RunView{}, session.ErrContinuationUnavailable
+	}
+	return cancellation.CancelRun(ctx, cmd)
+}
+
 func (m *managedContinuation) Recover(ctx context.Context) error {
 	if m == nil || m.runner == nil {
 		return session.ErrContinuationUnavailable
@@ -396,7 +407,7 @@ func main() {
 			return handlePersistedAgentLifecycle(lifecycleCtx, ledger, workspaceManager, lifecycle)
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
-			WorkerID: workerID, Permissions: continuationPermissions, MCPCatalog: continuationMCP.Catalog,
+			WorkerID: workerID, Permissions: continuationPermissions, MCPCatalog: continuationMCP.Catalog, CancelModelCalls: modelGateway.StopRunCalls,
 			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
 			Memory: sessionMemory, Tracer: telemetry,
 			AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {

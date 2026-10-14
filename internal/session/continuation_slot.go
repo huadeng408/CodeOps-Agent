@@ -141,6 +141,22 @@ func (s *ContinuationSlot) SubmitMessage(ctx context.Context, cmd SubmitMessageC
 	return m.SubmitMessage(ctx, cmd)
 }
 
+func (s *ContinuationSlot) CancelRun(ctx context.Context, cmd CancelRunCommand) (RunView, error) {
+	if s == nil {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	m, release := s.acquire()
+	if release == nil {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	defer release()
+	cancellation, ok := m.(RunCancellationModule)
+	if !ok {
+		return RunView{}, ErrContinuationUnavailable
+	}
+	return cancellation.CancelRun(ctx, cmd)
+}
+
 func (s *ContinuationSlot) Recover(ctx context.Context) error {
 	if s == nil {
 		return ErrContinuationUnavailable

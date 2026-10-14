@@ -16,6 +16,7 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/admission"
 	"code-agent/internal/identity"
+	"code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
 	"google.golang.org/grpc"
@@ -69,6 +70,170 @@ func TestGatewayRefusesUnadmittedTaskBeforeReservationOrHTTP(t *testing.T) {
 	defer runner.Close()
 	if err := runner.Recover(ctx); err != nil {
 		t.Fatalf("a pre-batch model scope poisoned recovery: %v", err)
+	}
+}
+
+func TestGatewayScopeReleaseStopsPendingProviderResponseAndRetainsReservation(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	budget := admission.NewBudget(ledger)
+	started, stopped := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[`))
+		w.(http.Flusher).Flush()
+		close(started)
+		<-request.Context().Done()
+		close(stopped)
+	}))
+	defer upstream.Close()
+	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL, Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	binding, release, err := gateway.Bind(7, "scope-task", "scope-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	invokeCtx, stopInvoke := context.WithCancel(ctx)
+	defer stopInvoke()
+	result := make(chan *pb.ModelCallResponse, 1)
+	go func() {
+		response, _ := gateway.Invoke(invokeCtx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: "pending-call", PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+		result <- response
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider request did not start")
+	}
+	release()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("released capability left its HTTP response active")
+	}
+	select {
+	case response := <-result:
+		if response == nil || response.ErrorCode == "" {
+			t.Fatalf("cancelled request became a success: %+v", response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Go provider handler did not stop")
+	}
+	batch, err := budget.Inspect(ctx, 7)
+	if err != nil || batch.ActiveCalls != 0 || !batch.UnknownUsage || batch.ReservedTokens != 103 || batch.UsedTokens != 0 {
+		t.Fatalf("cancellation erased or left active accounting: %+v %v", batch, err)
+	}
+}
+
+type cancellationGatewayConversation struct {
+	gateway *admission.Gateway
+	calls   atomic.Int32
+}
+
+func (conversation *cancellationGatewayConversation) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, _ orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	binding, release, err := conversation.gateway.BindActor(request.Actor, request.SessionID)
+	if err != nil {
+		return orchestrator.ConversationResult{}, err
+	}
+	defer release()
+	_, err = conversation.gateway.Invoke(ctx, &pb.ModelCallRequest{Capability: binding.Capability, CallId: fmt.Sprintf("cancel-call-%d", conversation.calls.Add(1)), PayloadJson: []byte(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`)})
+	return orchestrator.ConversationResult{}, err
+}
+
+func TestGatewayOldRunCancellationCannotRevokeTheNewRunsProviderRequest(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "gateway cancellation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := identity.Default().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, stopped := make(chan struct{}, 2), make(chan struct{}, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[`))
+		w.(http.Flusher).Flush()
+		started <- struct{}{}
+		<-request.Context().Done()
+		stopped <- struct{}{}
+	}))
+	defer upstream.Close()
+	gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL, Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	runner := session.NewSessionRunner(workbench, &cancellationGatewayConversation{gateway: gateway}, nil, session.SessionRunnerOptions{CancelModelCalls: gateway.StopRunCalls})
+	defer runner.Close()
+	first, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "one", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "one", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first provider request did not start")
+	}
+	old := session.CancelRunCommand{RequestID: "cancel-one", SessionID: created.ID, RunID: first.RunID, OwnerID: 7, Actor: actor}
+	if _, err := runner.CancelRun(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first provider request did not stop")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var view session.SessionView
+	for {
+		view, err = workbench.Get(ctx, 7, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Run != nil && view.Run.Status == session.RunCanceled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first cancellation was not durable")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	second, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "two", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(view.EventCount), Content: "two", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second provider request did not start")
+	}
+	if err := gateway.StopRunCalls(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+		t.Fatal("old run cancellation stopped the new provider request")
+	case <-time.After(100 * time.Millisecond):
+	}
+	current, err := runner.Run(ctx, created.ID, second.RunID)
+	if err != nil || current.Status != session.RunRunning {
+		t.Fatalf("new run changed: %+v %v", current, err)
 	}
 }
 
@@ -392,7 +557,7 @@ func TestGatewayRetainsRetryBoundaries(t *testing.T) {
 		{"single date delay", []string{"Thu, 01 Jan 1970 00:00:00 GMT"}, "provider_transient", 503, 3, 24, 0, false},
 		{"unknown retry usage", nil, "provider_rate_limited_unknown", 429, 2, 8, 103, true},
 		{"retry output violation", nil, "provider_bound_violated", 429, 2, 8, 103, true},
-		{"revoked binding", nil, "model_gateway_unavailable", 429, 1, 8, 0, false},
+		{"revoked binding", nil, "provider_transport_unknown", 429, 1, 0, 103, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

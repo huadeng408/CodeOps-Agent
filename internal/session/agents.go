@@ -552,7 +552,7 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 				return ErrSessionStateConflict
 			}
 			for _, run := range runs {
-				if !run.terminal {
+				if !run.terminal || run.view.Status == RunCanceled && run.view.CancellationState == "unknown" {
 					return ErrSessionStateConflict
 				}
 			}
@@ -1294,49 +1294,50 @@ func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask,
 		return err
 	}
 	task.Status = "canceled"
+	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+	if err != nil {
+		return err
+	}
+	runs, err := projectRuns(snapshot.Events)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if !run.terminal {
+			return nil
+		}
+	}
 	r.releaseSessionResources(task.ChildSessionId)
 	return r.reconcileAgentWorkspaceLifecycle(ctx, task)
 }
 
 func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
-	// Persist the cancellation fence before a stopped worker can write a failure.
-	defer func() {
-		r.agentMu.Lock()
-		defer r.agentMu.Unlock()
-		for key, cancel := range r.activeAgentRuns {
-			if key.sessionID == task.ChildSessionId {
-				cancel()
+	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+	if err != nil {
+		return err
+	}
+	runs, err := projectRuns(snapshot.Events)
+	if err != nil {
+		return err
+	}
+	for id, run := range runs {
+		if !run.terminal {
+			if _, err := r.CancelRun(ctx, CancelRunCommand{RequestID: "agent-cancel:" + task.Id + ":" + id, SessionID: task.ChildSessionId, RunID: id, OwnerID: projectionOwner(snapshot.Events), Actor: run.actor}); err != nil {
+				if errors.Is(err, ErrSessionStateConflict) {
+					current, readErr := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+					if readErr != nil {
+						return readErr
+					}
+					ended, projectErr := projectRun(current.Events, id)
+					if projectErr == nil && ended.terminal {
+						continue
+					}
+				}
+				return err
 			}
-		}
-	}()
-	for attempt := 0; attempt < 16; attempt++ {
-		snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
-		if err != nil {
-			return err
-		}
-		events := snapshot.Events
-		runs, err := projectRuns(events)
-		if err != nil {
-			return err
-		}
-		var active *runProjection
-		for _, run := range runs {
-			if !run.terminal {
-				copy := run
-				active = &copy
-				break
-			}
-		}
-		if active == nil {
-			r.workbench.signal(task.ChildSessionId)
-			return nil
-		}
-		_, err = r.workbench.ledger.Append(ctx, task.ChildSessionId, int64(len(events)), runCanceledEventType, runTerminalPayload{RunID: active.view.RunID, RequestID: active.view.RequestID, LeaseID: active.leaseID, Attempt: active.view.Attempt})
-		if err != nil && !errors.Is(err, ErrSequenceConflict) {
-			return err
 		}
 	}
-	return ErrSequenceConflict
+	return nil
 }
 
 // DecideAgentToolApproval is a human transport interface, not an AgentTask
