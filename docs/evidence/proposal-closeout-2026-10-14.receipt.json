@@ -1,0 +1,70 @@
+{
+  "scope": "#7 original isolation/proposal acceptance",
+  "current_source": "013fec88749269711a71fdc9b205d2fa93d5da9c",
+  "historic_real_model_receipt_sha256": "8d3791387c270dc208889bb04fcd4ea22e15af9a463e117768206f1eb25df857",
+  "historic_real_model_foreground": {
+    "total": 2,
+    "completed": 1,
+    "failed": 1
+  },
+  "historic_provider_attempts": {
+    "total": 8,
+    "settled": 5,
+    "unknown": 3
+  },
+  "current_paid_calls": 0,
+  "current_http_fixture": {
+    "passed": 1,
+    "skipped": 0,
+    "failed": 0,
+    "exit_code": 0,
+    "real_opensandbox": true,
+    "model_and_orchestrator_external_fixtures": true
+  },
+  "go_targeted": {
+    "pass": 15,
+    "skip": 0,
+    "fail": 0,
+    "exit_code": 0
+  },
+  "frontend_unit": {
+    "passed": 12,
+    "failed": 0,
+    "skipped": 0,
+    "exit_code": 0
+  },
+  "frontend_build_exit_code": 0,
+  "browser_fixture": {
+    "checks": 6,
+    "passed": 6,
+    "exit_code": 0
+  },
+  "historic_scope_binding": {
+    "unchanged_inputs": 855,
+    "changed_inputs": 40,
+    "proposal_core_unchanged": [
+      "internal/session/task_proposal.go",
+      "internal/session/proposal_diff.go",
+      "internal/sandbox/input_snapshot.go",
+      "frontend/src/TaskWorkspacePanel.tsx",
+      "frontend/src/api.ts",
+      "frontend/src/types.ts"
+    ]
+  },
+  "artifacts_sha256": {
+    ".scratch/proposal-closeout-20261014/binding.json": "0aea5f2109ac0eebc4a896f2aefae03233777747a7f406de2799a9f28856e574",
+    ".scratch/proposal-closeout-20261014/targeted.jsonl": "5cfba7afffe92a1da60c2ae2d4fbfe43e47d663ba21a7ed0c01fadffe534fccb",
+    ".scratch/proposal-closeout-20261014/frontend-test.log": "2de698481cabfd132f01f7771287a64f1772a6f51fb119f20ce8371b7dd21f74",
+    ".scratch/proposal-closeout-20261014/frontend-build.log": "71bf99d5bcec37daddc3ec37b2fe0498ada5656fe2a1ce75300912b2274d6934",
+    ".scratch/proposal-closeout-20261014/browser.log": "969c4a463e2c627d1e3d837bd3ccb1f69c96efb40e30c35319cfab37d6a1ffbc",
+    "deployments/docker/.local/receipts/proposal-closeout-20261014/facts.json": "7da37de36543e0458dc9448262ac53db4f85d4f17b6bbeddcccd3dce79d5b6f8",
+    "deployments/docker/.local/receipts/proposal-closeout-20261014/runtime.log": "20b8936b039b841e91c9ad3c907e8d53bcd69fc9ad58227f8ce3457b24cbfeef",
+    "output/playwright/task-proposal-1791971354593/receipt.json": "21611d94dfdebd051aca2eb4711e6fce7cebea6923f40c889c5028d8db03defd"
+  },
+  "not_run": [
+    "current paid model rerun",
+    "proposal application #8",
+    "Memory/Trace/ten-round specialities",
+    "full release"
+  ]
+}

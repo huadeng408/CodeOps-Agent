@@ -51,6 +51,7 @@
 - 重试等待字段：[重复 Retry-After 停止自动重试与已结算用量保留证据](evidence/model-retry-after-fields-2026-10-13.md)。
 - 重试字段数量：[split-date／空字段拒绝及上轮覆盖缺口的纠正证据](evidence/model-retry-after-arity-2026-10-13.md)。
 - 真实 Go 提案与预算续行：[受控产品演示、完整失败分母、冻结输入与原仓库保护证据](evidence/model-proposal-budget-2026-10-13.md)。
+- #7 隔离提案范围收口：[原验收映射、当前指纹与生产 HTTP／分组 OpenSandbox 回归](evidence/proposal-closeout-2026-10-14.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
