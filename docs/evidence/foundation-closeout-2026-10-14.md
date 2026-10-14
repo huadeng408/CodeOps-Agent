@@ -39,7 +39,27 @@
 本轮独立冻结一条 Use／With 只读问答，最多一个初始 run 和两次续行，使用真实浏览器、
 Go／Python、BeeAPI 与已批准的保留工作区。原 v13 两问及补问的 PASS／PARTIAL／FAIL
 均保留；本轮不把旧两问整体改为通过，不要求十轮、完整 Memory 或后端 Trace。
-本轮结果待记录。
+该新 profile 的产品结果为 FAIL，不能声明其通过。三项获准 run 均失败：
+首项工具轮次耗尽、首次续行 provider timeout、末次续行轮次耗尽，末次四项只读工具
+因准备租约到期被 Go 拒绝。没有新增持久答案，不追加第四次尝试。
+
+#5 的原五项验收按以下既有真实结果与当前范围核验收口；不是把 v14 的失败改为通过。
+
+| 原验收项 | 关闭依据 |
+| --- | --- |
+| 首个实际 provider／现有 client 与 Loop Registry | v13 的实际 BeeAPI／grok-4.6 Use／With 问答已完成，兼容 adapter 保持，未新增执行器 |
+| P0／P1／P2 按需加载、来源与 revision、Go Read | v13 第二问核心文件／函数来源核对 PASS；ContextEnvelope、授权读取及正常任务源码不变；当前 metadata-only、checksum／字段兼容回归通过 |
+| 浏览器有限计划、进展、失败状态与受控 Context | v13 回答／计划／工具显示和 v14 的实际有限计划、工具进展／失败均可核对；Harness-managed Python 不读取独立 LayeredContext，使用 Go 传入的 Context 与 Read |
+| 参数变换不授权、拒绝与错误／取消分类 | 当前 admission／gateway／runner 回归及各原拒绝记录；v14 timeout 与租约拒绝原样保留，未重复未知副作用 |
+| 新 user turn／实际 Continuation、CLI／HTTP 共用边界 | v13 新第二问及同请求冲突恢复、真实获准续行，当前公开 gRPC／HTTP 与缓存游标回归保持；不放宽跨 Session 权限 |
+
+v13 的 895 项输入中 886 项指纹仍相同，九项变化仅为 Go 模型期限配置／网关、
+protobuf 绑定、Python client 与对应测试；三项前端产物保持。受影响期限接缝由
+[实际 Go／Python 进程回归](model-deadline-2026-10-14.md)与当前准入回归验证。
+保留 v13 的原运行 SHA、结果和收据，不将它改绑为新运行。
+逐文件核验保存在 `.scratch/foundation-closeout-20261014/v13-scope-binding.json`。
+因此 #5 的原问答／Context 接入范围为 VERIFIED；180 秒可选 profile 的整条产品运行仍 FAIL。
+原 v13 第一问 PARTIAL、补问 FAIL 及其他原尝试继续保留，不宣称所有回答或调用均成功。
 
 ## #7 与 #8
 
@@ -58,6 +78,18 @@ Go／Python、BeeAPI 与已批准的保留工作区。原 v13 两问及补问的
 
 本轮完整发布、Memory 写回、后端 Trace 与十轮综合验收未运行。
 浏览器复用明确标注的 fixture 身份，普通登录继续按对应产品范围记录。
+
+v14 的七项独立场景为 6 PASS／1 FAIL；三项获准 run 为 0 completed／3 failed。
+24 次真实调用为 21 foreground／3 reflection，23 settled／1 terminal unknown；
+47 项工具结果为 43 成功／4 已知租约拒绝，没有 Shell、修改或子代理。
+新增确认 389,346 tokens，当前批次累计 2,329,796；原预留估计 2,506,024,576，费用 unknown。
+浏览器结束接口 HTTP 200，TaskID 已释放、ActiveCalls 为零；原仓库／index 和副本 98 文件
+均保持。所属 Go／Python 进程停止后两个端口无监听，控制容器及原 pin／数据保留。
+浏览器辅助 driver 在 finally 清理时仍等待；核对其 PID、创建时间、父进程和入口后
+只停止该所属 driver，退出码 1。原子进程 stdout 缓冲未保存，不声称完整日志／Trace。
+该清理诊断在 `receipt-v14-cleanup-note.json` 单列，原收据及全部计量／分母不改写。
+产品失败收据：`deployments/docker/.local/receipts/repository-qa-20261014/receipt-v14.json`，
+SHA-256 `d8fb1ebd0d0bd9031fe7ac95db26b2e5150e658759423fb177933d633aaec6b0`。
 
 | 当前验证命令 | 完整分母／退出码 |
 | --- | --- |
