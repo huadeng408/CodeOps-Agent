@@ -42,8 +42,9 @@ from missing provider fields and does not calculate money from a model name.
 ## Model invocation migration
 
 Engineering status: **IMPLEMENTED** for the Ledger module and CLI /
-full-stack / local-core invocation boundary; **BLOCKED** for Issue #3's complete product
-acceptance. The Go CLI and full-stack continuation client always issue transient,
+full-stack / local-core invocation boundary; **VERIFIED** for Issue #3's declared
+admission and accounting scope, mapped in [closeout evidence](evidence/foundation-closeout-2026-10-14.md).
+The Go CLI and full-stack continuation client always issue transient,
 actor-bound gRPC capabilities. Python uses its existing
 OpenAI/Anthropic payload adapters, while Go owns credentials, HTTP dispatch,
 reservation and settlement. Capabilities do not enter model Context or checkpoints.
@@ -201,9 +202,11 @@ exit never implies zero consumption or invents a provider usage response.
 [confirmed holder recovery checks](evidence/model-scope-recovery-2026-10-12.md)
 describe their separate scopes.
 
-Issue #3 still needs its complete attempt denominator for real-provider retries,
-reflection/child-call accounting, process restart and draft recovery. Retained
-unknown usage remains an accounting gap that can be settled later.
+Issue #3's declared admission and accounting checks retain complete attempt
+denominators for real foreground/reflection/child calls and process/draft recovery,
+alongside separately labelled controlled-HTTP retry checks. These do not claim
+that BeeAPI returned an accounted 429. Retained unknown usage remains an
+accounting gap that can be settled later and does not reopen the completed scope.
 Full coding tasks, product fault recovery, reflection writeback, cross-session
 recall and complete Trace readback are accepted under their own later tickets,
 not implicit dependencies of #3. Current scope evidence is linked from the Goal.

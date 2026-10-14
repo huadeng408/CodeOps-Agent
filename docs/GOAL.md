@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| #3 调用入场与预算 | 默认入口、持久批次、已停止调用的 unknown 保留与独立续行已有范围证据；仍需按 #3 核对真实重试、反思／子调用计量、进程重启与草稿恢复的完整尝试分母。完整代码修改、反思写回、跨会话召回和完整 Trace 分别按后续任务验收，不作为 #3 的隐式依赖 |
+| #5 仓库只读问答 | 既有两问的第二问核心来源通过；当前期限 profile 的有限问答仍在核验。按 #5 验 provider／Context、来源、进展与错误／续行边界，不加入 Memory、完整 Trace 或十轮门槛 |
 | #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
 | 模型代码任务与提案 | 受控 Go 示例已贯通真实模型、隔离修改与冻结提案测试；公开仓库两问已有持久回答，第二问核心来源核对通过，第一问质量仍部分通过、补问超时；仍需 Go／Python 完整任务、受批准应用和结果对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
@@ -77,6 +77,7 @@
 - 续行入场与工作区续租：[入队前拒绝、当前游标、活跃反思占用及同一保留工作区的 Go／HTTP 回归](evidence/continuation-admission-2026-10-14.md)。
 - 准入恢复后的真实浏览器验证：[两问回答、过期续租、独立补问失败与任务结束恢复的完整分母](evidence/continuation-recovery-product-2026-10-14.md)。
 - Go 控制的模型期限：[可选请求 profile、RPC 重试上界与取消／unknown 的协议范围证据](evidence/model-deadline-2026-10-14.md)。
+- 基础票按范围收口：[预算同步、#3 五项验收映射和有限 #5 问答](evidence/foundation-closeout-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标
