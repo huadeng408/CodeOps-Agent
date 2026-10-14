@@ -37,7 +37,7 @@ func sessionErrorStatus(err error) int {
 	if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, session.ErrSequenceConflict) || errors.Is(err, session.ErrSessionStateConflict) || errors.Is(err, admission.ErrTaskBusy) || errors.Is(err, admission.ErrUsageUnknown) || errors.Is(err, admission.ErrInvalidAdmission) {
+	if errors.Is(err, session.ErrSequenceConflict) || errors.Is(err, session.ErrSessionStateConflict) || errors.Is(err, admission.ErrTaskBusy) || errors.Is(err, admission.ErrRelayBusy) || errors.Is(err, admission.ErrUsageUnknown) || errors.Is(err, admission.ErrInvalidAdmission) {
 		return http.StatusConflict
 	}
 	if errors.Is(err, session.ErrInvalidSessionInput) {

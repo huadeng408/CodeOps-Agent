@@ -22,6 +22,7 @@ const (
 	taskPrepareIntentEvent = "workspace/task-prepare-intent"
 	taskPreparedEvent      = "workspace/task-prepared"
 	taskPrepareFailedEvent = "workspace/task-prepare-failed"
+	taskLeaseRenewedEvent  = "workspace/task-lease-renewed"
 )
 
 type TaskWorkspaceModule interface {
@@ -74,6 +75,12 @@ type taskPreparePayload struct {
 	IntentEventID string                 `json:"intent_event_id,omitempty"`
 }
 
+type taskLeaseRenewalPayload struct {
+	LeaseID           string    `json:"lease_id"`
+	PreviousExpiresAt time.Time `json:"previous_expires_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
 func NewTaskWorkspaces(w *Workbench, owner func(context.Context) (uint, error), repository, storage string) *TaskWorkspaces {
 	return &TaskWorkspaces{workbench: w, owner: owner, repository: repository, storage: storage, manager: worktree.NewManager(repository, "HEAD")}
 }
@@ -107,13 +114,30 @@ func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, cur
 	if err != nil {
 		return TaskModelWorkspace{}, err
 	}
-	if !view.Available || view.State != "prepared" || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
+	prepared, state, err := taskPreparation(snapshot.Events)
+	if err != nil {
+		return TaskModelWorkspace{}, err
+	}
+	expired := prepared != nil && state == "prepared" && time.Now().After(prepared.Task.LeaseExpiresAt)
+	if !view.Available || view.State != "prepared" && !expired || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
 		view.Test != nil && view.Test.State == "unknown" && !view.Test.Stopped ||
 		view.Proposal != nil && !view.Proposal.Test.Stopped {
 		return TaskModelWorkspace{}, ErrSessionStateConflict
 	}
 	if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
 		return TaskModelWorkspace{}, err
+	}
+	if expired {
+		if err := t.verifyTask(ctx, prepared.Task, snapshot.Events); err != nil {
+			return TaskModelWorkspace{}, ErrSessionStateConflict
+		}
+		renewal := taskLeaseRenewalPayload{LeaseID: prepared.Task.LeaseID, PreviousExpiresAt: prepared.Task.LeaseExpiresAt,
+			ExpiresAt: time.Now().UTC().Add(worktree.TaskLeaseTTL)}
+		if _, err := t.workbench.ledger.Append(ctx, id, int64(len(snapshot.Events)), taskLeaseRenewedEvent, renewal); err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		t.workbench.signal(id)
+		return t.modelWorkspace(ctx, owner, id, currentToolID)
 	}
 	workspace := TaskModelWorkspace{WorkingDir: filepath.Join(t.storage, view.WorkspaceID)}
 	if view.Dependency != nil {
@@ -457,6 +481,17 @@ func taskPreparation(events []Event) (*taskPreparePayload, string, error) {
 	var prepared *taskPreparePayload
 	intentID, state := "", ""
 	for _, event := range events {
+		if event.Type == taskLeaseRenewedEvent {
+			var renewal taskLeaseRenewalPayload
+			if prepared == nil || state != "prepared" || json.Unmarshal(event.Payload, &renewal) != nil ||
+				renewal.LeaseID != prepared.Task.LeaseID || !renewal.PreviousExpiresAt.Equal(prepared.Task.LeaseExpiresAt) ||
+				!event.CreatedAt.After(renewal.PreviousExpiresAt) || !renewal.ExpiresAt.After(event.CreatedAt) ||
+				renewal.ExpiresAt.After(event.CreatedAt.Add(worktree.TaskLeaseTTL)) {
+				return nil, "", ErrEventIntegrity
+			}
+			prepared.Task.LeaseExpiresAt = renewal.ExpiresAt
+			continue
+		}
 		if event.Type != taskPrepareIntentEvent && event.Type != taskPreparedEvent && event.Type != taskPrepareFailedEvent {
 			continue
 		}

@@ -611,6 +611,14 @@ func (r *SessionRunner) requestContinuation(ctx context.Context, command Continu
 	if err != nil {
 		return RunView{}, err
 	}
+	if int64(len(events)) != command.ExpectedSeq {
+		return RunView{}, ErrSequenceConflict
+	}
+	if r.options.Workspace != nil {
+		if _, err := r.options.Workspace(ctx, command.OwnerID, command.SessionID); err != nil {
+			return RunView{}, err
+		}
+	}
 	_, err = r.workbench.ledger.Append(ctx, command.SessionID, command.ExpectedSeq, continuationEventType, payload)
 	if err != nil {
 		if errors.Is(err, ErrSequenceConflict) {

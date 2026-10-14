@@ -46,6 +46,192 @@ func taskWorkspaceGit(t *testing.T, root string, args ...string) {
 
 func taskWorkspaceOwner(context.Context) (uint, error) { return 7, nil }
 
+func TestExpiredTaskWorkspaceAdmissionReconcilesSameLease(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first native Git directory pin contract")
+	}
+	ctx := context.Background()
+	repo, storage := taskWorkspaceRepository(t), t.TempDir()
+	ledger := openWorkbenchTestLedger(t)
+	w := NewWorkbench(ledger, nil)
+	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "retained task", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := TaskBaselineRuntime{
+		Runner:  sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage}),
+		Ready:   func(context.Context) error { return nil },
+		Acquire: func(context.Context, uint, string) error { return nil },
+		Finish:  func(context.Context, uint, string) error { return nil },
+	}
+	tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).WithBaselineRuntime(profile)
+	tasks.manager.SetAgentLeaseTTL(5 * time.Second)
+	prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
+	if err != nil || prepared.State != "prepared" {
+		t.Fatalf("prepare: %+v %v", prepared, err)
+	}
+	original, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(*prepared.LeaseExpiresAt) + 20*time.Millisecond)
+	expired, err := tasks.Inspect(ctx, 7, created.ID)
+	if err != nil || expired.State != "blocked" {
+		t.Fatalf("expired lease was silently admitted: %+v %v", expired, err)
+	}
+	reopened := NewTaskWorkspaces(NewWorkbench(ledger, nil), taskWorkspaceOwner, repo, storage).WithBaselineRuntime(profile)
+	workspace, err := reopened.ModelWorkspace(ctx, 7, created.ID)
+	if err != nil || workspace.WorkingDir != filepath.Join(storage, prepared.WorkspaceID) {
+		t.Fatalf("confirmed retained task did not recover: %+v %v", workspace, err)
+	}
+	recovered, err := reopened.Inspect(ctx, 7, created.ID)
+	if err != nil || recovered.State != "prepared" || recovered.WorkspaceID != prepared.WorkspaceID ||
+		recovered.Baseline.Checksum != prepared.Baseline.Checksum || !recovered.LeaseExpiresAt.After(time.Now()) || recovered.EventCount != 4 {
+		t.Fatalf("renewal changed the workspace identity or was not persisted: %+v %v", recovered, err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil || len(events) != 4 {
+		t.Fatal("renewal did not leave one durable fact")
+	}
+	for index, event := range original {
+		if events[index].EventID != event.EventID || events[index].Checksum != event.Checksum {
+			t.Fatal("renewal rewrote original preparation evidence")
+		}
+	}
+	again, err := NewTaskWorkspaces(NewWorkbench(ledger, nil), taskWorkspaceOwner, repo, storage).WithBaselineRuntime(profile).Inspect(ctx, 7, created.ID)
+	if err != nil || again.State != "prepared" || again.EventCount != recovered.EventCount || !again.LeaseExpiresAt.Equal(*recovered.LeaseExpiresAt) {
+		t.Fatalf("reopening lost the renewed lease: %+v %v", again, err)
+	}
+}
+
+func TestExpiredTaskWorkspaceRefusesUnverifiedRecovery(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first native Git directory pin contract")
+	}
+	for _, scenario := range []string{"runtime unavailable", "unrecorded file change", "unknown tool outcome"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			repo, storage := taskWorkspaceRepository(t), t.TempDir()
+			ledger := openWorkbenchTestLedger(t)
+			w := NewWorkbench(ledger, nil)
+			created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "unsafe recovery", "", repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeUnavailable := false
+			tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).WithBaselineRuntime(TaskBaselineRuntime{
+				Runner: sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage}),
+				Ready: func(context.Context) error {
+					if runtimeUnavailable {
+						return errors.New("fixture runtime identity unavailable")
+					}
+					return nil
+				},
+				Acquire: func(context.Context, uint, string) error { return nil },
+				Finish:  func(context.Context, uint, string) error { return nil },
+			})
+			tasks.manager.SetAgentLeaseTTL(5 * time.Second)
+			prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
+			if err != nil || prepared.State != "prepared" {
+				t.Fatalf("prepare: %+v %v", prepared, err)
+			}
+			time.Sleep(time.Until(*prepared.LeaseExpiresAt) + 20*time.Millisecond)
+			if _, err := tasks.ModelWorkspace(ctx, 8, created.ID); !errors.Is(err, ErrSessionNotFound) {
+				t.Fatal("foreign owner renewed or observed the workspace")
+			}
+			if scenario == "runtime unavailable" {
+				runtimeUnavailable = true
+			} else if scenario == "unrecorded file change" {
+				if err := os.WriteFile(filepath.Join(storage, prepared.WorkspaceID, "main.go"), []byte("unrecorded"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := ledger.Append(ctx, created.ID, 3, toolUnknownEventType, toolCallPayload{RunID: "lost-run", ToolCallID: "lost-call", ToolName: "Shell", ArgumentsJSON: `{}`}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := w.Get(ctx, 7, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if workspace, err := tasks.ModelWorkspace(ctx, 7, created.ID); !errors.Is(err, ErrSessionStateConflict) || workspace.WorkingDir != "" {
+				t.Fatalf("unsafe retained task was admitted: %+v %v", workspace, err)
+			}
+			after, err := tasks.Inspect(ctx, 7, created.ID)
+			if err != nil || after.State != "blocked" || after.EventCount != before.EventCount || !after.LeaseExpiresAt.Equal(*prepared.LeaseExpiresAt) {
+				t.Fatalf("refused recovery changed the retained lease: %+v %v", after, err)
+			}
+		})
+	}
+}
+
+func TestContinuationRejectsUnpreparedWorkspaceBeforeEnqueue(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-first native Git directory pin contract")
+	}
+	ctx := context.Background()
+	repo, storage := taskWorkspaceRepository(t), t.TempDir()
+	ledger := openWorkbenchTestLedger(t)
+	w := NewWorkbench(ledger, nil)
+	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "continue after preparation", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := w.AppendUserMessage(ctx, 7, created.ID, 1, "inspect the repository")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := w.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).WithBaselineRuntime(TaskBaselineRuntime{
+		Runner:  sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage}),
+		Ready:   func(context.Context) error { return nil },
+		Acquire: func(context.Context, uint, string) error { return nil },
+		Finish:  func(context.Context, uint, string) error { return nil },
+	})
+	adapter := &recordingConversationAdapter{reply: "repository inspected"}
+	runner := NewSessionRunner(w, adapter, nil, SessionRunnerOptions{WorkerID: "workspace-preflight", Workspace: tasks.ModelWorkspace})
+	defer runner.Close()
+	command := ContinueCommand{RequestID: "continue-after-prepare", SessionID: created.ID, OwnerID: 7,
+		CheckpointHash: checkpoint.Hash, ExpectedSeq: 4, Actor: testRunnerActor()}
+	if _, err := runner.RequestContinuation(ctx, command); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("unprepared workspace queued a continuation: %v", err)
+	}
+	view, err := w.Get(ctx, 7, created.ID)
+	if err != nil || view.EventCount != 4 || view.Run != nil || view.Status != "paused" {
+		t.Fatalf("rejected continuation changed the session: %+v %v", view, err)
+	}
+	tasks.manager.SetAgentLeaseTTL(5 * time.Second)
+	prepared, err := tasks.Prepare(ctx, 7, created.ID, 4, "prepare")
+	if err != nil || prepared.State != "prepared" {
+		t.Fatalf("prepare rejected task: %+v %v", prepared, err)
+	}
+	command.ExpectedSeq = int64(prepared.EventCount)
+	time.Sleep(time.Until(*prepared.LeaseExpiresAt) + 20*time.Millisecond)
+	if _, err := runner.RequestContinuation(ctx, command); !errors.Is(err, ErrSequenceConflict) {
+		t.Fatalf("renewed lease did not require the authoritative cursor: %v", err)
+	}
+	view, err = w.Get(ctx, 7, created.ID)
+	if err != nil || view.EventCount != prepared.EventCount+1 || view.Run != nil || view.Status != "paused" {
+		t.Fatalf("lease reconciliation queued or rewrote the continuation: %+v %v", view, err)
+	}
+	command.ExpectedSeq = int64(view.EventCount)
+	accepted, err := runner.RequestContinuation(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, runner, created.ID, accepted.RunID, RunCompleted)
+	duplicate, err := runner.RequestContinuation(ctx, command)
+	if err != nil || duplicate.RunID != accepted.RunID {
+		t.Fatalf("same request did not retain its run: %+v %v", duplicate, err)
+	}
+}
+
 func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-first native Git directory pin contract")

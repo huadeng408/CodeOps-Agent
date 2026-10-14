@@ -74,6 +74,7 @@
 - 真实失败分类与恢复：[工具轮次／timeout、启动草稿恢复、代理续行与全部失败分母](evidence/repository-qa-classified-2026-10-14.md)。
 - 有界续行恢复：[累计游标、同 run 额度、待执行请求重放与公开协议回归](evidence/continuation-rounds-2026-10-14.md)。
 - 有界续行的真实仓库验证：[实际游标推进、第一问质量缺口、第二问失败与完整调用分母](evidence/continuation-product-2026-10-14.md)。
+- 续行入场与工作区续租：[入队前拒绝、当前游标、活跃反思占用及同一保留工作区的 Go／HTTP 回归](evidence/continuation-admission-2026-10-14.md)。
 - 旧测试数量、旧 blocker 和施工过程：[原文快照](archive/receipts/GOAL-log-2026-10-11-before-instruction-consolidation.md)、[历史索引](archive/INDEX.md)。
 
 ## 长期能力与发布目标

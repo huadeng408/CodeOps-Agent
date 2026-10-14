@@ -308,7 +308,7 @@ func (h *EventHandler) ContinueSession(c *gin.Context) {
 		Actor: actor,
 	})
 	if err != nil {
-		writeSessionError(c, err, "failed to continue session")
+		writeSessionError(c, err, "failed to continue session", h.workbench)
 		return
 	}
 	writeSessionData(c, http.StatusAccepted, continued)

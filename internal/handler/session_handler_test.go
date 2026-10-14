@@ -256,6 +256,50 @@ func TestSubmitMessageRouteStartsNaturalLanguageTurnIdempotently(t *testing.T) {
 	}
 }
 
+func TestContinuationWorkspaceRefusalIncludesCanonicalCursor(t *testing.T) {
+	ctx := context.Background()
+	w, _ := openHandlerTestWorkbench(t)
+	repo := t.TempDir()
+	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "unprepared continuation", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := w.AppendUserMessage(ctx, 7, created.ID, 1, "retain this intent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := w.CreateCheckpoint(ctx, 7, created.ID, 2, message.ID, "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateStatus(ctx, 7, created.ID, 3, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	tasks := session.NewTaskWorkspaces(w, func(context.Context) (uint, error) { return 7, nil }, repo, t.TempDir())
+	runner := session.NewSessionRunner(w, handlerApprovalConversation{}, nil,
+		session.SessionRunnerOptions{WorkerID: "http-preflight", Workspace: tasks.ModelWorkspace})
+	defer runner.Close()
+	router := messageSubmissionRouter(7, w, runner)
+	router.POST("/sessions/:id/continue", NewEventHandler(w, runner).ContinueSession)
+	response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/continue", map[string]any{
+		"requestId": "retain-continuation", "checkpointHash": checkpoint.Hash, "expectedSeq": 4,
+	})
+	var rejected struct {
+		Cursor struct {
+			SessionID  string `json:"sessionId"`
+			EventCount int    `json:"eventCount"`
+		} `json:"cursor"`
+	}
+	if response.Code != http.StatusConflict || json.Unmarshal(response.Body.Bytes(), &rejected) != nil ||
+		rejected.Cursor.SessionID != created.ID || rejected.Cursor.EventCount != 4 {
+		t.Fatalf("workspace refusal lost its authoritative cursor: %d %s", response.Code, response.Body.String())
+	}
+	view, err := w.Get(ctx, 7, created.ID)
+	if err != nil || view.Run != nil || view.EventCount != 4 {
+		t.Fatalf("refused browser continuation changed durable intent: %+v %v", view, err)
+	}
+}
+
 func TestSubmitMessageConflictIncludesCanonicalCursor(t *testing.T) {
 	workbench, _ := openHandlerTestWorkbench(t)
 	created, err := workbench.Create(context.Background(), 7, "repo", "conflict", "goal")

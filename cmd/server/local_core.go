@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -118,23 +119,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 	}
 	provider := admission.ProviderFromEnv()
 	gateway := admission.NewGateway(admission.NewBudget(ledger), provider)
-	modelWorkspace := func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
-		workspace, err := workspaces.ModelWorkspace(ctx, owner, id)
-		if err != nil {
-			return session.TaskModelWorkspace{}, err
-		}
-		batch, err := admission.NewBudget(ledger).Inspect(ctx, owner)
-		if err != nil {
-			return session.TaskModelWorkspace{}, err
-		}
-		if batch.ActiveCalls != 0 {
-			return session.TaskModelWorkspace{}, admission.ErrUsageUnknown
-		}
-		if batch.TaskID != "" && batch.TaskID != id {
-			return session.TaskModelWorkspace{}, admission.ErrTaskBusy
-		}
-		return workspace, nil
-	}
+	modelWorkspace := localModelWorkspaceAdmission(workspaces, admission.NewBudget(ledger))
 	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
 		if workspaces == nil {
 			return session.ErrContinuationUnavailable
@@ -212,6 +197,22 @@ func runLocalCore(cfg serverconfig.Config) error {
 		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": capabilities})
 	})
 	return serveHTTPServer(&http.Server{Addr: net.JoinHostPort(host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 5 * time.Second})
+}
+
+func localModelWorkspaceAdmission(workspaces *session.TaskWorkspaces, budget *admission.Budget) func(context.Context, uint, string) (session.TaskModelWorkspace, error) {
+	return func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
+		batch, err := budget.Inspect(ctx, owner)
+		if err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		if batch.ActiveCalls != 0 {
+			return session.TaskModelWorkspace{}, fmt.Errorf("%w: wait for the active model call to finish", admission.ErrRelayBusy)
+		}
+		if batch.TaskID != "" && batch.TaskID != id {
+			return session.TaskModelWorkspace{}, admission.ErrTaskBusy
+		}
+		return workspaces.ModelWorkspace(ctx, owner, id)
+	}
 }
 
 func addModelAdmissionCapabilities(ctx context.Context, ledger session.EventLog, capabilities map[string]CapabilityStatus, owner uint) {

@@ -19,6 +19,8 @@ import (
 	gitindex "github.com/go-git/go-git/v5/plumbing/format/index"
 )
 
+const TaskLeaseTTL = defaultAgentLeaseTTL
+
 // TaskWorkspace is a retained preparation lease, not an executing Agent. Its
 // path is derived from host-approved storage; the Ledger stores no file bodies.
 type TaskWorkspace struct {
