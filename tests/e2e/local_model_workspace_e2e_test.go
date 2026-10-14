@@ -28,18 +28,25 @@ import (
 // This opt-in uses the approved live OpenSandbox profile. Only model HTTP and
 // orchestrator transport are external fixtures; all Harness modules are real.
 func TestProductionLocalCoreModelUsesRecordedTaskCopy(t *testing.T) {
-	testProductionLocalCoreModelTaskCopy(t, false, false)
+	testProductionLocalCoreModelTaskCopy(t, false, false, "")
 }
 
 func TestProductionLocalCoreModelRejectsUnknownShellOutcome(t *testing.T) {
-	testProductionLocalCoreModelTaskCopy(t, true, false)
+	testProductionLocalCoreModelTaskCopy(t, true, false, "")
 }
 
 func TestProductionLocalCoreGoFixProducesTestedProposal(t *testing.T) {
-	testProductionLocalCoreModelTaskCopy(t, false, true)
+	testProductionLocalCoreModelTaskCopy(t, false, true, "")
 }
 
-func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal bool) {
+func TestProductionLocalCoreBrowserApprovesProposal(t *testing.T) {
+	testProductionLocalCoreModelTaskCopy(t, false, true, "approve")
+}
+func TestProductionLocalCoreBrowserRejectsProposal(t *testing.T) {
+	testProductionLocalCoreModelTaskCopy(t, false, true, "reject")
+}
+
+func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal bool, decision string) {
 	if runtime.GOOS != "windows" || os.Getenv("CODE_AGENT_RUN_LOCAL_MODEL_WORKSPACE_E2E") != "1" {
 		t.Skip("requires the approved Windows OpenSandbox integration profile")
 	}
@@ -311,6 +318,34 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 		after, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
 		if err != nil || after.Checksum != baseline.Checksum {
 			t.Fatal("proposal generation or viewing applied the original repository")
+		}
+		if decision != "" {
+			command := exec.Command("node", "tests/e2e/proposal_decision_browser.mjs")
+			command.Dir = e2ERepositoryRoot(t)
+			command.Env = append(os.Environ(), "CODE_AGENT_DECISION_URL="+fixture.base, "CODE_AGENT_DECISION_PASSWORD="+fixture.password,
+				"CODE_AGENT_DECISION_SESSION="+created.Data.ID, "CODE_AGENT_DECISION_PROPOSAL="+got.ID, "CODE_AGENT_DECISION_ACTION="+decision,
+				"CODE_AGENT_DECISION_ARTIFACT="+os.Getenv("CODE_AGENT_LOCAL_WORKSPACE_ARTIFACT")+".browser.json")
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("browser decision failed: %v: %s", err, output)
+			}
+			original, err := os.ReadFile(filepath.Join(repository, changedPath))
+			want := "package calc\n\nfunc Add(left, right int) int { return left - right }\n"
+			if decision == "approve" {
+				want = expectedContent
+			}
+			if err != nil || string(original) != want {
+				t.Fatal("browser decision changed unexpected original content")
+			}
+			after, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
+			if err != nil || after.HeadCommit != baseline.HeadCommit || after.IndexSHA256 != baseline.IndexSHA256 {
+				t.Fatal("browser decision changed HEAD or index")
+			}
+			isolated, err := os.ReadFile(filepath.Join(copyRoot, changedPath))
+			if err != nil || string(isolated) != expectedContent {
+				t.Fatal("decision lost isolated result")
+			}
+			request(http.MethodPost, path+"/task/finish", map[string]any{}, nil, http.StatusOK)
+			return
 		}
 	}
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(fixture.dir, "sessions.sqlite"))

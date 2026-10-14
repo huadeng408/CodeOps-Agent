@@ -25,8 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| #6 执行环境与基线 | OpenSandbox 部署、完整 Go／Python 基线及 [#23 取消／故障重开／CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 的声明范围已验证；继续模型代码任务与提案所需的执行接入。基础执行证据不代替完整模型闭环 |
-| 模型代码任务与提案 | 受控 Go 示例已贯通真实模型、隔离修改与冻结提案测试；公开仓库两问已有持久回答，第二问核心来源核对通过，第一问质量仍部分通过、补问超时；仍需 Go／Python 完整任务、受批准应用和结果对账 |
+| 模型代码任务与提案 | #7 隔离提案、#8 Windows 单个既有文件的用户确认／拒绝已按范围验证；公开仓库问答的失败／部分结果保留。仍需 Go／Python 完整任务、新增／删除／重命名／多文件应用和更完整的中断对账 |
 | 取消、恢复与 Memory | 完整产品故障场景、真实反思写回、重启后的空新会话召回及来源边界 |
 | Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
@@ -52,6 +51,7 @@
 - 重试字段数量：[split-date／空字段拒绝及上轮覆盖缺口的纠正证据](evidence/model-retry-after-arity-2026-10-13.md)。
 - 真实 Go 提案与预算续行：[受控产品演示、完整失败分母、冻结输入与原仓库保护证据](evidence/model-proposal-budget-2026-10-13.md)。
 - #7 隔离提案范围收口：[原验收映射、当前指纹与生产 HTTP／分组 OpenSandbox 回归](evidence/proposal-closeout-2026-10-14.md)。
+- #8 单文件用户决策：[Go 授权／独占写入、重放／unknown 与实际浏览器确认／拒绝证据](evidence/proposal-application-2026-10-14.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

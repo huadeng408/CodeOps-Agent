@@ -31,6 +31,7 @@ type TaskWorkspaceModule interface {
 	PrepareDependency(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 	RunBaseline(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 	GenerateProposal(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
+	DecideProposal(context.Context, uint, string, int64, string, string, string) (TaskWorkspaceView, error)
 }
 
 // TaskWorkspaces keeps preparation on the Workbench's canonical Ledger. Only
@@ -44,23 +45,24 @@ type TaskWorkspaces struct {
 }
 
 type TaskWorkspaceView struct {
-	Available           bool                    `json:"available"`
-	State               string                  `json:"state"`
-	Reason              string                  `json:"reason,omitempty"`
-	Repository          string                  `json:"repository"`
-	WorkspaceID         string                  `json:"workspaceId,omitempty"`
-	Baseline            *worktree.Baseline      `json:"baseline,omitempty"`
-	LeaseExpiresAt      *time.Time              `json:"leaseExpiresAt,omitempty"`
-	EventCount          int                     `json:"eventCount"`
-	TestAvailable       bool                    `json:"testAvailable"`
-	TestReason          string                  `json:"testReason,omitempty"`
-	Test                *TaskBaselineView       `json:"test,omitempty"`
-	Dependency          *TaskDependencyView     `json:"dependency,omitempty"`
-	DependencyAvailable bool                    `json:"dependencyAvailable"`
-	Toolchain           string                  `json:"toolchain"`
-	ProposalAvailable   bool                    `json:"proposalAvailable"`
-	ProposalReason      string                  `json:"proposalReason,omitempty"`
-	Proposal            *CodeChangeProposalView `json:"proposal,omitempty"`
+	Available           bool                     `json:"available"`
+	State               string                   `json:"state"`
+	Reason              string                   `json:"reason,omitempty"`
+	Repository          string                   `json:"repository"`
+	WorkspaceID         string                   `json:"workspaceId,omitempty"`
+	Baseline            *worktree.Baseline       `json:"baseline,omitempty"`
+	LeaseExpiresAt      *time.Time               `json:"leaseExpiresAt,omitempty"`
+	EventCount          int                      `json:"eventCount"`
+	TestAvailable       bool                     `json:"testAvailable"`
+	TestReason          string                   `json:"testReason,omitempty"`
+	Test                *TaskBaselineView        `json:"test,omitempty"`
+	Dependency          *TaskDependencyView      `json:"dependency,omitempty"`
+	DependencyAvailable bool                     `json:"dependencyAvailable"`
+	Toolchain           string                   `json:"toolchain"`
+	ProposalAvailable   bool                     `json:"proposalAvailable"`
+	ProposalReason      string                   `json:"proposalReason,omitempty"`
+	Proposal            *CodeChangeProposalView  `json:"proposal,omitempty"`
+	Application         *ProposalApplicationView `json:"application,omitempty"`
 }
 
 // TaskModelWorkspace is a Harness-only execution context, never an HTTP root.
@@ -113,6 +115,15 @@ func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, cur
 	view, err := t.project(ctx, snapshot.Events, sessionView)
 	if err != nil {
 		return TaskModelWorkspace{}, err
+	}
+	applications, err := taskApplications(snapshot.Events)
+	if err != nil {
+		return TaskModelWorkspace{}, err
+	}
+	for _, application := range applications {
+		if application.View.State == "unknown" {
+			return TaskModelWorkspace{}, ErrSessionStateConflict
+		}
 	}
 	prepared, state, err := taskPreparation(snapshot.Events)
 	if err != nil {
@@ -400,6 +411,20 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 	view.ProposalAvailable = view.Available && view.State == "prepared" && view.Toolchain == "go" && view.TestAvailable && t.baselineRuntime.BeginProposal != nil &&
 		(sessionView.Run == nil || sessionView.Run.Status != RunQueued && sessionView.Run.Status != RunRunning) &&
 		(view.Proposal == nil || view.Proposal.Test.Stopped)
+	applications, err := taskApplications(events)
+	if err != nil {
+		return view, err
+	}
+	for _, application := range applications {
+		if view.Proposal != nil && application.View.ProposalID == view.Proposal.ID {
+			copy := application.View
+			view.Application = &copy
+			view.ProposalAvailable = false
+		}
+		if application.View.State == "unknown" {
+			view.ProposalAvailable = false
+		}
+	}
 	if !view.ProposalAvailable {
 		view.ProposalReason = "completed Go workspace and confirmed execution are required"
 	}

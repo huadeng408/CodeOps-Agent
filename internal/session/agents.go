@@ -533,6 +533,15 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 		if proposal != nil && !proposal.View.Test.Stopped {
 			return ErrSessionStateConflict
 		}
+		applications, applicationErr := taskApplications(snapshot.Events)
+		if applicationErr != nil {
+			return applicationErr
+		}
+		for _, application := range applications {
+			if application.View.State == "unknown" {
+				return ErrSessionStateConflict
+			}
+		}
 		owner, _, err := agentParent(snapshot.Events, current)
 		if err != nil {
 			return err

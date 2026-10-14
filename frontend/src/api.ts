@@ -167,6 +167,11 @@ class ApiClient {
     return result.data;
   }
 
+  async decideTaskProposal(sessionId: string, expectedSeq: number, requestId: string, proposalId: string, decision: 'approve' | 'reject', signal?: AbortSignal): Promise<TaskWorkspace> {
+    const result = await this.request<TaskWorkspace>('POST', `/sessions/${encodeURIComponent(sessionId)}/task-workspace/proposal/decision`, { body: { expectedSeq, requestId, proposalId, decision }, signal });
+    return result.data;
+  }
+
   async updateSessionTitle(sessionId: string, title: string, expectedSeq: number): Promise<void> {
     await this.request('PUT', `/sessions/${encodeURIComponent(sessionId)}/title`, { body: { title, expectedSeq } });
   }

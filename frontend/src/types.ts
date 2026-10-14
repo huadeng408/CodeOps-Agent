@@ -46,6 +46,13 @@ export interface TaskWorkspace {
   testReason?: string;
   proposalAvailable?: boolean;
   proposalReason?: string;
+  application?: {
+    requestId: string;
+    proposalId: string;
+    decision: 'approve' | 'reject';
+    state: 'applied' | 'rejected' | 'conflict' | 'unknown';
+    reason?: string;
+  };
   proposal?: {
     id: string;
     sessionId: string;

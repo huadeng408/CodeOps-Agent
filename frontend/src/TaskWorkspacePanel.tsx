@@ -159,6 +159,31 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
     }
   };
   const proposal = view?.proposal;
+  const decideProposal = async (decision: 'approve' | 'reject') => {
+    if (!view?.available || !proposal || view.application || busy) return;
+    const controller = new AbortController();
+    request.current?.abort(); request.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    const storageKey = `task-application-request:${sessionId}:${proposal.id}:${decision}`;
+    let identity = '';
+    try {
+      try { identity = localStorage.getItem(storageKey) || ''; } catch { /* The Ledger prevents a second application. */ }
+      identity ||= createContinuationRequestId();
+      try { localStorage.setItem(storageKey, identity); } catch { /* Proposal identity still prevents a second write. */ }
+      setBusy(true); setError('');
+      const data = await api.decideTaskProposal(sessionId, view.eventCount, identity, proposal.id, decision, controller.signal);
+      if (data.proposal?.sessionId !== sessionId || data.application?.proposalId !== proposal.id) throw new Error('application binding mismatch');
+      if (!controller.signal.aborted && request.current === controller) { setView(data); await onChanged(); }
+    } catch (cause) {
+      if (request.current === controller) {
+        setView(null);
+        setError(cause instanceof ApiError && cause.status === 409 ? '原基线、授权或会话已变化，请重新检查；不会覆盖现有内容。' : '无法确认应用结果，请重新检查；原请求已保留，不会自动重试写入。');
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (request.current === controller) setBusy(false);
+    }
+  };
   const boundTest = proposal && /^[a-f0-9]{64}$/.test(proposal.test.inputSHA256)
     && proposal.test.inputSHA256 === proposal.finalStateSHA256 && /^[a-f0-9]{64}$/.test(proposal.test.archiveSHA256)
     && proposal.test.modeTransform === 'readonly-v1' && proposal.test.stopped === true && !proposal.test.truncated;
@@ -231,6 +256,10 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
         <p className="workspace-description">文件模式变换：{proposal.test.modeTransform || '待核验'}</p>
         {proposal.test.reason && <p className="workspace-description">{reasons[proposal.test.reason] || proposal.test.reason}</p>}
         <pre className="task-baseline-output" tabIndex={0} aria-label="提案测试输出">{proposal.test.output || '暂无可确认的输出。'}</pre>
+        {view?.application ? <p role="status">{{ applied: '已应用，原 index 保留', rejected: '已拒绝，隔离结果保留', conflict: '应用冲突，现有内容保留', unknown: '应用结果待核验，请先对账' }[view.application.state]}</p> : view?.available && proposal.test.stopped && <div className="task-workspace-actions">
+          {proposalTestState === 'passed' && proposal.state === 'ready' && proposal.files.length === 1 && proposal.files[0].beforeExists && proposal.files[0].afterExists && proposal.files[0].beforeMode === proposal.files[0].afterMode && <button type="button" className="primary-btn" disabled={busy} onClick={() => void decideProposal('approve')}>确认应用此文件</button>}
+          <button type="button" disabled={busy} onClick={() => void decideProposal('reject')}>拒绝此提案</button>
+        </div>}
       </> : <p className="workspace-description">{view?.proposalReason ? reasons[view.proposalReason] || view.proposalReason : '任务完成后，冻结隔离修改并测试；原仓库保留。'}</p>}
       {view?.proposalAvailable && (!proposal || proposal.test.stopped && ['stale', 'failed', 'blocked'].includes(proposal.state)) && <button className="primary-btn" type="button" disabled={busy} onClick={() => void generateProposal()}>{proposal ? '重新生成并测试提案' : '生成并测试提案'}</button>}
     </section>

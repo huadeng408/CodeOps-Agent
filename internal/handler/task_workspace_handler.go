@@ -23,6 +23,7 @@ func (h *TaskWorkspaceHandler) Prepare(c *gin.Context)           { h.handle(c, "
 func (h *TaskWorkspaceHandler) RunBaseline(c *gin.Context)       { h.handle(c, "test") }
 func (h *TaskWorkspaceHandler) PrepareDependency(c *gin.Context) { h.handle(c, "dependency") }
 func (h *TaskWorkspaceHandler) GenerateProposal(c *gin.Context)  { h.handle(c, "proposal") }
+func (h *TaskWorkspaceHandler) DecideProposal(c *gin.Context)    { h.handle(c, "decision") }
 
 func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 	owner, err := authenticatedOwner(c)
@@ -46,17 +47,22 @@ func (h *TaskWorkspaceHandler) handle(c *gin.Context, action string) {
 	var view session.TaskWorkspaceView
 	if action != "" {
 		var request struct {
-			ExpectedSeq *int64 `json:"expectedSeq"`
-			RequestID   string `json:"requestId"`
+			ExpectedSeq *int64  `json:"expectedSeq"`
+			RequestID   string  `json:"requestId"`
+			ProposalID  *string `json:"proposalId"`
+			Decision    *string `json:"decision"`
 		}
 		data, readErr := io.ReadAll(io.LimitReader(c.Request.Body, 4097))
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
-		if readErr != nil || len(data) > 4096 || decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF || request.ExpectedSeq == nil {
+		if readErr != nil || len(data) > 4096 || decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF || request.ExpectedSeq == nil ||
+			action == "decision" && (request.ProposalID == nil || request.Decision == nil) || action != "decision" && (request.ProposalID != nil || request.Decision != nil) {
 			writeSessionError(c, session.ErrInvalidSessionInput, "invalid workspace request")
 			return
 		}
-		if action == "proposal" {
+		if action == "decision" {
+			view, err = h.tasks.DecideProposal(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID, *request.ProposalID, *request.Decision)
+		} else if action == "proposal" {
 			view, err = h.tasks.GenerateProposal(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)
 		} else if action == "test" {
 			view, err = h.tasks.RunBaseline(c.Request.Context(), owner, c.Param("id"), *request.ExpectedSeq, request.RequestID)

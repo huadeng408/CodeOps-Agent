@@ -1,0 +1,161 @@
+{
+  "scope": "#8 Windows one existing-file human proposal decision",
+  "source_head": "d96b1f03595853fb407cea039872b237ba22e77a",
+  "runtime_includes_uncommitted_implementation": true,
+  "final_runtime_inputs_verified": true,
+  "model_and_orchestrator_external_fixtures": true,
+  "actual_production_go_http_filesystem_opensandbox_browser": true,
+  "paid_model_calls": 0,
+  "go_full": {
+    "tests": {
+      "pass": 1601,
+      "skip": 74,
+      "fail": 0
+    },
+    "packages": {
+      "pass": 45,
+      "skip": 13,
+      "fail": 0
+    },
+    "failed_builds": 0,
+    "exit_code": 0
+  },
+  "go_targeted": {
+    "tests": {
+      "pass": 20,
+      "skip": 0,
+      "fail": 0
+    },
+    "packages": {
+      "pass": 3,
+      "skip": 0,
+      "fail": 0
+    },
+    "failed_builds": 0,
+    "exit_code": 0
+  },
+  "go_vet_exit_code": 0,
+  "first_full_attempt": {
+    "tests": {
+      "pass": 1412,
+      "skip": 74,
+      "fail": 0
+    },
+    "packages": {
+      "pass": 44,
+      "skip": 13,
+      "fail": 1
+    },
+    "failed_builds": 1,
+    "exit_code": 1
+  },
+  "first_vet_exit_code": 1,
+  "frontend_unit": {
+    "passed": 12,
+    "skipped": 0,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "frontend_build_exit_code": 0,
+  "frontend_browser_fixture": {
+    "checks": 6,
+    "passed": 6,
+    "exit_code": 0
+  },
+  "real_browser_decisions": {
+    "approve": {
+      "test_passed": 1,
+      "skipped": 0,
+      "failed": 0,
+      "exit_code": 0,
+      "browser_checks": 5,
+      "application_state": "applied",
+      "decision_events": 2,
+      "paid_calls": 0,
+      "final_input_fingerprints_verified": false
+    },
+    "reject": {
+      "test_passed": 1,
+      "skipped": 0,
+      "failed": 0,
+      "exit_code": 0,
+      "browser_checks": 5,
+      "application_state": "rejected",
+      "decision_events": 2,
+      "paid_calls": 0,
+      "final_input_fingerprints_verified": false
+    },
+    "approve-final": {
+      "test_passed": 1,
+      "skipped": 0,
+      "failed": 0,
+      "exit_code": 0,
+      "browser_checks": 5,
+      "application_state": "applied",
+      "decision_events": 2,
+      "paid_calls": 0,
+      "final_input_fingerprints_verified": true
+    },
+    "reject-final": {
+      "test_passed": 1,
+      "skipped": 0,
+      "failed": 0,
+      "exit_code": 0,
+      "browser_checks": 5,
+      "application_state": "rejected",
+      "decision_events": 2,
+      "paid_calls": 0,
+      "final_input_fingerprints_verified": true
+    }
+  },
+  "standards_findings": 0,
+  "spec_findings": 0,
+  "not_run": [
+    "full Python: unchanged source",
+    "Memory/Trace/ten-round specialities",
+    "full release",
+    "multi-file transaction #9",
+    "complete crash recovery matrix #10"
+  ],
+  "artifacts_sha256": {
+    ".scratch/proposal-closeout-20261014/application-go-full-final.exitcode": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+    ".scratch/proposal-closeout-20261014/application-go-vet-final.exitcode": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+    ".scratch/proposal-closeout-20261014/application-final-targeted-v2.exitcode": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+    ".scratch/proposal-closeout-20261014/application-frontend-test.exitcode": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+    ".scratch/proposal-closeout-20261014/application-browser-fixture.exitcode": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve/exitcode.json": "aaf7d842f4022eb24c95f6a36f05b9f27de8d33a2e03ad19c6bfb5cf07c50032",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve/runtime.log": "b4e446b1fe0327830f49434f2b49985482d7734546a871a5c3b41279d973ff5e",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve/facts.json": "7b611bd9238fbb26a919d23344d5d03a989867d89a1b70d7d5eb7e8ea92f7885",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve/facts.json.browser.json": "a1e17c43f8847ffb6586ef77ac9d2d7b5ba99710b1bd0db698ec99a4c392ee13",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve/facts.json.browser.json.png": "adf91e5fa25a410f3c00962c8146990ac8984acf09144a2c1f8d9f8c80528b0a",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject/exitcode.json": "aaf7d842f4022eb24c95f6a36f05b9f27de8d33a2e03ad19c6bfb5cf07c50032",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject/runtime.log": "c646443494c7d7b9a25f83ba832a4fb38ba42930a465585abb8d278c23ec66fc",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject/facts.json": "dc7032af41d13b711cb44a4e9b07f3f80403eba8c552226ea84569cc64348fab",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject/facts.json.browser.json": "127018d20cefac9ca994d4f24194c8c05e66802292772db6f0501afd61f882b9",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject/facts.json.browser.json.png": "408eeeeaa4a2a8cb3d0d10d7ce29ebf02a6bf605646b4202952c2c97f7e74188",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/exitcode.json": "aaf7d842f4022eb24c95f6a36f05b9f27de8d33a2e03ad19c6bfb5cf07c50032",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/runtime.log": "ae4423ea1fba2f3e9bfd1874f4a4a7e42e17ba3b03959870a702575aa1be9ff0",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/facts.json": "26c85cdedcc4620b3a7e52d1c4debbd36a5bf9a4ce586456c17b1cee2a9f4c32",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/facts.json.browser.json": "ea835d16dea3d6ac8c8240a8769f66ea7c3da9e5de3bd959f8c8edd8c76fdf81",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/facts.json.browser.json.png": "68f1e34354762853fae9c178162d371c24a861d6c28c716a3750b757898a8f24",
+    "deployments/docker/.local/receipts/proposal-application-20261014/approve-final/inputs.json": "93be37bb0c744ca9c40f55cc52bfb464b5bc10253a97974bebd30f19d5bfe969",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/exitcode.json": "aaf7d842f4022eb24c95f6a36f05b9f27de8d33a2e03ad19c6bfb5cf07c50032",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/runtime.log": "736c0ab86ad929749fe0e6d1087246346dae9d3e6b687c8a53dcf225e02a0fc8",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/facts.json": "2afd222d50646fb84507352eb577e81e5e348203b7812c7ab64cce7365306053",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/facts.json.browser.json": "b44a33152a7d1d281f85fffdecb5fea1cd58ac6cf87d2e7fbe3287d54d4a8e13",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/facts.json.browser.json.png": "736ad5846ab67516bf10a618a3f9c2f6c79eba679bb59a7fac69d977477472d8",
+    "deployments/docker/.local/receipts/proposal-application-20261014/reject-final/inputs.json": "93be37bb0c744ca9c40f55cc52bfb464b5bc10253a97974bebd30f19d5bfe969",
+    "output/playwright/task-proposal-1791973389050/receipt.json": "91afe8f1830223a4d07395f5074bf6c07c0844e82ec1503721934c7897426784",
+    ".scratch/proposal-closeout-20261014/application-go-full-final.jsonl": "1800f620ce1963295b9dc346b22e2d27071dd415e7360b8b2ceccaa59149635c",
+    ".scratch/proposal-closeout-20261014/application-go-full.jsonl": "01574dbf024c5e7b66991d498f58ee492428613ccc919e4415a17bbc8bdc1e74",
+    ".scratch/proposal-closeout-20261014/application-go-vet-final.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".scratch/proposal-closeout-20261014/application-go-vet.log": "e9c3371cb287ee1263217d378e5ddf62a4bbf283217ca0321b8d8e5668df346b",
+    ".scratch/proposal-closeout-20261014/application-final-targeted-v2.jsonl": "440d6c1e8fec66c8e248908e9267665e81f262929acc818cb091837c7d6f2fef",
+    ".scratch/proposal-closeout-20261014/application-frontend-test.log": "86139720debdde8e503983dc6c542b41d92f61211905ee460457042e8fc58f9e",
+    ".scratch/proposal-closeout-20261014/application-build.log": "1a3f1ae94f76068654e5364a4b1f7a1a845ef91fc3102e7e598b860e89872c22",
+    ".scratch/proposal-closeout-20261014/application-browser-fixture.log": "d59c4d4f013773ed73ca934bd5270e322b2024c1780b39dc8f7b2ee63a008bff",
+    ".scratch/proposal-closeout-20261014/apply-first-red.log": "65888fba93dc5f2ac9e67f9229c02b116aab7d8c08f60d9eabb633884e089571",
+    ".scratch/proposal-closeout-20261014/decision-first-red.log": "6f5014aa6bbf3de2ded89f45c4828507b17dbfbd377c5bae446433f3f8c62ae1",
+    ".scratch/proposal-closeout-20261014/application-final-targeted.jsonl": "734c45784c20ed6a8b752bef3650c8e7327cf0cb8266b0aef637e7f8b0d09ac5"
+  }
+}
