@@ -342,6 +342,7 @@ class ConversationRunner:
     _loop_plugin_metadata: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _pending_loop_context: list[str] = field(default_factory=list, init=False, repr=False)
     _loop_last_turn: int = field(default=0, init=False, repr=False)
+    _run_start_turn: int = field(default=1, init=False, repr=False)
     _active_route: PreparedRoute | None = field(default=None, init=False, repr=False)
     _hook_errors: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _pending_hook_context: list[str] = field(default_factory=list, init=False, repr=False)
@@ -543,7 +544,7 @@ class ConversationRunner:
                 return None
             raise ValueError("checkpoint history does not match request")
         phase = str(metadata.get("phase", "")).strip()
-        if phase not in {"model_before", "model_after", "tool_after"}:
+        if phase not in {"model_before", "model_after", "tool_before", "tool_after"}:
             return ConversationCheckpoint(
                 state=state,
                 phase=phase,
@@ -602,6 +603,7 @@ class ConversationRunner:
         self._hook_stop_message = ""
         self._stopping_hook_dispatched = False
         self._loop_last_turn = 0
+        self._run_start_turn = 1
         self._context_persistence_error = ""
         self._checkpoint_persistence_error = ""
         self._checkpoint_revision = 0
@@ -813,6 +815,7 @@ class ConversationRunner:
             ledger_checksum=self.ledger_checksum,
         )
         start_turn = 1
+        end_turn = self.max_tool_rounds + 1
         if checkpoint is not None and (
             checkpoint.resumable
             or (self._resume_requested and checkpoint.phase == "model_after")
@@ -826,7 +829,19 @@ class ConversationRunner:
                 # the only verifiable predecessor and becomes the stable
                 # root for subsequent retries.
                 self._active_retry_root_run_id = str(metadata.get("run_id", "")).strip()
-            start_turn = min(self.max_tool_rounds, checkpoint.next_turn)
+            start_turn = checkpoint.next_turn
+            run_start_turn = metadata.get("run_start_turn", 1)
+            if type(run_start_turn) is not int or not 1 <= run_start_turn <= start_turn:
+                raise ValueError("checkpoint round allowance is invalid")
+            self._run_start_turn = run_start_turn
+            if (
+                self._resume_requested
+                and self._active_retry_of_run_ids
+                and self._active_run_id != str(metadata.get("run_id", "")).strip()
+            ):
+                # A verified new run has its own bounded allowance, not a rewound cursor.
+                self._run_start_turn = start_turn
+            end_turn = self._run_start_turn + self.max_tool_rounds
             self._persist_event(
                 session_id,
                 "execution_result",
@@ -838,10 +853,10 @@ class ConversationRunner:
                     "tool_rounds": checkpoint.state.tool_rounds,
                 },
             )
-            if self._resume_requested and checkpoint.phase == "model_after":
+            if self._resume_requested and checkpoint.phase in {"model_after", "tool_before"}:
                 self._replay_response = self._checkpoint_response(checkpoint.state)
                 if self._replay_response is None:
-                    raise ValueError("model_after checkpoint is not replayable")
+                    raise ValueError(f"{checkpoint.phase} checkpoint is not replayable")
                 self._replay_checkpoint_turn = self._replay_response is not None
         total_tokens_in = 0
         total_tokens_out = 0
@@ -854,7 +869,7 @@ class ConversationRunner:
         overflow_retries = 0
         self._pending_compaction_updates.clear()
 
-        for turn in range(start_turn, self.max_tool_rounds + 1):
+        for turn in range(start_turn, end_turn):
             self._loop_last_turn = max(self._loop_last_turn, turn)
             if self._checkpoint_persistence_error:
                 yield self._finish(
@@ -1273,7 +1288,7 @@ class ConversationRunner:
                 for context in post_model.context
             )
 
-            for call in response.tool_calls:
+            for call_index, call in enumerate(response.tool_calls):
                 call_id = self._tool_call_id(call)
                 if self._hook_stop_message:
                     self._emit_loop_event(
@@ -1411,8 +1426,9 @@ class ConversationRunner:
                         turn=turn,
                         done=False,
                         tool_rounds=turn,
-                        tool_request_count=1,
+                        tool_request_count=len(response.tool_calls) - call_index,
                         tool_call_id=call_id,
+                        tool_requests=response.tool_calls[call_index:],
                     )
                     if self._checkpoint_persistence_error:
                         yield self._finish(
@@ -1682,8 +1698,9 @@ class ConversationRunner:
                         turn=turn,
                         done=False,
                         tool_rounds=turn,
-                        tool_request_count=1,
+                        tool_request_count=len(response.tool_calls) - call_index,
                         tool_call_id=call_id,
+                        tool_requests=response.tool_calls[call_index:],
                     )
                     if self._checkpoint_persistence_error:
                         yield self._finish(
@@ -1926,8 +1943,9 @@ class ConversationRunner:
                     turn=turn,
                     done=False,
                     tool_rounds=turn,
-                    tool_request_count=1,
+                    tool_request_count=len(response.tool_calls) - call_index,
                     tool_call_id=call_id,
+                    tool_requests=response.tool_calls[call_index:],
                 )
                 if self._checkpoint_persistence_error:
                     yield self._finish(
@@ -2018,7 +2036,7 @@ class ConversationRunner:
                 yield self._finish(session_id, False, "hook_blocked", turn=turn)
                 return
 
-        final_turn = self.max_tool_rounds + 1
+        final_turn = end_turn
         messages.append(
             ChatMessage(
                 role="system",
@@ -3602,6 +3620,7 @@ class ConversationRunner:
                 "run_id": self._active_run_id,
                 "phase": phase,
                 "turn": int(turn),
+                "run_start_turn": self._run_start_turn,
                 "model": str(getattr(self.llm, "model", "")),
                 "response_sha256": self._digest_value(response) if response else "",
                 "tool_request_count": int(tool_request_count),

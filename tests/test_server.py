@@ -865,6 +865,41 @@ class ToolLimitFakeLLM:
         )
 
 
+class ContinuationReadFakeLLM:
+    model = "gpt-4o"
+
+    def __init__(self, finish_after=8, interrupt_before_seven=False, batch_after_six=False):
+        self.finish_after = finish_after
+        self.interrupt_before_seven = interrupt_before_seven
+        self.batch_after_six = batch_after_six
+
+    async def chat(self, request):
+        if not request.tools:
+            return ChatResponse(text="Partial result; more source files are needed.")
+        completed = {
+            message.tool_call_id
+            for message in request.messages
+            if message.role == "tool"
+        }
+        if self.interrupt_before_seven and len(completed) == 6:
+            raise RuntimeError("simulated provider interruption")
+        for number in range(1, self.finish_after + 1):
+            identity = f"read-{number}"
+            if identity not in completed:
+                calls = []
+                for pending in ([7, 8] if self.batch_after_six and number == 7 else [number]):
+                    arguments = {"path": f"source-{pending}.py"}
+                    calls.append(ToolCall(
+                        id=f"read-{pending}", name="Read", arguments=arguments,
+                        arguments_json=json.dumps(arguments),
+                    ))
+                return ChatResponse(
+                    tool_calls=calls,
+                    usage=Usage(input_tokens=10, output_tokens=2),
+                )
+        return ChatResponse(text="Complete answer: repository comparison finished.")
+
+
 class DuplicateReadBatchFakeLLM:
     model = "gpt-4o"
 
@@ -2053,6 +2088,174 @@ def test_tool_round_limit_gets_final_no_tool_summary(monkeypatch, tmp_path) -> N
             assert "Tool round limit reached" in app.llm.requests[-1].messages[-1].content
     finally:
         server.stop(grace=0)
+
+
+@pytest.mark.parametrize("reopen", [None, "provider", "read", "batch"])
+def test_converse_continuation_can_finish_after_original_tool_round_limit(monkeypatch, tmp_path, reopen) -> None:
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    config = ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory"))
+    app = OrchestratorServer(config)
+    app.llm = ContinuationReadFakeLLM(
+        interrupt_before_seven=reopen == "provider", batch_after_six=reopen == "batch",
+    )
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "bounded-continuation"
+    history = [orchestrator_pb2.ConversationMessage(role="user", content="read required source files")]
+    for number in range(1, 7):
+        history.extend([
+            orchestrator_pb2.ConversationMessage(
+                role="assistant",
+                tool_calls=[orchestrator_pb2.ConversationToolCall(
+                    id=f"read-{number}", name="Read",
+                    arguments_json=json.dumps({"path": f"source-{number}.py"}),
+                )],
+            ),
+            orchestrator_pb2.ConversationMessage(
+                role="tool", name="Read", tool_call_id=f"read-{number}",
+                content=f"source fragment {number}",
+            ),
+        ])
+
+    def request(text, tool_numbers, prior_history=()):
+        yield orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(
+            text=text, session_id=session_id, actor=_session_actor(session_id), history=prior_history,
+        ))
+        for number in tool_numbers:
+            yield orchestrator_pb2.HarnessMessage(tool_result=orchestrator_pb2.ToolResult(
+                tool_name="Read", tool_call_id=f"read-{number}", output=f"source fragment {number}",
+            ))
+
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            original = list(stub.Converse(
+                request("read required source files", range(1, 7)),
+                metadata=(("x-code-agent-run-id", "run:original"),
+                          ("x-code-agent-surface-sha256", "surface:stable")),
+            ))
+            assert original[-1].done.success is False
+            assert original[-1].done.error_code == "tool_round_limit"
+            assert [r.tool_request.tool_call_id for r in original if r.HasField("tool_request")] == [
+                "read-1", "read-2", "read-3", "read-4", "read-5", "read-6",
+            ]
+
+            continued = list(stub.Converse(
+                request("", [] if reopen in {"read", "batch"} else [7, 8], history),
+                metadata=(("x-code-agent-run-id", "run:continuation"),
+                          ("x-code-agent-resume", "true"),
+                          ("x-code-agent-surface-sha256", "surface:stable"),
+                          ("x-code-agent-retry-of-run-id", "run:original")),
+            ))
+        if reopen:
+            assert continued[-1].done.success is False
+            if reopen == "provider":
+                assert continued[-1].done.error_code == "provider_runtime_error"
+            elif reopen == "read":
+                assert [r.tool_request.tool_call_id for r in continued if r.HasField("tool_request")] == ["read-7"]
+            else:
+                assert [call.tool_call_id for r in continued if r.HasField("tool_request_batch") for call in r.tool_request_batch.requests] == ["read-7", "read-8"]
+            server.stop(grace=0).wait()
+            app.close()
+            app = OrchestratorServer(config)
+            app.llm = ContinuationReadFakeLLM(
+                interrupt_before_seven=reopen in {"read", "batch"}, batch_after_six=reopen == "batch",
+            )
+            server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+            orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+            port = server.add_insecure_port("127.0.0.1:0")
+            server.start()
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+                continued = list(stub.Converse(
+                    request("", [7, 8], history),
+                    metadata=(("x-code-agent-run-id", "run:continuation"),
+                              ("x-code-agent-resume", "true"),
+                              ("x-code-agent-surface-sha256", "surface:stable"),
+                              ("x-code-agent-retry-of-run-id", "run:original")),
+                ))
+        assert continued[-1].done.success is True
+        calls = [r.tool_request for r in continued if r.HasField("tool_request")]
+        calls.extend(call for r in continued if r.HasField("tool_request_batch") for call in r.tool_request_batch.requests)
+        assert [call.tool_call_id for call in calls] == [
+            "read-7", "read-8",
+        ]
+        assert "Complete answer: repository comparison finished." in "".join(
+            r.text.text for r in continued if r.HasField("text")
+        )
+        assert continued[-2].session_meta.turn == (8 if reopen == "batch" else 9)
+    finally:
+        server.stop(grace=0)
+        app.close()
+
+
+def test_converse_continuation_does_not_refresh_same_run_tool_allowance(monkeypatch, tmp_path) -> None:
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    app = OrchestratorServer(ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory")))
+    app.llm = ContinuationReadFakeLLM(finish_after=20)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "continuation-allowance-limit"
+    history = []
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = orchestrator_pb2_grpc.OrchestratorStub(channel)
+            for run_id, identities in [
+                ("run:original", ["read-1", "read-2", "read-3", "read-4", "read-5", "read-6"]),
+                ("run:continuation", ["read-7", "read-8", "read-9", "read-10", "read-11", "read-12"]),
+            ]:
+                text = "read required source files" if not history else ""
+                metadata = [("x-code-agent-run-id", run_id), ("x-code-agent-surface-sha256", "surface:stable")]
+                if history:
+                    metadata.extend([("x-code-agent-resume", "true"), ("x-code-agent-retry-of-run-id", "run:original")])
+                messages = [orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(
+                    text=text, session_id=session_id, actor=_session_actor(session_id), history=history,
+                ))]
+                messages.extend(orchestrator_pb2.HarnessMessage(tool_result=orchestrator_pb2.ToolResult(
+                    tool_name="Read", tool_call_id=identity, output=f"fragment for {identity}",
+                )) for identity in identities)
+                responses = list(stub.Converse(iter(messages), metadata=metadata))
+                assert responses[-1].done.success is False
+                assert responses[-1].done.error_code == "tool_round_limit"
+                calls = [r.tool_request for r in responses if r.HasField("tool_request")]
+                assert [call.tool_call_id for call in calls] == identities
+                if text:
+                    history.append(orchestrator_pb2.ConversationMessage(role="user", content=text))
+                for call in calls:
+                    history.extend([
+                        orchestrator_pb2.ConversationMessage(
+                            role="assistant", tool_calls=[orchestrator_pb2.ConversationToolCall(
+                                id=call.tool_call_id, name=call.tool_name, arguments_json=call.parameters_json,
+                            )],
+                        ),
+                        orchestrator_pb2.ConversationMessage(
+                            role="tool", name="Read", tool_call_id=call.tool_call_id,
+                            content=f"fragment for {call.tool_call_id}",
+                        ),
+                    ])
+
+            recovered = list(stub.Converse(
+                iter([orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(
+                    session_id=session_id, actor=_session_actor(session_id), history=history,
+                ))]),
+                metadata=(("x-code-agent-run-id", "run:continuation"), ("x-code-agent-resume", "true"),
+                          ("x-code-agent-surface-sha256", "surface:stable"), ("x-code-agent-retry-of-run-id", "run:original")),
+            ))
+            assert not any(r.HasField("tool_request") or r.HasField("tool_request_batch") for r in recovered)
+            assert recovered[-1].done.success is False
+            assert recovered[-1].done.error_code == "tool_round_limit"
+            assert recovered[-2].session_meta.turn == 13
+    finally:
+        server.stop(grace=0)
+        app.close()
 
 
 def test_duplicate_read_calls_in_batch_are_executed_once(monkeypatch, tmp_path) -> None:
