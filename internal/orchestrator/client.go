@@ -175,6 +175,7 @@ type ConversationRequest struct {
 	ContextEnvelope   *codeagentpb.ContextEnvelope
 	AgentTask         *codeagentpb.AgentTask
 	AllowedTools      []string
+	MCPCatalog        *codeagentpb.MCPToolCatalog
 }
 
 type ConversationResult struct {
@@ -717,6 +718,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				AgentTask:         request.AgentTask,
 				AllowedTools:      request.AllowedTools,
 				ModelGateway:      binding,
+				McpCatalog:        request.MCPCatalog,
 			},
 		},
 	}); err != nil {

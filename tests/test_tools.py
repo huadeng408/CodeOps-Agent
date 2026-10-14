@@ -1,9 +1,36 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import pytest
 
 from codeagent import orchestrator_pb2
 from orchestrator.runtime.tools import ToolRegistry
+
+
+def test_go_mcp_catalog_replaces_workspace_manifest_and_respects_child_allowlist(tmp_path) -> None:
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".agent" / "mcp-tools.json").write_text(json.dumps({"tools": [{"name": "unapproved", "server": "workspace"}]}), encoding="utf-8")
+    schema = '{"properties":{"file":{"type":"string"}},"required":["file"],"type":"object"}'
+    tool = orchestrator_pb2.MCPToolDefinition(name="RepositoryManifest", description="Read manifest", server="codeops-repository",
+        input_schema_json=schema, input_schema_sha256=hashlib.sha256(schema.encode()).hexdigest(), server_config_sha256="a" * 64)
+    registry = ToolRegistry(str(tmp_path), mcp_tools=[tool])
+    spec = registry.get("RepositoryManifest")
+    assert spec is not None and spec.permission == orchestrator_pb2.ASK_SESSION
+    assert spec.parameters["required"] == ["file"]
+    assert registry.get("unapproved") is None
+    assert ToolRegistry(str(tmp_path), mcp_tools=[]).get("unapproved") is None
+    assert ToolRegistry(str(tmp_path), allowed_tools=[], mcp_tools=[tool]).list() == []
+
+
+@pytest.mark.parametrize("invalid", ["builtin", "schema_hash", "server_hash", "schema_type", "duplicate"])
+def test_go_mcp_catalog_rejects_invalid_identity(invalid) -> None:
+    schema = '{"type":"object"}' if invalid != "schema_type" else "null"
+    tool = orchestrator_pb2.MCPToolDefinition(name="Bash" if invalid == "builtin" else "RepositoryManifest", server="codeops-repository",
+        input_schema_json=schema, input_schema_sha256="0" * 64 if invalid == "schema_hash" else hashlib.sha256(schema.encode()).hexdigest(),
+        server_config_sha256="invalid" if invalid == "server_hash" else "a" * 64)
+    with pytest.raises(ValueError, match="Harness MCP"):
+        ToolRegistry(mcp_tools=[tool, tool] if invalid == "duplicate" else [tool])
 
 
 def test_file_lifecycle_tools_require_go_authorization_and_both_rename_paths() -> None:

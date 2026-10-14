@@ -217,6 +217,7 @@ type SessionRunnerOptions struct {
 	// AgentToolBinding resolves dynamic tools before delegation and again before
 	// every child call. Static Agent Card tools remain local policy.
 	AgentToolBinding func(string) (AgentToolBinding, bool)
+	MCPCatalog       func() *codeagentpb.MCPToolCatalog
 	AgentApproval    func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
 	AgentWorkerCount int
 	Tracer           genai.Tracer
@@ -274,11 +275,12 @@ type runTerminalPayload struct {
 }
 
 type toolCallPayload struct {
-	RunID         string `json:"run_id"`
-	ToolCallID    string `json:"tool_call_id"`
-	ToolName      string `json:"tool_name"`
-	ArgumentsJSON string `json:"arguments_json"`
-	OperationID   string `json:"operation_id,omitempty"`
+	RunID         string            `json:"run_id"`
+	ToolCallID    string            `json:"tool_call_id"`
+	ToolName      string            `json:"tool_name"`
+	ArgumentsJSON string            `json:"arguments_json"`
+	OperationID   string            `json:"operation_id,omitempty"`
+	MCPBinding    *AgentToolBinding `json:"mcp_binding,omitempty"`
 }
 
 type toolResultPayload struct {
@@ -1555,6 +1557,9 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 			return orchestrator.ConversationRequest{}, err
 		}
 	}
+	if r.options.MCPCatalog != nil {
+		request.MCPCatalog = r.options.MCPCatalog()
+	}
 	if request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
 		request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
 	}
@@ -1719,6 +1724,11 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
 	}
 	bindingChanged := false
+	if delegatedBinding == nil && r.options.AgentToolBinding != nil {
+		if binding, ok := r.options.AgentToolBinding(call.Name); ok {
+			delegatedBinding = &binding
+		}
+	}
 	if delegatedBinding != nil {
 		current, ok := AgentToolBinding{}, false
 		if r.options.AgentToolBinding != nil {
@@ -1790,7 +1800,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 				if prior.prepared == nil {
 					return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool result has no prepared invocation", ExitCode: 1}, true
 				}
-				callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON}
+				callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON, MCPBinding: prior.prepared.MCPBinding}
 				if state.prepared == nil {
 					if err := r.appendLeasedSurface(ctx, key, lease, "tool/call", callPayload); err != nil {
 						return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
@@ -1820,6 +1830,10 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool invocation requires reconciliation", ExitCode: 1}, true
 	}
 	callPayload := toolCallPayload{RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON, OperationID: call.OperationID}
+	if delegatedBinding != nil && !bindingChanged {
+		binding := *delegatedBinding
+		callPayload.MCPBinding = &binding
+	}
 	if state.prepared == nil {
 		if err := r.appendLeasedSurface(ctx, key, lease, "tool/call", callPayload); err != nil {
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool preparation persistence failed", ExitCode: 1}, true
@@ -2017,6 +2031,9 @@ func canonicalToolArguments(raw string) (string, error) {
 
 func toolCallMatches(payload toolCallPayload, call orchestrator.ToolCall) bool {
 	arguments, err := canonicalToolArguments(payload.ArgumentsJSON)
+	if payload.MCPBinding != nil && (payload.MCPBinding.Name != call.Name || payload.MCPBinding.Server != call.MCPServer || payload.MCPBinding.InputSchemaSHA256 != call.MCPInputSchemaSHA256 || payload.MCPBinding.ServerConfigSHA256 != call.MCPServerConfigSHA256) {
+		return false
+	}
 	return err == nil && strings.TrimSpace(payload.ToolName) == call.Name && arguments == call.ParametersJSON
 }
 

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -322,14 +323,19 @@ func (e *Executor) executeMCPTool(ctx context.Context, req ToolRequest) (ToolRes
 	output := mcpToolOutput(result)
 	if err != nil {
 		genai.MarkSpanError(span)
-		return ToolResult{Name: req.Name, Output: output, Error: err.Error(), ExitCode: 1}, true, err
+		out := ToolResult{Name: req.Name, Output: output, Error: err.Error(), ExitCode: 1}
+		var failure *mcp.CallError
+		if errors.As(err, &failure) {
+			out.OutcomeUnknown, out.Stopped = failure.OutcomeUnknown, failure.Stopped
+		}
+		return out, true, err
 	}
 	exitCode := 0
 	errorText := ""
 	if result.IsError {
 		genai.MarkSpanError(span)
 		exitCode = 1
-		errorText = output
+		errorText = "mcp_refused: " + output
 	}
 	return ToolResult{Name: req.Name, Output: output, Error: errorText, ExitCode: exitCode}, true, nil
 }

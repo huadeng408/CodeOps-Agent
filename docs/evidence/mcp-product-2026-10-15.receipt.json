@@ -1,0 +1,801 @@
+{
+  "scope": "#11 Windows single approved repository MCP: model, Go authorization, Ledger, browser and lifecycle",
+  "engineering_state": "IMPLEMENTED",
+  "verification": {
+    "unit": "passed",
+    "integration": "passed",
+    "product_declared_scope": "passed",
+    "full_release": "not_run"
+  },
+  "review": {
+    "kind": "AI_REVIEWED",
+    "standards_open_findings": 0,
+    "spec_open_findings": 0
+  },
+  "source_head": "cf99cc31b0316b989fb9eedaf111776638df8fab",
+  "runtime_includes_uncommitted_implementation": true,
+  "runtime_source_binding": {
+    "input_count": 495,
+    "sha256": "6c6364676d88141dcdfd47913228afc7862f4e6ec8bb306bf617ab4bc0bca410",
+    "current_binding_verified": true,
+    "test_only_changes_after_freeze": [
+      {
+        "path": "cmd/server/mcp_test.go",
+        "frozen_sha256": "65f495f12573b14114f401fa684b87662ec6bf94c46744c76ac6b459fe55f5bf",
+        "current_sha256": "ed6ed81df4c2564b701ba4b059a8ead1bda44877ff47370ba84e958f403bb992"
+      }
+    ]
+  },
+  "protocol": "MCP 2024-11-05 / JSON-RPC 2.0 / MCPToolCatalog schema 1",
+  "mcp": {
+    "name": "codeops-repository",
+    "version": "1.0.0",
+    "license": "Apache-2.0",
+    "sdk": "github.com/modelcontextprotocol/go-sdk@v1.7.0",
+    "tool": "RepositoryManifest",
+    "process": "same pinned Go binary --repository-mcp",
+    "network_permissions": "none",
+    "file_scope": [
+      "go.mod",
+      "pyproject.toml",
+      "package.json"
+    ]
+  },
+  "license_note": "SDK v1.7.0 preserves upstream MIT/Apache-2.0 transition; documentation CC-BY-4.0; verbatim license copies and NOTICE retained",
+  "sdk_tag_object": "25cb00203c6b693780f602ab4041c06f7f4b9570",
+  "sdk_commit": "bc72835f62eb94d0fb484439f886b6885b075f36",
+  "manifest_sha256": "39f4d592d297f32337cb4938e0e96045ccefc602d458da34301ce13f751b3b7c",
+  "task_image": "sha256:c35ffc50ff2d4e97ea90f973b29836945912397204592a0b06a0b6fbbba59b58",
+  "provider": {
+    "provider": "anthropic",
+    "model": "grok-4.6",
+    "endpoint_host": "beeapi.dev",
+    "input_bound": 500000,
+    "output_cap": 2048,
+    "service_hard_limit": 100000000
+  },
+  "auth_evidence": "Existing approved identity/token helper; real auth middleware rejects unauthenticated request. Not signup/login validation.",
+  "final_product": {
+    "session_id": "db61a4a892dbd8cccc52d91b3d028957",
+    "run_id": "run:59550db86ab781efdfc11e43799e31fdf",
+    "scene_pass": 10,
+    "scene_fail": 0,
+    "scene_not_run": 0,
+    "original_files": 98,
+    "task_files": 98,
+    "original_head_index_status_and_files_preserved": true,
+    "task_files_preserved": true,
+    "no_task_catalog_file": true,
+    "approval_http": 200,
+    "finish_http": 200,
+    "canonical_events": 29,
+    "tool_calls": 1,
+    "tool_results": 1,
+    "binding": {
+      "name": "RepositoryManifest",
+      "server": "codeops-repository",
+      "input_schema_sha256": "421bbe7058ee5877cb2081ecbf5fe33a1af821a03df1ac6a96ff0f9c128343fc",
+      "server_config_sha256": "cd4a4ef6b1a98aeb21639bc553ad42ef5a8e672b7d754ab968588549912a59a7"
+    },
+    "result_sha256": "1f512b7849eed7acb188046b4de09a8de6dc45edad91ea4f1e6637f83c4e0826",
+    "browser_page_errors": []
+  },
+  "rounds": [
+    {
+      "label": "v1",
+      "inputs": {
+        "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/inputs.json",
+        "sha256": "ba0840a58f278cc9d8e867b5aee7d907d5ab38463cd5e1dd7c7402832a11f6a8"
+      },
+      "binary_sha256": "fdc6b34753d559bddcb6cdefab0599bba5ade745113c10ec5873fe831d6f5aca",
+      "scenario_denominator": 10,
+      "scenarios": {
+        "unauthenticated-refusal": "not_recorded",
+        "browser-workspace-preparation": "passed",
+        "pinned-mcp-capability-and-catalog": "passed",
+        "real-model-tool-request-before-approval": "failed",
+        "browser-approval-and-go-execution": "not_run",
+        "browser-result-and-answer-provenance": "not_run",
+        "canonical-ledger-budget-and-original-prefix": "passed",
+        "original-and-task-files-protected": "failed",
+        "stopped-task-finish": "not_run",
+        "owned-processes-stopped": "passed"
+      },
+      "browser_command_attempts": 3,
+      "browser_command_failures": [
+        {
+          "id": "submit-real-mcp-question",
+          "error": "AssertionError"
+        }
+      ],
+      "accounting": {
+        "call_reservations": 0,
+        "settled": 0,
+        "ended_unknown": 0,
+        "confirmed_token_delta": 0,
+        "reserved_before": 2506024576,
+        "reserved_after": 2506024576,
+        "original_call_event_prefix_preserved": true,
+        "active_calls": 0,
+        "task_released": true
+      },
+      "owned_process_stop": {
+        "exit_codes": [
+          1,
+          1
+        ],
+        "page_errors": [],
+        "browser_closed": true
+      },
+      "artifacts": [
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/browser-commands.json",
+          "sha256": "07a90d363c23c7263867dfc2c250b3993e828b03f355a5df893c0c7581003ba1"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/budget-after-conflict.json",
+          "sha256": "95c79a920a2b7ca683f0337305812c88fb97292577fcd87ce22a19ca4e6c43bc"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/budget-before.json",
+          "sha256": "95c79a920a2b7ca683f0337305812c88fb97292577fcd87ce22a19ca4e6c43bc"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/canonical-submit-conflict.json",
+          "sha256": "612ccdeb149bcbd5dcfbad245f26918975a2f324c43eeecbfe3749a81c934939"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/capabilities.json",
+          "sha256": "a82425976d94a5db302402be068ece8e7e6096dc6087601f2ee00f719f4d035d"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/events-after-conflict.json",
+          "sha256": "b230b1487dea2414f177536ed57d617c322776d03e91ff98fd01897f0811ff41"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/go.log",
+          "sha256": "fbd6313430ac917e7057d4ee30e24970f47681be1e809e23a9825b8748ca58ad"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/inputs.json",
+          "sha256": "ba0840a58f278cc9d8e867b5aee7d907d5ab38463cd5e1dd7c7402832a11f6a8"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/model-submit.json",
+          "sha256": "26f13a2cbee232e93f45a35591d1e8a010145cb170f5b2f073b28a885d2098f6"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/owned-process-stop.json",
+          "sha256": "69473706bf4566e126e7e4776719a437f79354f8d6a1c384798a5df7467d7f65"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/prepared.png",
+          "sha256": "75fabd256716b432e93991c86cc234c596b4a7cb873d991a1ad6e98e313473f7"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/python.log",
+          "sha256": "1cd9d31690f1e8ad7b2247276ed94114065b0518e23f2324eddd56654bde7144"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/workspace-after-conflict.json",
+          "sha256": "61da475a4ebe5c937162ceebb0828c3e18a0a051cc78c25ac787d509b92f9a7d"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v1/workspace-prepared.json",
+          "sha256": "59051b2c831d14ac648eee595bbe6134c895e305d28a03d53dfc323d478e9cac"
+        }
+      ]
+    },
+    {
+      "label": "v2",
+      "inputs": {
+        "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/inputs.json",
+        "sha256": "772898781f9368fb094acbba8d60715ccd663dc40d6c319a6a1c7203d0bbe700"
+      },
+      "binary_sha256": "8f7c21e089765991b3493c3ee8a1a074c5a6baf1d0d5e8b03edb00c736f1841f",
+      "scenario_denominator": 10,
+      "scenarios": {
+        "unauthenticated-refusal": "not_recorded",
+        "browser-workspace-preparation": "passed",
+        "pinned-mcp-capability-and-catalog": "passed",
+        "real-model-tool-request-before-approval": "passed",
+        "browser-approval-and-go-execution": "passed",
+        "browser-result-and-answer-provenance": "passed",
+        "canonical-ledger-budget-and-original-prefix": "passed",
+        "original-and-task-files-protected": "passed",
+        "stopped-task-finish": "passed",
+        "owned-processes-stopped": "passed"
+      },
+      "browser_command_attempts": 6,
+      "browser_command_failures": [
+        {
+          "id": "verify-and-finish-v2",
+          "error": "TimeoutError"
+        }
+      ],
+      "accounting": {
+        "call_reservations": 3,
+        "settled": 2,
+        "ended_unknown": 1,
+        "confirmed_token_delta": 23381,
+        "reserved_before": 2506024576,
+        "reserved_after": 2606024576,
+        "original_call_event_prefix_preserved": true,
+        "active_calls": 0,
+        "task_released": true
+      },
+      "owned_process_stop": {
+        "exit_codes": [
+          1,
+          1
+        ],
+        "page_errors": [],
+        "browser_closed": true
+      },
+      "artifacts": [
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/accounting-and-finish.json",
+          "sha256": "901202eb37c03d8b2d28f75a3fceb8f87883cfef5a5684ae343cbdcb18e308d8"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/answer-and-protection.json",
+          "sha256": "3036fe604abaf6b60497c10094b032d77e07d5414a87171743e39fe5181f177b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/approval-pending.png",
+          "sha256": "42d8694c4a8ff59a7ad3196303575d085a8066b1a15b1f75bffa88f957f18f85"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/browser-approval.json",
+          "sha256": "ed17c99aaf2cfd70dbfb3ce271050372e36f0553936edaed665e6f8c04166450"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/browser-commands.json",
+          "sha256": "ea76156ea9c37c894ebe47e5945c2534f297983d5a0f9cf9998a139b065cdca6"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/budget-after-finish-verified.json",
+          "sha256": "a0314abe1ebd994ff2bbc467f7e2cd9bba7b8313d7e5297f69a09aeba7b121b0"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/budget-before-finish.json",
+          "sha256": "160994badb0a8519d413cc5df047246439ada54bc4351d6d17188fb8e554b216"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/budget-before.json",
+          "sha256": "95c79a920a2b7ca683f0337305812c88fb97292577fcd87ce22a19ca4e6c43bc"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/canonical-after-approval.json",
+          "sha256": "434fa8a7489b22fa93b54e76e17b72265ec2499b5a6c5f33f7078eec68920a4f"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/canonical-after-result.json",
+          "sha256": "61c1c64dd85339e121ba4da182733bb6522e9f8d53797cb99b8090ccd4515d0f"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/capabilities.json",
+          "sha256": "a82425976d94a5db302402be068ece8e7e6096dc6087601f2ee00f719f4d035d"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/events-after-mcp-result.json",
+          "sha256": "7f1e6452457cee95ada60ea89fc1213855c1c4c8648a55ea92a0cc52965c9531"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/events-before-approval.json",
+          "sha256": "edb7433f7ec6e00d6f614922aa136798bc0def7b7bc9cbbe58d84f4c2dc7062b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/events-final-observation.json",
+          "sha256": "596ff2842e249af73e345ff2baa3684dc64174b52abb8b87de14ab1035ccd894"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/final-answer-observation.png",
+          "sha256": "4f5bbb1ad67d5d4833b41b49475dc10240d9a34bd276f4a7991f6007e41411fa"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/finished-verified.png",
+          "sha256": "00a4ddf0fb5a727e8185e47ba1cf4b2dab911506b4578e80be9a6fe31dd91b42"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/go.log",
+          "sha256": "3f826dfe95849331f842aaddf6cec4ab24c05ec35d36508d9a01af93dcdb76bb"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/inputs.json",
+          "sha256": "772898781f9368fb094acbba8d60715ccd663dc40d6c319a6a1c7203d0bbe700"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/mcp-result.png",
+          "sha256": "02b894fb63aa0534a8c346b80f46674dabc799a24b1fbeb4869c9fa94402570c"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/model-running.png",
+          "sha256": "c267d8a6119d1f0eb8786c5bfbaae698fa9bb7db246573bb549b783a2548a45b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/model-submit.json",
+          "sha256": "ab96cb27978e718e249c9b2712f77ced082769071a2be76a3331496f608b484e"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/owned-process-stop.json",
+          "sha256": "69473706bf4566e126e7e4776719a437f79354f8d6a1c384798a5df7467d7f65"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/python.log",
+          "sha256": "acb0290115be2cbefd8c7d2096759d323e48c0f92ed0dbeb73893f9290362655"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/run-final-observation.json",
+          "sha256": "c49a1c32d05d2c259130c1b981dde98326a08ae4bfc26b4968980573a18ed909"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/workspace-after-result.json",
+          "sha256": "c17dae23d3f63810b1c7df65b4c49a5d961f68239c4110ab32424415159fb5fd"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v2/workspace-prepared.json",
+          "sha256": "15caddb14282ae42854a14cad35e21a07941cd550ae4932514c9c65360867c5d"
+        }
+      ]
+    },
+    {
+      "label": "v3",
+      "inputs": {
+        "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/inputs.json",
+        "sha256": "94cb30528605ecf3a66cb7eb85bb1fec57358a72d68719048880a2629d9a6e56"
+      },
+      "binary_sha256": "93708bfa1127ade6c3a7df4d94bb9fab35c6cac5d9a10aac52ff249b69659350",
+      "scenario_denominator": 10,
+      "scenarios": {
+        "unauthenticated-refusal": "not_recorded",
+        "browser-workspace-preparation": "passed",
+        "pinned-mcp-capability-and-catalog": "passed",
+        "real-model-tool-request-before-approval": "passed",
+        "browser-approval-and-go-execution": "passed",
+        "browser-result-and-answer-provenance": "passed",
+        "canonical-ledger-budget-and-original-prefix": "passed",
+        "original-and-task-files-protected": "passed",
+        "stopped-task-finish": "passed",
+        "owned-processes-stopped": "passed"
+      },
+      "browser_command_attempts": 7,
+      "browser_command_failures": [
+        {
+          "id": "verify-and-finish-final",
+          "error": "TypeError"
+        },
+        {
+          "id": "verify-protection-and-finish-final",
+          "error": "TimeoutError"
+        },
+        {
+          "id": "protect-and-release-final",
+          "error": "Error"
+        }
+      ],
+      "accounting": {
+        "call_reservations": 3,
+        "settled": 2,
+        "ended_unknown": 1,
+        "confirmed_token_delta": 23318,
+        "reserved_before": 2606024576,
+        "reserved_after": 2706024576,
+        "original_call_event_prefix_preserved": true,
+        "active_calls": 0,
+        "task_released": true
+      },
+      "owned_process_stop": {
+        "exit_codes": [
+          1,
+          1
+        ],
+        "page_errors": [],
+        "browser_closed": true
+      },
+      "artifacts": [
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/accounting-and-finish.json",
+          "sha256": "aa9e19c14bac261eba6d5d01154eefef58977cd04f67e9e3e9a926ccfb74722c"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/approval-pending.png",
+          "sha256": "df7813d92a617e2553ed7eb3f9a69994a482abcd32314dd37cd032267c9b16b9"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/browser-approval.json",
+          "sha256": "698245396a96ce33bf6c391d9e581ab596ee920b2c4b55ea599e3cdbbc5c6209"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/browser-commands.json",
+          "sha256": "2c54d4e29dc0022ce871be1e6d2e2bf3111b2b52c6881a6932f3647418856078"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/budget-after.json",
+          "sha256": "065c1b8b8401f27b92b9ef92934153c3253a7ad6994b942d10a824c7d038f157"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/budget-before-finish.json",
+          "sha256": "7f2704abe9e43d27dd4a868f74c65e08bd249496eff87ed8f25a4559ed016732"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/budget-before.json",
+          "sha256": "a0314abe1ebd994ff2bbc467f7e2cd9bba7b8313d7e5297f69a09aeba7b121b0"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/canonical-after-finish.json",
+          "sha256": "87461055a1ca6588e4af3f249011c9ac8a7eb4d5b68628f47f726f587e124844"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/canonical-before-finish.json",
+          "sha256": "87461055a1ca6588e4af3f249011c9ac8a7eb4d5b68628f47f726f587e124844"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/capabilities.json",
+          "sha256": "183dbe58b19b61745dfded885beae122feb17ac33abf20a991965de072a14c72"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/completed-answer.png",
+          "sha256": "5201c5619028a6a8a39197d7c5579c427b7e8a09844a701e71673dd713e782bf"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/events-after-answer.json",
+          "sha256": "e1741a147c824d345e83abc0ee6a35d5784391d56cb242de23b3ba7876d70461"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/events-after-mcp-result.json",
+          "sha256": "854b38474a148e023b06c21eb09cf01484294589542f98787c499665bad869da"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/events-before-approval.json",
+          "sha256": "14b30567566555fccb7b486664038f770e75a3209b2f2d0607d97ba399cb982f"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/finished-task.png",
+          "sha256": "ea5e45fc742953b6159768459a6175176d5f2272d1ee92c1e98eedf508417747"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/go.log",
+          "sha256": "c92034cb994a378f93e0fd8fd195d7b8a866f02804a265f871f134c67a33b64e"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/inputs.json",
+          "sha256": "94cb30528605ecf3a66cb7eb85bb1fec57358a72d68719048880a2629d9a6e56"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/mcp-result.png",
+          "sha256": "37fe6109a77410ee7f4c0d135fc6685682bdc81f8150f4f06ae9d6972c907582"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/model-running.png",
+          "sha256": "94b98b0c03ccff68058b421cffcc0097f7934c16ecc38be9cf09cb48eef61de6"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/model-submit.json",
+          "sha256": "1960649053e686ffb7e00c1553512b3e0689225780b835ce0dc4229c20aac75e"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/owned-process-stop.json",
+          "sha256": "69473706bf4566e126e7e4776719a437f79354f8d6a1c384798a5df7467d7f65"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/protected-files.json",
+          "sha256": "9a32ea03a74c57c6efae9d64395557c90546236176adf572be35380b9458441b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/python.log",
+          "sha256": "484a34374322564697dc973ef0110b35f74963aa2b5806df135fcfad298eba7c"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/task-finish-response.json",
+          "sha256": "cdddbbe7376d726ec9fc31b605c4880497020146b6abf62f3fdd0ea524a1e263"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v3/workspace-prepared.json",
+          "sha256": "e8f1b8395f700b26b69abc21b1f58b61fabe06989f3a4a0c255dceed856388fe"
+        }
+      ]
+    },
+    {
+      "label": "v4",
+      "inputs": {
+        "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/inputs.json",
+        "sha256": "924f522d846f55e93dfc2c0dbe9bc37ce141f12cec520593557c4c0e2a6b375b"
+      },
+      "binary_sha256": "c961841f7e1aa9b84219b870f1bcc15714a3704cacc800717eaf2fd42b1571e2",
+      "scenario_denominator": 10,
+      "scenarios": {
+        "unauthenticated-refusal": "passed",
+        "browser-workspace-preparation": "passed",
+        "pinned-mcp-capability-and-catalog": "passed",
+        "real-model-tool-request-before-approval": "passed",
+        "browser-approval-and-go-execution": "passed",
+        "browser-result-and-answer-provenance": "passed",
+        "canonical-ledger-budget-and-original-prefix": "passed",
+        "original-and-task-files-protected": "passed",
+        "stopped-task-finish": "passed",
+        "owned-processes-stopped": "passed"
+      },
+      "browser_command_attempts": 4,
+      "browser_command_failures": [
+        {
+          "id": "prepare-and-submit",
+          "error": "AssertionError"
+        }
+      ],
+      "accounting": {
+        "call_reservations": 3,
+        "settled": 2,
+        "ended_unknown": 1,
+        "confirmed_token_delta": 23202,
+        "reserved_before": 2706024576,
+        "reserved_after": 2806024576,
+        "original_call_event_prefix_preserved": true,
+        "active_calls": 0,
+        "task_released": true
+      },
+      "owned_process_stop": {
+        "exit_codes": [
+          1,
+          1
+        ],
+        "page_errors": [],
+        "browser_closed": true
+      },
+      "artifacts": [
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/accounting-and-finish.json",
+          "sha256": "dd06a9d891308daa8645a2d0267cace2dd6a337450a3573950d5fa0a2e46b1c6"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/approval-pending.png",
+          "sha256": "51229c21aa60b280a052c50060e997bffc012f30e25c2713cbb7ea4bb39bab6b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/browser-approval.json",
+          "sha256": "3dde6db9ed903e79bcbbf4d6e17b807b779ce859c2fbb7c6fb759f056d80e598"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/browser-commands.json",
+          "sha256": "6e1c3cdc3193c0b610c5bd83a643c524220fcec76b754e8ad4a3f6b7d509aeb9"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/budget-after.json",
+          "sha256": "f1cee7cce472aa9d7bc931a6ede5d8271650562680836db31dadb2f0ef3e6e4d"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/budget-before-finish.json",
+          "sha256": "7cdbeeb520b9ef2d26ba77073ca790b7b6799c5757a490527e17395cc0c0b0dc"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/budget-before.json",
+          "sha256": "065c1b8b8401f27b92b9ef92934153c3253a7ad6994b942d10a824c7d038f157"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/canonical-after-finish.json",
+          "sha256": "a0181d40f4b110f96239c565680d8824329cd80aa613299a4a22cde086304e82"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/capabilities.json",
+          "sha256": "2d4211b5e59139a6bc1a560a1a0dfbf72694cbceb6472b659ade5940f71b234b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/completed-answer.png",
+          "sha256": "f7eae000e5e559a75ce71240b72bf7af06d2e07f42d56d752a4cde290bcb59bb"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/events-after-answer.json",
+          "sha256": "c2d55b8d8b1cb76ba11c421d1b48496bf91ed4667dad657644fe67565a9c5809"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/events-after-mcp-result.json",
+          "sha256": "165dbc6f27be30eb3044f18eceeaa9b36666fdb9f1ac1309b73fc3e7bafa8fa1"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/events-before-approval.json",
+          "sha256": "85d8f4c856dfe45b0e6a014fc9cc08fcefa3a1dec026eb64dafc86b577c13723"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/finished-task.png",
+          "sha256": "64503d4ab2a29c719a06a44a26b6c4bab389a4c59fcf0dad7d09891db5058ba2"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/go.log",
+          "sha256": "7fb1372c092916464bcfefcebdb51f6a54e35e6e16d0fb712c84333ff8421cc8"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/inputs.json",
+          "sha256": "924f522d846f55e93dfc2c0dbe9bc37ce141f12cec520593557c4c0e2a6b375b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/mcp-result.png",
+          "sha256": "5052d75dd915c07bb4c97efac2467056a7a3b183773018fdba179150163927c3"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/model-running.png",
+          "sha256": "61c85243d433a33d4707235d642157076defa3c68d98067978faf4690ff0f6f6"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/model-submit.json",
+          "sha256": "2f63c4bd414e3f9a0940319f5de988b6fdf681a571459847af32c7b9556cdefe"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/owned-process-stop.json",
+          "sha256": "69473706bf4566e126e7e4776719a437f79354f8d6a1c384798a5df7467d7f65"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/protected-files.json",
+          "sha256": "8f191524fbdd04a01d7c6c9a148e44556fa7eee216a7517ec9a0226aab2da9df"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/python.log",
+          "sha256": "ad62750ebb5c67b6b81e60d423ff876994cd495a7e0ff153839497e8f692a87b"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/task-finish-response.json",
+          "sha256": "b1ee85c48bf79e7575d2c1227619ef584ebab9ff78a829d7ec41e5cb13e5af79"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/unauthenticated-refusal.json",
+          "sha256": "ae0e38a22db37e92fe73507daa90f5ce1fb4183507fbd8d7e8ed2a76e7a8b0d8"
+        },
+        {
+          "artifact": "deployments/docker/.local/receipts/mcp-product-20261015/v4/workspace-prepared.json",
+          "sha256": "8235c655c52164ad48ce122d042a93382617e6c046a4c9360f5af9214de795e7"
+        }
+      ]
+    }
+  ],
+  "total_model_accounting": {
+    "call_reservations": 9,
+    "settled": 6,
+    "ended_unknown": 3,
+    "confirmed_tokens": 69901,
+    "cost": "unknown",
+    "note": "Private drivers initially called six call accounting events six model calls. Canonical audit proves three reservations, two settlements and one unknown per successful round; original artifacts unchanged."
+  },
+  "validation": {
+    "go": {
+      "command": "go test ./... -count=1 -json",
+      "exit_code": 0,
+      "test_events": {
+        "pass": 1673,
+        "skip": 78,
+        "fail": 0
+      },
+      "packages": {
+        "pass": 45,
+        "no_tests": 13
+      },
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-sealed.jsonl",
+        "sha256": "7584f53af7821e9424ad8f9aaebad25e7de3355c5796896aa45a5badc93ae3ad"
+      }
+    },
+    "go_vet": {
+      "command": "go vet ./...",
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-vet-sealed.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "python": {
+      "command": "python -m pytest -q",
+      "pass": 2508,
+      "skip": 17,
+      "warnings": 31,
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/python-full.log",
+        "sha256": "d7a0a8270f96598363b00af1bbefd5fe0f657476ff2eb82694eaaac09321e761"
+      },
+      "post_full_test_only_addition": {
+        "command": "python -m pytest -q tests/test_tools.py",
+        "pass": 21,
+        "warnings": 1,
+        "exit_code": 0,
+        "log": {
+          "artifact": ".scratch/mcp-product-20261015/registry-negative.log",
+          "sha256": "74e7528b951cf7bc2982f88877825afc817378d8d8c960cabd8bcd060f26bd13"
+        }
+      }
+    },
+    "frontend": {
+      "test_pass": 12,
+      "test_exit_code": 0,
+      "build_exit_code": 0,
+      "test_log": {
+        "artifact": ".scratch/mcp-product-20261015/frontend-test.log",
+        "sha256": "6a2a9a39b3d44b0c73b9568fb70d3d4523e41c9139f0637c662044ad3411340f"
+      },
+      "build_log": {
+        "artifact": ".scratch/mcp-product-20261015/frontend-build.log",
+        "sha256": "fc84f016257884e27def6a68b8303c984d34edcbbfbb5b4fc50c0cec4168a1de"
+      }
+    },
+    "mcp_public_seams": {
+      "command": "go test ./cmd/server ./tests/go -run \"TestContinuationMCP|TestMCP\" -count=1 -json",
+      "pass": 42,
+      "skip": 1,
+      "fail": 0,
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/mcp-final-v3.jsonl",
+        "sha256": "0d4f0d023a35d7919af5ba0b6fbd816e21584bec907b5b1bf6c884fa2b1a3fc7"
+      }
+    }
+  },
+  "historical_go_rounds": [
+    {
+      "name": "go-full",
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-full.jsonl",
+        "sha256": "7abbaa5137a64fa80e932054fccc6c80365f2b7990d06fd8178501339f3a4978"
+      }
+    },
+    {
+      "name": "go-full-v2",
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-full-v2.jsonl",
+        "sha256": "2312ab6e6269905787cbcf7a9d64454104eb88502cec190cdbabea9e0240206d"
+      }
+    },
+    {
+      "name": "go-full-final",
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-full-final.jsonl",
+        "sha256": "2b9db16c7dbfb0d4c7ad3ee73e5eb220bea5a69ea6d26ebb4d89e5dbab6eaf15"
+      }
+    },
+    {
+      "name": "go-final-revocation",
+      "exit_code": 1,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/go-final-revocation.jsonl",
+        "sha256": "702dcd796b4f76c6b9f69c0882b7d63c74abbbc9f67f0760325a8a0d99750059"
+      }
+    },
+    {
+      "name": "mcp-final",
+      "exit_code": 1,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/mcp-final.jsonl",
+        "sha256": "133f5f758a25b8f0c45179a8c6c33d40cae24fa5b86181546a8288978f4c1f76"
+      }
+    },
+    {
+      "name": "mcp-final-v2",
+      "exit_code": 1,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/mcp-final-v2.jsonl",
+        "sha256": "5aac48a22e53cc02c24cf2021559710f644e9157f11a0f422b709ac0cd4aa27d"
+      }
+    },
+    {
+      "name": "revocation-red",
+      "exit_code": 1,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/revocation-red.jsonl",
+        "sha256": "aefe0b1bd461c5bf959bc976a859c447e23c9eaf0e72fea394a5369207c0ee98"
+      }
+    },
+    {
+      "name": "revocation-green",
+      "exit_code": 0,
+      "log": {
+        "artifact": ".scratch/mcp-product-20261015/revocation-green.jsonl",
+        "sha256": "f1f58d79561356a7379519a8e33f61c4c34efc82f02d3aa81fbf4f5dcfd66d74"
+      }
+    }
+  ],
+  "limits": [
+    "Windows bundled file-pin contract; arbitrary remote MCP and non-text results not added",
+    "Deterministic protocol/refusal/cancellation fixtures distinct from real provider/browser success",
+    "Memory quality, full Trace backend, ten-round coding tasks and complete release not_run"
+  ],
+  "unresolved_scope_blockers": []
+}

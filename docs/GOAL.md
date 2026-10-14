@@ -54,6 +54,7 @@
 - #8 单文件用户决策：[Go 授权／独占写入、重放／unknown 与实际浏览器确认／拒绝证据](evidence/proposal-application-2026-10-14.md)。
 - #9 文件生命周期：[四类文件修改、逐项 Ledger／部分失败及实际产品批准证据](evidence/file-lifecycle-2026-10-15.md)。
 - #10 应用中断与并发保护：[逐项核验、完整中断分母、生产浏览器与新基线再次批准证据](evidence/application-recovery-2026-10-15.md)。
+- #11 仓库 MCP：[固定只读能力、Go 授权／停用边界及真实模型与浏览器证据](evidence/mcp-product-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

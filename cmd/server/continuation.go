@@ -222,7 +222,7 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 	executor.SetSandbox(m.sandbox)
 	executor.SetTracer(m.tracer)
 	manager := m.mcp
-	if strings.HasPrefix(sessionID, "agent-") && manager != nil {
+	if (strings.HasPrefix(sessionID, "agent-") || m.taskWorkspaces != nil) && manager != nil {
 		var cloneErr error
 		manager, cloneErr = manager.CloneForWorkingDir(ctx, dir)
 		if cloneErr != nil {
@@ -230,6 +230,16 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 			return nil, fmt.Errorf("start child MCP manager: %w", cloneErr)
 		}
 		m.mcps[key] = manager
+	}
+	if manager != nil && m.taskWorkspaces == nil {
+		if err := manager.WriteToolsManifest(dir); err != nil {
+			if owned := m.mcps[key]; owned != nil {
+				_ = owned.Close()
+				delete(m.mcps, key)
+			}
+			_ = executor.Close()
+			return nil, fmt.Errorf("write session MCP catalog: %w", err)
+		}
 	}
 	executor.SetMCPManager(manager)
 	if err := executor.SetWorkingDir(dir); err != nil {
@@ -242,6 +252,11 @@ func (m *continuationToolExecutors) executor(ctx context.Context, sessionID, wor
 	}
 	m.items[key] = executor
 	return executor, nil
+}
+
+func (m *continuationToolExecutors) PrepareWorkspace(ctx context.Context, sessionID, workingDir string) error {
+	_, err := m.executor(ctx, sessionID, workingDir)
+	return err
 }
 
 func (m *continuationToolExecutors) ReleaseSession(sessionID string) error {

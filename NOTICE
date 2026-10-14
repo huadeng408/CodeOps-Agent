@@ -5,6 +5,12 @@ This distribution includes third-party dependencies. Their respective
 copyright notices and license terms remain applicable; see the dependency
 metadata in go.mod, go.sum, pyproject.toml, uv.lock, and frontend/package.json.
 
+The bundled repository MCP server uses the official Go MCP SDK v1.7.0.
+Its upstream MIT/Apache-2.0 licensing transition and documentation terms
+are preserved verbatim in docs/licenses/mcp-go-sdk-v1.7.0.txt.
+JSON Schema Go v0.4.3 is MIT licensed. License texts for these dependencies
+and the newly linked SDK dependencies are included in docs/licenses/.
+
 The rooted Git reader uses go-git and go-billy, licensed under Apache-2.0.
 Copyright 2018 Sourced Technologies, S.L. (go-git)
 Copyright 2017 Sourced Technologies S.L. (go-billy)

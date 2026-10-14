@@ -9,6 +9,7 @@
 | Windows 代码产品 | [正式规格 #1](https://github.com/huadeng408/CodeOps-Agent/issues/1)、[任务导航](refactor-tickets.md) |
 | 执行环境 | [Docker 目录约定](../deployments/docker/README.md)、[OpenSandbox 基础接口证据](evidence/opensandbox-foundation-2026-10-11.md) |
 | 模型调用与计量 | [Token 批次契约](token-budget.md)、[Provider 配置](provider-configuration.md) |
+| 仓库 MCP | [固定只读服务、Go 授权与 catalog 契约](mcp-repository.md) |
 | 复用候选比较 | [复用清单](reuse-landscape.md)；这是候选调查，具体接入仍须按当前任务核对 |
 | 专项与发布 | [GOAL.md](GOAL.md)、[发布契约](release-gate.md) |
 

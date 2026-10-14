@@ -271,7 +271,7 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		if app.orchestrator != nil {
 			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
-				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry,
+				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog,
 				AgentLifecycle: app.handleAgentLifecycle,
 				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 					binding, ok := mcpManager.ResolveBinding(name)
@@ -625,7 +625,7 @@ func (a *App) converse(ctx context.Context, input string) (string, error) {
 	result, err := a.orchestrator.RunConversation(ctx, orchestrator.ConversationRequest{
 		Input: input, SessionID: current.ID, WorkingDir: current.WorkingDir, Actor: current.Actor,
 		History: orchestratorHistory(current.Messages, input), State: planTodoSnapshot(current),
-		HarnessManaged: true, MemoryContextJSON: memoryContext, ContextEnvelope: contextEnvelope,
+		HarnessManaged: true, MemoryContextJSON: memoryContext, ContextEnvelope: contextEnvelope, MCPCatalog: a.mcp.Catalog(),
 	}, orchestrator.ConversationHandlers{
 		Tool: a.handleToolCall, Event: a.handleOrchestratorEvent, AskUser: a.handleAskUserRequest,
 		TextDelta: a.orchestrator.OnTextDelta, Compaction: a.handleCompactionUpdate, PlanTodo: a.handlePlanTodoUpdate,

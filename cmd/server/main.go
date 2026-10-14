@@ -120,6 +120,13 @@ func (m *managedContinuation) Health(ctx context.Context) error {
 
 // main bootstraps infrastructure dependencies and starts the HTTP server.
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--repository-mcp" {
+		if err := mcp.RunRepositoryServer(context.Background(), "."); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	configPath := strings.TrimSpace(os.Getenv("CODEAGENT_CONFIG"))
 	if configPath == "" {
 		configPath = "./configs/server.yaml"
@@ -389,7 +396,7 @@ func main() {
 			return handlePersistedAgentLifecycle(lifecycleCtx, ledger, workspaceManager, lifecycle)
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
-			WorkerID: workerID, Permissions: continuationPermissions,
+			WorkerID: workerID, Permissions: continuationPermissions, MCPCatalog: continuationMCP.Catalog,
 			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
 			Memory: sessionMemory, Tracer: telemetry,
 			AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {

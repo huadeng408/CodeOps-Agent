@@ -111,6 +111,22 @@ message UserInput {
   repeated string allowed_tools = 10;
   ContextEnvelope context_envelope = 11;
   ModelGatewayBinding model_gateway = 12;
+  // Presence distinguishes the Go catalog from the legacy workspace manifest.
+  MCPToolCatalog mcp_catalog = 13;
+}
+
+message MCPToolCatalog {
+  uint32 schema_version = 1;
+  repeated MCPToolDefinition tools = 2;
+}
+
+message MCPToolDefinition {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  string server = 4;
+  string input_schema_sha256 = 5;
+  string server_config_sha256 = 6;
 }
 
 // ContextEnvelope is a bounded, read-only projection produced by the Go

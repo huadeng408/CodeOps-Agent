@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Collection
@@ -32,10 +34,11 @@ class ToolRegistry:
         project_root: str | None = None,
         allowed_tools: Collection[str] | None = None,
         skills: Any = None,
+        mcp_tools: Collection[orchestrator_pb2.MCPToolDefinition] | None = None,
     ) -> None:
         self._project_root = Path(project_root).resolve() if project_root else None
         self._mcp_manifest_path = (
-            self._project_root / ".agent" / "mcp-tools.json" if self._project_root else None
+            self._project_root / ".agent" / "mcp-tools.json" if self._project_root and mcp_tools is None else None
         )
         self._skills_manifest_path = (
             self._project_root / ".agent" / "skills.json" if self._project_root else None
@@ -47,8 +50,27 @@ class ToolRegistry:
         self._mcp_tool_names: set[str] = set()
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         self._skills = skills
-        for spec in self._default_tools():
+        defaults = list(self._default_tools())
+        for spec in defaults:
             self.register(spec, builtin=True)
+        if mcp_tools is not None:
+            if len(mcp_tools) > 128:
+                raise ValueError("Harness MCP catalog exceeds the tool bound")
+            seen = {spec.name.lower() for spec in defaults}
+            for tool in mcp_tools:
+                if (not tool.name or tool.name.lower() in seen or not tool.server
+                    or len(tool.input_schema_json.encode("utf-8")) > 512 * 1024
+                    or hashlib.sha256(tool.input_schema_json.encode("utf-8")).hexdigest() != tool.input_schema_sha256
+                    or not re.fullmatch(r"[0-9a-f]{64}", tool.server_config_sha256)):
+                    raise ValueError("Harness MCP catalog identity is invalid")
+                try:
+                    parameters = json.loads(tool.input_schema_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("Harness MCP input schema is invalid") from exc
+                if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                    raise ValueError("Harness MCP input schema must describe an object")
+                seen.add(tool.name.lower())
+                self.register(ToolSpec(tool.name, f"{tool.description} (MCP server: {tool.server})", parameters, orchestrator_pb2.ASK_SESSION))
 
     def register(self, spec: ToolSpec, builtin: bool = False) -> None:
         if self._allowed_tools is not None and spec.name not in self._allowed_tools:

@@ -2,17 +2,23 @@ package codeagent_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/mcp"
+	"code-agent/internal/orchestrator"
+	"code-agent/internal/session"
 	"code-agent/internal/tools"
 )
 
@@ -135,6 +141,11 @@ func TestMCPManagerRejectsManifestWindowsJunctionEscape(t *testing.T) {
 
 func TestMCPManagerRejectsHarnessAndDynamicNameCollisions(t *testing.T) {
 	manager := mcp.NewManager()
+	for _, name := range []string{"Delete", "Rename"} {
+		if err := manager.RegisterTool(mcp.ToolDefinition{Name: name, Server: "malicious"}); err == nil || !strings.Contains(err.Error(), "Harness tool") {
+			t.Fatalf("native lifecycle tool collision accepted: %s %v", name, err)
+		}
+	}
 	if err := manager.RegisterTool(mcp.ToolDefinition{Name: "Write", Server: "malicious"}); err == nil || !strings.Contains(err.Error(), "Harness tool") {
 		t.Fatalf("reserved Harness tool was registered: %v", err)
 	}
@@ -461,6 +472,32 @@ func TestMCPManagerClonesRunningServersForChildWorkingDir(t *testing.T) {
 	if err != nil || len(result.Content) != 1 || result.Content[0].Text != "echo: child" {
 		t.Fatalf("independent child MCP call failed: result=%+v err=%v", result, err)
 	}
+	other, err := manager.CloneForWorkingDir(ctx, workingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := manager.Stop("fake"); err != nil {
+		t.Fatal(err)
+	}
+	for label, invoke := range map[string]func() error{
+		"bound": func() error {
+			_, err := child.CallToolBound(ctx, binding, map[string]any{"text": "revoked"})
+			return err
+		},
+		"unbound": func() error {
+			_, err := other.CallTool(ctx, "fake_echo", map[string]any{"text": "revoked"})
+			return err
+		},
+	} {
+		t.Run(label, func(t *testing.T) {
+			err := invoke()
+			var failure *mcp.CallError
+			if !errors.As(err, &failure) || failure.Kind != "refused" || failure.OutcomeUnknown || !failure.Stopped {
+				t.Fatalf("revoked parent catalog allowed a child call: %v", err)
+			}
+		})
+	}
 }
 
 func TestMCPManagerSupportsCamelCaseInputSchema(t *testing.T) {
@@ -557,7 +594,301 @@ func TestMCPHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestMCPManagerRejectsMalformedResponseBeforeReportingSuccess(t *testing.T) {
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "malformed", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_BAD_RPC_VERSION": "1"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Start(ctx, "malformed"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	result, err := manager.CallTool(ctx, "fake_echo", map[string]any{"text": "untrusted"})
+	if err == nil || !strings.Contains(err.Error(), "protocol") || len(result.Content) != 0 {
+		t.Fatalf("malformed response reported success: %+v %v", result, err)
+	}
+}
+
+func TestMCPManagerRejectsInvalidArgumentsBeforeDispatch(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "called")
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "arguments", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_CALLED_MARKER": marker}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Start(ctx, "arguments"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.CallTool(ctx, "fake_echo", map[string]any{"text": 123}); err == nil || !strings.Contains(err.Error(), "arguments") {
+		t.Fatalf("invalid argument accepted: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("invalid arguments reached server: %v", err)
+	}
+	if result, err := manager.CallTool(ctx, "fake_echo", map[string]any{"text": "valid"}); err != nil || result.Content[0].Text != "echo: valid" {
+		t.Fatalf("valid arguments rejected: %+v %v", result, err)
+	}
+}
+
+func TestMCPRepositoryToolReadsOnlyWorkspaceManifests(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("repository MCP file pinning is admitted on Windows")
+	}
+	dir := t.TempDir()
+	content := []byte("module example.org/task\n\ngo 1.25\n")
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := mcp.RepositoryServerConfig(os.Args[0], []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Env = map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_REPOSITORY": "1"}
+	manager := mcp.NewManager()
+	manager.RegisterServer(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Start(ctx, cfg.Name); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	result, err := manager.CallTool(ctx, "RepositoryManifest", map[string]any{"file": "go.mod"})
+	if err != nil || result.IsError || len(result.Content) != 1 {
+		t.Fatalf("repository manifest unavailable: %+v %v", result, err)
+	}
+	var manifest struct {
+		File, Content, SHA256 string
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &manifest); err != nil || manifest.File != "go.mod" || manifest.Content != string(content) || manifest.SHA256 != fmt.Sprintf("%x", sha256.Sum256(content)) {
+		t.Fatalf("manifest provenance mismatch: %+v %v", manifest, err)
+	}
+	for _, arguments := range []map[string]any{{"file": "../go.mod"}, {"file": ".env"}, {"file": "go.mod", "command": "echo widened"}} {
+		if _, err := manager.CallTool(ctx, "RepositoryManifest", arguments); err == nil {
+			t.Fatalf("scope widened: %+v", arguments)
+		}
+	}
+}
+
+func TestMCPManagerRejectsUntrustedExecutableBeforeStarting(t *testing.T) {
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "untrusted", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1"}, Trust: &mcp.ServerTrust{Name: "fake", Version: "1.0.0", License: "Apache-2.0", ExecutableSHA256: strings.Repeat("0", 64), Tools: map[string]string{"fake_echo": strings.Repeat("0", 64)}}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	defer manager.Close()
+	if err := manager.Start(ctx, "untrusted"); err == nil || !strings.Contains(err.Error(), "pin") {
+		t.Fatalf("untrusted executable started: %v", err)
+	}
+	if len(manager.ListTools()) != 0 || manager.Snapshot()[0].State != mcp.ServerStopped {
+		t.Fatal("untrusted catalog was published")
+	}
+}
+
+func TestMCPManagerRejectsChangedServerIdentity(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MCP executable pinning is admitted on Windows")
+	}
+	cfg, err := mcp.RepositoryServerConfig(os.Args[0], []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Env = map[string]string{"GO_WANT_HELPER_PROCESS": "1"}
+	manager := mcp.NewManager()
+	manager.RegisterServer(cfg)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Start(ctx, cfg.Name); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("changed server identity accepted: %v", err)
+	}
+	if len(manager.ListTools()) != 0 || manager.Snapshot()[0].State != mcp.ServerStopped {
+		t.Fatal("changed identity published a catalog")
+	}
+}
+
+func TestMCPManagerRejectsChangedApprovedCatalog(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MCP executable pinning is admitted on Windows")
+	}
+	cfg, err := mcp.RepositoryServerConfig(os.Args[0], []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Env = map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_REPOSITORY": "1"}
+	cfg.Trust.Tools["RepositoryManifest"] = strings.Repeat("0", 64)
+	manager := mcp.NewManager()
+	manager.RegisterServer(cfg)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Start(ctx, cfg.Name); err == nil || !strings.Contains(err.Error(), "catalog pin") {
+		t.Fatalf("changed tool catalog accepted: %v", err)
+	}
+	if len(manager.ListTools()) != 0 {
+		t.Fatal("unapproved catalog was exposed")
+	}
+}
+
+func TestMCPExecutorPreservesUnknownTimeoutAndStopsProcess(t *testing.T) {
+	dir := t.TempDir()
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "timeout", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_DELAY_MARKER": filepath.Join(dir, "delayed")}})
+	startup, stopStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopStartup()
+	if err := manager.Start(startup, "timeout"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	executor := tools.NewExecutor(dir)
+	defer executor.Close()
+	executor.SetMCPManager(manager)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result, err := executor.Execute(ctx, tools.ToolRequest{Name: "fake_echo", Arguments: map[string]any{"text": "first"}})
+	if err == nil || !strings.Contains(result.Error, "mcp_timeout") || !result.OutcomeUnknown || !result.Stopped {
+		t.Fatalf("timeout lost its execution boundary: %+v %v", result, err)
+	}
+	if result, err := executor.Execute(startup, tools.ToolRequest{Name: "fake_echo", Arguments: map[string]any{"text": "independent"}}); err != nil || result.OutcomeUnknown || result.Output != "echo: independent" {
+		t.Fatalf("independent request could not use pinned recovery: %+v %v", result, err)
+	}
+}
+
+func TestMCPExecutorClassifiesCancellationAfterDispatch(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "dispatched")
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "cancel", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_DELAY_MARKER": marker}})
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := manager.Start(ctx, "cancel"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	executor := tools.NewExecutor(dir)
+	defer executor.Close()
+	executor.SetMCPManager(manager)
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan tools.ToolResult, 1)
+	go func() {
+		result, _ := executor.Execute(callCtx, tools.ToolRequest{Name: "fake_echo", Arguments: map[string]any{"text": "cancel"}})
+		done <- result
+	}()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("MCP call never reached dispatch")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case result := <-done:
+		if !strings.Contains(result.Error, "mcp_cancelled") || !result.OutcomeUnknown || !result.Stopped {
+			t.Fatalf("dispatched cancellation lost its boundary: %+v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal("cancelled MCP process did not stop")
+	}
+}
+
+func TestMCPExecutorRejectsMalformedFramesAndLostConnections(t *testing.T) {
+	for _, scenario := range []string{"json", "id", "both", "content", "content_type", "text_missing", "text_null", "oversize", "disconnect"} {
+		t.Run(scenario, func(t *testing.T) {
+			manager := mcp.NewManager()
+			manager.RegisterServer(mcp.ServerConfig{Name: "frame", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_FRAME": scenario}})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := manager.Start(ctx, "frame"); err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			executor := tools.NewExecutor(t.TempDir())
+			defer executor.Close()
+			executor.SetMCPManager(manager)
+			result, err := executor.Execute(ctx, tools.ToolRequest{Name: "fake_echo", Arguments: map[string]any{"text": "untrusted"}})
+			kind := "mcp_protocol_invalid"
+			if scenario == "disconnect" {
+				kind = "mcp_connection_lost"
+			}
+			if err == nil || !strings.Contains(result.Error, kind) || !result.OutcomeUnknown || !result.Stopped || result.Output != "" {
+				t.Fatalf("untrusted frame escaped classification: %+v %v", result, err)
+			}
+		})
+	}
+}
+
+type mcpReplayConversation struct{}
+
+func (mcpReplayConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	call := orchestrator.ToolCall{ID: "unknown-mcp", Name: "fake_echo", ParametersJSON: `{"text":"first"}`}
+	for range 2 {
+		result := handlers.Tool(ctx, call)
+		if !result.OutcomeUnknown || !result.Stopped || !strings.Contains(result.Error, "mcp_timeout") {
+			return orchestrator.ConversationResult{}, fmt.Errorf("unknown MCP outcome was replaced: %+v", result)
+		}
+	}
+	return orchestrator.ConversationResult{Success: true, Message: "unknown result retained"}, nil
+}
+
+func TestMCPSessionDoesNotDispatchUnknownInvocationAgain(t *testing.T) {
+	dir := t.TempDir()
+	manager := mcp.NewManager()
+	manager.RegisterServer(mcp.ServerConfig{Name: "unknown", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess", "--", "mcp"}, Env: map[string]string{"GO_WANT_HELPER_PROCESS": "1", "FAKE_MCP_DELAY_MARKER": filepath.Join(dir, "delayed")}})
+	ctx := context.Background()
+	if err := manager.Start(ctx, "unknown"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	executor := tools.NewExecutor(dir)
+	defer executor.Close()
+	executor.SetMCPManager(manager)
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(dir, "sessions.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	workbench := session.NewWorkbench(ledger, nil)
+	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "unknown MCP", "", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var executions atomic.Int32
+	runner := session.NewSessionRunner(workbench, mcpReplayConversation{}, session.ToolExecutionFunc(func(ctx context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+		executions.Add(1)
+		bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		result, _ := executor.Execute(bounded, tools.ToolRequest{Name: call.Name, Arguments: map[string]any{"text": "first"}})
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: result.Error, ExitCode: int32(result.ExitCode), Stopped: result.Stopped, OutcomeUnknown: result.OutcomeUnknown}
+	}), session.SessionRunnerOptions{WorkerID: "mcp-unknown"})
+	defer runner.Close()
+	actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "test", TenantID: "org:test", Roles: []string{"USER"}}
+	accepted, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "mcp-unknown", SessionID: created.ID, OwnerID: 7, ExpectedSeq: 1, Content: "test unknown MCP", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		view, err := runner.Run(ctx, created.ID, accepted.RunID)
+		if err == nil && (view.Status == session.RunCompleted || view.Status == session.RunFailed) {
+			if view.Status != session.RunCompleted || executions.Load() != 1 {
+				t.Fatalf("unknown MCP replayed: %+v executions=%d", view, executions.Load())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("MCP replay run did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func runFakeMCPServer() {
+	if os.Getenv("FAKE_MCP_REPOSITORY") == "1" {
+		_ = mcp.RunRepositoryServer(context.Background(), ".")
+		return
+	}
 	drifted := false
 	if os.Getenv("FAKE_MCP_DRIFT_AFTER_DELAY") == "1" {
 		_, err := os.Stat(strings.TrimSpace(os.Getenv("FAKE_MCP_DELAY_MARKER")))
@@ -626,6 +957,9 @@ func runFakeMCPServer() {
 				}},
 			}
 		case "tools/call":
+			if marker := os.Getenv("FAKE_MCP_CALLED_MARKER"); marker != "" {
+				_ = os.WriteFile(marker, []byte("called"), 0o600)
+			}
 			if drifted {
 				if marker := strings.TrimSpace(os.Getenv("FAKE_MCP_DRIFTED_CALL_MARKER")); marker != "" {
 					_ = os.WriteFile(marker, []byte("called"), 0o600)
@@ -663,8 +997,38 @@ func runFakeMCPServer() {
 			continue
 		}
 		data, _ := json.Marshal(result)
+		if req.Method == "tools/call" {
+			switch os.Getenv("FAKE_MCP_FRAME") {
+			case "json":
+				fmt.Fprintln(os.Stdout, "{broken")
+				continue
+			case "id":
+				_ = encoder.Encode(mcp.Response{JSONRPC: "2.0", ID: fmt.Sprint(req.ID), Result: data})
+				continue
+			case "both":
+				_ = encoder.Encode(mcp.Response{JSONRPC: "2.0", ID: req.ID, Result: data, Error: &mcp.ErrorObject{Code: -32602, Message: "both fields"}})
+				continue
+			case "content":
+				data = []byte(`{"content":null}`)
+			case "content_type":
+				data = []byte(`{"content":[{"type":"bogus","text":"forged"}]}`)
+			case "text_missing":
+				data = []byte(`{"content":[{"type":"text"}]}`)
+			case "text_null":
+				data = []byte(`{"content":[{"type":"text","text":null}]}`)
+			case "oversize":
+				fmt.Fprintln(os.Stdout, strings.Repeat("x", (8<<20)+1))
+				continue
+			case "disconnect":
+				return
+			}
+		}
+		version := "2.0"
+		if req.Method == "tools/call" && os.Getenv("FAKE_MCP_BAD_RPC_VERSION") == "1" {
+			version = "1.0"
+		}
 		_ = encoder.Encode(mcp.Response{
-			JSONRPC: "2.0",
+			JSONRPC: version,
 			ID:      req.ID,
 			Result:  data,
 		})

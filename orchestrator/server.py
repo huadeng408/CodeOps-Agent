@@ -458,6 +458,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         *,
         project_root: str | None = None,
         model_gateway=None,
+        mcp_catalog=None,
     ) -> ConversationRunner:
         # Auxiliary summaries use the configured provider but never inherit
         # executable tools. This keeps compaction on the same model boundary
@@ -482,7 +483,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         return ConversationRunner(
             graph=self.app.graph,
             llm=client,
-            tool_registry=ToolRegistry(runner_root, skills=skills),
+            tool_registry=ToolRegistry(runner_root, skills=skills, mcp_tools=mcp_catalog.tools if mcp_catalog is not None else None),
             todo_manager=self.app.todos,
             memory_manager=self.app.memory,
             skills=skills,
@@ -571,6 +572,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         agent_task = None
         allowed_tools = ()
         model_gateway = None
+        mcp_catalog = None
         for message in request_iterator:
             payload = message.WhichOneof("payload")
             if payload == "user_input":
@@ -580,6 +582,10 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 session_id = user_input.session_id
                 working_dir = self._validate_working_dir(user_input.working_dir, session_id, context)
                 harness_managed = user_input.harness_managed
+                if user_input.HasField("mcp_catalog"):
+                    if not harness_managed or user_input.mcp_catalog.schema_version != 1:
+                        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "MCP catalog requires a versioned Harness request")
+                    mcp_catalog = user_input.mcp_catalog
                 memory_context = user_input.memory_context_json
                 if user_input.HasField("context_envelope"):
                     if not harness_managed:
@@ -666,11 +672,12 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     working_dir=working_dir or None,
                     project_root=child_root,
                     **({"model_gateway": model_gateway} if model_gateway is not None else {}),
+                    **({"mcp_catalog": mcp_catalog} if mcp_catalog is not None else {}),
                 )
             elif working_dir:
-                runner = self._new_runner(working_dir=working_dir, **({"model_gateway": model_gateway} if model_gateway is not None else {}))
+                runner = self._new_runner(working_dir=working_dir, **({"model_gateway": model_gateway} if model_gateway is not None else {}), **({"mcp_catalog": mcp_catalog} if mcp_catalog is not None else {}))
             else:
-                runner = self._new_runner(**({"model_gateway": model_gateway} if model_gateway is not None else {}))
+                runner = self._new_runner(**({"model_gateway": model_gateway} if model_gateway is not None else {}), **({"mcp_catalog": mcp_catalog} if mcp_catalog is not None else {}))
             if harness_managed:
                 runner.harness_managed = True
                 runner.harness_memory_context = memory_context
@@ -699,6 +706,7 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                         runner.project_root,
                         allowed_tools=allowed_tools,
                         skills=runner.skills,
+                        mcp_tools=mcp_catalog.tools if mcp_catalog is not None else None,
                     )
             runner_actor = actor
             new_turn_options = {}

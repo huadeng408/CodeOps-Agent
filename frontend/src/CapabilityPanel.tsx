@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './api';
 import type { RuntimeCapabilities, Session } from './types';
 
-const labels = { identity: '本机身份', history: '会话历史', provider: '模型接入', sandbox: '执行环境', budget: 'token 批次', execution: '任务执行', rag: '知识检索', trace: '追踪记录' } as const;
+const labels = { identity: '本机身份', history: '会话历史', provider: '模型接入', sandbox: '执行环境', budget: 'token 批次', execution: '任务执行', mcp: '仓库 MCP', rag: '知识检索', trace: '追踪记录' } as const;
 const reasons: Record<string, string> = {
   'local persistent authentication': '本机身份已启用。',
   'canonical Session Ledger': '会话持久化已启用，重启后仍可查看。',
@@ -16,6 +16,8 @@ const reasons: Record<string, string> = {
   'model profile is invalid': '核对模型协议、地址和 token 上界；当前配置不能准入。',
   'model profile configured; live validity is not confirmed': '模型配置已齐全，实际可用性尚待调用确认。',
   'local task runtime is not attached': '启用已批准的隔离执行环境后才能修改或运行代码。',
+  'bundled read-only repository MCP is unavailable': '只读仓库工具尚未通过身份与版本核验。',
+  'pinned read-only repository manifest tool; per-call approval required': '读取当前任务的依赖清单与校验值，调用前需批准。',
   'token Ledger is unavailable; restore it before calling a model': '无法读取额度账本，恢复账本后才能调用模型。',
   'persistent token admission; price unknown': '累计额度跨进程保留；当前费用未知。',
   'provider enforces budget; local usage is audited': '预算上限由服务商执行，本地记录已确认用量；费用未知。',

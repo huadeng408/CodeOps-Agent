@@ -15,6 +15,7 @@ import (
 	"code-agent/internal/admission"
 	"code-agent/internal/handler"
 	"code-agent/internal/localidentity"
+	"code-agent/internal/mcp"
 	"code-agent/internal/memory"
 	"code-agent/internal/middleware"
 	harnessorch "code-agent/internal/orchestrator"
@@ -143,6 +144,32 @@ func runLocalCore(cfg serverconfig.Config) error {
 	executors := newContinuationToolExecutors(cfg.Harness.TaskWorkspaceRoot)
 	executors.sandbox = newLazySandboxRunner(taskConfig)
 	executors.taskWorkspaces, executors.taskOwner = workspaces, identity.OwnerID
+	repositoryMCP := mcp.NewManager()
+	defer repositoryMCP.Close()
+	if workspaces != nil {
+		executable, err := os.Executable()
+		if err == nil {
+			serverCfg, err := mcp.RepositoryServerConfig(executable, []string{"--repository-mcp"}, cfg.Harness.RepositoryRoot)
+			if err == nil {
+				repositoryMCP.RegisterServer(serverCfg)
+				if err := repositoryMCP.Start(context.Background(), serverCfg.Name); err != nil {
+					log.Errorf("bundled repository MCP is unavailable")
+				}
+			}
+		}
+	}
+	executors.SetMCPManager(repositoryMCP)
+	admitWorkspace := modelWorkspace
+	modelWorkspace = func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
+		workspace, err := admitWorkspace(ctx, owner, id)
+		if err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		if err := executors.PrepareWorkspace(ctx, id, workspace.WorkingDir); err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		return workspace, nil
+	}
 	executors.SetTracer(telemetry)
 	defer executors.Close()
 	target := strings.TrimSpace(os.Getenv("CODE_AGENT_ORCHESTRATOR_ADDR"))
@@ -161,7 +188,11 @@ func runLocalCore(cfg serverconfig.Config) error {
 		client.SetModelScopeFactory(gateway.BindActor)
 		memories := memory.NewLedgerMemory(ledger, client.ReflectMemory)
 		memories.SetTracer(telemetry)
-		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: modelWorkspace})
+		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: modelWorkspace,
+			MCPCatalog: repositoryMCP.Catalog, AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
+				binding, ok := repositoryMCP.ResolveBinding(name)
+				return session.AgentToolBinding{Name: binding.Name, Server: binding.Server, InputSchemaSHA256: binding.InputSchemaSHA256, ServerConfigSHA256: binding.ServerConfigSHA256}, ok
+			}})
 		return &managedContinuation{runner: runner, client: client}, nil
 	})
 	supervisor.Start(context.Background())
@@ -184,6 +215,10 @@ func runLocalCore(cfg serverconfig.Config) error {
 		owner, _ := identity.OwnerID(c.Request.Context())
 		addModelAdmissionCapabilities(c.Request.Context(), ledger, capabilities, owner)
 		capabilities["sandbox"] = CapabilityStatus{State: "blocked", Reason: "local task runtime is not attached"}
+		capabilities["mcp"] = CapabilityStatus{State: "blocked", Reason: "bundled read-only repository MCP is unavailable"}
+		if len(repositoryMCP.ListTools()) == 1 {
+			capabilities["mcp"] = CapabilityStatus{State: "ready", Reason: "pinned read-only repository manifest tool; per-call approval required"}
+		}
 		if taskRuntime != nil {
 			if taskRuntime.Ready(c.Request.Context()) == nil {
 				capabilities["sandbox"] = CapabilityStatus{State: "ready", Reason: "approved OpenSandbox baseline profile"}

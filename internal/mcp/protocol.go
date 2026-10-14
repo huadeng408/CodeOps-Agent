@@ -1,6 +1,22 @@
 package mcp
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/google/jsonschema-go/jsonschema"
+)
+
+// CallError distinguishes a refusal from a dispatched operation with no
+// trustworthy result. Unknown operations must not be dispatched again.
+type CallError struct {
+	Kind           string
+	OutcomeUnknown bool
+	Stopped        bool
+	Cause          error
+}
+
+func (e *CallError) Error() string { return "mcp_" + e.Kind + ": " + e.Cause.Error() }
+func (e *CallError) Unwrap() error { return e.Cause }
 
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -29,6 +45,7 @@ type ErrorObject struct {
 }
 
 type ToolDefinition struct {
+	input              *jsonschema.Resolved
 	Name               string          `json:"name"`
 	Description        string          `json:"description"`
 	InputSchema        json.RawMessage `json:"input_schema,omitempty"`
@@ -91,4 +108,14 @@ type ServerConfig struct {
 	Args       []string          `json:"args,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	WorkingDir string            `json:"working_dir,omitempty"`
+	Trust      *ServerTrust      `json:"trust,omitempty"`
+}
+
+// ServerTrust is Harness configuration, never model-supplied call arguments.
+type ServerTrust struct {
+	Name             string            `json:"name"`
+	Version          string            `json:"version"`
+	License          string            `json:"license"`
+	ExecutableSHA256 string            `json:"executable_sha256"`
+	Tools            map[string]string `json:"tools"`
 }

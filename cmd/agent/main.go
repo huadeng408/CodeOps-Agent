@@ -8,10 +8,18 @@ import (
 
 	"code-agent/internal/cli"
 	"code-agent/internal/config"
+	"code-agent/internal/mcp"
 )
 
 func main() {
 	ctx := context.Background()
+	if len(os.Args) == 2 && os.Args[1] == "--repository-mcp" {
+		if err := mcp.RunRepositoryServer(ctx, "."); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load("")
 	if err != nil {
