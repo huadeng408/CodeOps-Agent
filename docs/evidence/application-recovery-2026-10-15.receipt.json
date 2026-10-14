@@ -1,0 +1,446 @@
+{
+  "scope": "#10 Windows application conflict, crash reconciliation and new-baseline approval",
+  "engineering_state": "IMPLEMENTED",
+  "verification": {
+    "unit": "passed",
+    "integration": "passed",
+    "product_declared_scope": "passed",
+    "full_release": "not_run"
+  },
+  "review": {
+    "kind": "AI_REVIEWED",
+    "standards_open_findings": 0,
+    "spec_open_findings": 0
+  },
+  "source_head": "85f305abf893736423ca02d480015e803147e74b",
+  "runtime_includes_uncommitted_implementation": true,
+  "fault_injection": "test-only public Ledger decorator pauses unchanged native application in a Go subprocess; production binary/HTTP/browser perform restart reconciliation",
+  "external_model_and_orchestrator_fixtures": true,
+  "paid_model_calls": 0,
+  "full_go_then_final_cursor_change": "full regression followed by four fresh public-seam regressions and final product run for the cursor error classification; unaffected full-suite results retained",
+  "runtime_inputs_verified": true,
+  "runtime_input_count": 526,
+  "runtime_inputs_sha256": "7696249adc58023e625494a08bd433170307be53a43f8ae3d19542914c34de90",
+  "runtime_source_fingerprint": "e5981b2a5cb10ee82dfe5cb1e50ce3c8b3b9afdb6d6f63017a14a1ad74628fcb",
+  "manifest_sha256": "39f4d592d297f32337cb4938e0e96045ccefc602d458da34301ce13f751b3b7c",
+  "task_image": "sha256:c35ffc50ff2d4e97ea90f973b29836945912397204592a0b06a0b6fbbba59b58",
+  "runtime_rounds": [
+    {
+      "label": "matrix-v1",
+      "exit_code": 4294967295,
+      "test_events": {
+        "test_pass": 2,
+        "test_fail": 5
+      },
+      "planned_crash_cases": 16,
+      "planned_concurrent_cases": 3,
+      "planned_fresh_review_cases": 1,
+      "runtime_log_sha256": "f009978a623331477f163187e0d7e8357f084d621794defc59363848867832bb",
+      "inputs_sha256": "fbd7a890792fa02d1fa59cc72e888379a096ab697b2c6d23c32205e21ccbf0f5"
+    },
+    {
+      "label": "matrix-v2",
+      "exit_code": 1,
+      "test_events": {
+        "test_pass": 5,
+        "test_fail": 15,
+        "package_fail": 1
+      },
+      "planned_crash_cases": 16,
+      "planned_concurrent_cases": 3,
+      "planned_fresh_review_cases": 1,
+      "runtime_log_sha256": "bbd335945ae8531cf393e4112d8b311359d8f5716adf5eaa4452b50e2581e9c9",
+      "inputs_sha256": "200b62e72244c24fc94aa822e73819b1ea2eb73331ce30784bc7527cc4ac1ced"
+    },
+    {
+      "label": "matrix-v3",
+      "exit_code": 1,
+      "test_events": {
+        "test_pass": 4,
+        "test_fail": 16,
+        "package_fail": 1
+      },
+      "planned_crash_cases": 16,
+      "planned_concurrent_cases": 3,
+      "planned_fresh_review_cases": 1,
+      "runtime_log_sha256": "47b36c3cca7d6846e750e83f4cf6131d8b73c88930a1225cbd2ee21a541fe8a4",
+      "inputs_sha256": "4915eb2668ddbf32bf6e34f36a12e67dabc4deaa4753b8d4bcf4050082c81b26"
+    },
+    {
+      "label": "matrix-v4",
+      "exit_code": 0,
+      "test_events": {
+        "test_pass": 20,
+        "package_pass": 1
+      },
+      "planned_crash_cases": 16,
+      "planned_concurrent_cases": 3,
+      "planned_fresh_review_cases": 1,
+      "runtime_log_sha256": "21fad779f170536b4595f28165d48a0965b209652dd5e0afae31b060c031419b",
+      "inputs_sha256": "7696249adc58023e625494a08bd433170307be53a43f8ae3d19542914c34de90"
+    }
+  ],
+  "final_product_cases": {
+    "crash": {
+      "pass": 16,
+      "fail": 0,
+      "planned_file_items": 64
+    },
+    "concurrent": {
+      "pass": 3,
+      "fail": 0
+    },
+    "fresh_baseline_and_approval": {
+      "pass": 1,
+      "fail": 0,
+      "remaining_items": 3
+    }
+  },
+  "browser": {
+    "pass": 18,
+    "fail": 0,
+    "checks_pass": 123,
+    "artifacts": [
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.concurrent-content.json.browser.json",
+        "sha256": "96040460ee46b4a8124cf0ae8c6fae13c417e6e6221b337515497de5e04d08aa",
+        "checks": 4,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.fresh-review.json.browser.json",
+        "sha256": "e59fdc615eb9ff4204f9874c99e8391e8cb91458c485a55e5d3c09df4a053588",
+        "checks": 4,
+        "reconciliation_attempts": [],
+        "approval_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 64,
+              "requestId": "browser:97a3f733-b282-4cfa-833b-c2f3f95b8ea2",
+              "proposalId": "deca0afc54164261bc1e0137ae90006a59f9b08c7f10bad529edd67c3fcc3eb9",
+              "decision": "approve"
+            },
+            "status": 200
+          }
+        ]
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-intent-after-0.json.browser.json",
+        "sha256": "d29356b23f60a39bacf315915ffdf73bd1e4134ecf0f6c40095c470a7b6d384b",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 78,
+              "requestId": "browser:19c9b170-1620-4051-a74a-bf93dab9d174",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-intent-after-1.json.browser.json",
+        "sha256": "47a79a3498e6c28d1ef7187163b551b56847f3ba02f94850c1206e48d14b7ff8",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 81,
+              "requestId": "browser:57ddb924-b0e0-49b6-b4f6-12d759073a61",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-intent-after-2.json.browser.json",
+        "sha256": "d4f12183ffe17586e02a0e89d7c9aed2c0bbbb28a1b0696e0b0e4b16f597dcc8",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 83,
+              "requestId": "browser:89ec9a3c-b584-4db4-a05d-a83f1038b82f",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-intent-after-3.json.browser.json",
+        "sha256": "decfa63db4d518c48ee63e1eac0b88be5bbec2fab8fd5505907d9678a2ba2787",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 85,
+              "requestId": "browser:2bca34af-307b-49c4-b542-9e4409677e7d",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-after-0.json.browser.json",
+        "sha256": "daf151685354d80e7f401dc81d1777747c9ad0f42fbdbf771f9317b5e755ad9a",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 80,
+              "requestId": "browser:de380276-0876-4dd7-8dff-24fb7afc9bad",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-after-1.json.browser.json",
+        "sha256": "c197c87deffb942abe0dceb4ac50867d5179b7fa0d5b11b2b5479291308eab41",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 82,
+              "requestId": "browser:ea05599f-8bda-4e21-909b-3adebda6c9f7",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-after-2.json.browser.json",
+        "sha256": "5dfd8f3425c60d550a13312a72b7711f8c7b349e1926007932b7e287f56177ea",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 84,
+              "requestId": "browser:964d3a44-e75b-4427-8b73-1ac67b161198",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-after-3.json.browser.json",
+        "sha256": "873cba452ca7c5eed432833422d996b5845d15b13bd77a3fa6a00278a1ea9db8",
+        "checks": 6,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-before-0.json.browser.json",
+        "sha256": "2cb928f15fd3105b76fce69d179aab4a631e1d361bf8cc57986c728bb6278782",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 79,
+              "requestId": "browser:506d1711-7fcf-4b17-8fdf-5a422980c0df",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-before-1.json.browser.json",
+        "sha256": "e38067931e4a1162280089fff7bd967aa9d95c67718d66c1702cff510b5c9ca0",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 81,
+              "requestId": "browser:3fe7cd1c-fa19-4cd1-82ba-01f2f11150b8",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-before-2.json.browser.json",
+        "sha256": "cc45d6000313a7c054a7605218f7cadf8e7b5952a7c96601be99496b9976715d",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 83,
+              "requestId": "browser:264374ca-4bf5-4c11-930a-3ac347b6560a",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.item-outcome-before-3.json.browser.json",
+        "sha256": "873cba452ca7c5eed432833422d996b5845d15b13bd77a3fa6a00278a1ea9db8",
+        "checks": 6,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.parent-intent-after-0.json.browser.json",
+        "sha256": "26515f9e8b2303cccce8db973d5c565a27a8af781e7e7dcf406acb130ecc55b2",
+        "checks": 8,
+        "reconciliation_attempts": [
+          {
+            "payload": {
+              "expectedSeq": 77,
+              "requestId": "browser:f89dac92-c190-4388-b3ba-f1404568ef50",
+              "applicationRequestId": "crashed-product-application"
+            },
+            "status": 200
+          }
+        ],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.parent-intent-before-0.json.browser.json",
+        "sha256": "5446f1b4729d8d5f504d289066502fd7365007654a2b49faeda591e54183ff50",
+        "checks": 3,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.parent-outcome-after-0.json.browser.json",
+        "sha256": "873cba452ca7c5eed432833422d996b5845d15b13bd77a3fa6a00278a1ea9db8",
+        "checks": 6,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      },
+      {
+        "artifact": "deployments/docker/.local/receipts/application-recovery-20261015/matrix-v4/facts.json.parent-outcome-before-0.json.browser.json",
+        "sha256": "873cba452ca7c5eed432833422d996b5845d15b13bd77a3fa6a00278a1ea9db8",
+        "checks": 6,
+        "reconciliation_attempts": [],
+        "approval_attempts": []
+      }
+    ]
+  },
+  "attempt_recording_scope": "browser reconciliation/approval arrays and Go reconciliation CAS-refusal artifacts; fresh proposal HTTP retry count is not claimed",
+  "checks": [
+    {
+      "command": "go test ./... -count=1 -json",
+      "exit_code": 1,
+      "artifact": ".scratch/application-recovery-20261015/go-full.jsonl",
+      "sha256": "aa313ed182576580b57253246c010a16d7fca68b64063df9a024b31a280a2403",
+      "test_events": {
+        "package_skip": 13,
+        "test_pass": 1647,
+        "package_pass": 44,
+        "test_skip": 78,
+        "test_fail": 2,
+        "package_fail": 1
+      }
+    },
+    {
+      "command": "go test ./... -count=1 -json",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/go-full-final.jsonl",
+      "sha256": "fab56c7058d5751d03b302ff3a0e96d480dd8406b9f4b70ad8af4b1e5070aa12",
+      "test_events": {
+        "package_skip": 13,
+        "test_pass": 1649,
+        "package_pass": 45,
+        "test_skip": 78
+      }
+    },
+    {
+      "command": "go test ./internal/sandbox -run ^TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox$ -count=1 -json",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/go-sandbox-recheck.jsonl",
+      "sha256": "94d47a7c1ded2a0795dc934acd2455ae1d50d9eb902a10b3360d079bf341e66d",
+      "test_events": {
+        "test_pass": 34,
+        "package_pass": 1
+      }
+    },
+    {
+      "command": "go test ./internal/session -run ^Test(ReconcileApplicationRequiresRefreshedCursorForNewFacts|ReconciledPartialAllowsFinishButRequiresNewTask|ReconcileDeletionPreservesReplacementDirectory|RepeatedReconciliation) -count=1 -json",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/cursor-green.jsonl",
+      "sha256": "a83c576aff2aa563bafb6c8242bc36c2ee0673b96dcd699ed01a4aad4884e900",
+      "test_events": {
+        "test_pass": 4,
+        "package_pass": 1
+      }
+    },
+    {
+      "command": "go test ./internal/session -run ^TestApplicationCrashMatrixKeepsEveryPlannedItem$ -count=1 -json",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/crash-matrix.jsonl",
+      "sha256": "3eeb5e9024bd6a06f3d5fefa1616969bded384cb63ca224b5859a748f427c27e",
+      "test_events": {
+        "test_pass": 17,
+        "package_pass": 1
+      }
+    },
+    {
+      "command": "go vet ./...",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/go-vet-final.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -q",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/python-full.log",
+      "sha256": "a920562021a9651344b97ab19e256b7afc294b0754f023bc5e317e0b3c1a6a7c"
+    },
+    {
+      "command": "npm test (frontend)",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/frontend-tests-final.log",
+      "sha256": "6efa24cd997988f3e46efe38f1bf213d6df43b644a66298a4eaccc5c07b35ee8"
+    },
+    {
+      "command": "npm run build (frontend)",
+      "exit_code": 0,
+      "artifact": ".scratch/application-recovery-20261015/frontend-build-final.log",
+      "sha256": "6f806ed47b838c46636ce843919754697668073ad3a474f905daf51d40421119"
+    }
+  ],
+  "python_counts": {
+    "pass": 2507,
+    "skip": 17,
+    "fail": 0,
+    "warnings": 3
+  },
+  "frontend_counts": {
+    "pass": 12,
+    "skip": 0,
+    "fail": 0
+  },
+  "fixture_browser": {
+    "artifact": "output/playwright/task-proposal-1792002387249/receipt.json",
+    "exit_code": 0,
+    "checks_pass": 7,
+    "sha256": "079eb4c90be2a844d4e74f7df941018295704237706b04473d4e2e614538354d"
+  },
+  "limitations": [
+    "No new CLI proposal application entry",
+    "No real paid model validation in this scope",
+    "Full milestone and release validation remain separate"
+  ]
+}

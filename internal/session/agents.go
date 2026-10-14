@@ -538,7 +538,7 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 			return applicationErr
 		}
 		for _, application := range applications {
-			if application.View.State == "unknown" || application.View.State == "partial" {
+			if application.View.State == "unknown" || application.View.State == "partial" && !application.View.Reconciled {
 				return ErrSessionStateConflict
 			}
 		}

@@ -32,6 +32,7 @@ type TaskWorkspaceModule interface {
 	RunBaseline(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 	GenerateProposal(context.Context, uint, string, int64, string) (TaskWorkspaceView, error)
 	DecideProposal(context.Context, uint, string, int64, string, string, string) (TaskWorkspaceView, error)
+	ReconcileApplication(context.Context, uint, string, int64, string, string) (TaskWorkspaceView, error)
 }
 
 // TaskWorkspaces keeps preparation on the Workbench's canonical Ledger. Only

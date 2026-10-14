@@ -52,7 +52,9 @@ export interface TaskWorkspace {
     decision: 'approve' | 'reject';
     state: 'applied' | 'rejected' | 'conflict' | 'unknown' | 'partial';
     reason?: string;
-    items?: Array<{ path: string; destination?: string; operation: 'create' | 'edit' | 'delete' | 'rename'; state: 'not_started' | 'pending' | 'applied' | 'conflict' | 'unknown'; reason?: string; createdDirectories?: string[] }>;
+    reconciled?: boolean;
+    observedChecksum?: string;
+    items?: Array<{ path: string; destination?: string; operation: 'create' | 'edit' | 'delete' | 'rename'; state: 'not_started' | 'not_applied' | 'pending' | 'applied' | 'conflict' | 'unknown'; reason?: string; createdDirectories?: string[] }>;
   };
   proposal?: {
     id: string;

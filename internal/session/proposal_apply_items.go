@@ -1,6 +1,7 @@
 package session
 
 import (
+	"code-agent/internal/safety"
 	"code-agent/internal/worktree"
 	"context"
 	"encoding/json"
@@ -24,9 +25,17 @@ func (t *TaskWorkspaces) applyProposal(ctx context.Context, owner uint, id strin
 	if err != nil || prepared == nil || proposal.View.State != "ready" || t.verifyTask(ctx, prepared.Task, events) != nil {
 		return TaskWorkspaceView{}, ErrSessionStateConflict
 	}
-	files, inputs, err := proposalFiles(prepared.Task.Baseline, events)
+	changes, err := proposalFileApplications(prepared.Task.Baseline, proposal, events)
+	if err != nil {
+		return TaskWorkspaceView{}, err
+	}
+	return t.recordProposalApplication(ctx, owner, id, seq, requestID, proposal, prepared.Task.Baseline, changes)
+}
+
+func proposalFileApplications(baseline worktree.Baseline, proposal *taskProposalPayload, events []Event) ([]worktree.FileApplication, error) {
+	files, inputs, err := proposalFiles(baseline, events)
 	if err != nil || !slices.Equal(files, proposal.View.Files) || !slices.Equal(inputs, proposal.InputFiles) {
-		return TaskWorkspaceView{}, ErrSessionStateConflict
+		return nil, ErrSessionStateConflict
 	}
 	before, after := map[string]string{}, map[string]string{}
 	started := false
@@ -39,7 +48,7 @@ func (t *TaskWorkspaces) applyProposal(ctx context.Context, owner uint, id strin
 		}
 		var change codeModificationPayload
 		if json.Unmarshal(event.Payload, &change) != nil {
-			return TaskWorkspaceView{}, ErrEventIntegrity
+			return nil, ErrEventIntegrity
 		}
 		if _, seen := before[change.Path]; !seen {
 			before[change.Path] = change.Before
@@ -60,18 +69,26 @@ func (t *TaskWorkspaces) applyProposal(ctx context.Context, owner uint, id strin
 		if file.BeforeExists {
 			change.Before = before[file.Path]
 			if hashCodeState(change.Before) != file.BeforeSHA256 {
-				return TaskWorkspaceView{}, ErrEventIntegrity
+				return nil, ErrEventIntegrity
 			}
 		}
 		if file.AfterExists {
 			change.After = after[target]
 			if hashCodeState(change.After) != file.AfterSHA256 {
-				return TaskWorkspaceView{}, ErrEventIntegrity
+				return nil, ErrEventIntegrity
 			}
 		}
 		changes = append(changes, change)
 	}
-	payload := proposalApplicationPayload{SchemaVersion: 2, OwnerID: owner, BaselineChecksum: proposal.View.BaselineChecksum, FinalStateSHA256: proposal.View.FinalStateSHA256, View: ProposalApplicationView{RequestID: requestID, ProposalID: proposal.View.ID, Decision: "approve", State: "unknown", Reason: "application outcome requires reconciliation"}}
+	return changes, nil
+}
+
+func (t *TaskWorkspaces) recordProposalApplication(ctx context.Context, owner uint, id string, seq int64, requestID string, proposal *taskProposalPayload, baseline worktree.Baseline, changes []worktree.FileApplication) (TaskWorkspaceView, error) {
+	process, err := safety.CurrentProcessIdentity()
+	if err != nil {
+		return TaskWorkspaceView{}, ErrSessionStateConflict
+	}
+	payload := proposalApplicationPayload{SchemaVersion: 3, Process: process, OwnerID: owner, BaselineChecksum: proposal.View.BaselineChecksum, FinalStateSHA256: proposal.View.FinalStateSHA256, View: ProposalApplicationView{RequestID: requestID, ProposalID: proposal.View.ID, Decision: "approve", State: "unknown", Reason: "application outcome requires reconciliation"}}
 	var parent Event
 	itemIntents := map[int]string{}
 	record := func(index int, result *worktree.FileApplicationResult) error {
@@ -123,7 +140,7 @@ func (t *TaskWorkspaces) applyProposal(ctx context.Context, owner uint, id strin
 		}
 		return ErrSequenceConflict
 	}
-	_, applyErr := t.manager.ApplyFiles(ctx, prepared.Task.Baseline, changes, record)
+	_, applyErr := t.manager.ApplyFiles(ctx, baseline, changes, record)
 	if parent.EventID == "" {
 		return TaskWorkspaceView{}, errors.Join(ErrSessionStateConflict, applyErr)
 	}
@@ -138,6 +155,9 @@ func (t *TaskWorkspaces) applyProposal(ctx context.Context, owner uint, id strin
 		applications, readErr := taskApplications(latest.Events)
 		if readErr != nil {
 			return TaskWorkspaceView{}, readErr
+		}
+		if applications[requestID].View.Reconciled {
+			return t.Inspect(recordCtx, owner, id)
 		}
 		payload.View.State = applicationItemsState(applications[requestID].View.Items)
 		if payload.View.State == "applied" {

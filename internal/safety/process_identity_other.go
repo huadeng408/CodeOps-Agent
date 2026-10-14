@@ -1,6 +1,6 @@
 //go:build !windows && !linux
 
-package admission
+package safety
 
 import "errors"
 

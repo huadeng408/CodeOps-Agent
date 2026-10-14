@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 
 const output = resolve('../output/playwright/task-proposal-' + Date.now());
-const partial = process.argv.includes('--partial');
+const recovery = process.argv.includes('--reconcile');
+const partial = process.argv.includes('--partial') || recovery;
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -31,11 +32,12 @@ let retained = partial ? { ...proposal, files: [
   { ...proposal.files[0], path: 'new.txt', operation: 'create', beforeExists: false, beforeMode: 0, diff: '' },
   { ...proposal.files[0], path: 'old.txt', destination: 'moved.txt', operation: 'rename', diff: '' },
 ] } : undefined;
-const application = partial ? { id: 'application-1', proposalId: proposal.id, decision: 'approve', state: 'partial', reason: 'item_intent_not_committed',
+let application = partial ? { requestId: 'application-1', proposalId: proposal.id, decision: 'approve', state: 'partial', reason: 'item_intent_not_committed',
   items: retained.files.map((file, index) => ({ path: file.path, destination: file.destination, operation: file.operation, state: index === 0 ? 'applied' : 'not_started' })) } : undefined;
 const attempts = [], errors = [];
 const checks = partial ? { partial_status: false, complete_item_denominator: false, no_blind_retry: false, refresh_retains_partial: false, no_page_errors: false }
   : { generation: false, review_diff_and_binding: false, refresh_retains_result: false, regeneration_after_stale: false, no_apply: false, no_page_errors: false };
+if (recovery) {checks.explicit_readonly_reconciliation = false; checks.retained_identity = false;}
 let failed = true;
 page.on('pageerror', error => errors.push(error.message));
 try {
@@ -49,11 +51,16 @@ try {
     else if (path === '/api/v1/sessions') data = [session];
     else if (path === '/api/v1/sessions/' + session.id) data = session;
     else if (path.endsWith('/ws-ticket')) data = { ticket: 'fixture' };
+    else if (path.endsWith('/task-workspace/proposal/reconcile')) {
+      attempts.push({ method: request.method(), path, body: request.postDataJSON() });
+      application = { ...application, reconciled: true, observedChecksum: 'c'.repeat(64) };
+      data = { ...workspace, available: true, state: 'blocked', proposal: retained, application, eventCount: 18 };
+    }
     else if (path.endsWith('/task-workspace/proposal')) {
       attempts.push({ method: request.method(), path, body: request.postDataJSON() });
       retained = { ...proposal, id: attempts.length === 1 ? 'proposal-1' : 'proposal-2' };
       data = { ...workspace, proposalAvailable: false, eventCount: 18, proposal: retained };
-    } else if (path.endsWith('/task-workspace')) data = { ...workspace, state: partial ? 'blocked' : workspace.state,
+    } else if (path.endsWith('/task-workspace')) data = { ...workspace, available: recovery, state: partial ? 'blocked' : workspace.state,
       proposalAvailable: !retained || retained.state === 'stale' && retained.test.stopped, proposal: retained, application };
     await route.fulfill({ json: { data } });
   });
@@ -76,6 +83,20 @@ try {
     await card.getByText('部分应用，需对账', { exact: true }).waitFor();
     assert.equal(attempts.length, 0);
     checks.refresh_retains_partial = true;
+    if (recovery) {
+      await card.getByRole('button', { name: '核验应用结果', exact: true }).click();
+      await card.getByText(/已核验原副本，未继续执行旧应用/).waitFor();
+      assert.equal(attempts.length, 1);
+      assert.equal(attempts[0].body.applicationRequestId, 'application-1');
+      assert.equal(attempts[0].body.expectedSeq, 17);
+      assert.deepEqual(Object.keys(attempts[0].body).sort(), ['applicationRequestId', 'expectedSeq', 'requestId']);
+      checks.explicit_readonly_reconciliation = true;
+      assert.ok(attempts[0].body.requestId);
+      await page.getByRole('button', { name: '重新检查工作区', exact: true }).click();
+      await card.getByText('部分应用，需对账', { exact: true }).waitFor();
+      assert.equal(attempts.length, 1);
+      checks.retained_identity = true;
+    }
   } else {
   const generate = page.getByRole('button', { name: '生成并测试提案', exact: true });
   assert.equal(await generate.count(), 1, 'completed task exposes no proposal generation control');

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"code-agent/internal/safety"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,14 +16,17 @@ const proposalApplicationIntent = "workspace/application-intent"
 const proposalApplicationOutcome = "workspace/application-outcome"
 const proposalItemIntent = "workspace/application-item-intent"
 const proposalItemOutcome = "workspace/application-item-outcome"
+const proposalApplicationReconciled = "workspace/application-reconciled"
 
 type ProposalApplicationView struct {
-	RequestID  string                    `json:"requestId"`
-	ProposalID string                    `json:"proposalId"`
-	Decision   string                    `json:"decision"`
-	State      string                    `json:"state"`
-	Reason     string                    `json:"reason,omitempty"`
-	Items      []ProposalApplicationItem `json:"items,omitempty"`
+	RequestID        string                    `json:"requestId"`
+	ProposalID       string                    `json:"proposalId"`
+	Decision         string                    `json:"decision"`
+	State            string                    `json:"state"`
+	Reason           string                    `json:"reason,omitempty"`
+	Items            []ProposalApplicationItem `json:"items,omitempty"`
+	Reconciled       bool                      `json:"reconciled,omitempty"`
+	ObservedChecksum string                    `json:"observedChecksum,omitempty"`
 }
 
 type ProposalApplicationItem struct {
@@ -35,6 +39,9 @@ type ProposalApplicationItem struct {
 }
 
 type proposalApplicationPayload struct {
+	ItemIntentIDs    []string                `json:"-"`
+	Process          *safety.ProcessIdentity `json:"process,omitempty"`
+	OutcomeRecorded  bool                    `json:"-"`
 	SchemaVersion    int                     `json:"schema_version"`
 	OwnerID          uint                    `json:"owner_id"`
 	BaselineChecksum string                  `json:"baseline_checksum"`
@@ -147,13 +154,36 @@ func taskApplications(events []Event) (map[string]proposalApplicationPayload, er
 	outcomes := map[string]bool{}
 	itemIntents := map[string]string{}
 	for position, event := range events {
+		if event.Type == proposalApplicationReconciled {
+			var recovery applicationReconcilePayload
+			if json.Unmarshal(event.Payload, &recovery) != nil {
+				return nil, ErrEventIntegrity
+			}
+			parent, exists := result[recovery.ApplicationRequestID]
+			if !exists || recovery.SchemaVersion != 1 || recovery.RequestID == "" || len(recovery.RequestID) > 128 || strings.IndexFunc(recovery.RequestID, unicode.IsControl) >= 0 || parent.OwnerID != recovery.OwnerID || parent.IntentEventID != recovery.IntentEventID || recovery.SourceEventChecksum != event.PrevChecksum || len(recovery.ObservedChecksum) != 64 || len(recovery.ItemStates) != len(parent.View.Items) {
+				return nil, ErrEventIntegrity
+			}
+			for index, state := range recovery.ItemStates {
+				if state != "applied" && state != "not_applied" && state != "not_started" && state != "unknown" || parent.ItemIntentIDs[index] == "" && state != "not_started" && state != "unknown" {
+					return nil, ErrEventIntegrity
+				}
+				parent.View.Items[index].State = state
+			}
+			if recovery.State != applicationItemsState(parent.View.Items) {
+				return nil, ErrEventIntegrity
+			}
+			parent.View.State, parent.View.Reason, parent.View.Reconciled, parent.View.ObservedChecksum = recovery.State, recovery.Reason, true, recovery.ObservedChecksum
+			result[recovery.ApplicationRequestID] = parent
+			outcomes[recovery.ApplicationRequestID] = true
+			continue
+		}
 		if event.Type == proposalItemIntent || event.Type == proposalItemOutcome {
 			var item proposalItemPayload
 			if json.Unmarshal(event.Payload, &item) != nil || item.SchemaVersion != 2 {
 				return nil, ErrEventIntegrity
 			}
 			parent, exists := result[item.RequestID]
-			if !exists || parent.SchemaVersion != 2 || parent.OwnerID != item.OwnerID || parent.IntentEventID != item.ApplicationIntentID || outcomes[item.RequestID] || item.Index < 0 || item.Index >= len(parent.View.Items) {
+			if !exists || parent.SchemaVersion < 2 || parent.OwnerID != item.OwnerID || parent.IntentEventID != item.ApplicationIntentID || outcomes[item.RequestID] || item.Index < 0 || item.Index >= len(parent.View.Items) {
 				return nil, ErrEventIntegrity
 			}
 			key := item.RequestID + "\x00" + strconv.Itoa(item.Index)
@@ -168,6 +198,7 @@ func taskApplications(events []Event) (map[string]proposalApplicationPayload, er
 					}
 				}
 				itemIntents[key] = event.EventID
+				parent.ItemIntentIDs[item.Index] = event.EventID
 				view.State = "pending"
 			} else {
 				if view.State != "pending" || itemIntents[key] == "" || item.IntentEventID != itemIntents[key] || item.Result.State != "applied" && item.Result.State != "conflict" && item.Result.State != "unknown" {
@@ -192,7 +223,7 @@ func taskApplications(events []Event) (map[string]proposalApplicationPayload, er
 			continue
 		}
 		var payload proposalApplicationPayload
-		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion != 1 && payload.SchemaVersion != 2 || len(payload.View.Items) != 0 || payload.OwnerID == 0 || payload.View.RequestID == "" || len(payload.View.RequestID) > 128 || strings.IndexFunc(payload.View.RequestID, unicode.IsControl) >= 0 || payload.View.Decision != "approve" && payload.View.Decision != "reject" {
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion < 1 || payload.SchemaVersion > 3 || payload.SchemaVersion == 3 && (payload.Process == nil || !payload.Process.Valid()) || payload.SchemaVersion < 3 && payload.Process != nil || len(payload.View.Items) != 0 || payload.View.Reconciled || payload.View.ObservedChecksum != "" || payload.OwnerID == 0 || payload.View.RequestID == "" || len(payload.View.RequestID) > 128 || strings.IndexFunc(payload.View.RequestID, unicode.IsControl) >= 0 || payload.View.Decision != "approve" && payload.View.Decision != "reject" {
 			return nil, ErrEventIntegrity
 		}
 		if event.Type == proposalApplicationIntent {
@@ -211,7 +242,7 @@ func taskApplications(events []Event) (map[string]proposalApplicationPayload, er
 			if payload.View.Decision == "approve" && (proposal.View.State != "ready" || payload.SchemaVersion == 1 && (len(proposal.View.Files) != 1 || !proposal.View.Files[0].BeforeExists || !proposal.View.Files[0].AfterExists || proposal.View.Files[0].BeforeMode != proposal.View.Files[0].AfterMode)) {
 				return nil, ErrEventIntegrity
 			}
-			if payload.SchemaVersion == 2 && payload.View.Decision != "approve" {
+			if payload.SchemaVersion >= 2 && payload.View.Decision != "approve" {
 				return nil, ErrEventIntegrity
 			}
 			for _, file := range proposal.View.Files {
@@ -220,24 +251,34 @@ func taskApplications(events []Event) (map[string]proposalApplicationPayload, er
 					state = "unknown"
 				}
 				payload.View.Items = append(payload.View.Items, ProposalApplicationItem{Path: file.Path, Destination: file.Destination, Operation: file.Operation, State: state})
+				itemIntent := ""
+				if payload.SchemaVersion == 1 && payload.View.Decision == "approve" {
+					itemIntent = event.EventID
+				}
+				payload.ItemIntentIDs = append(payload.ItemIntentIDs, itemIntent)
 			}
 			payload.IntentEventID = event.EventID
 			decided[payload.View.ProposalID] = true
 		} else {
 			previous, exists := result[payload.View.RequestID]
+			if payload.SchemaVersion == 3 && (previous.Process == nil || *previous.Process != *payload.Process) {
+				return nil, ErrEventIntegrity
+			}
 			if !exists || outcomes[payload.View.RequestID] || previous.SchemaVersion != payload.SchemaVersion || previous.View.State != "unknown" || previous.IntentEventID != payload.IntentEventID || previous.OwnerID != payload.OwnerID || previous.BaselineChecksum != payload.BaselineChecksum || previous.FinalStateSHA256 != payload.FinalStateSHA256 || previous.View.ProposalID != payload.View.ProposalID || previous.View.Decision != payload.View.Decision {
 				return nil, ErrEventIntegrity
 			}
-			if payload.SchemaVersion == 2 && payload.View.State != applicationItemsState(previous.View.Items) || payload.SchemaVersion == 1 && payload.View.State != "unknown" && (payload.View.Decision == "reject" && payload.View.State != "rejected" || payload.View.Decision == "approve" && payload.View.State != "applied" && payload.View.State != "conflict") {
+			if payload.SchemaVersion >= 2 && payload.View.State != applicationItemsState(previous.View.Items) || payload.SchemaVersion == 1 && payload.View.State != "unknown" && (payload.View.Decision == "reject" && payload.View.State != "rejected" || payload.View.Decision == "approve" && payload.View.State != "applied" && payload.View.State != "conflict") {
 				return nil, ErrEventIntegrity
 			}
 			payload.View.Items = previous.View.Items
+			payload.ItemIntentIDs = previous.ItemIntentIDs
 			if payload.SchemaVersion == 1 && payload.View.Decision == "approve" {
 				for index := range payload.View.Items {
 					payload.View.Items[index].State = payload.View.State
 				}
 			}
 			outcomes[payload.View.RequestID] = true
+			payload.OutcomeRecorded = true
 		}
 		result[payload.View.RequestID] = payload
 	}

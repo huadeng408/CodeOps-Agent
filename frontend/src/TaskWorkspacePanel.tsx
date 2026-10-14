@@ -187,6 +187,32 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
   const boundTest = proposal && /^[a-f0-9]{64}$/.test(proposal.test.inputSHA256)
     && proposal.test.inputSHA256 === proposal.finalStateSHA256 && /^[a-f0-9]{64}$/.test(proposal.test.archiveSHA256)
     && proposal.test.modeTransform === 'readonly-v1' && proposal.test.stopped === true && !proposal.test.truncated;
+  const reconcileApplication = async () => {
+    const application = view?.application;
+    if (!view?.available || !application || busy) return;
+    const controller = new AbortController();
+    request.current?.abort(); request.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    const storageKey = `task-reconcile-request:${sessionId}:${application.requestId}`;
+    try {
+      let identity = '';
+      try { identity = localStorage.getItem(storageKey) || ''; } catch { /* Ledger retains the reconciliation identity. */ }
+      identity ||= createContinuationRequestId();
+      try { localStorage.setItem(storageKey, identity); } catch { /* The request is read-only on repository files. */ }
+      setBusy(true); setError('');
+      const data = await api.reconcileTaskApplication(sessionId, view.eventCount, identity, application.requestId, controller.signal);
+      if (data.application?.requestId !== application.requestId) throw new Error('application binding mismatch');
+      if (!controller.signal.aborted && request.current === controller) {
+        setView(data); await onChanged();
+        try { localStorage.removeItem(storageKey); } catch { /* The next explicit check may reuse the retained result. */ }
+      }
+    } catch (cause) {
+      if (request.current === controller) { setView(null); setError(cause instanceof ApiError && cause.status === 409 ? '会话记录或应用状态已变化，请重新检查后核验；已有文件不会重写。' : '无法确认核验结果，请重新检查；正在执行或无法确认停止的应用仍需处理。'); }
+    } finally {
+      window.clearTimeout(timeout);
+      if (request.current === controller) setBusy(false);
+    }
+  };
   const proposalTestState = !proposal ? 'unknown' : !boundTest ? 'unknown'
     : proposal.state === 'ready' && proposal.test.state === 'passed' && proposal.test.exitCode === 0 ? 'passed'
     : proposal.test.state === 'failed' && proposal.test.exitCode !== undefined && proposal.test.exitCode !== 0 ? 'failed'
@@ -258,7 +284,9 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
         <pre className="task-baseline-output" tabIndex={0} aria-label="提案测试输出">{proposal.test.output || '暂无可确认的输出。'}</pre>
         {view?.application ? <>
           <p role="status">{{ applied: '已应用，原 index 保留', rejected: '已拒绝，隔离结果保留', conflict: '应用冲突，现有内容保留', unknown: '应用结果待核验，请先对账', partial: '部分应用，需对账' }[view.application.state]}</p>
-          {view.application.items && <ul className="task-workspace-files" aria-label="逐项应用结果">{view.application.items.map(item => <li key={item.path}><code>{item.path}{item.destination ? ` → ${item.destination}` : ''}</code><span>{{ not_started: '未执行', pending: '待核验', applied: '已完成', conflict: '冲突', unknown: '待核验' }[item.state]}</span></li>)}</ul>}
+          {view.application.items && <ul className="task-workspace-files" aria-label="逐项应用结果">{view.application.items.map(item => <li key={item.path}><code>{item.path}{item.destination ? ` → ${item.destination}` : ''}</code><span>{{ not_started: '未执行', not_applied: '当前未应用', pending: '待核验', applied: '已完成', conflict: '冲突', unknown: '待核验' }[item.state]}</span></li>)}</ul>}
+          {view.application.reconciled && <p className="workspace-description">已核验原副本，未继续执行旧应用。未完成项需基于新基线重新审核：结束当前任务后，在同一仓库新建会话，准备工作区、测试并重新批准。</p>}
+          {view.available && view.application.decision === 'approve' && ['unknown', 'partial', 'conflict'].includes(view.application.state) && <button type="button" disabled={busy} onClick={() => void reconcileApplication()}>核验应用结果</button>}
         </> : view?.available && proposal.test.stopped && <div className="task-workspace-actions">
           {proposalTestState === 'passed' && proposal.state === 'ready' && proposal.files.length > 0 && <button type="button" className="primary-btn" disabled={busy} onClick={() => void decideProposal('approve')}>{proposal.files.length === 1 && proposal.files[0].beforeExists && proposal.files[0].afterExists && !proposal.files[0].destination ? '确认应用此文件' : `确认应用这 ${proposal.files.length} 项修改`}</button>}
           <button type="button" disabled={busy} onClick={() => void decideProposal('reject')}>拒绝此提案</button>

@@ -78,3 +78,36 @@ func TestProposalDecisionHTTPRejectsUnapprovedBodiesAndForeignOwner(t *testing.T
 		t.Fatal("refused HTTP decision added effect facts")
 	}
 }
+
+func TestApplicationReconciliationHTTPRejectsEffectsAndForeignOwner(t *testing.T) {
+	w, ledger := openHandlerTestWorkbench(t)
+	ctx := context.Background()
+	repo := t.TempDir()
+	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "recovery", "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := session.NewTaskWorkspaces(w, func(context.Context) (uint, error) { return 7, nil }, repo, t.TempDir())
+	for _, test := range []struct {
+		owner uint
+		body  map[string]any
+		want  int
+	}{
+		{7, map[string]any{"expectedSeq": 1, "requestId": "inspect", "applicationRequestId": "apply", "content": "overwrite"}, 400},
+		{7, map[string]any{"expectedSeq": 1, "requestId": "inspect"}, 400},
+		{8, map[string]any{"expectedSeq": 1, "requestId": "inspect", "applicationRequestId": "apply"}, 404},
+		{7, map[string]any{"expectedSeq": 1, "requestId": "inspect", "applicationRequestId": "apply"}, 409},
+	} {
+		router := gin.New()
+		router.Use(func(c *gin.Context) { c.Set("claims", &token.CustomClaims{UserID: test.owner}); c.Next() })
+		router.POST("/sessions/:id/task-workspace/proposal/reconcile", NewTaskWorkspaceHandler(w, tasks).ReconcileApplication)
+		response := performSessionRequest(router, http.MethodPost, "/sessions/"+created.ID+"/task-workspace/proposal/reconcile", test.body)
+		if response.Code != test.want {
+			t.Fatalf("HTTP=%d want=%d", response.Code, test.want)
+		}
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil || len(events) != 1 {
+		t.Fatal("refused reconciliation persisted facts")
+	}
+}

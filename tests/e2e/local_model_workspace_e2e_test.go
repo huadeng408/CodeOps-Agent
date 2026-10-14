@@ -48,6 +48,9 @@ func TestProductionLocalCoreBrowserRejectsProposal(t *testing.T) {
 func TestProductionLocalCoreBrowserAppliesFileLifecycle(t *testing.T) {
 	testProductionLocalCoreModelTaskCopy(t, false, true, "lifecycle")
 }
+func TestProductionLocalCoreApplicationCrashRecovery(t *testing.T) {
+	testProductionLocalCoreModelTaskCopy(t, false, true, "recovery")
+}
 
 func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal bool, decision string) {
 	if runtime.GOOS != "windows" || os.Getenv("CODE_AGENT_RUN_LOCAL_MODEL_WORKSPACE_E2E") != "1" {
@@ -66,7 +69,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 			"calc.go":      "package calc\n\nfunc Add(left, right int) int { return left - right }\n",
 			"calc_test.go": "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) { if got := Add(2, 3); got != 5 { t.Fatalf(\"Add(2, 3) = %d, want 5\", got) } }\n",
 		}
-		if decision == "lifecycle" {
+		if decision == "lifecycle" || decision == "recovery" {
 			files["empty.txt"], files["old.txt"] = "", "rename content"
 		}
 		for path, content := range files {
@@ -135,7 +138,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 	transport := grpc.NewServer()
 	captured := make(chan *pb.UserInput, 1)
 	failures := make(chan error, 1)
-	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell, proposal: proposal, lifecycle: decision == "lifecycle"})
+	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell, proposal: proposal, lifecycle: decision == "lifecycle" || decision == "recovery", recovery: decision == "recovery"})
 	go transport.Serve(listener)
 	defer transport.Stop()
 	fixture.stop(t)
@@ -308,7 +311,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 			t.Fatalf("proposal is not bound to the reviewed task: %+v", got)
 		}
 		wantFiles := 1
-		if decision == "lifecycle" {
+		if decision == "lifecycle" || decision == "recovery" {
 			wantFiles = 4
 			operations := map[string]string{}
 			for _, file := range got.Files {
@@ -343,6 +346,10 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 			t.Fatal("proposal generation or viewing applied the original repository")
 		}
 		if decision != "" {
+			if decision == "recovery" {
+				testProductionApplicationRecovery(t, fixture, repository, storage, created.Data, prepared.Data, baseline)
+				return
+			}
 			command := exec.Command("node", "tests/e2e/proposal_decision_browser.mjs")
 			command.Dir = e2ERepositoryRoot(t)
 			command.Env = append(os.Environ(), "CODE_AGENT_DECISION_URL="+fixture.base, "CODE_AGENT_DECISION_PASSWORD="+fixture.password,
@@ -528,6 +535,7 @@ type localWorkspaceTransport struct {
 	unknownShell bool
 	proposal     bool
 	lifecycle    bool
+	recovery     bool
 }
 
 func (localWorkspaceTransport) Health(context.Context, *pb.Empty) (*pb.HealthResponse, error) {
@@ -577,6 +585,15 @@ func (fixture localWorkspaceTransport) Converse(stream grpc.BidiStreamingServer[
 			{ToolName: "Delete", ToolCallId: "delete-empty", ParametersJson: `{"path":"empty.txt"}`},
 			{ToolName: "Rename", ToolCallId: "rename-copy", ParametersJson: `{"path":"old.txt","destination":"moved.txt"}`},
 			calls[2],
+		}
+	}
+	if fixture.recovery {
+		content, err := os.ReadFile(filepath.Join(input.WorkingDir, "calc.go"))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(content), "return left + right") {
+			calls = append(calls[:1], calls[2:]...)
 		}
 	}
 	for index := range len(calls) + 1 {
