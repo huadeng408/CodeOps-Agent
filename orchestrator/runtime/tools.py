@@ -397,6 +397,18 @@ class ToolRegistry:
                 },
             ),
             ToolSpec(
+                name="Delete",
+                description="Delete one existing regular file in the approved workspace.",
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            ),
+            ToolSpec(
+                name="Rename",
+                description="Move one existing regular file to an absent workspace path without overwriting.",
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={"type": "object", "properties": {"path": {"type": "string"}, "destination": {"type": "string"}}, "required": ["path", "destination"]},
+            ),
+            ToolSpec(
                 name="NotebookEdit",
                 description=(
                     "Edit a Jupyter notebook (.ipynb) at the cell level: insert, "

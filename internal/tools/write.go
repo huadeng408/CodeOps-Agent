@@ -18,7 +18,11 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 	if err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
-	beforeBytes, _ := os.ReadFile(abs)
+	beforeBytes, readErr := os.ReadFile(abs)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return ToolResult{Name: "Write", Error: readErr.Error()}, readErr
+	}
+	beforeExists, afterExists := readErr == nil, true
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return ToolResult{Name: "Write", Error: err.Error()}, err
 	}
@@ -39,9 +43,10 @@ func (e *Executor) executeWrite(_ context.Context, args map[string]any) (ToolRes
 		Name:   "Write",
 		Output: "written",
 		Changes: []Change{{
-			Path:   changePath,
-			Before: string(beforeBytes),
-			After:  content,
+			Path:         changePath,
+			Before:       string(beforeBytes),
+			After:        content,
+			BeforeExists: &beforeExists, AfterExists: &afterExists,
 		}},
 	}, nil
 }

@@ -148,13 +148,15 @@ func (e *Executor) executeNotebookEdit(_ context.Context, args map[string]any) (
 	if err := atomicWriteFile(abs, encoded, mode); err != nil {
 		return ToolResult{Name: "NotebookEdit", Error: err.Error()}, err
 	}
+	beforeExists, afterExists := true, true
 	return ToolResult{
 		Name:   "NotebookEdit",
 		Output: summary,
 		Changes: []Change{{
-			Path:   changePath,
-			Before: before,
-			After:  string(encoded),
+			Path:         changePath,
+			Before:       before,
+			After:        string(encoded),
+			BeforeExists: &beforeExists, AfterExists: &afterExists,
 		}},
 	}, nil
 }

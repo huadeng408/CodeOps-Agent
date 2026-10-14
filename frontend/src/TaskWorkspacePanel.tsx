@@ -243,7 +243,7 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
           <div><dt>最终状态 SHA-256</dt><dd>{proposal.finalStateSHA256}</dd></div>
         </dl>
         {proposal.files.map(file => <details key={file.path}>
-          <summary>{file.path}</summary>
+          <summary><span>{file.path}</span> · {{ create: '新增', edit: '修改', delete: '删除', rename: '重命名' }[file.operation || (!file.beforeExists ? 'create' : !file.afterExists ? 'delete' : 'edit')]}{file.destination && <> → <span>{file.destination}</span></>}</summary>
           <p className="workspace-description">{file.beforeExists ? `原 SHA-256：${file.beforeSha256} · 模式 ${file.beforeMode.toString(8)}` : '原文件不存在'}<br />{file.afterExists ? `修改后 SHA-256：${file.afterSha256} · 模式 ${file.afterMode.toString(8)}` : '修改后已删除'}</p>
           <pre className="task-baseline-output" tabIndex={0} aria-label={`${file.path} 修改 diff`}>{file.diff}</pre>
         </details>)}
@@ -256,8 +256,11 @@ export function TaskWorkspacePanel({ sessionId, onChanged }: { sessionId: string
         <p className="workspace-description">文件模式变换：{proposal.test.modeTransform || '待核验'}</p>
         {proposal.test.reason && <p className="workspace-description">{reasons[proposal.test.reason] || proposal.test.reason}</p>}
         <pre className="task-baseline-output" tabIndex={0} aria-label="提案测试输出">{proposal.test.output || '暂无可确认的输出。'}</pre>
-        {view?.application ? <p role="status">{{ applied: '已应用，原 index 保留', rejected: '已拒绝，隔离结果保留', conflict: '应用冲突，现有内容保留', unknown: '应用结果待核验，请先对账' }[view.application.state]}</p> : view?.available && proposal.test.stopped && <div className="task-workspace-actions">
-          {proposalTestState === 'passed' && proposal.state === 'ready' && proposal.files.length === 1 && proposal.files[0].beforeExists && proposal.files[0].afterExists && proposal.files[0].beforeMode === proposal.files[0].afterMode && <button type="button" className="primary-btn" disabled={busy} onClick={() => void decideProposal('approve')}>确认应用此文件</button>}
+        {view?.application ? <>
+          <p role="status">{{ applied: '已应用，原 index 保留', rejected: '已拒绝，隔离结果保留', conflict: '应用冲突，现有内容保留', unknown: '应用结果待核验，请先对账', partial: '部分应用，需对账' }[view.application.state]}</p>
+          {view.application.items && <ul className="task-workspace-files" aria-label="逐项应用结果">{view.application.items.map(item => <li key={item.path}><code>{item.path}{item.destination ? ` → ${item.destination}` : ''}</code><span>{{ not_started: '未执行', pending: '待核验', applied: '已完成', conflict: '冲突', unknown: '待核验' }[item.state]}</span></li>)}</ul>}
+        </> : view?.available && proposal.test.stopped && <div className="task-workspace-actions">
+          {proposalTestState === 'passed' && proposal.state === 'ready' && proposal.files.length > 0 && <button type="button" className="primary-btn" disabled={busy} onClick={() => void decideProposal('approve')}>{proposal.files.length === 1 && proposal.files[0].beforeExists && proposal.files[0].afterExists && !proposal.files[0].destination ? '确认应用此文件' : `确认应用这 ${proposal.files.length} 项修改`}</button>}
           <button type="button" disabled={busy} onClick={() => void decideProposal('reject')}>拒绝此提案</button>
         </div>}
       </> : <p className="workspace-description">{view?.proposalReason ? reasons[view.proposalReason] || view.proposalReason : '任务完成后，冻结隔离修改并测试；原仓库保留。'}</p>}

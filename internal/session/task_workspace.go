@@ -121,7 +121,7 @@ func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, cur
 		return TaskModelWorkspace{}, err
 	}
 	for _, application := range applications {
-		if application.View.State == "unknown" {
+		if application.View.State == "unknown" || application.View.State == "partial" {
 			return TaskModelWorkspace{}, ErrSessionStateConflict
 		}
 	}
@@ -421,7 +421,7 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 			view.Application = &copy
 			view.ProposalAvailable = false
 		}
-		if application.View.State == "unknown" {
+		if application.View.State == "unknown" || application.View.State == "partial" {
 			view.ProposalAvailable = false
 		}
 	}
@@ -497,7 +497,7 @@ func (t *TaskWorkspaces) verifyTask(ctx context.Context, task worktree.TaskWorks
 		if !exists || result.seq <= event.Seq || result.Error != "" || result.ExitCode != 0 || result.OutcomeUnknown || result.ToolName != change.ToolName || dispatched[key].ToolName != change.ToolName || dispatched[key].seq >= event.Seq {
 			return ErrSessionStateConflict
 		}
-		changes = append(changes, worktree.TaskFileChange{Path: change.Path, Before: change.Before, After: change.After, Operation: change.Operation})
+		changes = append(changes, worktree.TaskFileChange{Path: change.Path, Before: change.Before, After: change.After, Operation: change.Operation, Destination: change.Destination, BeforeExists: change.BeforeExists, AfterExists: change.AfterExists})
 	}
 	return t.manager.VerifyTask(ctx, t.storage, task, changes...)
 }

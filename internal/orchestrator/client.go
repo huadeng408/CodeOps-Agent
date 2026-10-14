@@ -84,9 +84,12 @@ type ToolResult struct {
 }
 
 type CodeChange struct {
-	Path   string
-	Before string
-	After  string
+	Path         string
+	Before       string
+	After        string
+	BeforeExists *bool
+	AfterExists  *bool
+	Destination  string
 }
 
 type SpillRef struct {

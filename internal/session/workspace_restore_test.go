@@ -2,11 +2,18 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
 
 func TestWorkbenchRestoreCodeChangesUsesCheckpointBoundTerminalRun(t *testing.T) {
+	for _, operation := range []string{"legacy", "explicit", "Delete", "Rename", "empty Write"} {
+		t.Run(operation, func(t *testing.T) { testWorkbenchRestoreCodeChanges(t, operation) })
+	}
+}
+
+func testWorkbenchRestoreCodeChanges(t *testing.T, operation string) {
 	ctx := context.Background()
 	ledger := openWorkbenchTestLedger(t)
 	workbench := NewWorkbench(ledger, nil)
@@ -38,6 +45,23 @@ func TestWorkbenchRestoreCodeChangesUsesCheckpointBoundTerminalRun(t *testing.T)
 		RunID: "restore-run", ToolCallID: "write-1", ToolName: "Write", Operation: "Write", Summary: "Write modified notes.txt", Path: "notes.txt",
 		Before: "before", After: "after", BeforeSHA256: hashCodeState("before"), AfterSHA256: hashCodeState("after"), DiffSHA256: hashCodeTransition("before", "after"),
 	}
+	if operation != "legacy" {
+		before, after := true, true
+		modification.BeforeExists, modification.AfterExists = &before, &after
+		if operation == "Delete" || operation == "Rename" {
+			modification.Operation, modification.ToolName = operation, operation
+			modification.After = modification.Before
+			if operation == "Delete" {
+				after, modification.After = false, ""
+			} else {
+				modification.Destination = "moved.txt"
+			}
+		} else if operation == "empty Write" {
+			modification.Before = ""
+		}
+		modification.BeforeSHA256, modification.AfterSHA256 = hashCodeState(modification.Before), hashCodeState(modification.After)
+		modification.DiffSHA256 = hashCodeTransition(modification.Before, modification.After)
+	}
 	if _, err := ledger.Append(ctx, created.ID, 5, codeModifiedEventType, modification); err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +74,13 @@ func TestWorkbenchRestoreCodeChangesUsesCheckpointBoundTerminalRun(t *testing.T)
 		applied = append([]CodeFileTransition(nil), changes...)
 		return nil
 	})
+	if operation != "legacy" && operation != "explicit" {
+		events, readErr := ledger.Events(ctx, created.ID)
+		if !errors.Is(err, ErrSessionStateConflict) || readErr != nil || len(applied) != 0 || len(events) != 7 {
+			t.Fatalf("unsupported restore was not refused before intent/effects: %v events=%d applied=%v", err, len(events), applied)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("restore code changes: %v", err)
 	}

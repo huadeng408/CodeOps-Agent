@@ -24,6 +24,8 @@ const taskProposalOutcomeEvent = "workspace/proposal-outcome"
 
 type ProposalFileView struct {
 	Path         string `json:"path"`
+	Operation    string `json:"operation,omitempty"`
+	Destination  string `json:"destination,omitempty"`
 	BeforeExists bool   `json:"beforeExists"`
 	AfterExists  bool   `json:"afterExists"`
 	BeforeSHA256 string `json:"beforeSha256"`
@@ -187,10 +189,15 @@ func (t *TaskWorkspaces) GenerateProposal(ctx context.Context, owner uint, id st
 
 func proposalFiles(baseline worktree.Baseline, events []Event) ([]ProposalFileView, []sandbox.InputFile, error) {
 	inputs := map[string]sandbox.InputFile{}
+	original := map[string]worktree.BaselineFile{}
+	origins := map[string]string{}
 	for _, file := range baseline.Files {
 		inputs[file.Path] = sandbox.InputFile{Path: file.Path, Exists: file.Exists, SHA256: file.SHA256, Size: file.Size, Mode: file.Mode}
+		original[file.Path] = file
+		if file.Exists {
+			origins[file.Path] = file.Path
+		}
 	}
-	changes := map[string]ProposalFileView{}
 	before, after := map[string]string{}, map[string]string{}
 	prepared := false
 	for _, event := range events {
@@ -204,11 +211,29 @@ func proposalFiles(baseline worktree.Baseline, events []Event) ([]ProposalFileVi
 		if json.Unmarshal(event.Payload, &change) != nil || validateCodeModificationPayload(change) != nil || change.BeforeSHA256 != hashCodeState(change.Before) || change.AfterSHA256 != hashCodeState(change.After) || change.DiffSHA256 != hashCodeTransition(change.Before, change.After) || !utf8.ValidString(change.Before) || !utf8.ValidString(change.After) || strings.ContainsRune(change.Before+change.After, 0) {
 			return nil, nil, ErrEventIntegrity
 		}
-		item, exists := inputs[change.Path]
-		file, seen := changes[change.Path]
-		if !seen {
-			file = ProposalFileView{Path: change.Path, BeforeExists: exists && item.Exists, BeforeSHA256: item.SHA256, BeforeMode: item.Mode}
-			before[change.Path] = change.Before
+		item := inputs[change.Path]
+		if item.Exists && (item.SHA256 != change.BeforeSHA256 || item.Size != int64(len(change.Before))) || !item.Exists && (change.Before != "" || change.Operation != "Write") || change.BeforeExists != nil && *change.BeforeExists != item.Exists {
+			return nil, nil, ErrEventIntegrity
+		}
+		origin := origins[change.Path]
+		if origin != "" {
+			if _, seen := before[origin]; !seen {
+				before[origin] = change.Before
+			}
+		}
+		if change.Operation == "Delete" || change.Operation == "Rename" {
+			if change.Operation == "Rename" {
+				if inputs[change.Destination].Exists {
+					return nil, nil, ErrEventIntegrity
+				}
+				moved := item
+				moved.Path = change.Destination
+				inputs[change.Destination] = moved
+				origins[change.Destination], after[change.Destination] = origin, change.After
+			}
+			inputs[change.Path] = sandbox.InputFile{Path: change.Path, Exists: false}
+			origins[change.Path], after[change.Path] = "", ""
+			continue
 		}
 		item.Path, item.Exists, item.SHA256, item.Size = change.Path, true, change.AfterSHA256, int64(len(change.After))
 		if change.Operation == "Write" {
@@ -217,20 +242,49 @@ func proposalFiles(baseline worktree.Baseline, events []Event) ([]ProposalFileVi
 				item.Mode = 0666
 			}
 		}
-		file.AfterExists, file.AfterSHA256, file.AfterMode = true, item.SHA256, item.Mode
-		inputs[change.Path], changes[change.Path], after[change.Path] = item, file, change.After
+		inputs[change.Path], after[change.Path] = item, change.After
 	}
 	files, total := []ProposalFileView{}, 0
-	for path, file := range changes {
-		if file.BeforeExists == file.AfterExists && file.BeforeSHA256 == file.AfterSHA256 && file.BeforeMode == file.AfterMode {
-			continue
-		}
-		file.Diff = proposalDiff(file, before[path], after[path])
+	consumed := map[string]bool{}
+	appendFile := func(file ProposalFileView, oldContent, newContent string) error {
+		file.Diff = proposalDiff(file, oldContent, newContent)
 		total += len(file.Diff)
 		if total > 1<<20 {
-			return nil, nil, fmt.Errorf("%w: complete proposal diff exceeds review bounds", ErrSessionStateConflict)
+			return fmt.Errorf("%w: complete proposal diff exceeds review bounds", ErrSessionStateConflict)
 		}
 		files = append(files, file)
+		return nil
+	}
+	for path, item := range inputs {
+		origin := origins[path]
+		if !item.Exists || origin == "" || origin == path || !original[origin].Exists || original[path].Exists || inputs[origin].Exists {
+			continue
+		}
+		previous := original[origin]
+		file := ProposalFileView{Path: origin, Destination: path, Operation: "rename", BeforeExists: true, AfterExists: true, BeforeSHA256: previous.SHA256, AfterSHA256: item.SHA256, BeforeMode: previous.Mode, AfterMode: item.Mode}
+		if err := appendFile(file, before[origin], after[path]); err != nil {
+			return nil, nil, err
+		}
+		consumed[origin], consumed[path] = true, true
+	}
+	for path, item := range inputs {
+		previous := original[path]
+		if consumed[path] || previous.Exists == item.Exists && previous.SHA256 == item.SHA256 && previous.Mode == item.Mode {
+			continue
+		}
+		if !previous.Exists && !item.Exists {
+			continue
+		}
+		operation := "edit"
+		if !previous.Exists {
+			operation = "create"
+		} else if !item.Exists {
+			operation = "delete"
+		}
+		file := ProposalFileView{Path: path, Operation: operation, BeforeExists: previous.Exists, AfterExists: item.Exists, BeforeSHA256: previous.SHA256, AfterSHA256: item.SHA256, BeforeMode: previous.Mode, AfterMode: item.Mode}
+		if err := appendFile(file, before[path], after[path]); err != nil {
+			return nil, nil, err
+		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	inventory := make([]sandbox.InputFile, 0, len(inputs))
@@ -251,6 +305,21 @@ func taskProposal(events []Event) (*taskProposalPayload, error) {
 		var payload taskProposalPayload
 		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion != 1 || payload.OwnerID == 0 || payload.RequestID == "" || len(payload.View.ID) != 64 || payload.View.SessionID != event.SessionID || payload.View.WorkspaceID == "" || len(payload.View.BaselineChecksum) != 64 || len(payload.View.SourceEventChecksum) != 64 || len(payload.View.Files) == 0 {
 			return nil, ErrEventIntegrity
+		}
+		// Legacy proposal bytes remain immutable; only their read projection gains lifecycle labels.
+		for index, file := range payload.View.Files {
+			if file.Operation == "" {
+				if file.Destination != "" {
+					return nil, ErrEventIntegrity
+				}
+				file.Operation = "edit"
+				if !file.BeforeExists {
+					file.Operation = "create"
+				} else if !file.AfterExists {
+					file.Operation = "delete"
+				}
+				payload.View.Files[index] = file
+			}
 		}
 		data, _ := json.Marshal(payload.InputFiles)
 		if hashCodeState(string(data)) != payload.View.FinalStateSHA256 || payload.View.Test.OperationID != payload.View.ID || !slices.Equal(payload.View.Test.Command, []string{"go", "test", "./...", "-count=1"}) || payload.View.Test.ModeTransform != "readonly-v1" {

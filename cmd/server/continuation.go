@@ -180,7 +180,7 @@ func (m *continuationToolExecutors) ExecuteInWorkingDir(ctx context.Context, _ i
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}
 	out.RuntimeID, out.Stopped, out.OutcomeUnknown = result.RuntimeID, result.Stopped, result.OutcomeUnknown
 	for _, change := range result.Changes {
-		out.Changes = append(out.Changes, orchestrator.CodeChange{Path: change.Path, Before: change.Before, After: change.After})
+		out.Changes = append(out.Changes, orchestrator.CodeChange{Path: change.Path, Before: change.Before, After: change.After, BeforeExists: change.BeforeExists, AfterExists: change.AfterExists, Destination: change.Destination})
 	}
 	if execErr != nil && out.Error == "" {
 		out.Error = execErr.Error()

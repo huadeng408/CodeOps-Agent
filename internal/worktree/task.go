@@ -33,6 +33,8 @@ type TaskWorkspace struct {
 // TaskFileChange is a completed Go file effect reconstructed from the Ledger.
 type TaskFileChange struct {
 	Path, Before, After, Operation string
+	Destination                    string
+	BeforeExists, AfterExists      *bool
 }
 
 func (m *Manager) PlanTask(ctx context.Context) (TaskWorkspace, error) {
@@ -323,6 +325,9 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 		if item.Exists && (item.SHA256 != baselineDigest([]byte(change.Before)) || item.Size != int64(len(change.Before))) || !item.Exists && (change.Before != "" || change.Operation != "Write") {
 			return errors.New("recorded task change does not follow the preceding file state")
 		}
+		if (change.BeforeExists == nil) != (change.AfterExists == nil) || change.BeforeExists != nil && *change.BeforeExists != item.Exists {
+			return errors.New("recorded task existence contradicts prior state")
+		}
 		switch change.Operation {
 		case "Write":
 			item.Mode = 0644
@@ -330,8 +335,46 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 				item.Mode = 0666
 			}
 		case "Edit", "NotebookEdit":
+		case "Delete":
+			if change.BeforeExists == nil || !item.Exists || *change.AfterExists || change.After != "" || change.Destination != "" {
+				return errors.New("invalid recorded deletion")
+			}
+			item.Exists, item.SHA256, item.Size, item.Mode = false, "", 0, 0
+			continue
+		case "Rename":
+			if change.BeforeExists == nil || !item.Exists || !*change.AfterExists || change.Before != change.After || validateBaselinePath(change.Destination) != nil || sameBaselinePath(change.Path, change.Destination) {
+				return errors.New("invalid recorded rename")
+			}
+			if _, reason := baselineExclusion(change.Destination); reason != "" {
+				return errors.New("excluded rename target")
+			}
+			destination := -1
+			for i, target := range files {
+				if sameBaselinePath(target.Path, change.Destination) {
+					if target.Path != change.Destination || target.Exists || target.PublicTestFixture {
+						return errors.New("rename target exists or aliases a task path")
+					}
+					destination = i
+					break
+				}
+			}
+			moved := *item
+			moved.Path = change.Destination
+			item.Exists, item.SHA256, item.Size, item.Mode = false, "", 0, 0
+			if destination < 0 {
+				if len(files) >= maxBaselineFiles {
+					return errors.New("rename exceeds task file bounds")
+				}
+				files = append(files, moved)
+			} else {
+				files[destination] = moved
+			}
+			continue
 		default:
 			return errors.New("unsupported recorded task change")
+		}
+		if change.Destination != "" || change.AfterExists != nil && !*change.AfterExists {
+			return errors.New("recorded write has invalid target existence")
 		}
 		item.Exists, item.SHA256, item.Size = true, baselineDigest([]byte(change.After)), int64(len(change.After))
 	}

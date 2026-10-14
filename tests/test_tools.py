@@ -6,6 +6,18 @@ from codeagent import orchestrator_pb2
 from orchestrator.runtime.tools import ToolRegistry
 
 
+def test_file_lifecycle_tools_require_go_authorization_and_both_rename_paths() -> None:
+    registry = ToolRegistry()
+    delete = registry.get("Delete")
+    rename = registry.get("Rename")
+    assert delete is not None and rename is not None
+    assert delete.permission == orchestrator_pb2.ASK_SESSION
+    assert rename.permission == orchestrator_pb2.ASK_SESSION
+    assert delete.parameters["required"] == ["path"]
+    assert rename.parameters["required"] == ["path", "destination"]
+    assert set(rename.parameters["properties"]) == {"path", "destination"}
+
+
 def test_skill_tool_exposes_confined_resource_read() -> None:
     spec = ToolRegistry().get("Skill")
     assert spec is not None

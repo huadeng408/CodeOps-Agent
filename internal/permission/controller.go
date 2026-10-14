@@ -63,6 +63,8 @@ var DefaultPermissions = map[string]Level{
 	"AskUser":         AutoAllow,
 	"Edit":            AskSession,
 	"Write":           AskSession,
+	"Delete":          AskSession,
+	"Rename":          AskSession,
 	"Bash":            AlwaysAsk,
 	"Git":             AskSession,
 	"WebFetch":        AskSession,

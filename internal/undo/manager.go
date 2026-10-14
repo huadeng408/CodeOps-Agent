@@ -10,9 +10,10 @@ import (
 )
 
 type Change struct {
-	Path   string `json:"path"`
-	Before string `json:"before,omitempty"`
-	After  string `json:"after,omitempty"`
+	Path         string `json:"path"`
+	Before       string `json:"before,omitempty"`
+	After        string `json:"after,omitempty"`
+	BeforeExists *bool  `json:"before_exists,omitempty"`
 }
 
 type Entry struct {
@@ -38,7 +39,7 @@ func (m *Manager) Record(description string, changes []Change) Entry {
 	entry := Entry{
 		ID:          nextID(),
 		Description: description,
-		Changes:     append([]Change(nil), changes...),
+		Changes:     cloneEntry(Entry{Changes: changes}).Changes,
 		CreatedAt:   time.Now(),
 	}
 	m.entries = append(m.entries, entry)
@@ -89,6 +90,9 @@ func (m *Manager) Restore(entries []Entry) {
 }
 
 func ApplyEntry(root string, entry Entry) error {
+	if len(entry.Changes) == 0 {
+		return fmt.Errorf("%s: no legacy restoration is available; reconcile the retained lifecycle result", entry.Description)
+	}
 	paths := make([]string, len(entry.Changes))
 	for i, change := range entry.Changes {
 		abs, err := workspacePath(root, change.Path)
@@ -100,7 +104,7 @@ func ApplyEntry(root string, entry Entry) error {
 	for i := len(entry.Changes) - 1; i >= 0; i-- {
 		change := entry.Changes[i]
 		abs := paths[i]
-		if change.Before == "" {
+		if change.BeforeExists != nil && !*change.BeforeExists || change.BeforeExists == nil && change.Before == "" {
 			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("remove %s: %w", change.Path, err)
 			}
@@ -120,6 +124,12 @@ func cloneEntry(entry Entry) Entry {
 	out := entry
 	if len(entry.Changes) > 0 {
 		out.Changes = append([]Change(nil), entry.Changes...)
+		for index, change := range out.Changes {
+			if change.BeforeExists != nil {
+				value := *change.BeforeExists
+				out.Changes[index].BeforeExists = &value
+			}
+		}
 	}
 	return out
 }

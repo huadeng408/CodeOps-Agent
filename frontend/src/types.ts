@@ -50,8 +50,9 @@ export interface TaskWorkspace {
     requestId: string;
     proposalId: string;
     decision: 'approve' | 'reject';
-    state: 'applied' | 'rejected' | 'conflict' | 'unknown';
+    state: 'applied' | 'rejected' | 'conflict' | 'unknown' | 'partial';
     reason?: string;
+    items?: Array<{ path: string; destination?: string; operation: 'create' | 'edit' | 'delete' | 'rename'; state: 'not_started' | 'pending' | 'applied' | 'conflict' | 'unknown'; reason?: string; createdDirectories?: string[] }>;
   };
   proposal?: {
     id: string;
@@ -63,6 +64,8 @@ export interface TaskWorkspace {
     state: 'ready' | 'failed' | 'blocked' | 'unknown' | 'stale';
     files: Array<{
       path: string;
+      operation?: 'create' | 'edit' | 'delete' | 'rename';
+      destination?: string;
       beforeExists: boolean;
       afterExists: boolean;
       beforeSha256: string;

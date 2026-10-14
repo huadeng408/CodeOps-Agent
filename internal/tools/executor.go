@@ -56,9 +56,12 @@ type ContentBlock struct {
 }
 
 type Change struct {
-	Path   string `json:"path"`
-	Before string `json:"before,omitempty"`
-	After  string `json:"after,omitempty"`
+	Path         string `json:"path"`
+	Before       string `json:"before,omitempty"`
+	After        string `json:"after,omitempty"`
+	BeforeExists *bool  `json:"before_exists,omitempty"`
+	AfterExists  *bool  `json:"after_exists,omitempty"`
+	Destination  string `json:"destination,omitempty"`
 }
 
 type Executor struct {
@@ -246,6 +249,8 @@ func (e *Executor) Execute(ctx context.Context, req ToolRequest) (ToolResult, er
 		result, err = e.executeNotebookEdit(ctx, req.Arguments)
 	case "Write":
 		result, err = e.executeWrite(ctx, req.Arguments)
+	case "Delete", "Rename":
+		result, err = e.executeFileLifecycle(ctx, req)
 	case "Bash":
 		result, err = e.executeBash(ctx, req)
 	case "JobStart", "job_start":

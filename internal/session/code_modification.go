@@ -26,6 +26,9 @@ type CodeModificationView struct {
 	BeforeSHA256 string `json:"beforeSha256"`
 	AfterSHA256  string `json:"afterSha256"`
 	DiffSHA256   string `json:"diffSha256"`
+	BeforeExists *bool  `json:"beforeExists,omitempty"`
+	AfterExists  *bool  `json:"afterExists,omitempty"`
+	Destination  string `json:"destination,omitempty"`
 }
 
 type codeModificationPayload struct {
@@ -40,10 +43,13 @@ type codeModificationPayload struct {
 	DiffSHA256   string `json:"diff_sha256"`
 	Before       string `json:"before,omitempty"`
 	After        string `json:"after,omitempty"`
+	BeforeExists *bool  `json:"before_exists,omitempty"`
+	AfterExists  *bool  `json:"after_exists,omitempty"`
+	Destination  string `json:"destination,omitempty"`
 }
 
 func codeModificationPayloads(result orchestrator.ToolResult, runID string) []codeModificationPayload {
-	if result.Error != "" || result.ExitCode != 0 || (result.ToolName != "Write" && result.ToolName != "Edit" && result.ToolName != "NotebookEdit") {
+	if result.Error != "" || result.ExitCode != 0 || result.OutcomeUnknown || (result.ToolName != "Write" && result.ToolName != "Edit" && result.ToolName != "NotebookEdit" && result.ToolName != "Delete" && result.ToolName != "Rename") {
 		return nil
 	}
 	out := make([]codeModificationPayload, 0, len(result.Changes))
@@ -55,6 +61,7 @@ func codeModificationPayloads(result orchestrator.ToolResult, runID string) []co
 			BeforeSHA256: hashCodeState(change.Before), AfterSHA256: hashCodeState(change.After),
 			DiffSHA256: hashCodeTransition(change.Before, change.After),
 			Before:     change.Before, After: change.After,
+			BeforeExists: change.BeforeExists, AfterExists: change.AfterExists, Destination: change.Destination,
 		}
 		if validateCodeModificationPayload(payload) == nil {
 			out = append(out, payload)
@@ -72,15 +79,45 @@ func codeModificationEventView(event Event) (CodeModificationView, error) {
 		RunID: payload.RunID, ToolCallID: payload.ToolCallID, ToolName: payload.ToolName,
 		Path: payload.Path, Operation: payload.Operation, Summary: payload.Summary,
 		BeforeSHA256: payload.BeforeSHA256, AfterSHA256: payload.AfterSHA256, DiffSHA256: payload.DiffSHA256,
+		BeforeExists: payload.BeforeExists, AfterExists: payload.AfterExists, Destination: payload.Destination,
 	}, nil
 }
 
 func validateCodeModificationPayload(payload codeModificationPayload) error {
+	if (payload.BeforeExists == nil) != (payload.AfterExists == nil) {
+		return fmt.Errorf("file existence must be complete")
+	}
 	if strings.TrimSpace(payload.RunID) == "" || strings.TrimSpace(payload.ToolCallID) == "" || strings.TrimSpace(payload.ToolName) == "" || strings.TrimSpace(payload.Path) == "" {
 		return fmt.Errorf("code modification identity is required")
 	}
 	if payload.Operation != payload.ToolName || strings.TrimSpace(payload.Summary) == "" {
 		return fmt.Errorf("code modification operation is invalid")
+	}
+	if payload.BeforeExists == nil {
+		if payload.Operation != "Write" && payload.Operation != "Edit" && payload.Operation != "NotebookEdit" || payload.Destination != "" {
+			return fmt.Errorf("legacy receipt cannot authorize file lifecycle")
+		}
+	} else {
+		switch payload.Operation {
+		case "Write":
+			if !*payload.AfterExists || !*payload.BeforeExists && payload.Before != "" || payload.Destination != "" {
+				return fmt.Errorf("invalid write existence")
+			}
+		case "Edit", "NotebookEdit":
+			if !*payload.BeforeExists || !*payload.AfterExists || payload.Destination != "" {
+				return fmt.Errorf("invalid edit existence")
+			}
+		case "Delete":
+			if !*payload.BeforeExists || *payload.AfterExists || payload.After != "" || payload.Destination != "" {
+				return fmt.Errorf("invalid deletion existence")
+			}
+		case "Rename":
+			if !*payload.BeforeExists || !*payload.AfterExists || payload.Before != payload.After || !fs.ValidPath(payload.Destination) || payload.Destination == "." || strings.ContainsAny(payload.Destination, "\\\x00\r\n:") || strings.EqualFold(payload.Path, payload.Destination) {
+				return fmt.Errorf("invalid rename identity")
+			}
+		default:
+			return fmt.Errorf("invalid file operation")
+		}
 	}
 	// Ledger paths use portable slash-separated names, independent of the host OS.
 	if !fs.ValidPath(payload.Path) || payload.Path == "." || strings.ContainsAny(payload.Path, "\\\x00\r\n:") {

@@ -9,25 +9,48 @@ import (
 	"code-agent/internal/undo"
 )
 
+func TestUndoPreservesAnExistingEmptyFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "empty.txt")
+	if err := os.WriteFile(path, []byte("after"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	exists := true
+	if err := undo.ApplyEntry(root, undo.Entry{Changes: []undo.Change{{Path: "empty.txt", Before: "", After: "after", BeforeExists: &exists}}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) != 0 {
+		t.Fatal("undo removed an existing empty file")
+	}
+}
+
 func TestUndoManagerRestoreAndListCloneEntries(t *testing.T) {
 	manager := undo.NewManager()
+	exists := true
 	manager.Restore([]undo.Entry{{
 		ID:          "undo-1",
 		Description: "Write",
 		Changes: []undo.Change{{
-			Path:   "notes/demo.txt",
-			Before: "before",
-			After:  "after",
+			Path:         "notes/demo.txt",
+			Before:       "before",
+			After:        "after",
+			BeforeExists: &exists,
 		}},
 	}})
+	exists = false
 
 	entries := manager.List()
-	if len(entries) != 1 || entries[0].Changes[0].Before != "before" {
+	if len(entries) != 1 || entries[0].Changes[0].Before != "before" || !*entries[0].Changes[0].BeforeExists {
 		t.Fatalf("unexpected restored undo entries: %#v", entries)
 	}
 	entries[0].Changes[0].Before = "mutated"
+	*entries[0].Changes[0].BeforeExists = false
 
 	again := manager.List()
+	if !*again[0].Changes[0].BeforeExists {
+		t.Fatal("undo list leaked the existence pointer")
+	}
 	if got := again[0].Changes[0].Before; got != "before" {
 		t.Fatalf("undo list leaked mutable changes, got %q", got)
 	}

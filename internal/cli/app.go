@@ -1443,6 +1443,13 @@ func (a *App) handleSlashCommand(ctx context.Context, raw string) bool {
 	case "/agents":
 		a.handleAgentsCommand(ctx, fields)
 	case "/undo":
+		// shortcut: legacy undo is unavailable after a lifecycle dispatch, even if its undo snapshot failed to save.
+		for _, invocation := range a.session.Current().Invocations {
+			if (invocation.Name == "Delete" || invocation.Name == "Rename") && invocation.Status != session.InvocationPrepared {
+				a.renderer.PrintLine("undo unavailable: reconcile the retained file lifecycle before legacy restoration")
+				return true
+			}
+		}
 		entry, ok := a.undo.Latest()
 		if !ok {
 			a.renderer.PrintLine("nothing to undo")
@@ -1852,15 +1859,29 @@ func skillCommand(name string) string {
 }
 
 func (a *App) recordUndo(call orchestrator.ToolCall, result tools.ToolResult) {
+	if call.Name == "Delete" || call.Name == "Rename" {
+		if result.OutcomeUnknown || result.ExitCode == 0 && strings.TrimSpace(result.Error) == "" {
+			// shortcut: an empty persisted entry fences legacy /undo until lifecycle recovery is available.
+			a.undo.Record(call.Name+": lifecycle reconciliation required", nil)
+			a.session.SetUndo(sessionUndoEntries(a.undo.List()))
+		}
+		return
+	}
 	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" || len(result.Changes) == 0 {
 		return
 	}
 	changes := make([]undo.Change, 0, len(result.Changes))
 	for _, change := range result.Changes {
+		if change.Destination != "" || change.AfterExists != nil && !*change.AfterExists {
+			a.undo.Record(call.Name+": lifecycle reconciliation required", nil)
+			a.session.SetUndo(sessionUndoEntries(a.undo.List()))
+			return
+		}
 		changes = append(changes, undo.Change{
-			Path:   change.Path,
-			Before: change.Before,
-			After:  change.After,
+			Path:         change.Path,
+			Before:       change.Before,
+			After:        change.After,
+			BeforeExists: change.BeforeExists,
 		})
 	}
 	a.undo.Record(call.Name, changes)
@@ -2542,9 +2563,10 @@ func sessionUndoEntries(entries []undo.Entry) []session.UndoEntry {
 		changes := make([]session.UndoChange, 0, len(entry.Changes))
 		for _, change := range entry.Changes {
 			changes = append(changes, session.UndoChange{
-				Path:   change.Path,
-				Before: change.Before,
-				After:  change.After,
+				Path:         change.Path,
+				Before:       change.Before,
+				After:        change.After,
+				BeforeExists: change.BeforeExists,
 			})
 		}
 		out = append(out, session.UndoEntry{
@@ -2563,9 +2585,10 @@ func undoEntries(entries []session.UndoEntry) []undo.Entry {
 		changes := make([]undo.Change, 0, len(entry.Changes))
 		for _, change := range entry.Changes {
 			changes = append(changes, undo.Change{
-				Path:   change.Path,
-				Before: change.Before,
-				After:  change.After,
+				Path:         change.Path,
+				Before:       change.Before,
+				After:        change.After,
+				BeforeExists: change.BeforeExists,
 			})
 		}
 		out = append(out, undo.Entry{

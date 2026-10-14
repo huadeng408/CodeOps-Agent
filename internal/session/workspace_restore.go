@@ -147,6 +147,10 @@ func codeTransitionsForRun(events []Event, runID, checkpointHash string, termina
 		if payload.BeforeSHA256 != hashCodeState(payload.Before) || payload.AfterSHA256 != hashCodeState(payload.After) || payload.DiffSHA256 != hashCodeTransition(payload.Before, payload.After) {
 			return nil, nil, fmt.Errorf("%w: code modification contents do not match digests", ErrEventIntegrity)
 		}
+		// shortcut: legacy restore has no existence/rename contract; reject ambiguous new receipts until lifecycle recovery.
+		if payload.Operation == "Delete" || payload.Operation == "Rename" || payload.BeforeExists != nil && (*payload.BeforeExists && payload.Before == "" || *payload.AfterExists && payload.After == "") {
+			return nil, nil, fmt.Errorf("%w: legacy restore cannot represent this file lifecycle", ErrSessionStateConflict)
+		}
 		if index, exists := byPath[payload.Path]; exists {
 			if transitions[index].After != payload.Before {
 				return nil, nil, fmt.Errorf("%w: non-contiguous code modification transition", ErrEventIntegrity)

@@ -118,9 +118,10 @@ type AgentSpawnRecord struct {
 }
 
 type UndoChange struct {
-	Path   string `json:"path"`
-	Before string `json:"before,omitempty"`
-	After  string `json:"after,omitempty"`
+	Path         string `json:"path"`
+	Before       string `json:"before,omitempty"`
+	After        string `json:"after,omitempty"`
+	BeforeExists *bool  `json:"before_exists,omitempty"`
 }
 
 type UndoEntry struct {
@@ -1392,6 +1393,12 @@ func cloneUndo(in []UndoEntry) []UndoEntry {
 		out[i] = entry
 		if len(entry.Changes) > 0 {
 			out[i].Changes = append([]UndoChange(nil), entry.Changes...)
+			for index, change := range out[i].Changes {
+				if change.BeforeExists != nil {
+					value := *change.BeforeExists
+					out[i].Changes[index].BeforeExists = &value
+				}
+			}
 		}
 	}
 	return out

@@ -55,13 +55,15 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 	if err := atomicWriteFile(abs, []byte(replaced), mode); err != nil {
 		return ToolResult{Name: "Edit", Error: err.Error()}, err
 	}
+	beforeExists, afterExists := true, true
 	return ToolResult{
 		Name:   "Edit",
 		Output: fmt.Sprintf("edited %s (%d replacement%s)", filepath.ToSlash(path), countForOutput(count, replaceAll), pluralSuffix(countForOutput(count, replaceAll))),
 		Changes: []Change{{
-			Path:   changePath,
-			Before: before,
-			After:  replaced,
+			Path:         changePath,
+			Before:       before,
+			After:        replaced,
+			BeforeExists: &beforeExists, AfterExists: &afterExists,
 		}},
 	}, nil
 }

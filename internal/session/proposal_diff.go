@@ -53,7 +53,11 @@ func proposalDiff(file ProposalFileView, before, after string) string {
 		patch.from = proposalDiffFile{file.Path, before, file.BeforeMode}
 	}
 	if file.AfterExists {
-		patch.to = proposalDiffFile{file.Path, after, file.AfterMode}
+		path := file.Path
+		if file.Destination != "" {
+			path = file.Destination
+		}
+		patch.to = proposalDiffFile{path, after, file.AfterMode}
 	}
 	// shortcut: large diffs replace the whole file; add a bounded minimal-diff algorithm if review size requires it.
 	if (int64(strings.Count(before, "\n"))+1)*(int64(strings.Count(after, "\n"))+1) > 1_000_000 {

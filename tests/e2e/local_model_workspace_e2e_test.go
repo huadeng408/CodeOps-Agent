@@ -45,6 +45,9 @@ func TestProductionLocalCoreBrowserApprovesProposal(t *testing.T) {
 func TestProductionLocalCoreBrowserRejectsProposal(t *testing.T) {
 	testProductionLocalCoreModelTaskCopy(t, false, true, "reject")
 }
+func TestProductionLocalCoreBrowserAppliesFileLifecycle(t *testing.T) {
+	testProductionLocalCoreModelTaskCopy(t, false, true, "lifecycle")
+}
 
 func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal bool, decision string) {
 	if runtime.GOOS != "windows" || os.Getenv("CODE_AGENT_RUN_LOCAL_MODEL_WORKSPACE_E2E") != "1" {
@@ -58,11 +61,15 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 				t.Fatalf("fixture Git: %s %v", output, err)
 			}
 		}
-		for path, content := range map[string]string{
+		files := map[string]string{
 			"go.mod":       "module example.test/codeops-proposal\n\ngo 1.20\n",
 			"calc.go":      "package calc\n\nfunc Add(left, right int) int { return left - right }\n",
 			"calc_test.go": "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) { if got := Add(2, 3); got != 5 { t.Fatalf(\"Add(2, 3) = %d, want 5\", got) } }\n",
-		} {
+		}
+		if decision == "lifecycle" {
+			files["empty.txt"], files["old.txt"] = "", "rename content"
+		}
+		for path, content := range files {
 			if err := os.WriteFile(filepath.Join(repository, path), []byte(content), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -128,7 +135,7 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 	transport := grpc.NewServer()
 	captured := make(chan *pb.UserInput, 1)
 	failures := make(chan error, 1)
-	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell, proposal: proposal})
+	pb.RegisterOrchestratorServer(transport, localWorkspaceTransport{captured: captured, failures: failures, unknownShell: unknownShell, proposal: proposal, lifecycle: decision == "lifecycle"})
 	go transport.Serve(listener)
 	defer transport.Stop()
 	fixture.stop(t)
@@ -278,8 +285,8 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 				Proposal   struct {
 					ID, SessionID, WorkspaceID, BaselineChecksum, FinalStateSHA256, State string
 					Files                                                                 []struct {
-						Path, Diff                string
-						BeforeExists, AfterExists bool
+						Path, Diff, Operation, Destination string
+						BeforeExists, AfterExists          bool
 					}
 					Test struct {
 						State, InputSHA256, RuntimeID string
@@ -300,7 +307,23 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 		if len(got.ID) != 64 || got.SessionID != created.Data.ID || got.WorkspaceID != prepared.Data.WorkspaceID || got.BaselineChecksum != baseline.Checksum || len(got.FinalStateSHA256) != 64 || got.State != "ready" {
 			t.Fatalf("proposal is not bound to the reviewed task: %+v", got)
 		}
-		if len(got.Files) != 1 || got.Files[0].Path != "calc.go" || !got.Files[0].BeforeExists || !got.Files[0].AfterExists || !strings.Contains(got.Files[0].Diff, "-func Add(left, right int) int { return left - right }") || !strings.Contains(got.Files[0].Diff, "+func Add(left, right int) int { return left + right }") {
+		wantFiles := 1
+		if decision == "lifecycle" {
+			wantFiles = 4
+			operations := map[string]string{}
+			for _, file := range got.Files {
+				operations[file.Path] = file.Operation
+				if file.Path == "nested/new.txt" && (file.BeforeExists || !file.AfterExists) || file.Path == "empty.txt" && (!file.BeforeExists || file.AfterExists) || file.Path == "old.txt" && (file.Destination != "moved.txt" || !strings.Contains(file.Diff, "b/moved.txt")) {
+					t.Fatal("proposal lost explicit empty-file or rename metadata")
+				}
+			}
+			for path, operation := range map[string]string{"calc.go": "edit", "empty.txt": "delete", "nested/new.txt": "create", "old.txt": "rename"} {
+				if operations[path] != operation {
+					t.Fatal("proposal lost lifecycle operation")
+				}
+			}
+		}
+		if len(got.Files) != wantFiles || got.Files[0].Path != "calc.go" || !got.Files[0].BeforeExists || !got.Files[0].AfterExists || !strings.Contains(got.Files[0].Diff, "-func Add(left, right int) int { return left - right }") || !strings.Contains(got.Files[0].Diff, "+func Add(left, right int) int { return left + right }") {
 			t.Fatal("proposal lacks an accurate diff against the initial working copy")
 		}
 		if got.Test.State != "passed" || got.Test.ExitCode == nil || *got.Test.ExitCode != 0 || got.Test.InputSHA256 != got.FinalStateSHA256 || got.Test.RuntimeID == "" || !got.Test.Stopped {
@@ -330,11 +353,26 @@ func testProductionLocalCoreModelTaskCopy(t *testing.T, unknownShell, proposal b
 			}
 			original, err := os.ReadFile(filepath.Join(repository, changedPath))
 			want := "package calc\n\nfunc Add(left, right int) int { return left - right }\n"
-			if decision == "approve" {
+			if decision == "approve" || decision == "lifecycle" {
 				want = expectedContent
 			}
 			if err != nil || string(original) != want {
 				t.Fatal("browser decision changed unexpected original content")
+			}
+			if decision == "lifecycle" {
+				created, err := os.ReadFile(filepath.Join(repository, "nested", "new.txt"))
+				if err != nil || len(created) != 0 {
+					t.Fatal("browser application lost an empty new file")
+				}
+				for _, path := range []string{"empty.txt", "old.txt"} {
+					if _, err := os.Lstat(filepath.Join(repository, path)); !os.IsNotExist(err) {
+						t.Fatal("browser application did not remove the old path")
+					}
+				}
+				moved, err := os.ReadFile(filepath.Join(repository, "moved.txt"))
+				if err != nil || string(moved) != "rename content" {
+					t.Fatal("browser rename changed bytes")
+				}
 			}
 			after, err := worktree.NewManager(repository, "HEAD").CaptureBaseline(context.Background())
 			if err != nil || after.HeadCommit != baseline.HeadCommit || after.IndexSHA256 != baseline.IndexSHA256 {
@@ -489,6 +527,7 @@ type localWorkspaceTransport struct {
 	failures     chan error
 	unknownShell bool
 	proposal     bool
+	lifecycle    bool
 }
 
 func (localWorkspaceTransport) Health(context.Context, *pb.Empty) (*pb.HealthResponse, error) {
@@ -531,7 +570,16 @@ func (fixture localWorkspaceTransport) Converse(stream grpc.BidiStreamingServer[
 		calls[1].ParametersJson = `{"path":"calc.go","old":"return left - right","new":"return left + right"}`
 		wantModule = "example.test/codeops-proposal"
 	}
-	for index := range 4 {
+	if fixture.lifecycle {
+		calls = []*pb.ToolRequest{
+			{ToolName: "Write", ToolCallId: "create-empty", ParametersJson: `{"path":"nested/new.txt","content":""}`},
+			calls[1],
+			{ToolName: "Delete", ToolCallId: "delete-empty", ParametersJson: `{"path":"empty.txt"}`},
+			{ToolName: "Rename", ToolCallId: "rename-copy", ParametersJson: `{"path":"old.txt","destination":"moved.txt"}`},
+			calls[2],
+		}
+	}
+	for index := range len(calls) + 1 {
 		payload, _ := json.Marshal(map[string]any{"model": binding.Model, "messages": []map[string]string{{"role": "user", "content": "public transport fixture"}}})
 		response, err := model.Invoke(stream.Context(), &pb.ModelCallRequest{Capability: binding.Capability, CallId: fmt.Sprintf("call-%s-%d", input.SessionId, index), PayloadJson: payload, Purpose: "foreground"})
 		if index == 3 && fixture.unknownShell {
@@ -561,7 +609,7 @@ func (fixture localWorkspaceTransport) Converse(stream grpc.BidiStreamingServer[
 					}
 					break
 				}
-				if result.ExitCode != 0 || result.Error != "" || result.Truncated || index == 2 && !strings.Contains(result.Output, wantModule) {
+				if result.ExitCode != 0 || result.Error != "" || result.Truncated || calls[index].ToolName == "Bash" && !strings.Contains(result.Output, wantModule) {
 					return fmt.Errorf("isolated tool %s failed: exit=%d truncated=%t error=%q output=%q", calls[index].ToolName, result.ExitCode, result.Truncated, result.Error, result.Output)
 				}
 				break
