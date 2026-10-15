@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "scope": "multi-run-product-trace-validator-source",
+  "engineering_status": "IMPLEMENTED",
+  "verification_status": "VERIFIED unit/integration and source CI only",
+  "source_commit": "2b27c4483c35ecbf223f0b3b61a424517a79ab0f",
+  "source_sha256": {
+    "docs/observability-phoenix-live-trace-runbook.md": "91132b7368e6b48166298513273918f6438be8f3e7da4886b3338743faf11c8c",
+    "eval/harness/trace_contract.py": "e3bf6c143a88c05f1604bf6c5c4f7f2c41b90e748454d5261672dfd268424305",
+    "eval/product_trace.py": "49ac2968c07cb51a5b2fc76b95b03ef4430581e0a71f7348b61bba7c6bd694e4",
+    "tests/eval/test_product_trace.py": "d1de4cbf244e44a982b25f77faafe14627c1e6aa0b03dd95aebc32db786d87ec",
+    "tests/eval/test_trace_contract.py": "7645b16a74b750a0a9f011b755ad2044c62996cd81dc85263898497802805ed4",
+    "tests/fixtures/product_trace/generate_multirun.go": "0104ad5baf83b6a4900e639565be137613ac6e1ce55cffcbdae49675e4fc0e61"
+  },
+  "base_commit": "174569cedf32d0bc1b7b875a04d911d7ba8648e2",
+  "local_affected_suite": {
+    "command": "python -m pytest -q tests/eval/test_product_trace.py tests/eval/test_trace_contract.py tests/eval/test_phoenix_readback.py",
+    "passed": 71,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "pre_followup_windows_full_suite": {
+    "passed": 2551,
+    "skipped": 17,
+    "warnings": 31,
+    "exit_code": 0,
+    "limit": "Three reviewed validator corrections followed this stable snapshot; current full-source CI below includes them."
+  },
+  "current_ci": {
+    "conclusion": "success",
+    "headSha": "2b27c4483c35ecbf223f0b3b61a424517a79ab0f",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Python",
+        "status": "completed",
+        "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38763374370/job/116520173982"
+      },
+      {
+        "conclusion": "success",
+        "name": "Go",
+        "status": "completed",
+        "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38763374370/job/116520174378"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows startup contracts",
+        "status": "completed",
+        "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38763374370/job/116520174444"
+      },
+      {
+        "conclusion": "success",
+        "name": "Frontend",
+        "status": "completed",
+        "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38763374370/job/116520174934"
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38763374370",
+    "python": {
+      "passed": 2561,
+      "skipped": 12,
+      "warnings": 3,
+      "exit_code": 0
+    }
+  },
+  "go_previous_snapshot": {
+    "passed_tests": 1733,
+    "skipped_tests": 79,
+    "total_tests": 1812,
+    "failed": 0,
+    "exit_code": 0,
+    "limit": "Production Go unchanged; final fixture branch execution also covered by affected CLI tests and current full Go CI."
+  },
+  "vet": {
+    "full_go_exit_code": 0,
+    "final_fixture_exit_code": 0,
+    "gofmt_diff": "empty"
+  },
+  "review": {
+    "standards_hard": 0,
+    "standards_smells": 0,
+    "spec_missing": 0,
+    "spec_creep": 0,
+    "spec_wrong": 0,
+    "classification": "AI_REVIEWED; not HUMAN_REVIEWED"
+  },
+  "retained_failures": [
+    "earlier mixed-source Python full snapshot: 5 failed /2544 passed /17 skipped",
+    "earlier canonical fixture CAS conflict and intermediate targeted failures",
+    "three root-parent red failures",
+    "one omitted-unadmitted-run red failure",
+    "one partial-readback red failure",
+    "initial staged scan matched an unchanged negative credential-detection fixture; exact committed fixture checksum exception only, actual credentials still scanned"
+  ],
+  "artifact_root": "deployments/docker/.local/receipts/browser-tasks-20261015/source-preparation",
+  "artifact_count": 64,
+  "artifact_manifest_sha256": "a4953722ad66a21a0f7cfb09a72cb490477146c9251a678453e1af4370254433",
+  "product_validation": "NOT_RUN for this validator-source receipt; #17 real browser acceptance is separate",
+  "release_validation": "NOT_RUN",
+  "unresolved_source_blockers": []
+}
