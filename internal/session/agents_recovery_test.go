@@ -211,7 +211,7 @@ func TestIndependentAgentRecoveryCompletesCancellationFence(t *testing.T) {
 
 func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *testing.T) {
 	ctx := context.Background()
-	fixture := &independentAgentFixture{mode: "input"}
+	fixture := &independentAgentFixture{mode: "input", inputRelease: make(chan struct{})}
 	runner, _, actor := agentTestRunner(t, fixture)
 	runner.options.AgentWorkspace = func(context.Context, AgentWorkspaceRequest) (string, error) {
 		return t.TempDir(), nil
@@ -230,11 +230,17 @@ func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *t
 	}
 	runner.options.AgentLifecycle = lifecycle
 	task := agentTestCall(t, runner, actor, "spawn-lifecycle-recovery", "SpawnAgent", `{"kind":"general","title":"recover cleanup","objective":"ask before cleanup"}`)
+	view, err := runner.workbench.Get(ctx, 7, task.ChildSessionId)
+	if err != nil || view.Run == nil {
+		t.Fatalf("child run before cancellation: %+v %v", view.Run, err)
+	}
 	result := runner.ExecuteAgentTool(ctx, actor, actor.SessionID, orchestrator.ToolCall{
 		ID: "cancel-lifecycle-recovery", Name: "AgentTask",
 		ParametersJSON: `{"action":"cancel","task_id":"` + task.Id + `"}`,
 	})
-	if result.Error == "" || lifecycleCalls.Load() < 1 {
+	// Cancellation accepts the fence before asynchronous cleanup can finish.
+	ended := waitForRunStatus(t, runner, task.ChildSessionId, view.Run.RunID, RunCanceled)
+	if ended.CancellationState != "unknown" || lifecycleCalls.Load() < 1 {
 		t.Fatalf("initial lifecycle failure = result=%+v calls=%d", result, lifecycleCalls.Load())
 	}
 	beforeRetry := lifecycleCalls.Load()

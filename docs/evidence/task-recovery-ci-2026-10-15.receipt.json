@@ -1,0 +1,89 @@
+{
+  "scope": "test-only correction for asynchronous cancellation lifecycle observation after #13 source CI",
+  "source_base": "1646cd0da818a121ad952b7df28019c5acfe41ad",
+  "changed_test": "internal/session/agents_recovery_test.go",
+  "test_sha256": "8daeca9a18b573a777c7c18f0d83238ef1e0c61df3b1a2b3b26aedbeff30d676",
+  "production_behavior_changed": false,
+  "original_product_receipt_preserved": true,
+  "original_ci": {
+    "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38658859177",
+    "conclusion": "failure",
+    "jobs": [
+      {
+        "name": "Frontend",
+        "conclusion": "success"
+      },
+      {
+        "name": "Python",
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows startup contracts",
+        "conclusion": "success"
+      },
+      {
+        "name": "Go",
+        "conclusion": "failure"
+      }
+    ]
+  },
+  "failed_ci_log_sha256": "82679fdbc52f7414dc46c9c7e01cc7de94fabf033b01de48418c6b6f096ef306",
+  "all_local_attempts": [
+    {
+      "name": "lifecycle-ci-repro",
+      "exit_code": 0,
+      "tests": {
+        "pass": 50
+      },
+      "log_sha256": "a335523b2bcca77f052cd83e9c11debcbb9aadd9549e0addcb2b38113c55e9ba",
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "name": "lifecycle-ci-held-worker",
+      "exit_code": 1,
+      "tests": {
+        "fail": 10
+      },
+      "log_sha256": "2ae5288b75b968f33045131369beab78d0a43d70f986d481fe314160ee41dd70",
+      "exit_sha256": "f1b2f662800122bed0ff255693df89c4487fbdcf453d3524a42d4ec20c3d9c04"
+    },
+    {
+      "name": "lifecycle-ci-green",
+      "exit_code": 0,
+      "tests": {
+        "pass": 50
+      },
+      "log_sha256": "94961d45cf26c61375261577add0de94ffabd05a0b98f045502636c461dcac4d",
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "name": "lifecycle-ci-race",
+      "exit_code": 0,
+      "tests": {
+        "pass": 10
+      },
+      "log_sha256": "8aaf0ebb34cdcf130e0cace499f2492ff1bfd25d77352d1f3f25e424bf974fee",
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "name": "lifecycle-ci-session",
+      "exit_code": 0,
+      "tests": {
+        "pass": 247,
+        "skip": 1
+      },
+      "log_sha256": "a47c4571c17cc8ed2a537557ca0110c6a88d87bf79ba0b80be39a4fbacd17a2d",
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    }
+  ],
+  "local_uncommitted_scope": "Local Session suite also included independent #14 Memory caller changes; subsequent CI validates only the exact pushed test/document patch.",
+  "review": {
+    "kind": "AI_REVIEWED",
+    "standards_hard": 0,
+    "standards_smells": 0,
+    "spec_findings": 0
+  },
+  "product_repeated": "not_run: test-only patch; original runtime inputs and product receipt retained",
+  "release": "not_run",
+  "raw_evidence": ".scratch/task-recovery-20261015/"
+}
