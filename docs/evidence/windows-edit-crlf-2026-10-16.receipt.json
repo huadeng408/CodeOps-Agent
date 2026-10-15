@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "scope": "Windows Go Read/Edit uniform-CRLF compatibility source repair",
+  "engineering_status": "IMPLEMENTED",
+  "source_commit": "91c45e7d39e875335ca94cb635784da9e4d056fb",
+  "review_base": "bde3827962f2fcad96546dcb4525d3937406506f",
+  "source_sha256": {
+    "internal/tools/edit.go": "1593ca3f145a021a9062d615e77a21d85c039e76b82eedeca5e9899e39919f9f",
+    "internal/tools/file_safety_test.go": "353cfa7171e22326b707fd93babfc466b61da8bdd8c93a893f3c28d133481d8f"
+  },
+  "reviewed_staged_committed_diff_sha256": "c21ec9879a145b1e435f925c1254e130eae7663fff6ce3bb9f7fd84a6e06a5db",
+  "evidence_markdown_sha256": "fbecc8102c4e529c232cfd63766ed8eed2cbaef76ad0dd9b2df07720a2cd9d9c",
+  "verification": {
+    "unit": "VERIFIED",
+    "source_integration": "VERIFIED",
+    "complete_browser_coding_task": "NOT_VERIFIED",
+    "release": "NOT_RUN"
+  },
+  "tdd": {
+    "public_seam": "Executor.Execute Read/Edit",
+    "first_red": {
+      "command": [
+        "go",
+        "test",
+        "./internal/tools",
+        "-run",
+        "^TestFileToolsEditLFExcerptInCRLFFile$",
+        "-count=1"
+      ],
+      "exit_code": 1,
+      "failure": "old text not found in source.go"
+    },
+    "first_green_exit_code": 0,
+    "review_counterexample_red": {
+      "command": [
+        "go",
+        "test",
+        "./internal/tools",
+        "-run",
+        "^TestFileToolsEditNewlineMappingKeepsExactMatchGuards/standalone_CR_has_no_inferred_mapping$",
+        "-count=1"
+      ],
+      "exit_code": 1,
+      "failure": "Edit error=<nil>, wantErr=true"
+    },
+    "final_targeted": {
+      "command": [
+        "go",
+        "test",
+        "./internal/tools",
+        "-run",
+        "^TestFileTools(Edit|WriteAndEdit|RejectWorkspace)",
+        "-count=1"
+      ],
+      "exit_code": 0
+    }
+  },
+  "windows_final_regression": {
+    "scope": "Final Windows source regression, not browser coding-task/release acceptance",
+    "command": "go test ./... -count=1 -json",
+    "exit_code": 0,
+    "packages_started": 60,
+    "package_results": {
+      "skip": 13,
+      "pass": 47
+    },
+    "test_and_subtest_results": {
+      "pass": 1745,
+      "skip": 79
+    },
+    "top_level_test_results": {
+      "pass": 1221,
+      "skip": 76
+    },
+    "first_event_at": "2026-10-16T01:50:14.8216274+08:00",
+    "last_event_at": "2026-10-16T01:53:46.7734428+08:00",
+    "go_vet_exit_code": 0,
+    "reviewed_source_unchanged": true
+  },
+  "ci": {
+    "source_commit": "91c45e7d39e875335ca94cb635784da9e4d056fb",
+    "run_id": 38781360295,
+    "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38781360295",
+    "conclusion": "success",
+    "job_count": 4,
+    "jobs": {
+      "Go": "success",
+      "Python": "success",
+      "Frontend": "success",
+      "Windows startup contracts": "success"
+    },
+    "metrics": {
+      "python": "2563 passed, 12 skipped, 3 warnings in 214.60s (0:03:34)",
+      "windows": "10 passed in 12.94s",
+      "go": {
+        "passed_packages": 47,
+        "no_test_packages": 13,
+        "per_case_counts": "not emitted by CI command"
+      },
+      "frontend": [
+        "2026-10-15T17:55:46.7323371Z # tests 12",
+        "2026-10-15T17:55:46.7323636Z # suites 0",
+        "2026-10-15T17:55:46.7323844Z # pass 12",
+        "2026-10-15T17:55:46.7324052Z # fail 0",
+        "2026-10-15T17:55:46.7324508Z # skipped 0"
+      ]
+    }
+  },
+  "review": {
+    "label": "AI_REVIEWED",
+    "standards_hard": 0,
+    "standards_smells": 0,
+    "spec_initial": 1,
+    "spec_resolved": 1,
+    "spec_unresolved": 0
+  },
+  "preserved_failed_browser_attempt": {
+    "session_id": "61c710ae77171582cf55301564c6aaaa",
+    "message_attempts": 3,
+    "complete_rounds": 2,
+    "canceled_rounds": 1,
+    "native_events": 462,
+    "backend_spans": 101,
+    "error_spans": 2,
+    "trace_verdict": "FAIL",
+    "model_calls": 20,
+    "settled_calls": 20,
+    "new_unknown_calls": 0,
+    "confirmed_tokens": 583771,
+    "cost_status": "unknown",
+    "original_files_preserved": 99,
+    "isolated_files_preserved": 99,
+    "original_index_preserved": true,
+    "active_calls_after_task_finish": 0,
+    "task_slot_after_finish": "",
+    "owned_cleanup_confirmed": true,
+    "manifest": "deployments/docker/.local/receipts/browser-tasks-20261015/go/timeout600-v1/failed-crlf-attempt-artifact-manifest.json",
+    "artifact_count": 47,
+    "manifest_sha256": "3a5e3c6d4e0c92b5116bec6a66aa594eee6e02e234ec8c3e690011c277907936"
+  },
+  "new_portable_build": {
+    "command": [
+      "python",
+      "scripts/build-windows.py",
+      "--output",
+      "deployments/windows/.local/\u8fc1\u79fb\u7a7a\u95f4/CodeOps Agent crlf"
+    ],
+    "exit_code": 0,
+    "manifest_sha256": "e7f25bdf9110a9587e19a62e7c9a5df65aa5df8633b2f94f0154ba1d12136d97",
+    "server_sha256": "aa4a8bda30d6d00ae657f070237d6947f3770f7d6aa86f6ead678d2dce090ce4",
+    "launcher_sha256": "55b190aeb7730093463076379f2590566c42c2c503452d9a756b3d4cb114c23d",
+    "runtime_files": 3219,
+    "compiled_source_files": 603
+  },
+  "next_public_task_freeze": {
+    "path": "deployments/docker/.local/receipts/browser-tasks-20261015/freeze-crlf/inputs.json",
+    "sha256": "ca16b4040332efc855ad99958a5a9d405b4cb50817f21641ae1e7948d0b30220",
+    "tasks": 2,
+    "scenario_denominator_per_task": 12,
+    "runtime_and_validator_source_files": 607,
+    "go_timeout_seconds": 600,
+    "model": "grok-4.6",
+    "batch_id": "02cfc8d9c93975b3ea63f27cc0a3331d",
+    "previous_failure_manifest_sha256": "3a5e3c6d4e0c92b5116bec6a66aa594eee6e02e234ec8c3e690011c277907936"
+  },
+  "source_artifact_manifest": {
+    "path": "deployments/docker/.local/receipts/browser-tasks-20261015/crlf-edit-source/artifact-manifest.json",
+    "artifact_count": 41,
+    "sha256": "d79a89ae42cd15a891eee53de399b55b4bad1d83f662b4f343ab67e840617be0"
+  },
+  "ticket_17": "OPEN: original ten meaningful browser rounds, actual changes/tests/review/application and complete successful backend forest remain required",
+  "source_fix_unresolved_blockers": []
+}
