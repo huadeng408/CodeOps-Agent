@@ -240,6 +240,18 @@ func localModelWorkspaceAdmission(workspaces *session.TaskWorkspaces, budget *ad
 		if err != nil {
 			return session.TaskModelWorkspace{}, err
 		}
+		if batch.ActiveCalls != 0 && batch.TaskID == id && workspaces != nil {
+			if _, err := workspaces.Inspect(ctx, owner, id); err != nil {
+				return session.TaskModelWorkspace{}, err
+			}
+			if err := budget.RecoverStoppedScopes(ctx, batch.TaskOwnerID, id); err != nil && !errors.Is(err, admission.ErrTaskBusy) && !errors.Is(err, admission.ErrUsageUnknown) {
+				return session.TaskModelWorkspace{}, err
+			}
+			batch, err = budget.Inspect(ctx, owner)
+			if err != nil {
+				return session.TaskModelWorkspace{}, err
+			}
+		}
 		if batch.ActiveCalls != 0 {
 			return session.TaskModelWorkspace{}, fmt.Errorf("%w: wait for the active model call to finish", admission.ErrRelayBusy)
 		}

@@ -1,0 +1,315 @@
+{
+  "scope": "#13 actual Windows task process fault and Go/Python restart into the same retained Session",
+  "engineering_state": "IMPLEMENTED",
+  "verification": {
+    "unit": "passed",
+    "integration": "passed",
+    "product_declared_scope": "passed",
+    "full_fault_matrix": "not_run",
+    "full_release": "not_run"
+  },
+  "review": {
+    "kind": "AI_REVIEWED",
+    "standards_open_findings": 0,
+    "standards_smells": 0,
+    "spec_open_findings": 0
+  },
+  "source_head": "cebb68940232aec626e62563d66b88ee7b72ac81",
+  "runtime_includes_uncommitted_implementation": true,
+  "runtime_binding": {
+    "inputs_sha256": "e12129d17a273c3d6d095300bce711f6a1236739c19d98270f086df4d8329bed",
+    "source_count": 921,
+    "source_map_sha256": "cac876d1ba2625af17ec077a8fe97cbafd8c3ec1e1dbf93dd2f7090fb3cb3552",
+    "current_binding_verified": true,
+    "binary_sha256": "beed05dd43f8b21866dcb39bc1dc36585a400da2025cb44bd3dd9aead7832127",
+    "assets_sha256": {
+      "index.html": "f156f5d3396899ef7b2260abfe25d822f3e7d60ea5b81ac024bc9bfcab10a96c",
+      "assets/index-Bh1olE6O.js": "06999bca05602572e5dff90a8a5f4e9afcf5600d393d8e710e18af019528ce0f",
+      "assets/index-CoxDLLvf.css": "6a4a72fc4e224f060cb303b2f6e7b7ff1d0c41e8225abcacd72e3264b6a2a5f5"
+    }
+  },
+  "provider": {
+    "model": "grok-4.6",
+    "provider": "anthropic",
+    "endpoint_host": "beeapi.dev",
+    "input_bound": 500000,
+    "output_cap": 2048,
+    "service_hard_limit": 100000000
+  },
+  "task_image": "sha256:c35ffc50ff2d4e97ea90f973b29836945912397204592a0b06a0b6fbbba59b58",
+  "manifest_sha256": "39f4d592d297f32337cb4938e0e96045ccefc602d458da34301ce13f751b3b7c",
+  "scenario_denominator": [
+    "owner-auth-and-original-protection",
+    "actual-owned-sandbox-process-failure",
+    "fault-partial-file-and-history-retained",
+    "unknown-effect-continuation-refused",
+    "confirmed-write-before-go-restart",
+    "actual-active-go-process-death-and-restart",
+    "same-session-checkpoint-lineage-surface-plan-and-lease-recovery",
+    "confirmed-effect-not-replayed",
+    "actual-python-process-death-and-restart",
+    "same-old-session-reopen-and-legal-new-turn",
+    "budget-known-unknown-and-task-identity-retained",
+    "owned-resource-and-process-stop"
+  ],
+  "scenario_results": {
+    "passed": 12,
+    "failed": 0,
+    "not_run": 0
+  },
+  "fault": {
+    "session_id": "93ef9ee713046a2171dc7ec4ad515251",
+    "canonical_events": 53,
+    "container_exit": 137,
+    "container_sha256_image_verified": true,
+    "actual_sleep_process_observed": true,
+    "partial_marker_preserved": true,
+    "unknown_effect_continuation_http": 409,
+    "task_finish_http": 200
+  },
+  "go_restart": {
+    "old_pid": 35516,
+    "new_pid": 29028,
+    "old_exit_code": 1,
+    "active_model_attempt_before_fault": 1,
+    "same_session_id": "a468a43404e9d9afcb1e39d1873f86e1",
+    "recovered_run": {
+      "sessionId": "a468a43404e9d9afcb1e39d1873f86e1",
+      "runId": "run:46bc97d6d970b1666af97f8e5477a8ad",
+      "requestId": "browser:fb330195-577c-4980-b0d2-3627d2a308db",
+      "status": "completed",
+      "attempt": 2,
+      "workerId": "local:18094",
+      "checkpointHash": "fa955d2f10175eb6ee59fb7f28687998ad2648a56672f2fc9b2779afc0ad3ce4",
+      "startedAt": "2026-10-14T23:55:00.2968449Z",
+      "completedAt": "2026-10-14T23:55:40.4536762Z"
+    },
+    "old_event_prefix_preserved": true,
+    "scope_recovered_facts": 1,
+    "confirmed_write_results": 1
+  },
+  "python_restart": {
+    "old_pid": 12264,
+    "new_pid": 36516,
+    "old_exit_code": 1,
+    "reattach_ms": 6009,
+    "detached_then_attached": true,
+    "same_session_owner_checkpoint_workspace_and_event_prefix": true,
+    "ordinary_new_turn_http": 202,
+    "ordinary_new_turn_status": "completed",
+    "new_user_turn_has_new_checkpoint": true
+  },
+  "continuation": {
+    "foreign_checkpoint_http": 404,
+    "stale_cursor_http": 409,
+    "valid_browser_http": 202,
+    "valid_status": "completed",
+    "same_checkpoint_verified": true
+  },
+  "checkpoint_projection": {
+    "count": 13,
+    "steps": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "parent_chain_verified": true,
+    "all_go_ledger_seq_checksum_bindings_verified": true,
+    "per_request_local_revision_is_separate_from_saver_step": true,
+    "sha256": "e02de8319ef6bac08272b65e588936da607d6470d2fadd96374f68322cff6f30"
+  },
+  "state": {
+    "plan": "No plan/todo facts in this task; empty canonical plan projection remains empty",
+    "surface": "Go continuation surface hashes retained and bound to all graph checkpoint metadata",
+    "ledger": "native Go verification; continuous canonical hash chains",
+    "workspaces": [
+      {
+        "workspaceId": "lease-80239281c3a7b7feb55725a52a060b7a",
+        "original_files": 98
+      },
+      {
+        "workspaceId": "lease-966b9332de6fca0e071aca9148cb4b0b",
+        "original_files": 98
+      }
+    ]
+  },
+  "protection": {
+    "original_head_index_status_and_98_files_unchanged": true,
+    "workspaces_original_files_each": 98,
+    "old_sessions_unchanged": 57,
+    "existing_containers_before_control_restore": 55,
+    "other_data_removed": false
+  },
+  "budget": {
+    "before": {
+      "ID": "02cfc8d9c93975b3ea63f27cc0a3331d",
+      "LimitTokens": 100000000,
+      "UsedTokens": 2434312,
+      "ReservedTokens": 3006024576,
+      "TaskID": "",
+      "TaskOwnerID": 0,
+      "UnknownUsage": true,
+      "CostStatus": "unknown",
+      "ActiveCalls": 0
+    },
+    "after": {
+      "ID": "02cfc8d9c93975b3ea63f27cc0a3331d",
+      "LimitTokens": 100000000,
+      "UsedTokens": 2515632,
+      "ReservedTokens": 3606024576,
+      "TaskID": "",
+      "TaskOwnerID": 0,
+      "UnknownUsage": true,
+      "CostStatus": "unknown",
+      "ActiveCalls": 0
+    },
+    "old_accounting_prefix_unchanged": true,
+    "reserved_calls": 12,
+    "settled_calls": 6,
+    "ended_usage_unknown_calls": 6,
+    "known_tokens_added": 81320,
+    "unknown_reservations_retained": true,
+    "cost": "unknown"
+  },
+  "owned_process_stop": {
+    "owned_pids": [
+      12264,
+      35516,
+      29028,
+      36516
+    ],
+    "owned_alive": 0,
+    "driver_exit": 0,
+    "control_container": "7e9a27fdf3e83a7171a321d9b6adf94b478770c3e24e9bdceb0d6106e99f16db",
+    "restored_state": "exited",
+    "checked_at": "2026-10-15T00:05:11.3863105Z"
+  },
+  "browser_stop": {
+    "exit_codes": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "page_errors": [],
+    "browser_closed": true
+  },
+  "browser_commands": {
+    "count": 15,
+    "observer_failures": [
+      {
+        "id": "fault-create-and-admit",
+        "error": "Error"
+      }
+    ],
+    "note": "Initial title regex matched sidebar and main title; reused created Session without another model request."
+  },
+  "all_test_attempts": [
+    {
+      "name": "dead-model-holder-green",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+      "tests": {
+        "pass": 2
+      },
+      "packages": {
+        "pass": 1
+      },
+      "log_sha256": "522f11c24762221b4e7cb00881163a6c058d25e4d38f2f1ed7f6ff5a891d6ad8"
+    },
+    {
+      "name": "dead-model-holder-red",
+      "exit_code": 1,
+      "exit_sha256": "f1b2f662800122bed0ff255693df89c4487fbdcf453d3524a42d4ec20c3d9c04",
+      "tests": {
+        "fail": 1
+      },
+      "packages": {
+        "fail": 1
+      },
+      "log_sha256": "c029e399ee60c21e4849a8621077e81be3b0ea8655f130ab9d1ef1608fb2ae22"
+    },
+    {
+      "name": "go-full",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+      "tests": {
+        "pass": 1700,
+        "skip": 79
+      },
+      "packages": {
+        "skip": 13,
+        "pass": 45
+      },
+      "log_sha256": "4d5ebff417529b9a0441b8d3721bda6993c07dbf08bc712d841cc1017cffd8b4"
+    },
+    {
+      "name": "go-vet",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "name": "initial-recovery",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+      "tests": {
+        "pass": 34,
+        "skip": 1
+      },
+      "packages": {
+        "pass": 2
+      },
+      "log_sha256": "9f273f8a0ccd86e883be683fc82d5a8cacb011b79f5e8951f837cba267474b76"
+    },
+    {
+      "name": "recovery-boundaries",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+      "tests": {
+        "pass": 16,
+        "skip": 3
+      },
+      "packages": {
+        "pass": 2
+      },
+      "log_sha256": "630d21e43cc60499f4bbcdd768787191667bb8a17821a37cbfb4b96db76011e0"
+    },
+    {
+      "name": "recovery-boundary-race",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354",
+      "tests": {
+        "pass": 2
+      },
+      "packages": {
+        "pass": 1
+      },
+      "log_sha256": "ee02b59590b608fccff7c7c604d07a0f6e7c110de22c469d8f543c2f6c34c401"
+    },
+    {
+      "name": "server-build-v1",
+      "exit_code": 0,
+      "exit_sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    }
+  ],
+  "raw_checksum_count": 77,
+  "raw_checksum_manifest_sha256": "58b7f9161cd43557c858686983399899eaf9dacb28bab5e225a047227b124180",
+  "raw_receipts": "deployments/docker/.local/receipts/task-recovery-20261015/v1/",
+  "raw_tests": ".scratch/task-recovery-20261015/",
+  "remaining_scope": [
+    "#14 empty new-session Memory recall",
+    "#15 full real Trace",
+    "#19 complete production fault matrix",
+    "full release"
+  ]
+}

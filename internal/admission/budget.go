@@ -326,7 +326,9 @@ func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scope
 	return session.ErrSequenceConflict
 }
 
-func (budget *Budget) recoverScopes(ctx context.Context, owner uint, taskID string) error {
+// RecoverStoppedScopes requires exact process-death proof and retains the task,
+// usage and original reservations while reclaiming its dead model transports.
+func (budget *Budget) RecoverStoppedScopes(ctx context.Context, owner uint, taskID string) error {
 	for attempt := 0; attempt < 8; attempt++ {
 		state, err := budget.read(ctx, owner)
 		if err != nil {

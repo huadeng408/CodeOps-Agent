@@ -331,7 +331,7 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 		return nil
 	}
 	if state.taskHasScopes(actorOwner(actor), root) || state.outstanding() != 0 {
-		if err := gateway.budget.recoverScopes(ctx, actorOwner(actor), root); err != nil {
+		if err := gateway.budget.RecoverStoppedScopes(ctx, actorOwner(actor), root); err != nil {
 			return err
 		}
 	}
