@@ -256,6 +256,8 @@ type SessionRunner struct {
 	admissionClosed atomic.Bool
 	enqueueMu       sync.Mutex
 	wg              sync.WaitGroup
+	// Keep this Runner's leased writers from exhausting each other's CAS retries.
+	appendMu sync.Mutex
 }
 
 type runKey struct {
@@ -2201,6 +2203,8 @@ func toolResultSucceeded(payload toolResultPayload) bool {
 }
 
 func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lease runLeasePayload, eventType string, payload any) error {
+	r.appendMu.Lock()
+	defer r.appendMu.Unlock()
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
@@ -2241,6 +2245,8 @@ func (r *SessionRunner) appendLeasedFact(ctx context.Context, key runKey, leaseI
 }
 
 func (r *SessionRunner) appendLeasedFactEvent(ctx context.Context, key runKey, leaseID, eventType string, payload any) (Event, error) {
+	r.appendMu.Lock()
+	defer r.appendMu.Unlock()
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
