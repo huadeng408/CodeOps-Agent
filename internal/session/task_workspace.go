@@ -409,7 +409,7 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 			view.Proposal.State = "stale"
 		}
 	}
-	view.ProposalAvailable = view.Available && view.State == "prepared" && view.Toolchain == "go" && view.TestAvailable && t.baselineRuntime.BeginProposal != nil &&
+	view.ProposalAvailable = view.Available && view.State == "prepared" && (view.Toolchain == "go" || view.Toolchain == "python") && view.TestAvailable && t.baselineRuntime.BeginProposal != nil &&
 		(sessionView.Run == nil || sessionView.Run.Status != RunQueued && sessionView.Run.Status != RunRunning) &&
 		(view.Proposal == nil || view.Proposal.Test.Stopped)
 	applications, err := taskApplications(events)
@@ -427,7 +427,7 @@ func (t *TaskWorkspaces) project(ctx context.Context, events []Event, sessionVie
 		}
 	}
 	if !view.ProposalAvailable {
-		view.ProposalReason = "completed Go workspace and confirmed execution are required"
+		view.ProposalReason = "completed task workspace and confirmed execution are required"
 	}
 	return view, nil
 }

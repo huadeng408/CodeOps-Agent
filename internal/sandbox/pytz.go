@@ -23,6 +23,9 @@ const PytzSource = "https://files.pythonhosted.org/packages/4f/ef/c66110d46fb800
 const PytzSHA256 = "e658af3757f9e26a9d25dd2aff38335acd92bc9104f890a894b2c1ba28311b03"
 const PytzSize = 506342
 
+// PythonUnittestScript installs the approved wheel only in sandbox scratch.
+const PythonUnittestScript = "import os,subprocess,sys;subprocess.run([sys.executable,'-m','pip','install','--no-index','--no-deps','--disable-pip-version-check','--target','/run/codeops/python-site','/deps/" + PytzName + "'],check=True);os.execv(sys.executable,[sys.executable,'-m','unittest','discover','-v'])"
+
 // PreparePytz has no URL/package selector and never installs on the host.
 func PreparePytz(ctx context.Context, storage, operation string, client *http.Client) error {
 	if !openSandboxHex(operation, 64) {

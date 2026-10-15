@@ -72,7 +72,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"changed frozen input", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"changed frozen input", "Python changed frozen input", "Python frozen arbitrary command", "Python frozen missing dependency", "Python frozen wrong toolchain", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -385,7 +385,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			if scenario == "stricter scratch limit" {
 				config.TmpfsSize = "16m"
 			}
-			if scenario == "changed frozen input" {
+			if scenario == "changed frozen input" || scenario == "Python changed frozen input" || strings.HasPrefix(scenario, "Python frozen ") {
 				if runtime.GOOS != "windows" {
 					t.Skip("requires the Windows native frozen-input pin contract")
 				}
@@ -407,11 +407,27 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				if err := runner.Ready(context.Background()); err != nil {
 					t.Fatal("approved fixture runtime is not ready")
 				}
-				if err := os.WriteFile(input.Path, []byte("untrusted replacement archive"), 0600); err != nil {
-					t.Fatal(err)
+				if strings.Contains(scenario, "changed frozen input") {
+					if err := os.WriteFile(input.Path, []byte("untrusted replacement archive"), 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
-				result, err := runner.Run(context.Background(), sandbox.Request{Workspace: input.Path, FrozenInput: input, OperationID: operation, Program: "go", Args: []string{"test", "./...", "-count=1"}})
-				if !errors.Is(err, sandbox.ErrSandboxUnavailable) || !strings.Contains(err.Error(), "frozen input") || result.InputSHA256 != "" || result.RuntimeID != "" || created != 0 || executed != 0 || deleted != 0 {
+				request := sandbox.Request{Workspace: input.Path, FrozenInput: input, OperationID: operation, Program: "go", Args: []string{"test", "./...", "-count=1"}}
+				reason := "frozen input"
+				if strings.HasPrefix(scenario, "Python ") {
+					request.Program, request.Args, request.DependencyOperationID = "python", []string{"-c", sandbox.PythonUnittestScript}, strings.Repeat("8", 64)
+					reason = "frozen input archive checksum differs"
+				}
+				switch scenario {
+				case "Python frozen arbitrary command":
+					request.Args, reason = []string{"-c", "print('unapproved')"}, "outside its test contract"
+				case "Python frozen missing dependency":
+					request.DependencyOperationID, reason = "", "outside its test contract"
+				case "Python frozen wrong toolchain":
+					request.Program, reason = "go", "matching approved toolchain"
+				}
+				result, err := runner.Run(context.Background(), request)
+				if !errors.Is(err, sandbox.ErrSandboxUnavailable) || !strings.Contains(err.Error(), reason) || result.InputSHA256 != "" || result.RuntimeID != "" || created != 0 || executed != 0 || deleted != 0 {
 					t.Fatalf("changed frozen archive was executed or bound to a test: %+v lifecycle=%d/%d/%d %v", result, created, executed, deleted, err)
 				}
 				return

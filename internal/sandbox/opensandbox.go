@@ -133,8 +133,8 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 		input := *request.FrozenInput
 		input.Files = append([]InputFile(nil), input.Files...)
 		request.FrozenInput = &input
-		if r.config.Toolchain != "go" {
-			return result, fmt.Errorf("%w: frozen input requires the approved Go profile", ErrSandboxUnavailable)
+		if request.Program != r.config.Toolchain {
+			return result, fmt.Errorf("%w: frozen input requires the matching approved toolchain", ErrSandboxUnavailable)
 		}
 		release, err := pinFrozenInput(ctx, r.config.TrustRoot, request)
 		if err != nil {

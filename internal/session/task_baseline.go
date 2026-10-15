@@ -187,9 +187,7 @@ func (t *TaskWorkspaces) RunBaseline(ctx context.Context, owner uint, id string,
 		workspace := filepath.Join(t.storage, prepared.Task.LeaseID)
 		request := sandbox.Request{Workspace: workspace, WorkingDir: workspace, OperationID: operation, Program: command[0], Args: command[1:], DependencyOperationID: dependencyOperation}
 		if dependencyOperation != "" {
-			// Installation stays in sandbox scratch; neither host nor source inventory changes.
-			script := "import os,subprocess,sys;subprocess.run([sys.executable,'-m','pip','install','--no-index','--no-deps','--disable-pip-version-check','--target','/run/codeops/python-site','/deps/" + sandbox.PytzName + "'],check=True);os.execv(sys.executable,[sys.executable,'-m','unittest','discover','-v'])"
-			request.Args = []string{"-c", script}
+			request.Args = []string{"-c", sandbox.PythonUnittestScript}
 		}
 		result, runErr := profile.Runner.Run(ctx, request)
 		payload.View.Output, payload.View.Truncated, payload.View.RuntimeID, payload.View.Stopped = tools.RedactSensitive(result.Output), result.Truncated, result.RuntimeID, result.Stopped

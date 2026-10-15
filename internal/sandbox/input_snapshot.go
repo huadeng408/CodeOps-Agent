@@ -248,7 +248,9 @@ func safeInputPath(name string) bool {
 // pinFrozenInput verifies both the archive bytes and the canonical source manifest through cleanup.
 func pinFrozenInput(ctx context.Context, storage string, request Request) (func(), error) {
 	input := request.FrozenInput
-	if input == nil || input.ModeTransform != inputModeTransform || !openSandboxHex(input.ArchiveSHA256, 64) || !openSandboxHex(input.SourceSHA256, 64) || !openSandboxHex(request.OperationID, 64) || input.Path != request.Workspace || input.Path != filepath.Join(storage, "input-"+request.OperationID, "source.tar") || request.Program != "go" || !slices.Equal(request.Args, []string{"test", "./...", "-count=1"}) || request.WorkingDir != "" || request.Command != "" || request.DependencyOperationID != "" || request.Interactive {
+	goTest := request.Program == "go" && slices.Equal(request.Args, []string{"test", "./...", "-count=1"}) && request.DependencyOperationID == ""
+	pythonTest := request.Program == "python" && slices.Equal(request.Args, []string{"-c", PythonUnittestScript}) && openSandboxHex(request.DependencyOperationID, 64)
+	if input == nil || input.ModeTransform != inputModeTransform || !openSandboxHex(input.ArchiveSHA256, 64) || !openSandboxHex(input.SourceSHA256, 64) || !openSandboxHex(request.OperationID, 64) || input.Path != request.Workspace || input.Path != filepath.Join(storage, "input-"+request.OperationID, "source.tar") || !goTest && !pythonTest || request.WorkingDir != "" || request.Command != "" || request.Interactive {
 		return nil, errors.New("frozen input request is outside its test contract")
 	}
 	files, headers, sourceSHA, err := inputManifest(input.Files)

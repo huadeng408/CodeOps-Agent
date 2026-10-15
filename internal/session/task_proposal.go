@@ -55,15 +55,16 @@ type CodeChangeProposalView struct {
 }
 
 type taskProposalPayload struct {
-	SchemaVersion int                    `json:"schema_version"`
-	OwnerID       uint                   `json:"owner_id"`
-	RequestID     string                 `json:"request_id"`
-	IntentEventID string                 `json:"intent_event_id,omitempty"`
-	InputFiles    []sandbox.InputFile    `json:"input_files"`
-	View          CodeChangeProposalView `json:"view"`
+	SchemaVersion         int                    `json:"schema_version"`
+	OwnerID               uint                   `json:"owner_id"`
+	RequestID             string                 `json:"request_id"`
+	IntentEventID         string                 `json:"intent_event_id,omitempty"`
+	DependencyOperationID string                 `json:"dependency_operation_id,omitempty"`
+	InputFiles            []sandbox.InputFile    `json:"input_files"`
+	View                  CodeChangeProposalView `json:"view"`
 }
 
-// GenerateProposal freezes only completed Go effects; it never applies source changes.
+// GenerateProposal freezes only completed Harness effects; it never applies source changes.
 func (t *TaskWorkspaces) GenerateProposal(ctx context.Context, owner uint, id string, seq int64, requestID string) (TaskWorkspaceView, error) {
 	if requestID == "" || len(requestID) > 128 || strings.IndexFunc(requestID, unicode.IsControl) >= 0 || seq < 0 {
 		return TaskWorkspaceView{}, ErrInvalidSessionInput
@@ -106,14 +107,24 @@ func (t *TaskWorkspaces) GenerateProposal(ctx context.Context, owner uint, id st
 	if len(files) == 0 {
 		return view, fmt.Errorf("%w: no completed file changes to propose", ErrSessionStateConflict)
 	}
+	command := []string{"go", "test", "./...", "-count=1"}
+	dependencyOperation := ""
+	if view.Toolchain == "python" {
+		dependency, err := taskDependency(snapshot.Events)
+		if err != nil || dependency == nil || dependency.View.State != "ready" || dependency.BaselineChecksum != prepared.Task.Baseline.Checksum {
+			return view, ErrSessionStateConflict
+		}
+		dependencyOperation = dependency.View.OperationID
+		command = []string{"python", "-m", "unittest", "discover", "-v"}
+	}
 	data, _ := json.Marshal(inputs)
 	finalSHA := hashCodeState(string(data))
 	operation := hashCodeState(id + "\x00" + requestID + "\x00" + prepared.Task.LeaseID + "\x00" + finalSHA)
-	payload := taskProposalPayload{SchemaVersion: 1, OwnerID: owner, RequestID: requestID, InputFiles: inputs,
+	payload := taskProposalPayload{SchemaVersion: 1, OwnerID: owner, RequestID: requestID, DependencyOperationID: dependencyOperation, InputFiles: inputs,
 		View: CodeChangeProposalView{ID: operation, SessionID: id, WorkspaceID: prepared.Task.LeaseID,
 			BaselineChecksum: prepared.Task.Baseline.Checksum, SourceEventChecksum: snapshot.Events[len(snapshot.Events)-1].Checksum,
 			FinalStateSHA256: finalSHA, State: "unknown", Files: files,
-			Test: ProposalTestView{TaskBaselineView: TaskBaselineView{State: "unknown", Command: []string{"go", "test", "./...", "-count=1"}, OperationID: operation, Reason: "proposal test outcome requires reconciliation"}, ModeTransform: "readonly-v1"}}}
+			Test: ProposalTestView{TaskBaselineView: TaskBaselineView{State: "unknown", Command: command, OperationID: operation, Reason: "proposal test outcome requires reconciliation"}, ModeTransform: "readonly-v1"}}}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	deleted, stopWatching := t.workbench.watchDeletion(id)
@@ -138,7 +149,11 @@ func (t *TaskWorkspaces) GenerateProposal(ctx context.Context, owner uint, id st
 		current, _, readErr := t.read(ctx, owner, id)
 		if freezeErr == nil && readErr == nil && t.verifyTask(ctx, prepared.Task, current.Events) == nil {
 			payload.View.Test.ArchiveSHA256 = frozen.ArchiveSHA256
-			result, runErr := t.baselineRuntime.Runner.Run(ctx, sandbox.Request{Workspace: frozen.Path, FrozenInput: frozen, OperationID: operation, Program: "go", Args: []string{"test", "./...", "-count=1"}})
+			request := sandbox.Request{Workspace: frozen.Path, FrozenInput: frozen, OperationID: operation, Program: command[0], Args: command[1:], DependencyOperationID: dependencyOperation}
+			if dependencyOperation != "" {
+				request.Args = []string{"-c", sandbox.PythonUnittestScript}
+			}
+			result, runErr := t.baselineRuntime.Runner.Run(ctx, request)
 			knownOutcome := runErr == nil || errors.Is(runErr, sandbox.ErrSandboxUnavailable) && !errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown)
 			knownStopped = result.Stopped || knownOutcome
 			payload.View.Test.Output = tools.RedactSensitive(result.Output)
@@ -322,7 +337,11 @@ func taskProposal(events []Event) (*taskProposalPayload, error) {
 			}
 		}
 		data, _ := json.Marshal(payload.InputFiles)
-		if hashCodeState(string(data)) != payload.View.FinalStateSHA256 || payload.View.Test.OperationID != payload.View.ID || !slices.Equal(payload.View.Test.Command, []string{"go", "test", "./...", "-count=1"}) || payload.View.Test.ModeTransform != "readonly-v1" {
+		command := []string{"go", "test", "./...", "-count=1"}
+		if payload.DependencyOperationID != "" {
+			command = []string{"python", "-m", "unittest", "discover", "-v"}
+		}
+		if hashCodeState(string(data)) != payload.View.FinalStateSHA256 || payload.View.Test.OperationID != payload.View.ID || !slices.Equal(payload.View.Test.Command, command) || payload.View.Test.ModeTransform != "readonly-v1" {
 			return nil, ErrEventIntegrity
 		}
 		if event.Type == taskProposalIntentEvent {
@@ -334,13 +353,19 @@ func taskProposal(events []Event) (*taskProposalPayload, error) {
 			if err != nil || prepared == nil || payload.View.SourceEventChecksum != event.PrevChecksum || payload.View.WorkspaceID != prepared.Task.LeaseID || payload.View.BaselineChecksum != prepared.Task.Baseline.Checksum {
 				return nil, ErrEventIntegrity
 			}
+			if payload.DependencyOperationID != "" {
+				dependency, err := taskDependency(events[:position])
+				if err != nil || dependency == nil || dependency.View.State != "ready" || dependency.View.OperationID != payload.DependencyOperationID || dependency.BaselineChecksum != payload.View.BaselineChecksum {
+					return nil, ErrEventIntegrity
+				}
+			}
 			files, inputs, err := proposalFiles(prepared.Task.Baseline, events[:position])
 			if err != nil || !slices.Equal(files, payload.View.Files) || !slices.Equal(inputs, payload.InputFiles) || payload.View.ID != hashCodeState(event.SessionID+"\x00"+payload.RequestID+"\x00"+payload.View.WorkspaceID+"\x00"+payload.View.FinalStateSHA256) {
 				return nil, ErrEventIntegrity
 			}
 			payload.IntentEventID = event.EventID
 		} else {
-			if result == nil || result.IntentEventID != payload.IntentEventID || result.RequestID != payload.RequestID || result.View.ID != payload.View.ID || result.OwnerID != payload.OwnerID || result.View.FinalStateSHA256 != payload.View.FinalStateSHA256 ||
+			if result == nil || result.IntentEventID != payload.IntentEventID || result.RequestID != payload.RequestID || result.View.ID != payload.View.ID || result.OwnerID != payload.OwnerID || result.DependencyOperationID != payload.DependencyOperationID || result.View.FinalStateSHA256 != payload.View.FinalStateSHA256 ||
 				result.View.SessionID != payload.View.SessionID || result.View.WorkspaceID != payload.View.WorkspaceID || result.View.BaselineChecksum != payload.View.BaselineChecksum || result.View.SourceEventChecksum != payload.View.SourceEventChecksum ||
 				!slices.Equal(result.InputFiles, payload.InputFiles) || !slices.Equal(result.View.Files, payload.View.Files) || !slices.Equal(result.View.Test.Command, payload.View.Test.Command) || result.View.Test.ModeTransform != payload.View.Test.ModeTransform {
 				return nil, ErrEventIntegrity
