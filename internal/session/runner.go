@@ -1849,6 +1849,13 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 				if strings.TrimSpace(pending.ToolCallID) != call.ID && !argumentsMatch {
 					continue
 				}
+				prior := invocationProjection(events, candidateRunID, pending.ToolCallID)
+				// A known result resolves the effect before the run closes commit_pending.
+				if prior.prepared != nil && prior.dispatched != nil && prior.result != nil &&
+					prior.result.ToolName == pending.ToolName && !prior.result.OutcomeUnknown &&
+					(prior.result.RuntimeID == "" || prior.result.Stopped) {
+					continue
+				}
 				_ = r.appendLeasedFact(ctx, key, lease.LeaseID, toolUnknownEventType, toolCallPayload{
 					RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON,
 				})

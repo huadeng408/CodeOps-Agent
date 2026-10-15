@@ -506,6 +506,31 @@ func ModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (
 	return "", ErrEventIntegrity
 }
 
+func undispatchedRepeatRefusal(events []Event, call toolCallPayload) bool {
+	current := invocationProjection(events, call.RunID, call.ToolCallID)
+	if current.prepared != nil || current.dispatched != nil || current.result != nil {
+		return false
+	}
+	for _, event := range events {
+		if event.Type != "tool/call" {
+			continue
+		}
+		var prior toolCallPayload
+		if json.Unmarshal(event.Payload, &prior) != nil {
+			return false
+		}
+		if prior.RunID != call.RunID || prior.ToolName != call.ToolName || prior.ArgumentsJSON != call.ArgumentsJSON {
+			continue
+		}
+		completed := invocationProjection(events, prior.RunID, prior.ToolCallID)
+		if completed.dispatched != nil && completed.result != nil && completed.result.ToolName == call.ToolName &&
+			!completed.result.OutcomeUnknown && (completed.result.RuntimeID == "" || completed.result.Stopped) {
+			return true
+		}
+	}
+	return false
+}
+
 // ModelTaskIdle refuses completion while a linked agent can still produce work.
 func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) error {
 	root, err := ModelTaskRoot(ctx, ledger, actor)
@@ -576,7 +601,14 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 				}
 				delete(pending, invocationHistoryKey(result.RunID, result.ToolCallID))
 			case toolUnknownEventType:
-				return ErrSessionStateConflict
+				var call toolCallPayload
+				if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" || call.ToolName == "" {
+					return ErrEventIntegrity
+				}
+				// Older repeat guards could reject a new identity before any dispatch.
+				if !undispatchedRepeatRefusal(snapshot.Events, call) {
+					return ErrSessionStateConflict
+				}
 			}
 		}
 		if len(pending) != 0 {
