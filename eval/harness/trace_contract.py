@@ -356,25 +356,37 @@ def _matches_kind(span_name: str, kind_name: str) -> bool:
 
 
 def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str, Any]) -> dict[str, Any]:
-    """Check the actual product tree against its durable tool/model denominator."""
+    """Check the product's selected run trees against its durable denominator."""
     items = list(spans)
     problems, missing = [], []
     session_id, run_id = expected["session_id"], expected["run_id"]
-    tools, models = expected["tool_calls"], expected["model_calls"]
+    run_ids = expected.get("run_ids", [run_id])
+    tools_by_run = expected.get("tool_calls_by_run")
+    if tools_by_run is None:
+        tools_by_run = {run_id: expected["tool_calls"]}
+    tools = {(run, call_id): name for run, calls in tools_by_run.items() for call_id, name in calls.items()}
+    models = expected["model_calls"]
     retry_of = expected.get("retry_of", {})
     logical_calls = {call_id: purpose for call_id, purpose in models.items() if not retry_of.get(call_id)}
     if expected.get("completed") is not True:
         problems.append("the durable product run did not complete successfully")
     if not tools or not models:
         problems.append("a coding product trace requires actual tool and model calls")
+    if set(tools_by_run) != set(run_ids):
+        problems.append("tool run identities do not match the durable runs")
     roots = [span for span in items if span.name == "agent.main"]
-    root = roots[0] if len(roots) == 1 else None
+    roots_by_trace = {span.trace_id: span for span in roots}
+    root = roots[0] if roots else None
     if not roots:
         missing.append("agent.main")
-    elif len(roots) != 1:
-        problems.append("product capture must contain exactly one Go task root")
-    elif root.attributes.get("session.id") != session_id or root.attributes.get("session.run_id") != run_id:
+    elif (len(roots) != len(run_ids) or len(set(run_ids)) != len(run_ids)
+          or len(roots_by_trace) != len(roots)
+          or {span.attributes.get("session.run_id") for span in roots} != set(run_ids)):
+        problems.append("product capture must contain exactly one Go root per requested run")
+    if any(span.attributes.get("session.id") != session_id for span in roots):
         problems.append("Go root does not match the durable Session/run")
+    if any(span.parent_span_id for span in roots):
+        problems.append("Go task root must not have a parent")
     by_id = {span.span_id: span for span in items}
     if len(by_id) != len(items):
         problems.append("duplicate span IDs")
@@ -388,17 +400,25 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
             problems.append("product tree includes an error or canceled span")
         if find_secret_leak(span.attributes) or find_secret_leak(span.name):
             problems.append("product tree contains a credential shape")
-        if root is None:
+        owning_root = roots_by_trace.get(span.trace_id)
+        if owning_root is None:
+            if roots:
+                problems.append("product span is in another trace")
             continue
-        if span.trace_id != root.trace_id:
-            problems.append("product span is in another trace")
         current, seen = span, set()
-        while current.span_id != root.span_id:
+        while current.span_id != owning_root.span_id:
             if current.span_id in seen or current.parent_span_id not in by_id:
                 problems.append("product span does not reach the Go root")
                 break
             seen.add(current.span_id)
             current = by_id[current.parent_span_id]
+            if current.trace_id != span.trace_id:
+                problems.append("product parent is in another trace")
+                break
+    if len(run_ids) > 1:
+        foreground_traces = {span.trace_id for span in items if span.name == "provider.call" and span.attributes.get("model.purpose") == "foreground"}
+        if any(span.trace_id not in foreground_traces for span in roots):
+            problems.append("a Go run has no foreground Python provider call")
     for name, calls, id_key, value_key in (
         ("execute_tool", tools, "gen_ai.tool.call.id", "gen_ai.tool.name"),
         ("provider.call", logical_calls, "model.call_id", "model.purpose"),
@@ -409,10 +429,13 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
             if not _matches_kind(span.name, name):
                 continue
             call_id = span.attributes.get(id_key)
+            if name == "execute_tool":
+                owning_root = roots_by_trace.get(span.trace_id)
+                call_id = (owning_root.attributes.get("session.run_id") if owning_root else "", call_id)
             if call_id in observed:
                 problems.append("duplicate call spans")
             observed[call_id] = span.attributes.get(value_key)
-        missing.extend(name + ":" + call_id for call_id in calls if call_id not in observed)
+        missing.extend(name + ":" + ("/".join(call_id) if isinstance(call_id, tuple) else call_id) for call_id in calls if call_id not in observed)
         if any(call_id not in calls or calls[call_id] != value for call_id, value in observed.items()):
             problems.append("call spans do not match the durable call identities")
     for span in items:
@@ -437,8 +460,9 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
             if parent is None or parent.name != "provider.call" or parent.attributes.get("model.call_id") != call_id:
                 problems.append("provider attempt is not a child of its logical Python call")
     verdict = VERDICT_FAIL if problems else VERDICT_INCOMPLETE if missing or not items else VERDICT_PASS
-    return {"contract_version": "product-v1", "profile": "product", "verdict": verdict,
+    return {"contract_version": "product-task-v1" if len(run_ids) > 1 else "product-v1", "profile": "product", "verdict": verdict,
             "session_id": session_id, "run_id": run_id, "primary_trace_id": root.trace_id if root else "",
+            "run_ids": list(run_ids), "trace_ids": sorted(roots_by_trace),
             "span_count": len(items), "expected_tools": len(tools), "expected_model_calls": len(models),
             "expected_logical_calls": len(logical_calls),
             "missing": sorted(set(missing)), "problems": sorted(set(problems))}

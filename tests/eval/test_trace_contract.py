@@ -66,6 +66,60 @@ def test_product_trace_matches_the_durable_run_and_every_expected_call(product_t
     assert report["span_count"] == 7
 
 
+@pytest.fixture
+def product_task_trace_capture(product_trace_capture):
+    spans, expected = product_trace_capture
+    expected["run_ids"] = ["run:1", "run:2"]
+    expected["tool_calls_by_run"] = {"run:1": expected.pop("tool_calls"), "run:2": {}}
+    expected["model_calls"]["model-3"] = "foreground"
+    spans.extend([
+        CapturedSpan("agent.main", "b" * 32, "8" * 16, attributes={"session.id": "session-1", "session.run_id": "run:2"}),
+        CapturedSpan("chat", "b" * 32, "9" * 16, "8" * 16),
+        CapturedSpan("provider.call", "b" * 32, "a" * 16, "9" * 16, attributes={"model.call_id": "model-3", "model.purpose": "foreground", "gen_ai.request.model": "fixture"}),
+        CapturedSpan("provider.attempt", "b" * 32, "b" * 16, "a" * 16, attributes={"model.call_id": "model-3", "model.purpose": "foreground", "gen_ai.request.model": "fixture"}),
+    ])
+    return spans, expected
+
+
+def test_product_task_trace_covers_a_readonly_round_and_a_coding_round(product_task_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_task_trace_capture
+    report = evaluate_product_trace(spans, expected)
+    assert report["verdict"] == "PASS"
+    assert report["run_ids"] == ["run:1", "run:2"]
+    assert report["trace_ids"] == ["a" * 32, "b" * 32]
+    assert report["span_count"] == 11 and report["expected_model_calls"] == 3
+
+
+def test_product_task_trace_rejects_a_tool_attached_to_another_round(product_task_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_task_trace_capture
+    spans[2].trace_id = "b" * 32
+    spans[2].parent_span_id = "8" * 16
+    assert evaluate_product_trace(spans, expected)["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("parent", ["f" * 16, "1" * 16, "8" * 16])
+def test_product_task_trace_rejects_a_go_root_with_a_parent(product_task_trace_capture, parent):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_task_trace_capture
+    spans[7].parent_span_id = parent
+    assert evaluate_product_trace(spans, expected)["verdict"] == "FAIL"
+
+
+def test_product_task_trace_keeps_reused_tool_ids_in_different_runs(product_task_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_task_trace_capture
+    expected["tool_calls_by_run"] = {"run:1": {"tool-1": "Read"}, "run:2": {"tool-1": "Read"}}
+    spans.append(CapturedSpan("execute_tool Read", "b" * 32, "c" * 16, "8" * 16, attributes={"gen_ai.tool.call.id": "tool-1", "gen_ai.tool.name": "Read"}))
+    report = evaluate_product_trace(spans, expected)
+    assert report["verdict"] == "PASS" and report["expected_tools"] == 2
+
+
 @pytest.mark.parametrize("case,verdict", [("missing-tool", "INCOMPLETE"), ("missing-reflection", "INCOMPLETE"),
     ("unfinished", "INCOMPLETE"), ("error", "FAIL"), ("canceled-run", "FAIL"), ("wrong-run", "FAIL"),
     ("detached", "FAIL"), ("cycle", "FAIL"), ("duplicate-call", "FAIL"), ("secret", "FAIL"),

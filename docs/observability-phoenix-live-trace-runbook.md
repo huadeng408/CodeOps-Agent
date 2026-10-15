@@ -21,6 +21,11 @@ Go `provider.attempt` 表示每次已准入的 HTTP 尝试；重试全部保留�
 包含原始序号、checksum 和 payload；只筛选 call 事件的导出不能校验完整链。
 命令内部复用 `go run ./cmd/trace-audit` 的原生事件链和预算投影，需要 Go 工具链。
 它核对当前任务所有调用已结算且任务已停止；其他已结束任务的历史 unknown 不阻塞本次读回。
+同一代码任务包含多轮对话时，重复 `--run-id` 提供各轮实际 run。命令核对每轮的 Go 根、
+完成状态和工具归属，并用同一任务的完整准入前后分母检查全部模型调用；只读轮次不需要伪造写入。
+整个所选任务仍须有真实代码修改及工具执行。缺一轮、遗漏调用或跨轮错误父链均不能通过。
+请求列表必须覆盖 Session 的全部 canonical run；未完成的轮次仍会拒绝验收。
+后续轮次读回失败时保留先前已核验的部分 Trace 和完整调用分母，并记录失败轮次，保持 `BLOCKED`。
 
 ```powershell
 python -m eval.product_trace --phoenix-url http://127.0.0.1:6006 --project default `
