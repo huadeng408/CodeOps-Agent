@@ -63,6 +63,7 @@
 - 多轮 Trace 验证器：[完整轮次、父链、调用分母及部分读回留存的源码／集成证据](evidence/product-task-trace-source-2026-10-15.md)；#17/#18 真实十轮验收仍单独进行。
 - 受管代码任务工具额度：[两次真实提前停止、有限额度修复及公开协议／当前源码 CI 证据](evidence/harness-tool-allowance-2026-10-16.md)；真实十轮任务继续独立验收。
 - Windows 文件编辑换行：[真实 Read/Edit 缺口、精确匹配保护、源码回归及新构建证据](evidence/windows-edit-crlf-2026-10-16.md)；实际十轮任务仍单独验收。
+- 并发工具入账：[五并发 CAS 缺口、Runner 协调、源码回归及新构建证据](evidence/parallel-tool-ledger-2026-10-16.md)；#17/#18 十轮任务继续独立验收。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。

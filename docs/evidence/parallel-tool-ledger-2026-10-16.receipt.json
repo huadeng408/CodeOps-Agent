@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "scope": "SessionRunner leased Ledger append coordination, source/integration regression and Windows portable build",
+  "engineering_status": "IMPLEMENTED",
+  "source_commit": "29f5618c94f6c27aff27215bc174a74865fae2a9",
+  "review_base": "39c8caabd98138cf936d4b3718879c44c4095cc7",
+  "source_sha256": {
+    "internal/session/runner.go": "111a99bfae60e7b6f06632985ae9165b3c925ababc26559260ef70fd2b68a6e0",
+    "internal/session/runner_parallel_tools_test.go": "51e6a62eea42a44af8ad5191fb7249dafaf23b6c84c06a25f21071da80099e0e"
+  },
+  "reviewed_staged_committed_diff_sha256": "9cae9a36dc7f269fd2a2b12fead45c41f43a4e17f63a4fde705a60875ce85477",
+  "verification": {
+    "unit": "VERIFIED",
+    "source_integration": "VERIFIED",
+    "windows_portable_build": "VERIFIED",
+    "complete_browser_coding_task": "NOT_VERIFIED",
+    "release": "NOT_RUN"
+  },
+  "tdd": {
+    "public_seam": "SessionRunner SubmitMessage, external conversation/tool adapters and real SQLite ReadVerifiedSnapshot",
+    "initial_five_call_red": {"runs": 10, "failed": 10, "exit_code": 1},
+    "two_call_control": {"runs": 3, "passed": 3, "exit_code": 0},
+    "minimal_five_call_red": {"runs": 3, "failed": 3, "exit_code": 1},
+    "diagnostic_failure": "ErrSequenceConflict; temporary instrumentation removed",
+    "final_green": {
+      "command": "go test ./internal/session -run '^TestSessionRunnerCompletesParallelReadonlyCalls$' -count=10 -v",
+      "runs": 10, "passed": 10, "exit_code": 0,
+      "durable_call_result_pairs_per_run": 5
+    },
+    "pre_review_session_package": {"pass_including_subtests": 251, "skip_including_subtests": 1, "exit_code": 0}
+  },
+  "windows_final_regression": {
+    "command": "go test ./... -count=1 -json",
+    "exit_code": 0,
+    "packages_started": 60,
+    "package_results": {"pass": 47, "skip": 13},
+    "test_and_subtest_results": {"pass": 1746, "skip": 79},
+    "top_level_test_results": {"pass": 1222, "skip": 76},
+    "first_event_at": "2026-10-16T03:13:41.4403141+08:00",
+    "last_event_at": "2026-10-16T03:17:23.363197+08:00",
+    "go_vet_exit_code": 0,
+    "reviewed_source_unchanged": true
+  },
+  "ci": {
+    "source_commit": "29f5618c94f6c27aff27215bc174a74865fae2a9",
+    "run_id": 38792774597,
+    "url": "https://github.com/huadeng408/CodeOps-Agent/actions/runs/38792774597",
+    "conclusion": "success",
+    "job_count": 4,
+    "jobs": {"Go": "success", "Python": "success", "Frontend": "success", "Windows startup contracts": "success"},
+    "metrics": {
+      "go_passed_packages": 47,
+      "go_no_test_packages": 13,
+      "go_case_counts": "not emitted by CI command",
+      "python": {"pass": 2563, "skip": 12, "warnings": 3},
+      "frontend": {"pass": 12, "fail": 0, "build": "success"},
+      "windows_startup": {"pass": 10}
+    }
+  },
+  "review": {"label": "AI_REVIEWED", "standards_hard": 0, "standards_smells": 0, "spec_unresolved": 0},
+  "retained_failed_attempt_manifests": [
+    {
+      "path": "deployments/docker/.local/receipts/browser-tasks-20261015/go/crlf-v1/failed-http502-artifact-manifest.json",
+      "artifact_count": 42,
+      "sha256": "326d85748e9ced717cdbfd24667bee312105198556abe29fbf83a7aa381d7e3c"
+    },
+    {
+      "path": "deployments/docker/.local/receipts/browser-tasks-20261015/python/crlf-v1/failed-readonly-artifact-manifest.json",
+      "artifact_count": 32,
+      "sha256": "0e826e76bce9373b66545b5191b5a445a185289a9bf335ce06369e444fb76ab0"
+    }
+  ],
+  "new_portable_build": {
+    "exit_code": 0,
+    "manifest_sha256": "61e1a8162da6c691ec742965c382f39d07faf8942ce2500b7373bdca64c75bcf",
+    "server_sha256": "979fa978148bac7f8ebb8b6faf93db46494af9972956db58e91d00b56fb6a241",
+    "launcher_sha256": "a9f386bbb4d16d24738514cc091db950092321dc8a756464619c846940ce2a4b",
+    "runtime_files": 3219,
+    "compiled_source_files": 604,
+    "python_packages": 53,
+    "go_modules": 98,
+    "frontend_packages": 3
+  },
+  "next_public_task_freeze": {
+    "path": "deployments/docker/.local/receipts/browser-tasks-20261015/freeze-ledger/inputs.json",
+    "sha256": "65f1042abd56ab65ab870d27a579f9f7642bdc48628fc14fe1e182cf040bcfcf",
+    "tasks": 2,
+    "scenario_denominator_per_task": 12,
+    "runtime_and_validator_source_files": 608,
+    "go_timeout_seconds": 600,
+    "managed_tool_round_allowance": 16,
+    "model": "grok-4.6",
+    "batch_id": "02cfc8d9c93975b3ea63f27cc0a3331d"
+  },
+  "source_artifact_manifest": {
+    "path": "deployments/docker/.local/receipts/browser-tasks-20261015/parallel-ledger-source/artifact-manifest.json",
+    "artifact_count": 37,
+    "sha256": "604364284e259f93f04bec2f41d2967963c604df2ab68871c184990af11ce2bd"
+  },
+  "source_fix_unresolved_blockers": [],
+  "ticket_17": "OPEN: ten-round real Go product task remains required",
+  "ticket_18": "OPEN: ten-round real Python product task remains required"
+}
