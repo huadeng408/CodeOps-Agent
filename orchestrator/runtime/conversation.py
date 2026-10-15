@@ -2479,10 +2479,13 @@ class ConversationRunner:
         tools = self.tool_registry.openai_schemas() if allow_tools else []
         tracer = _try_get_otel_tracer()
         span = None
+        span_token = None
         if tracer is not None:
             try:
+                from opentelemetry import context as otel_context
                 from opentelemetry import trace as otel_trace
                 span = tracer.start_span("chat", kind=otel_trace.SpanKind.CLIENT)
+                span_token = otel_context.attach(otel_trace.set_span_in_context(span))
             except Exception:
                 pass
         try:
@@ -2511,13 +2514,16 @@ class ConversationRunner:
             )
             if span is not None:
                 _set_gen_ai_attributes(span, self, response)
-                span.end()
             return response
-        except BaseException as exc:
+        except BaseException:
             if span is not None:
-                span.record_exception(exc)
-                span.end()
+                span.set_status(otel_trace.StatusCode.ERROR)
             raise
+        finally:
+            if span_token is not None:
+                otel_context.detach(span_token)
+            if span is not None:
+                span.end()
 
     def _stream_chat(
         self,
@@ -2594,10 +2600,13 @@ class ConversationRunner:
         # regardless of how the generator is consumed.
         tracer = _try_get_otel_tracer()
         span = None
+        span_token = None
         if tracer is not None:
             try:
+                from opentelemetry import context as otel_context
                 from opentelemetry import trace as _otel_trace
                 span = tracer.start_span("chat", kind=_otel_trace.SpanKind.CLIENT)
+                span_token = otel_context.attach(_otel_trace.set_span_in_context(span))
             except Exception:
                 pass
 
@@ -2657,7 +2666,13 @@ class ConversationRunner:
 
             if span is not None:
                 _set_gen_ai_attributes(span, self, response)
+        except BaseException:
+            if span is not None:
+                span.set_status(_otel_trace.StatusCode.ERROR)
+            raise
         finally:
+            if span_token is not None:
+                otel_context.detach(span_token)
             if span is not None:
                 try:
                     span.end()

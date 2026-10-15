@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 #: Bumped whenever the required-kind set or a rule changes, so an artifact's
 #: verdict stays interpretable after the schema moves on.  An artifact that
@@ -302,6 +302,26 @@ def find_secret_leak(value: Any) -> str | None:
     return None
 
 
+def find_trace_privacy_problem(value: Any) -> str | None:
+    """Inspect the backend object before any attribute allowlist hides fields."""
+    if find_secret_leak(value):
+        return "credential-shape"
+
+    def contains_raw_content(item: Any, path: str = "") -> bool:
+        if isinstance(item, Mapping):
+            for key, child in item.items():
+                name = path + "." + str(key)
+                if any(name.endswith("." + prohibited) for prohibited in _O3_PROHIBITED_ATTRIBUTE_KEYS):
+                    return True
+                if contains_raw_content(child, name):
+                    return True
+        elif isinstance(item, list):
+            return any(contains_raw_content(child, path) for child in item)
+        return False
+
+    return "raw-content" if contains_raw_content(value) else None
+
+
 def redact_if_secret(value: Any) -> Any:
     """Replace *value* with ``<redacted>`` when it looks like a credential."""
     return "<redacted>" if find_secret_leak(value) is not None else value
@@ -333,6 +353,95 @@ def _matches_kind(span_name: str, kind_name: str) -> bool:
     the contract accept those without forcing either language to rename spans.
     """
     return span_name == kind_name or span_name.startswith(kind_name + " ")
+
+
+def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str, Any]) -> dict[str, Any]:
+    """Check the actual product tree against its durable tool/model denominator."""
+    items = list(spans)
+    problems, missing = [], []
+    session_id, run_id = expected["session_id"], expected["run_id"]
+    tools, models = expected["tool_calls"], expected["model_calls"]
+    retry_of = expected.get("retry_of", {})
+    logical_calls = {call_id: purpose for call_id, purpose in models.items() if not retry_of.get(call_id)}
+    if expected.get("completed") is not True:
+        problems.append("the durable product run did not complete successfully")
+    if not tools or not models:
+        problems.append("a coding product trace requires actual tool and model calls")
+    roots = [span for span in items if span.name == "agent.main"]
+    root = roots[0] if len(roots) == 1 else None
+    if not roots:
+        missing.append("agent.main")
+    elif len(roots) != 1:
+        problems.append("product capture must contain exactly one Go task root")
+    elif root.attributes.get("session.id") != session_id or root.attributes.get("session.run_id") != run_id:
+        problems.append("Go root does not match the durable Session/run")
+    by_id = {span.span_id: span for span in items}
+    if len(by_id) != len(items):
+        problems.append("duplicate span IDs")
+    for span in items:
+        if (not re.fullmatch(r"[0-9a-f]{32}", span.trace_id) or span.trace_id == "0" * 32
+                or not re.fullmatch(r"[0-9a-f]{16}", span.span_id) or span.span_id == "0" * 16):
+            problems.append("invalid W3C span identity")
+        if not span.ended:
+            missing.append("unfinished span")
+        if str(span.status).upper() not in {"OK", "UNSET"}:
+            problems.append("product tree includes an error or canceled span")
+        if find_secret_leak(span.attributes) or find_secret_leak(span.name):
+            problems.append("product tree contains a credential shape")
+        if root is None:
+            continue
+        if span.trace_id != root.trace_id:
+            problems.append("product span is in another trace")
+        current, seen = span, set()
+        while current.span_id != root.span_id:
+            if current.span_id in seen or current.parent_span_id not in by_id:
+                problems.append("product span does not reach the Go root")
+                break
+            seen.add(current.span_id)
+            current = by_id[current.parent_span_id]
+    for name, calls, id_key, value_key in (
+        ("execute_tool", tools, "gen_ai.tool.call.id", "gen_ai.tool.name"),
+        ("provider.call", logical_calls, "model.call_id", "model.purpose"),
+        ("provider.attempt", models, "model.call_id", "model.purpose"),
+    ):
+        observed = {}
+        for span in items:
+            if not _matches_kind(span.name, name):
+                continue
+            call_id = span.attributes.get(id_key)
+            if call_id in observed:
+                problems.append("duplicate call spans")
+            observed[call_id] = span.attributes.get(value_key)
+        missing.extend(name + ":" + call_id for call_id in calls if call_id not in observed)
+        if any(call_id not in calls or calls[call_id] != value for call_id, value in observed.items()):
+            problems.append("call spans do not match the durable call identities")
+    for span in items:
+        if span.name not in {"provider.call", "provider.attempt"}:
+            continue
+        if span.attributes.get("gen_ai.request.model") != expected["model"]:
+            problems.append("provider model does not match the frozen request model")
+        parent = by_id.get(span.parent_span_id)
+        if span.name == "provider.call" and span.attributes.get("model.purpose") == "foreground":
+            if parent is None or parent.name != "chat":
+                problems.append("foreground provider call is not a child of Python chat")
+        if span.name == "provider.attempt":
+            call_id, seen = span.attributes.get("model.call_id"), set()
+            if span.attributes.get("model.retry_of", "") != retry_of.get(call_id, ""):
+                problems.append("provider retry lineage differs from the Ledger")
+            while retry_of.get(call_id):
+                if call_id in seen:
+                    problems.append("cyclic provider retry lineage")
+                    break
+                seen.add(call_id)
+                call_id = retry_of[call_id]
+            if parent is None or parent.name != "provider.call" or parent.attributes.get("model.call_id") != call_id:
+                problems.append("provider attempt is not a child of its logical Python call")
+    verdict = VERDICT_FAIL if problems else VERDICT_INCOMPLETE if missing or not items else VERDICT_PASS
+    return {"contract_version": "product-v1", "profile": "product", "verdict": verdict,
+            "session_id": session_id, "run_id": run_id, "primary_trace_id": root.trace_id if root else "",
+            "span_count": len(items), "expected_tools": len(tools), "expected_model_calls": len(models),
+            "expected_logical_calls": len(logical_calls),
+            "missing": sorted(set(missing)), "problems": sorted(set(problems))}
 
 
 def evaluate_trace_contract(

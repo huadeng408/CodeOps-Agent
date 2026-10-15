@@ -20,9 +20,13 @@ import (
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/session"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -510,6 +514,15 @@ func TestGatewayRejectsAmbiguousProviderUsage(t *testing.T) {
 func TestGatewayRetriesOnlyAfterErrorUsageSettles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
+	_, parent := provider.Tracer("python-provider-fixture").Start(ctx, "provider.call")
+	defer parent.End()
+	sc := parent.SpanContext()
+	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("traceparent", fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())))
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -561,6 +574,28 @@ func TestGatewayRetriesOnlyAfterErrorUsageSettles(t *testing.T) {
 	batch, err := budget.Inspect(ctx, 7)
 	if err != nil || batch.UsedTokens != 13 || batch.ReservedTokens != 0 || batch.UnknownUsage || batch.CostStatus != "unknown" {
 		t.Fatal("retry reset, skipped or double-counted attributable usage")
+	}
+	var recorded []sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == "provider.attempt" {
+			recorded = append(recorded, span)
+		}
+	}
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d attempts, want the original 429 and successful retry", len(recorded))
+	}
+	attributes := make([]map[string]string, 2)
+	for i, span := range recorded {
+		if span.Parent().SpanID() != sc.SpanID() || span.SpanContext().TraceID() != sc.TraceID() {
+			t.Fatal("provider attempt detached from the Python logical call")
+		}
+		attributes[i] = map[string]string{}
+		for _, value := range span.Attributes() {
+			attributes[i][string(value.Key)] = value.Value.Emit()
+		}
+	}
+	if attributes[0]["model.call_id"] != "original-attempt" || attributes[1]["model.call_id"] == "original-attempt" || attributes[1]["model.retry_of"] != "original-attempt" {
+		t.Fatal("retry attempt identity or lineage missing from trace")
 	}
 }
 

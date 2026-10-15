@@ -66,19 +66,46 @@ class HarnessModelClient(LLMClient):
         self._capability = b""
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
-        return await asyncio.to_thread(self._chat_sync, request)
+        call_id = uuid.uuid4().hex
+        try:
+            from opentelemetry import trace
+        except ImportError:
+            return await asyncio.to_thread(self._chat_sync, request, call_id)
 
-    def _chat_sync(self, request: ChatRequest) -> ChatResponse:
+        with trace.get_tracer(__name__).start_as_current_span(
+            "provider.call", kind=trace.SpanKind.CLIENT,
+            record_exception=False, set_status_on_exception=False,
+            attributes={"model.call_id": call_id, "model.purpose": request.purpose or "foreground",
+                        "gen_ai.operation.name": "chat", "gen_ai.provider.name": self.protocol,
+                        "gen_ai.request.model": self.model},
+        ) as span:
+            try:
+                response = await asyncio.to_thread(self._chat_sync, request, call_id)
+            except BaseException:
+                span.set_status(trace.StatusCode.ERROR)
+                raise
+            span.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
+            span.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+            return response
+
+    def _chat_sync(self, request: ChatRequest, call_id: str) -> ChatResponse:
         cancel = request.cancel_event
         if cancel is not None and cancel.is_set():
             raise RequestInterrupted("model request canceled before admission")
         payload = self._adapter._stream_payload(request)
         payload["stream"] = False
         payload.pop("stream_options", None)
-        call = pb.ModelCallRequest(capability=self._capability, call_id=uuid.uuid4().hex,
+        call = pb.ModelCallRequest(capability=self._capability, call_id=call_id,
                                    payload_json=json.dumps(payload).encode(),
                                    purpose=request.purpose or "foreground")
-        future = self._stub.Invoke.future(call, timeout=self._rpc_timeout_seconds)
+        carrier = {}
+        try:
+            from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+            TraceContextTextMapPropagator().inject(carrier)
+        except ImportError:
+            pass
+        future = self._stub.Invoke.future(call, timeout=self._rpc_timeout_seconds, metadata=tuple(carrier.items()))
         try:
             while True:
                 if cancel is not None and cancel.is_set():

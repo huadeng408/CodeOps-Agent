@@ -88,3 +88,31 @@ def test_read_run_spans_rejects_repeated_pagination_cursor(monkeypatch) -> None:
 
     with pytest.raises(PhoenixReadbackError, match="repeated pagination cursor"):
         read_run_spans("http://phoenix", "code-agent", "2026-08-13T00:00:00Z", "run-1")
+
+
+def test_product_readback_locates_go_run_then_reads_all_its_spans(monkeypatch) -> None:
+    from eval.harness import phoenix
+
+    root = _span(run_id="", instance_id="session-1", name="agent.main")
+    root["parent_id"] = None
+    root["attributes"].update({"session.id": "session-1", "session.run_id": "run:actual"})
+    child = _span(run_id="", instance_id="session-1", name="provider.call")
+    child["context"]["span_id"] = "c" * 16
+    child["parent_id"] = "b" * 16
+    child["attributes"].update({"model.call_id": "call-1", "model.purpose": "memory_reflection"})
+    responses = iter([{"data": [root]}, {"data": [root], "next_cursor": "child"}, {"data": [child]}])
+    urls = []
+
+    def request(url):
+        urls.append(url)
+        return next(responses)
+
+    monkeypatch.setattr(phoenix, "_request_json", request)
+    spans = phoenix.read_product_spans("http://phoenix", "default", "2026-10-15T00:00:00Z", "session-1", "run:actual")
+    assert [span.name for span in spans] == ["agent.main", "provider.call"]
+    assert spans[1].attributes["model.call_id"] == "call-1"
+    assert spans[1].attributes["model.purpose"] == "memory_reflection"
+    assert "untrusted.raw.prompt" not in spans[1].attributes
+    assert "session.run_id" in urls[0] and "name=agent.main" in urls[0]
+    assert "trace_id=" + "a" * 32 in urls[1]
+    assert "cursor=child" in urls[2]

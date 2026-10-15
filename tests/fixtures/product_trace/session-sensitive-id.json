@@ -1,0 +1,336 @@
+{
+  "events": [
+    {
+      "session_id": "session-1",
+      "seq": 0,
+      "event_id": "a5a0933fa1dd35384a324a554ba62772",
+      "version": 1,
+      "type": "session/created",
+      "created_at": "2026-10-15T02:53:52.9362743Z",
+      "payload": {
+        "owner_id": 7,
+        "project_name": "fixture",
+        "status": "active",
+        "title": "trace fixture"
+      },
+      "checksum": "b8942e9456c4151d7060d9faedef45946cc2465f58b20534a313376b9798552d"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 1,
+      "event_id": "94a3c8796d4a9d2c5e28ca99960c9c55",
+      "version": 1,
+      "type": "user/message",
+      "created_at": "2026-10-15T02:53:52.9389653Z",
+      "payload": {
+        "author": "user",
+        "content": "fixture code task",
+        "request_id": "fixture"
+      },
+      "surface_op": {
+        "op": "append"
+      },
+      "prev_checksum": "b8942e9456c4151d7060d9faedef45946cc2465f58b20534a313376b9798552d",
+      "checksum": "4373e50908883d7c8dd3248901bd49fb65d50395b14d7b23d3e2c5f4fd21735b"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 2,
+      "event_id": "73bc079112160a3a08ebfd3b495515ba",
+      "version": 1,
+      "type": "checkpoint/create",
+      "created_at": "2026-10-15T02:53:52.9421358Z",
+      "payload": {
+        "target_event_id": "94a3c8796d4a9d2c5e28ca99960c9c55",
+        "target_seq": 1,
+        "target_checksum": "4373e50908883d7c8dd3248901bd49fb65d50395b14d7b23d3e2c5f4fd21735b",
+        "label": "automatic user turn",
+        "request_id": "fixture",
+        "automatic": true
+      },
+      "prev_checksum": "4373e50908883d7c8dd3248901bd49fb65d50395b14d7b23d3e2c5f4fd21735b",
+      "checksum": "b1d9afb5344c7cf6f4cb74705ddcbade27c8a171b8ec3bcac73deef0f5f8d67a"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 3,
+      "event_id": "ee94536884d6cfe090c7c64f8e4a1fc3",
+      "version": 1,
+      "type": "session/continued",
+      "created_at": "2026-10-15T02:53:52.9452647Z",
+      "payload": {
+        "request_id": "fixture",
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "checkpoint_hash": "b1d9afb5344c7cf6f4cb74705ddcbade27c8a171b8ec3bcac73deef0f5f8d67a",
+        "target_event_id": "94a3c8796d4a9d2c5e28ca99960c9c55",
+        "target_seq": 1,
+        "target_checksum": "4373e50908883d7c8dd3248901bd49fb65d50395b14d7b23d3e2c5f4fd21735b",
+        "surface_sha256": "f3bbbae1eb27d63d6c2b9dcf78a6f772b68655b3cc0e640798297d9dabd3faad",
+        "input_event_id": "94a3c8796d4a9d2c5e28ca99960c9c55",
+        "resume_count": 1,
+        "actor": {
+          "schema_version": 1,
+          "actor_id": "actor:local",
+          "subject": "local",
+          "tenant_id": "tenant:local",
+          "roles": [
+            "LOCAL"
+          ],
+          "session_id": "session-1"
+        }
+      },
+      "prev_checksum": "b1d9afb5344c7cf6f4cb74705ddcbade27c8a171b8ec3bcac73deef0f5f8d67a",
+      "checksum": "f15df4ac70a132e9c8742a7ca2fecdaa5fa74048f45247ceee34744d94be4ae5"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 4,
+      "event_id": "febdf7b2c06c12663da3f6fe9a6a93e6",
+      "version": 1,
+      "type": "session/run-leased",
+      "created_at": "2026-10-15T02:53:52.9484083Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "request_id": "fixture",
+        "lease_id": "816d406785cab738c02d119c09d131e4",
+        "worker_id": "fixture",
+        "attempt": 1,
+        "lease_until": "2026-10-15T02:54:22.9478942Z"
+      },
+      "prev_checksum": "f15df4ac70a132e9c8742a7ca2fecdaa5fa74048f45247ceee34744d94be4ae5",
+      "checksum": "91894c066bff93b9b3408e6a1163b53b69ada2a91258cde4ff647dfc42395965"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 5,
+      "event_id": "0a4ee105d48c9b4d99afd04b64a7ec8b",
+      "version": 1,
+      "type": "session/progress",
+      "created_at": "2026-10-15T02:53:52.95155Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "kind": "phase",
+        "title": "开始执行",
+        "summary": "已开始分析本次请求并准备执行。",
+        "source_event_seq": 4
+      },
+      "prev_checksum": "91894c066bff93b9b3408e6a1163b53b69ada2a91258cde4ff647dfc42395965",
+      "checksum": "4680d1bf947d8674d084dca197f2488d22b55ee0e3307fc96c83fb4c3855aa8a"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 6,
+      "event_id": "188c2ec77bb7d9ddd8abf792a1d87f07",
+      "version": 1,
+      "type": "tool/call",
+      "created_at": "2026-10-15T02:53:52.9551876Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "arguments_json": "{\"content\":\"package fixture\\n\",\"path\":\"fixture.go\"}",
+        "operation_id": "7304c8c0101b73044aee8bce3839d0439870fca11cce32ac509f7a784aa6a08c"
+      },
+      "surface_op": {
+        "op": "append"
+      },
+      "prev_checksum": "4680d1bf947d8674d084dca197f2488d22b55ee0e3307fc96c83fb4c3855aa8a",
+      "checksum": "21b09e5fb09c814f59d7afff30f81d59d0968c48b24438afb85ffdaba5f2134b"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 7,
+      "event_id": "a6ea408f0af5136c90d28bb1e80e0f0f",
+      "version": 1,
+      "type": "session/progress",
+      "created_at": "2026-10-15T02:53:52.9571925Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "kind": "phase",
+        "title": "执行工具",
+        "summary": "正在执行 Write。",
+        "source_event_seq": 6
+      },
+      "prev_checksum": "21b09e5fb09c814f59d7afff30f81d59d0968c48b24438afb85ffdaba5f2134b",
+      "checksum": "8872e7827d3dca2b3e7ed8adfdb77e5884480e2a6a3d6ce49490a30b043d8991"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 8,
+      "event_id": "927554017adc9c4f36f372989e5914e3",
+      "version": 1,
+      "type": "commit_pending",
+      "created_at": "2026-10-15T02:53:52.9604698Z",
+      "payload": {
+        "commit_id": "run:a83bc565810ecf3815d8df946e2bdbd8\u0000tool-1",
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "arguments_json": "{\"content\":\"package fixture\\n\",\"path\":\"fixture.go\"}"
+      },
+      "prev_checksum": "8872e7827d3dca2b3e7ed8adfdb77e5884480e2a6a3d6ce49490a30b043d8991",
+      "checksum": "307d072b97ded5f4314e87c5af43f7dc5eb7107d2db45739eb408a258cc5ea4d"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 9,
+      "event_id": "0ad342a651177b14d7f4b23a3f8d9e15",
+      "version": 1,
+      "type": "tool/dispatched",
+      "created_at": "2026-10-15T02:53:52.9634687Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "arguments_json": "{\"content\":\"package fixture\\n\",\"path\":\"fixture.go\"}",
+        "operation_id": "7304c8c0101b73044aee8bce3839d0439870fca11cce32ac509f7a784aa6a08c"
+      },
+      "prev_checksum": "307d072b97ded5f4314e87c5af43f7dc5eb7107d2db45739eb408a258cc5ea4d",
+      "checksum": "d21b69042613e3c3a771885e9ce60b9e5e493cf95be6062b42bc06003c33b1cf"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 10,
+      "event_id": "4f84a0d75ef4ea8a11f0057481608d3a",
+      "version": 1,
+      "type": "code/modified",
+      "created_at": "2026-10-15T02:53:52.9655523Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "path": "fixture.go",
+        "operation": "Write",
+        "summary": "Write modified fixture.go",
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "c9f09e0a76fbbf83847013f7d79aa09c1566778489cc499e76e3e5d72b1c8db6",
+        "diff_sha256": "ac03f4d5bbcd90944ae44534c7083b8459d05bcd9c616b339a745eda45aa5db3",
+        "after": "package fixture\n"
+      },
+      "prev_checksum": "d21b69042613e3c3a771885e9ce60b9e5e493cf95be6062b42bc06003c33b1cf",
+      "checksum": "76538309765aa052e66c7f95c13df4f0b196121b56fbd3071e2fd21bc68523d0"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 11,
+      "event_id": "20cbb7ac41f39bc1951fe685c4bf9168",
+      "version": 1,
+      "type": "tool/result",
+      "created_at": "2026-10-15T02:53:52.9685527Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "output": "fixture",
+        "exit_code": 0
+      },
+      "surface_op": {
+        "op": "append"
+      },
+      "prev_checksum": "76538309765aa052e66c7f95c13df4f0b196121b56fbd3071e2fd21bc68523d0",
+      "checksum": "ef05575b7880e3fe116294f6dde7a73357b146a4e5b18ce7e45b6d2975d8b5f5"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 12,
+      "event_id": "4bf8918d976e844463e97d4aa4df86a5",
+      "version": 1,
+      "type": "session/progress",
+      "created_at": "2026-10-15T02:53:52.9716647Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "kind": "milestone",
+        "title": "工具完成",
+        "summary": "Write 已完成，正在继续下一步。",
+        "source_event_seq": 11
+      },
+      "prev_checksum": "ef05575b7880e3fe116294f6dde7a73357b146a4e5b18ce7e45b6d2975d8b5f5",
+      "checksum": "79e2ab1d882d572193f0081048e7cd988273dccf9396393badde855ce4da724e"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 13,
+      "event_id": "d68a2f6a337cb91716671541f8201027",
+      "version": 1,
+      "type": "assistant/message",
+      "created_at": "2026-10-15T02:53:52.9751985Z",
+      "payload": {
+        "author": "assistant",
+        "content": "fixture completed",
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8"
+      },
+      "surface_op": {
+        "op": "append"
+      },
+      "prev_checksum": "79e2ab1d882d572193f0081048e7cd988273dccf9396393badde855ce4da724e",
+      "checksum": "9e6d2f61833221dcf331d8c14842c0956a852a6ad2c815ce3b1d5cb13c3abdd4"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 14,
+      "event_id": "086e815ecb487a838f754c2fc4a0b17f",
+      "version": 1,
+      "type": "commit_done",
+      "created_at": "2026-10-15T02:53:52.9778064Z",
+      "payload": {
+        "commit_id": "run:a83bc565810ecf3815d8df946e2bdbd8\u0000tool-1",
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "tool-1",
+        "tool_name": "Write",
+        "arguments_json": "{\"content\":\"package fixture\\n\",\"path\":\"fixture.go\"}",
+        "pending_seq": 8,
+        "pending_checksum": "307d072b97ded5f4314e87c5af43f7dc5eb7107d2db45739eb408a258cc5ea4d"
+      },
+      "prev_checksum": "9e6d2f61833221dcf331d8c14842c0956a852a6ad2c815ce3b1d5cb13c3abdd4",
+      "checksum": "ac253626e22b3c4323935fed58b08167ad66177c73b320a829344213f1c63726"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 15,
+      "event_id": "ea2443825fa077b0c46cccb85c28eecd",
+      "version": 1,
+      "type": "session/run-completed",
+      "created_at": "2026-10-15T02:53:52.9815283Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "request_id": "fixture",
+        "lease_id": "816d406785cab738c02d119c09d131e4",
+        "attempt": 1
+      },
+      "prev_checksum": "ac253626e22b3c4323935fed58b08167ad66177c73b320a829344213f1c63726",
+      "checksum": "6e6743c8b5b7625c34ea471042bc17edf3cb5ff509f064fa655ba1f29d61577e"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 16,
+      "event_id": "fac148d9c1d04e4ef0ebe4d7dbe7adaf",
+      "version": 1,
+      "type": "session/progress",
+      "created_at": "2026-10-15T02:53:52.9846309Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "kind": "milestone",
+        "title": "任务完成",
+        "summary": "本次任务已完成，已保存回复和执行记录。",
+        "source_event_seq": 15
+      },
+      "prev_checksum": "6e6743c8b5b7625c34ea471042bc17edf3cb5ff509f064fa655ba1f29d61577e",
+      "checksum": "4f2c08c9433e3ab10f25c3b9a05e307e8aed1ee2ddcc70f067d56131d1612e66"
+    },
+    {
+      "session_id": "session-1",
+      "seq": 17,
+      "event_id": "a62412cf605808901fc0770792fa1d35",
+      "version": 1,
+      "type": "tool/call",
+      "created_at": "2026-10-15T02:53:53.0046319Z",
+      "payload": {
+        "run_id": "run:a83bc565810ecf3815d8df946e2bdbd8",
+        "tool_call_id": "\u0073k-fixturefixturefixturefixturefixture",
+        "tool_name": "Write"
+      },
+      "prev_checksum": "4f2c08c9433e3ab10f25c3b9a05e307e8aed1ee2ddcc70f067d56131d1612e66",
+      "checksum": "fa8283dad130722467f46225d94b69f65ad72532a462a74a6744c5d2f5352fff"
+    }
+  ]
+}

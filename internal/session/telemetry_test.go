@@ -177,6 +177,12 @@ func TestMainAgentTraceKeepsQueuedRequestParent(t *testing.T) {
 	if got := spanStringAttribute(mainSpan, genai.AttrEvalRunID); got != "run-main-1" {
 		t.Fatalf("main eval.run_id = %q", got)
 	}
+	if got := spanStringAttribute(mainSpan, "session.id"); got != created.ID {
+		t.Fatalf("main session.id = %q, want %q", got, created.ID)
+	}
+	if got := spanStringAttribute(mainSpan, "session.run_id"); got != run.RunID {
+		t.Fatalf("main session.run_id = %q, want %q", got, run.RunID)
+	}
 	assertSpanHasNoSentinel(t, mainSpan)
 }
 

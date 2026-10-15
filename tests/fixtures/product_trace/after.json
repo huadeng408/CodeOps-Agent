@@ -1,0 +1,63 @@
+{
+  "events": [
+    {
+      "session_id": "admission:verification:v1",
+      "seq": 0,
+      "event_id": "5281bebc7cbd5ecfd8153988cfcf0f3d",
+      "version": 1,
+      "type": "admission/batch_created",
+      "created_at": "2026-10-15T02:53:52.9918508Z",
+      "payload": {
+        "owner_id": 5666574757315319,
+        "limit_tokens": 100000000
+      },
+      "checksum": "0645eecfe69370b26c6dce18317901c29224c4d051dd054d8871db36d106ad9d"
+    },
+    {
+      "session_id": "admission:verification:v1",
+      "seq": 1,
+      "event_id": "85e031f88ca3886d86fa1b21499b59af",
+      "version": 1,
+      "type": "admission/call_reserved",
+      "created_at": "2026-10-15T02:53:52.9961104Z",
+      "payload": {
+        "owner_id": 5666574757315319,
+        "task_id": "session-1",
+        "call_id": "call-1",
+        "tokens": 100,
+        "purpose": "foreground"
+      },
+      "prev_checksum": "0645eecfe69370b26c6dce18317901c29224c4d051dd054d8871db36d106ad9d",
+      "checksum": "f55ca4fc740e7fdb2ea346bf5eec8c8269129b0343f261f9aeaaee00104f21f2"
+    },
+    {
+      "session_id": "admission:verification:v1",
+      "seq": 2,
+      "event_id": "5247eaf3c77e45a5eb07e810f099ba2c",
+      "version": 1,
+      "type": "admission/call_settled",
+      "created_at": "2026-10-15T02:53:52.9988407Z",
+      "payload": {
+        "owner_id": 5666574757315319,
+        "call_id": "call-1",
+        "tokens": 20
+      },
+      "prev_checksum": "f55ca4fc740e7fdb2ea346bf5eec8c8269129b0343f261f9aeaaee00104f21f2",
+      "checksum": "58e3348819de10cf02c2f8ce5163f188fb7927e529ac9771b43653a2294dd73c"
+    },
+    {
+      "session_id": "admission:verification:v1",
+      "seq": 3,
+      "event_id": "e83357b177ec9612e3bb7c02f1c07a4e",
+      "version": 1,
+      "type": "admission/task_finished",
+      "created_at": "2026-10-15T02:53:53.0014299Z",
+      "payload": {
+        "owner_id": 5666574757315319,
+        "task_id": "session-1"
+      },
+      "prev_checksum": "58e3348819de10cf02c2f8ce5163f188fb7927e529ac9771b43653a2294dd73c",
+      "checksum": "723d89add9fec3b5bb77d4b490243fb3b4d0f6658bedd2098e4f7f7e864963e5"
+    }
+  ]
+}

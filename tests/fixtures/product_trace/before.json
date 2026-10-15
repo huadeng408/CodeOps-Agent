@@ -1,0 +1,17 @@
+{
+  "events": [
+    {
+      "session_id": "admission:verification:v1",
+      "seq": 0,
+      "event_id": "5281bebc7cbd5ecfd8153988cfcf0f3d",
+      "version": 1,
+      "type": "admission/batch_created",
+      "created_at": "2026-10-15T02:53:52.9918508Z",
+      "payload": {
+        "owner_id": 5666574757315319,
+        "limit_tokens": 100000000
+      },
+      "checksum": "0645eecfe69370b26c6dce18317901c29224c4d051dd054d8871db36d106ad9d"
+    }
+  ]
+}

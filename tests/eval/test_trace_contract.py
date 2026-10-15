@@ -40,6 +40,73 @@ from eval.harness.trace_contract import (
     span_kinds,
 )
 
+@pytest.fixture
+def product_trace_capture():
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    root = CapturedSpan("agent.main", "a" * 32, "1" * 16, attributes={"session.id": "session-1", "session.run_id": "run:1"})
+    spans = [root, CapturedSpan("chat", root.trace_id, "2" * 16, root.span_id),
+             CapturedSpan("execute_tool Read", root.trace_id, "3" * 16, root.span_id, attributes={"gen_ai.tool.call.id": "tool-1", "gen_ai.tool.name": "Read"}),
+             CapturedSpan("provider.call", root.trace_id, "4" * 16, "2" * 16, attributes={"model.call_id": "model-1", "model.purpose": "foreground", "gen_ai.request.model": "fixture"}),
+             CapturedSpan("provider.call", root.trace_id, "5" * 16, root.span_id, attributes={"model.call_id": "model-2", "model.purpose": "memory_reflection", "gen_ai.request.model": "fixture"}),
+             CapturedSpan("provider.attempt", root.trace_id, "6" * 16, "4" * 16, attributes={"model.call_id": "model-1", "model.purpose": "foreground", "gen_ai.request.model": "fixture"}),
+             CapturedSpan("provider.attempt", root.trace_id, "7" * 16, "5" * 16, attributes={"model.call_id": "model-2", "model.purpose": "memory_reflection", "gen_ai.request.model": "fixture"})]
+    expected = {"session_id": "session-1", "run_id": "run:1", "completed": True,
+                "tool_calls": {"tool-1": "Read"}, "model_calls": {"model-1": "foreground", "model-2": "memory_reflection"}, "model": "fixture"}
+    return spans, expected
+
+
+def test_product_trace_matches_the_durable_run_and_every_expected_call(product_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_trace_capture
+    report = evaluate_product_trace(spans, expected)
+    assert report["verdict"] == "PASS"
+    assert report["primary_trace_id"] == "a" * 32
+    assert report["span_count"] == 7
+
+
+@pytest.mark.parametrize("case,verdict", [("missing-tool", "INCOMPLETE"), ("missing-reflection", "INCOMPLETE"),
+    ("unfinished", "INCOMPLETE"), ("error", "FAIL"), ("canceled-run", "FAIL"), ("wrong-run", "FAIL"),
+    ("detached", "FAIL"), ("cycle", "FAIL"), ("duplicate-call", "FAIL"), ("secret", "FAIL"),
+    ("zero-trace", "FAIL"), ("zero-span", "FAIL"), ("wrong-model", "FAIL"), ("chat-sibling", "FAIL")])
+def test_product_trace_never_promotes_partial_or_invalid_evidence(product_trace_capture, case, verdict):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_trace_capture
+    if case == "missing-tool": spans.pop(2)
+    elif case == "missing-reflection": spans.pop()
+    elif case == "unfinished": spans[-1].ended = False
+    elif case == "error": spans[-1].status = "ERROR"
+    elif case == "canceled-run": expected["completed"] = False
+    elif case == "wrong-run": spans[0].attributes["session.run_id"] = "run:other"
+    elif case == "detached": spans[-1].parent_span_id = "f" * 16
+    elif case == "cycle": spans[-1].parent_span_id = spans[-1].span_id
+    elif case == "duplicate-call": spans.append(CapturedSpan("provider.call", "a" * 32, "6" * 16, "1" * 16, attributes=dict(spans[-1].attributes)))
+    elif case == "secret": spans[-1].attributes["unsafe"] = "sk-" + "fixture" * 5
+    elif case == "zero-trace":
+        for span in spans: span.trace_id = "0" * 32
+    elif case == "zero-span": spans[-1].span_id = "0" * 16
+    elif case == "wrong-model": spans[-1].attributes["gen_ai.request.model"] = "another-model"
+    elif case == "chat-sibling": spans[3].parent_span_id = spans[0].span_id
+    assert evaluate_product_trace(spans, expected)["verdict"] == verdict
+
+
+def test_product_trace_keeps_every_attempt_in_a_settled_retry(product_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_trace_capture
+    expected["model_calls"]["model-retry"] = "foreground"
+    expected["retry_of"] = {"model-retry": "model-1"}
+    spans[5].status = "ERROR"
+    spans.append(CapturedSpan("provider.attempt", "a" * 32, "8" * 16, "4" * 16, attributes={
+        "model.call_id": "model-retry", "model.retry_of": "model-1", "model.purpose": "foreground", "gen_ai.request.model": "fixture",
+    }))
+    report = evaluate_product_trace(spans, expected)
+    assert report["expected_logical_calls"] == 2 and report["expected_model_calls"] == 3
+    assert report["missing"] == [] and report["verdict"] == "FAIL"
+    assert report["problems"] == ["product tree includes an error or canceled span"]
+
 
 def _span(
     name: str,

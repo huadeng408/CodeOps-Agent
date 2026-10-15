@@ -19,6 +19,7 @@ import (
 	"code-agent/internal/permission"
 	"code-agent/internal/telemetry/genai"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -1228,7 +1229,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	if r.options.Tracer != nil {
 		traceCtx, agentSpan = r.options.Tracer.StartSpan(traceCtx, spanName, genai.OperationInvokeAgent, genai.SystemGenAI)
 		completionCtx = traceCtx
-		agentSpan.SetAttributes(genai.AgentNameKV(agentName))
+		agentSpan.SetAttributes(genai.AgentNameKV(agentName), attribute.String("session.id", key.sessionID), attribute.String("session.run_id", key.runID))
 		defer agentSpan.End()
 	}
 	r.recordProgress(traceCtx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)

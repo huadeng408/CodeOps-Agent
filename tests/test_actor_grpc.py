@@ -35,7 +35,8 @@ def grpc_service(tmp_path, monkeypatch):
         ServerConfig(memory_dir=str(tmp_path / "memory"), project_root=str(tmp_path))
     )
     app.llm = _NoToolLLM()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    # One reused thread makes the following RPC exercise trace-context cleanup.
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
         OrchestratorService(app), server
     )
@@ -100,3 +101,79 @@ def test_grpc_allows_repeat_request_for_same_actor(grpc_service) -> None:
 
     assert first[-1].done.success is True
     assert second[-1].done.success is True
+
+
+def test_reflection_rpc_keeps_go_trace_parent_without_leaking_to_next_rpc(grpc_service) -> None:
+    from opentelemetry import baggage, trace
+
+    stub, app = grpc_service
+    observed = []
+
+    class ReflectionLLM:
+        model = "trace-reflection-fixture"
+
+        async def chat(self, request):
+            current = trace.get_current_span().get_span_context()
+            observed.append((current.trace_id, current.span_id, baggage.get_baggage("eval.instance_id")))
+            assert request.allow_tools is False and request.tools == []
+            return ChatResponse(text='{"candidates": []}')
+
+    app.llm = ReflectionLLM()
+    request = orchestrator_pb2.MemoryReflectionRequest(
+        session_id="reflection-trace-session",
+        actor=_actor(session_id="reflection-trace-session"),
+        source_checksum="a" * 64,
+        sources=[orchestrator_pb2.MemorySource(event_id="source-1", checksum="b" * 64, text="verified evidence")],
+    )
+    result = stub.ReflectMemory(request, metadata=(
+        ("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"),
+        ("baggage", "eval.instance_id=reflection-trace-session"),
+    ))
+    assert result.error_code == ""
+    assert observed[0] == (int("0123456789abcdef0123456789abcdef", 16), int("0123456789abcdef", 16), "reflection-trace-session")
+
+    assert stub.ReflectMemory(request).error_code == ""
+    assert observed[1] == (0, 0, None)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_conversation_rpc_parents_provider_under_python_chat(grpc_service, monkeypatch, streaming):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from orchestrator.llm.client import StreamDelta
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("grpc-conversation-parent")
+    monkeypatch.setattr(trace, "get_tracer", lambda *args, **kwargs: tracer)
+
+    class TrackedChat(_NoToolLLM):
+        async def chat(self, request):
+            with tracer.start_as_current_span("provider.capture"):
+                return ChatResponse(text="authorized")
+
+    class TrackedStream(TrackedChat):
+        async def stream(self, request):
+            with tracer.start_as_current_span("provider.capture"):
+                text = "authorized"
+            yield StreamDelta(kind="text", text=text)
+            yield StreamDelta(kind="done")
+
+    stub, app = grpc_service
+    app.llm = TrackedStream() if streaming else TrackedChat()
+    try:
+        result = list(stub.Converse(_request("actor-grpc-session", _actor()), metadata=(
+            ("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"),
+        )))
+        assert result[-1].done.success
+        spans = exporter.get_finished_spans()
+        chats = [span for span in spans if span.name == "chat"]
+        calls = [span for span in spans if span.name == "provider.capture"]
+        assert chats and len(calls) == len(chats)
+        assert {span.parent.span_id for span in calls} == {span.context.span_id for span in chats}
+        assert all(span.parent.span_id == int("0123456789abcdef", 16) for span in chats)
+    finally:
+        provider.shutdown()

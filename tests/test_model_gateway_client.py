@@ -95,12 +95,24 @@ def test_harness_model_client_can_cancel_long_admitted_rpc():
         interrupter.join(2)
 
 
-def test_harness_model_client_uses_go_transport_and_normalized_usage():
+def test_harness_model_client_uses_go_transport_and_normalized_usage(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("model-gateway-boundary")
+    monkeypatch.setattr(trace, "get_tracer", lambda *args, **kwargs: tracer)
     captured = []
+    trace_metadata = []
 
     class Service(rpc.ModelGatewayServicer):
         def Invoke(self, request, context):
             captured.append(request)
+            trace_metadata.append(dict(context.invocation_metadata()))
             return pb.ModelCallResponse(
                 payload_json=json.dumps({"model": "fixture-model", "choices": [{"message": {"content": "ok"}}],
                                          "usage": {"prompt_tokens": 8, "completion_tokens": 3}}).encode(),
@@ -116,7 +128,8 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage():
         protocol="openai", model="fixture-model",
     ))
     try:
-        response = asyncio.run(client.chat(ChatRequest(model="fixture-model", messages=[ChatMessage("user", "hello")], purpose="compaction")))
+        with tracer.start_as_current_span("go.parent") as parent:
+            response = asyncio.run(client.chat(ChatRequest(model="fixture-model", messages=[ChatMessage("user", "hello")], purpose="compaction")))
         assert response.text == "ok"
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.cached_input_tokens) == (17, 3, 4)
         assert response.model_identity["cost_status"] == "unknown"
@@ -126,6 +139,16 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage():
         assert payload["model"] == "fixture-model"
         assert payload["messages"][0]["content"] == "hello"
         assert "api_key" not in payload and "authorization" not in payload
+        calls = [span for span in exporter.get_finished_spans() if span.name == "provider.call"]
+        assert len(calls) == 1
+        span = calls[0]
+        assert span.parent.span_id == parent.get_span_context().span_id
+        assert span.context.trace_id == parent.get_span_context().trace_id
+        assert span.attributes["model.call_id"] == captured[0].call_id
+        assert span.attributes["model.purpose"] == "compaction"
+        assert span.attributes["gen_ai.usage.input_tokens"] == 17
+        assert trace_metadata[0]["traceparent"] == f"00-{span.context.trace_id:032x}-{span.context.span_id:016x}-{span.context.trace_flags:02x}"
+        assert "hello" not in str(span.attributes) and not span.events
         executor = ProviderWorkerExecutor({"default": client})
         result = asyncio.run(executor(WorkerSpec("worker-1", "Probe", "Reply briefly"), {}))
         assert result.output == "ok"
@@ -133,6 +156,7 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage():
     finally:
         client.close()
         server.stop(0).wait()
+        provider.shutdown()
 
 
 @pytest.mark.parametrize("gateway_error", [

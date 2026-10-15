@@ -22,8 +22,14 @@ import (
 	pb "code-agent/gen/codeagentpb"
 	"code-agent/internal/identity"
 	"code-agent/internal/session"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -170,7 +176,7 @@ func (gateway *Gateway) StopRunCalls(ctx context.Context, command session.Cancel
 	if err != nil {
 		return err
 	}
-	owner := actorOwner(actor)
+	owner := ActorOwner(actor)
 	gateway.mu.Lock()
 	view, err := session.NewWorkbench(gateway.budget.ledger, nil).Get(ctx, command.OwnerID, actor.SessionID)
 	if err != nil {
@@ -262,10 +268,11 @@ func (gateway *Gateway) BindActor(actor identity.Actor, _ string) (*pb.ModelGate
 	if err != nil {
 		return nil, nil, err
 	}
-	return gateway.Bind(actorOwner(actor), taskID, actor.SessionID)
+	return gateway.Bind(ActorOwner(actor), taskID, actor.SessionID)
 }
 
-func actorOwner(actor identity.Actor) uint {
+// ActorOwner is the stable admission identity; it differs from the HTTP user ID.
+func ActorOwner(actor identity.Actor) uint {
 	digest := sha256.Sum256([]byte(actor.TenantID + "\x00" + actor.ActorID + "\x00" + actor.Subject))
 	owner := uint(binary.BigEndian.Uint64(digest[:8]) & ((1 << 53) - 1))
 	if owner == 0 {
@@ -333,24 +340,24 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 			return ErrTaskBusy
 		}
 	}
-	state, err := gateway.budget.read(ctx, actorOwner(actor))
+	state, err := gateway.budget.read(ctx, ActorOwner(actor))
 	if err != nil {
 		return err
 	}
-	if state.closedTasks[taskKey(actorOwner(actor), root)] {
+	if state.closedTasks[taskKey(ActorOwner(actor), root)] {
 		return nil
 	}
-	if state.taskHasScopes(actorOwner(actor), root) || state.outstanding() != 0 {
-		if err := gateway.budget.RecoverStoppedScopes(ctx, actorOwner(actor), root); err != nil {
+	if state.taskHasScopes(ActorOwner(actor), root) || state.outstanding() != 0 {
+		if err := gateway.budget.RecoverStoppedScopes(ctx, ActorOwner(actor), root); err != nil {
 			return err
 		}
 	}
 	if state.TaskID == "" {
-		if _, err := gateway.budget.AcquireTask(ctx, actorOwner(actor), root); err != nil {
+		if _, err := gateway.budget.AcquireTask(ctx, ActorOwner(actor), root); err != nil {
 			return err
 		}
 	}
-	_, err = gateway.budget.FinishTask(ctx, actorOwner(actor), root)
+	_, err = gateway.budget.FinishTask(ctx, ActorOwner(actor), root)
 	return err
 }
 
@@ -371,6 +378,15 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		return nil, status.Error(codes.Unauthenticated, "model capability unavailable")
 	}
 	defer scope.calls.Done()
+	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
+		carrier := propagation.MapCarrier{}
+		for _, key := range []string{"traceparent", "tracestate"} {
+			if values := incoming.Get(key); len(values) == 1 {
+				carrier.Set(key, values[0])
+			}
+		}
+		ctx = propagation.TraceContext{}.Extract(ctx, carrier)
+	}
 	result := &pb.ModelCallResponse{CostStatus: "unknown"}
 	config := gateway.provider
 	endpoint, err := providerEndpoint(config)
@@ -465,6 +481,21 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			return result, nil
 		}
 		confirmed := false
+		attemptCtx, span := otel.Tracer("code-agent-model-gateway").Start(ctx, "provider.attempt", trace.WithSpanKind(trace.SpanKindClient))
+		span.SetAttributes(attribute.String("model.call_id", callID), attribute.String("model.retry_of", retryOf),
+			attribute.String("model.purpose", purpose), attribute.String("gen_ai.request.model", config.Model),
+			attribute.String("gen_ai.provider.name", config.Protocol))
+		defer func() {
+			span.SetAttributes(attribute.Bool("model.usage_known", confirmed), attribute.String("model.outcome", result.ErrorCode),
+				attribute.Int("http.response.status_code", int(result.HttpStatus)))
+			if confirmed {
+				span.SetAttributes(attribute.Int64("gen_ai.usage.input_tokens", result.InputTokens), attribute.Int64("gen_ai.usage.output_tokens", result.OutputTokens))
+			}
+			if result.ErrorCode != "" {
+				span.SetStatus(otelcodes.Error, "")
+			}
+			span.End()
+		}()
 		defer func() {
 			if !confirmed {
 				auditCtx, cancel := newAuditContext()
@@ -472,7 +503,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 				_, _ = gateway.budget.MarkUnknown(auditCtx, scope.owner, callID)
 			}
 		}()
-		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		upstream, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			result.ErrorCode = "provider_request_invalid"
 			return result, nil

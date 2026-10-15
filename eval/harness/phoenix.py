@@ -33,6 +33,21 @@ _ATTRIBUTE_ALLOWLIST = frozenset(
         "rag.degraded",
         "rag.reranker_timeout",
         "gen_ai.operation.name",
+        "session.id",
+        "session.run_id",
+        "model.call_id",
+        "model.purpose",
+        "model.retry_of",
+        "model.outcome",
+        "model.usage_known",
+        "http.response.status_code",
+        "gen_ai.tool.name",
+        "gen_ai.tool.call.id",
+        "gen_ai.provider.name",
+        "gen_ai.request.model",
+        "gen_ai.response.model",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
     }
 )
 
@@ -106,27 +121,62 @@ def read_run_spans(
     fail closed rather than looping indefinitely or silently truncating data.
     """
     expected = set(expected_instance_ids)
-    cursor = ""
-    seen_cursors: set[str] = set()
     matched: list[CapturedSpan] = []
-    while True:
-        page, next_cursor = _parse_page(_request_json(_spans_url(phoenix_url, project, start_time, cursor)))
-        for span in page:
+    for page in _project_pages(phoenix_url, project, start_time):
+        spans, _ = _parse_page(page)
+        for span in spans:
             if str(span.attributes.get("eval.run_id", "")) != run_id:
                 continue
-            # ``eval.run`` is run-scoped and correctly carries an empty
-            # instance ID.  Keep it alongside expected instance spans so the
-            # O3 topology validator can see the real root of the trace.
-            if (
-                expected
-                and span.name != "eval.run"
-                and str(span.attributes.get("eval.instance_id", "")) not in expected
-            ):
+            if expected and span.name != "eval.run" and str(span.attributes.get("eval.instance_id", "")) not in expected:
                 continue
             matched.append(span)
+    return matched
+
+
+def _project_pages(phoenix_url: str, project: str, start_time: str, filters=()):
+    cursor = ""
+    seen_cursors: set[str] = set()
+    while True:
+        url = _spans_url(phoenix_url, project, start_time, cursor)
+        if filters:
+            url += "&" + urlencode(filters)
+        page = _request_json(url)
+        yield page
+        next_cursor = str(page.get("next_cursor") or "")
         if not next_cursor:
-            return matched
+            return
         if next_cursor in seen_cursors:
             raise PhoenixReadbackError(f"Phoenix repeated pagination cursor {next_cursor!r}")
         seen_cursors.add(next_cursor)
         cursor = next_cursor
+
+
+def read_product_spans(phoenix_url: str, project: str, start_time: str, session_id: str, run_id: str) -> list[CapturedSpan]:
+    """Find one durable Go run and read its whole backend trace, not a subset."""
+    roots = []
+    filters = (("name", "agent.main"), ("attribute", "session.id:" + json.dumps(session_id)),
+               ("attribute", "session.run_id:" + json.dumps(run_id)))
+    for page in _project_pages(phoenix_url, project, start_time, filters):
+        spans, _ = _parse_product_page(page)
+        roots.extend(span for span in spans if span.name == "agent.main" and
+                     span.attributes.get("session.id") == session_id and span.attributes.get("session.run_id") == run_id)
+    if not roots:
+        return []
+    if len(roots) != 1:
+        raise PhoenixReadbackError("product Session/run matched multiple roots")
+    result = []
+    for page in _project_pages(phoenix_url, project, start_time, (("trace_id", roots[0].trace_id),)):
+        spans, _ = _parse_product_page(page)
+        if any(span.trace_id != roots[0].trace_id for span in spans):
+            raise PhoenixReadbackError("backend returned an unexpected trace")
+        result.extend(spans)
+    return result
+
+
+def _parse_product_page(page):
+    from eval.harness.trace_contract import find_trace_privacy_problem
+
+    spans, cursor = _parse_page(page)
+    if any(find_trace_privacy_problem(raw) for raw in page["data"]):
+        raise PhoenixReadbackError("product backend trace contains sensitive fields")
+    return spans, cursor

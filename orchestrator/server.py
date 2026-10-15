@@ -370,11 +370,21 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and not request.HasField("model_gateway"):
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "model admission binding required")
         client = HarnessModelClient(request.model_gateway) if request.HasField("model_gateway") else self.app.llm
+        parent_ctx = _admitted_grpc_trace_context(context.invocation_metadata())
+        otel_token = None
+        if parent_ctx is not None:
+            from opentelemetry import context as otel_context
+
+            otel_token = otel_context.attach(parent_ctx)
         try:
             return reflect_memory(client, request, cancel)
         finally:
-            if isinstance(client, HarnessModelClient):
-                client.close()
+            try:
+                if isinstance(client, HarnessModelClient):
+                    client.close()
+            finally:
+                if otel_token is not None:
+                    otel_context.detach(otel_token)
 
     def _authorize_actor(self, actor_wire, session_id: str, context) -> ActorIdentity | None:
         # Keep the pre-Actor API usable for ephemeral, session-less callers.
