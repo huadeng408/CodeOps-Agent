@@ -27,7 +27,7 @@
 | --- | --- |
 | 模型代码任务与提案 | #7–#10 的提案、批准、文件生命周期及应用中断核验已按各自范围验证；仍需 Go／Python 完整真实模型任务与多轮浏览器验收 |
 | Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
-| Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
+| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 #17/#18 各十轮真实浏览器任务及 #19 故障矩阵 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
 当前凭据、沙箱和后端前提在具体运行准备时核对；旧环境错误不作为本机当前事实。
@@ -60,6 +60,7 @@
 - #13 任务故障与重开：[真实任务故障、Go/Python 重启、同一旧 Session 续行及严格拒绝证据](evidence/task-recovery-2026-10-15.md)；[源码 CI 异步取消回归修正](evidence/task-recovery-ci-2026-10-15.md)。
 - #14 Memory：[同用户同仓库、来源完整性与旧身份的源码验证](evidence/memory-scope-2026-10-15.md)；[真实反思写回、进程重启后空新会话召回与跨仓库拒绝](evidence/memory-product-2026-10-15.md)。
 - #15 产品 Trace：[真实浏览器代码任务、Go/Python/provider/tool/反思整树后端读回与拒绝边界](evidence/product-trace-2026-10-15.md)。
+- #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。
