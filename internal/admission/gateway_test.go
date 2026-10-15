@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -138,6 +139,33 @@ type cancellationGatewayConversation struct {
 	calls   atomic.Int32
 }
 
+type pausedScopeReleaseLedger struct {
+	session.EventLog
+	held    atomic.Bool
+	release chan struct{}
+	once    sync.Once
+}
+
+func (ledger *pausedScopeReleaseLedger) Append(ctx context.Context, id string, seq int64, kind string, payload any) (session.Event, error) {
+	// Hold the first release until competing cleanup reaches a durable decision.
+	if kind == "admission/scope_released" {
+		if ledger.held.CompareAndSwap(false, true) {
+			select {
+			case <-ledger.release:
+			case <-ctx.Done():
+				return session.Event{}, ctx.Err()
+			}
+		} else {
+			ledger.once.Do(func() { close(ledger.release) })
+		}
+	}
+	event, err := ledger.EventLog.Append(ctx, id, seq, kind, payload)
+	if err == nil && kind == "session/run-canceled" {
+		ledger.once.Do(func() { close(ledger.release) })
+	}
+	return event, err
+}
+
 func (conversation *cancellationGatewayConversation) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, _ orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	binding, release, err := conversation.gateway.BindActor(request.Actor, request.SessionID)
 	if err != nil {
@@ -150,11 +178,12 @@ func (conversation *cancellationGatewayConversation) RunConversation(ctx context
 
 func TestGatewayOldRunCancellationCannotRevokeTheNewRunsProviderRequest(t *testing.T) {
 	ctx := context.Background()
-	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	persisted, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ledger.Close()
+	defer persisted.Close()
+	ledger := &pausedScopeReleaseLedger{EventLog: persisted, release: make(chan struct{})}
 	workbench := session.NewWorkbench(ledger, nil)
 	created, err := workbench.Create(ctx, 7, "repo", "gateway cancellation", "")
 	if err != nil {
@@ -207,6 +236,9 @@ func TestGatewayOldRunCancellationCannotRevokeTheNewRunsProviderRequest(t *testi
 			t.Fatal(err)
 		}
 		if view.Run != nil && view.Run.Status == session.RunCanceled {
+			if view.Run.CancellationState != "stopped" {
+				t.Fatalf("stopped provider cleanup remained unconfirmed: %+v", view.Run)
+			}
 			break
 		}
 		if time.Now().After(deadline) {

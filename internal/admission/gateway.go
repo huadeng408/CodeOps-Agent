@@ -130,7 +130,9 @@ func (gateway *Gateway) releaseScope(scope modelScope) {
 }
 
 func (gateway *Gateway) stopScope(ctx context.Context, scope modelScope) error {
+	gateway.mu.Lock()
 	scope.stop()
+	gateway.mu.Unlock()
 	done := make(chan struct{})
 	go func() { scope.calls.Wait(); close(done) }()
 	select {
@@ -140,8 +142,17 @@ func (gateway *Gateway) stopScope(ctx context.Context, scope modelScope) error {
 	}
 	if gateway.budget != nil {
 		// A failed append retains the cross-process fence for explicit recovery.
-		return gateway.budget.recordScope(ctx, scope.owner, scope.taskID, scope.id, "admission/scope_released")
+		if err := gateway.budget.recordScope(ctx, scope.owner, scope.taskID, scope.id, "admission/scope_released"); err != nil {
+			return err
+		}
 	}
+	gateway.mu.Lock()
+	for capability, current := range gateway.scopes {
+		if current.id == scope.id {
+			delete(gateway.scopes, capability)
+		}
+	}
+	gateway.mu.Unlock()
 	return nil
 }
 
@@ -175,9 +186,8 @@ func (gateway *Gateway) StopRunCalls(ctx context.Context, command session.Cancel
 		return ErrInvalidAdmission
 	}
 	scopes := []modelScope{}
-	for capability, scope := range gateway.scopes {
+	for _, scope := range gateway.scopes {
 		if scope.owner == owner && scope.taskID == root && (root == actor.SessionID || scope.sessionID == actor.SessionID) {
-			delete(gateway.scopes, capability)
 			scope.stop()
 			scopes = append(scopes, scope)
 		}
@@ -231,15 +241,7 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 	}
 	gateway.scopes[digest] = scope
 	release := func() {
-		gateway.mu.Lock()
-		_, exists := gateway.scopes[digest]
-		if exists {
-			delete(gateway.scopes, digest)
-		}
-		gateway.mu.Unlock()
-		if exists {
-			gateway.releaseScope(scope)
-		}
+		gateway.releaseScope(scope)
 	}
 	return &pb.ModelGatewayBinding{SchemaVersion: 1, Address: gateway.address, Capability: capability,
 		Protocol: gateway.provider.Protocol, Model: gateway.provider.Model, OutputLimit: gateway.provider.OutputLimit,
@@ -359,6 +361,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	digest := sha256.Sum256(request.Capability)
 	gateway.mu.Lock()
 	scope, found := gateway.scopes[digest]
+	found = found && scope.ctx.Err() == nil
 	if found {
 		scope.calls.Add(1)
 	}
@@ -448,7 +451,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		bound, active := gateway.scopes[digest]
 		checkTask = gateway.taskAdmission
 		gateway.mu.Unlock()
-		if !active || bound.id != scope.id {
+		if !active || bound.id != scope.id || bound.ctx.Err() != nil {
 			result.ErrorCode = "model_gateway_unavailable"
 			return result, nil
 		}

@@ -56,6 +56,7 @@
 - #10 应用中断与并发保护：[逐项核验、完整中断分母、生产浏览器与新基线再次批准证据](evidence/application-recovery-2026-10-15.md)。
 - #11 仓库 MCP：[固定只读能力、Go 授权／停用边界及真实模型与浏览器证据](evidence/mcp-product-2026-10-15.md)。
 - #12 代码任务取消：[Go fence、资源归属、provider/tool/approval 实际取消与结果留存证据](evidence/task-cancellation-2026-10-15.md)。
+- 模型 scope 并发释放：[持久释放窗口复现、精确撤销及 Go 回归](evidence/model-scope-release-2026-10-15.md)。
 - #13 任务故障与重开：[真实任务故障、Go/Python 重启、同一旧 Session 续行及严格拒绝证据](evidence/task-recovery-2026-10-15.md)；[源码 CI 异步取消回归修正](evidence/task-recovery-ci-2026-10-15.md)。
 - #14 Memory 范围实现：[同用户同仓库、来源完整性、旧身份及共享期限的源码验证](evidence/memory-scope-2026-10-15.md)；真实反思写回与重启召回仍待验收。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。

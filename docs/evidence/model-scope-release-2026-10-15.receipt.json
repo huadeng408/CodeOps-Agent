@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scope": "Concurrent Go model-scope revocation and durable release",
+  "source_base_sha": "9ee7a6bba2aed8e11c5bcf79d03d66857d710631",
+  "engineering_status": "IMPLEMENTED",
+  "unit_integration_status": "VERIFIED at public Gateway/SessionRunner/EventLog seams",
+  "product_status": "NOT_RUN as a complete cancellation matrix",
+  "release_status": "NOT_RUN",
+  "first_source_ci": {"run": 38664584874, "go": "FAILED", "other_jobs_passed": 3, "log_sha256": "c90e7053f86e88ce21165abe10d01610f169c7fa242b9a2601cc37c3deaa4e6b"},
+  "attempts_retained": [
+    {"name": "original-cancellation-timing", "count": 50, "exit_code": 0},
+    {"name": "callback-delay-only", "count": 5, "exit_code": 0},
+    {"name": "paused-durable-scope-release-red", "failed": 3, "exit_code": 1, "sha256": "4e3ebec346641a650593f94a714fa223fa6cb4f82a150876cbfa009612dee5c2"},
+    {"name": "same-public-regression-green", "passed": 10, "exit_code": 0, "sha256": "decff901e6cec760fabb12ca1cef3174e9234d5d94b49ad3da82742e5f59d7ef"},
+    {"command": "go test ./internal/admission -count=1 -json", "passed": 135, "skipped": 4, "exit_code": 0, "sha256": "f1412dcc59e42190110ac8994f088b1049b2216ff35b51f13b237d95d66f2985"},
+    {"command": "go test -race ./internal/admission -run 'TestGatewayOldRunCancellationCannotRevokeTheNewRunsProviderRequest|TestGatewayCancellation' -count=10 -json", "passed": 10, "exit_code": 0, "sha256": "be8614c30e0e1a7d60abab46ec6359e90dea7adabff0ea5c14aa22c115be6348"},
+    {"command": "go vet ./internal/admission", "exit_code": 0},
+    {"command": "git diff --check", "exit_code": 0}
+  ],
+  "review": {"classification": "AI_REVIEWED", "standards_hard_findings": 0, "standards_smells": 0, "spec_findings": 0},
+  "source_ci_for_followup": "PENDING"
+}
