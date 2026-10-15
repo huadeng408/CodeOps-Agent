@@ -271,7 +271,8 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		if app.orchestrator != nil {
 			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
-				Permissions: app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog, CancelModelCalls: app.modelGateway.StopRunCalls,
+				MemoryCommitTimeout: app.modelGateway.ReflectionTimeout(),
+				Permissions:         app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog, CancelModelCalls: app.modelGateway.StopRunCalls,
 				AgentLifecycle: app.handleAgentLifecycle,
 				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 					binding, ok := mcpManager.ResolveBinding(name)
@@ -615,7 +616,7 @@ func (a *App) converse(ctx context.Context, input string) (string, error) {
 	memoryContext := ""
 	if a.ledgerMemory != nil {
 		if owner, err := memory.OwnerForActor(current.Actor); err == nil && a.permissions.CheckFor(current.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
-			memoryContext, _ = a.ledgerMemory.Recall(ctx, owner, input, 1200)
+			memoryContext, _ = a.ledgerMemory.RecallWithOptions(ctx, owner, session.MemoryQuery{Query: input, MaxTokens: 1200, TargetSessionID: current.ID})
 		}
 	}
 	contextEnvelope, err := a.session.ContextEnvelope(ctx)
@@ -631,7 +632,7 @@ func (a *App) converse(ctx context.Context, input string) (string, error) {
 		TextDelta: a.orchestrator.OnTextDelta, Compaction: a.handleCompactionUpdate, PlanTodo: a.handlePlanTodoUpdate,
 	})
 	if err == nil && result.Success && a.ledgerMemory != nil {
-		memoryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		memoryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.modelGateway.ReflectionTimeout())
 		if commitErr := a.ledgerMemory.CommitCLIOutcome(memoryCtx, current.ID, result.Message); commitErr != nil {
 			a.renderer.PrintLine("memory reflection unavailable; task reply preserved")
 		}
@@ -1048,6 +1049,7 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 			decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
 			decoder.DisallowUnknownFields()
 			if err = decoder.Decode(&query); err == nil {
+				query.TargetSessionID = current.ID
 				var owner uint
 				if owner, err = memory.OwnerForActor(current.Actor); err == nil {
 					result.Output, err = a.ledgerMemory.RecallWithOptions(ctx, owner, query)

@@ -132,7 +132,11 @@ func TestMemoryConcurrentReflectionPromotesOneDurableProposal(t *testing.T) {
 		}
 	}
 	_, entries, _, err := module.catalog(ctx, 7)
-	if err != nil || len(entries) != 1 || entries[experienceID("preferences", "testing/ledger")].Revision != 1 || proposals != 1 {
+	var revision uint64
+	for _, item := range entries {
+		revision = item.Revision
+	}
+	if err != nil || len(entries) != 1 || revision != 1 || proposals != 1 {
 		t.Fatalf("non-idempotent promotion: entries=%v proposals=%d err=%v", entries, proposals, err)
 	}
 }
@@ -147,7 +151,10 @@ func TestMemoryReflectionEvolutionProgressiveRecallAndForget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := experienceID("preferences", "testing/ledger")
+	var id string
+	for key := range entries {
+		id = key
+	}
 	if len(entries) != 1 || entries[id].Revision != 2 || len(entries[id].Origins) != 2 {
 		t.Fatalf("evolution = %+v", entries)
 	}
@@ -236,5 +243,12 @@ func TestLegacyCLIMemoryUsesSameLedgerAndAuthenticatedIdentity(t *testing.T) {
 	otherOwner, _ := OwnerForActor(other)
 	if found := decodeMemoryRecall(t, module, otherOwner, "CLI", 1200); len(found.Entries) != 0 {
 		t.Fatal("legacy actor memory leaked")
+	}
+	cli := NewLedgerCLI(module, func() session.Session { return session.Session{ID: state.ID} }, nil)
+	if items := cli.LoadRelevant("CLI"); len(items) != 1 {
+		t.Fatalf("legacy CLI lost its repository scope: %+v", items)
+	}
+	if item, err := cli.Add("Keep CLI source verification"); err != nil || item.ID == "" || len(cli.List()) != 1 {
+		t.Fatalf("legacy CLI repository memory write/read: %+v %v", item, err)
 	}
 }

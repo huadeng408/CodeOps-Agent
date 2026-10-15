@@ -32,18 +32,19 @@ type memoryOrigin struct {
 }
 
 type Experience struct {
-	ID        string         `json:"id"`
-	Kind      string         `json:"kind"`
-	Key       string         `json:"key"`
-	Tags      []string       `json:"tags,omitempty"`
-	Abstract  string         `json:"abstract"`
-	Overview  string         `json:"overview"`
-	Content   string         `json:"content"`
-	Revision  uint64         `json:"revision"`
-	Deleted   bool           `json:"deleted,omitempty"`
-	ExpiresAt *time.Time     `json:"expires_at,omitempty"`
-	Origins   []memoryOrigin `json:"origins"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	ID         string         `json:"id"`
+	Repository string         `json:"repository,omitempty"`
+	Kind       string         `json:"kind"`
+	Key        string         `json:"key"`
+	Tags       []string       `json:"tags,omitempty"`
+	Abstract   string         `json:"abstract"`
+	Overview   string         `json:"overview"`
+	Content    string         `json:"content"`
+	Revision   uint64         `json:"revision"`
+	Deleted    bool           `json:"deleted,omitempty"`
+	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
+	Origins    []memoryOrigin `json:"origins"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 type catalogMutation struct {
@@ -53,8 +54,41 @@ type catalogMutation struct {
 	Entries       []Experience `json:"entries"`
 }
 
-func catalogID(owner uint) string          { return fmt.Sprintf("memory-user-%d", owner) }
-func experienceID(kind, key string) string { return "experience-" + trajectoryDigest(kind+"\x00"+key) }
+func catalogID(owner uint) string { return fmt.Sprintf("memory-user-%d", owner) }
+func experienceID(kind, key, repository string) string {
+	value := kind + "\x00" + key
+	if repository != "" {
+		value = repository + "\x00" + value
+	}
+	return "experience-" + trajectoryDigest(value)
+}
+
+func (m *LedgerMemory) experienceIdentity(ctx context.Context, owner uint, target, kind, key string, entries map[string]Experience) (string, string, error) {
+	repository, err := m.repositoryKey(ctx, owner, target)
+	if err != nil {
+		return "", "", err
+	}
+	id := experienceID(kind, key, repository)
+	if _, exists := entries[id]; exists {
+		return id, repository, nil
+	}
+	legacy, exists := entries[experienceID(kind, key, "")]
+	if exists {
+		origins := make([]Memory, 0, len(legacy.Origins))
+		for _, origin := range legacy.Origins {
+			origins = append(origins, Memory{SessionID: origin.SessionID})
+		}
+		matching, err := m.repositoryItems(ctx, owner, target, origins)
+		if err != nil {
+			return "", "", err
+		}
+		// Preserve legacy revisions and tombstones without rewriting old facts.
+		if len(matching) == len(origins) || legacy.Deleted && len(matching) > 0 {
+			return legacy.ID, "", nil
+		}
+	}
+	return id, repository, nil
+}
 
 // This stream lives in the Session Ledger, not in a separate memory database.
 // One owner-stream CAS makes cross-session revisions and tombstones atomic.
@@ -84,7 +118,7 @@ func (m *LedgerMemory) catalog(ctx context.Context, owner uint) (session.LedgerS
 		}
 		for _, item := range mutation.Entries {
 			previous := entries[item.ID]
-			if item.ID != experienceID(item.Kind, item.Key) || item.Revision != previous.Revision+1 || validateExperience(item) != nil {
+			if item.ID != experienceID(item.Kind, item.Key, item.Repository) || item.Revision != previous.Revision+1 || validateExperience(item) != nil {
 				return snapshot, nil, nil, ErrTrajectoryIntegrity
 			}
 			entries[item.ID] = item
@@ -97,6 +131,12 @@ func (m *LedgerMemory) catalog(ctx context.Context, owner uint) (session.LedgerS
 }
 
 func validateExperience(item Experience) error {
+	if item.Repository != "" {
+		digest, err := hex.DecodeString(item.Repository)
+		if err != nil || len(digest) != sha256.Size || strings.ToLower(item.Repository) != item.Repository {
+			return errors.New("invalid memory repository")
+		}
+	}
 	if !experienceKinds[item.Kind] || !memoryKey.MatchString(item.Key) || item.Revision == 0 || len(item.Origins) == 0 || len(item.Origins) > 64 || len(item.Tags) > 32 {
 		return errors.New("invalid memory identity or provenance")
 	}
@@ -130,6 +170,60 @@ func sensitiveMemoryText(text string) bool {
 		}
 	}
 	return false
+}
+
+func validateOriginSource(snapshot session.LedgerSnapshot, owner uint, origin memoryOrigin) error {
+	if len(origin.Sources) == 0 {
+		return ErrTrajectoryIntegrity
+	}
+	if origin.Manual {
+		if len(origin.Sources) != 1 {
+			return ErrTrajectoryIntegrity
+		}
+		fact, err := resolveTrajectorySource(snapshot.Events, origin.Sources[0])
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(fact.Payload)
+		if origin.SourceChecksum != hex.EncodeToString(digest[:]) {
+			return ErrTrajectoryIntegrity
+		}
+		return nil
+	}
+	for _, event := range trajectoryBranch(snapshot.Events) {
+		if event.Type != trajectoryCommittedEvent {
+			continue
+		}
+		var commit trajectoryCommit
+		if json.Unmarshal(event.Payload, &commit) != nil {
+			return ErrTrajectoryIntegrity
+		}
+		if commit.Trajectory.SourceChecksum != origin.SourceChecksum {
+			continue
+		}
+		prefix, err := snapshot.Prefix(event.Seq + 1)
+		if err != nil {
+			return err
+		}
+		verified, _, err := activeTrajectoryCommit(prefix, owner)
+		if err != nil || verified == nil || verified.Trajectory.SourceChecksum != origin.SourceChecksum {
+			return ErrTrajectoryIntegrity
+		}
+		allowed := make(map[string]string, len(verified.Trajectory.Sources))
+		for _, source := range verified.Trajectory.Sources {
+			allowed[source.EventID] = source.Checksum
+		}
+		for _, source := range origin.Sources {
+			if _, err := resolveTrajectorySource(snapshot.Events, source); err != nil {
+				return err
+			}
+			if allowed[source.EventID] != source.Checksum {
+				return ErrTrajectoryIntegrity
+			}
+		}
+		return nil
+	}
+	return ErrTrajectoryIntegrity
 }
 
 func (m *LedgerMemory) updateCatalog(ctx context.Context, owner uint, sourceID string, update func(map[string]Experience) ([]Experience, error)) error {
@@ -311,7 +405,10 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 		}
 		changes := make([]Experience, 0, len(response.Candidates))
 		for _, candidate := range response.Candidates {
-			id := experienceID(candidate.Kind, candidate.Key)
+			id, repository, err := m.experienceIdentity(ctx, owner, request.SessionId, candidate.Kind, candidate.Key, entries)
+			if err != nil {
+				return nil, err
+			}
 			previous := entries[id]
 			if previous.Deleted {
 				continue
@@ -328,7 +425,7 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 			if len(origins) > 64 {
 				origins = origins[len(origins)-64:]
 			}
-			item := Experience{ID: id, Kind: candidate.Kind, Key: candidate.Key, Abstract: candidate.Abstract, Overview: candidate.Overview, Content: candidate.Content,
+			item := Experience{ID: id, Repository: repository, Kind: candidate.Kind, Key: candidate.Key, Abstract: candidate.Abstract, Overview: candidate.Overview, Content: candidate.Content,
 				Revision: previous.Revision + 1, Origins: origins, UpdatedAt: time.Now().UTC(), ExpiresAt: previous.ExpiresAt, Tags: previous.Tags}
 			if err := validateExperience(item); err != nil {
 				return nil, err
@@ -429,6 +526,18 @@ func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail, 
 			if err != nil || actualOwner != owner {
 				return nil, ErrTrajectoryIntegrity
 			}
+			if err := validateOriginSource(snapshot, owner, origin); err != nil {
+				return nil, err
+			}
+			if entry.Repository != "" {
+				repository, err := m.repositoryKey(ctx, owner, origin.SessionID)
+				if err != nil {
+					return nil, err
+				}
+				if repository != entry.Repository {
+					return nil, ErrTrajectoryIntegrity
+				}
+			}
 			branch := map[string]string{}
 			active := map[string]bool{}
 			for _, fact := range snapshot.Surface {
@@ -486,6 +595,10 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if err != nil {
 			return "", err
 		}
+		items, err = m.repositoryItems(ctx, owner, sourceSessionID, items)
+		if err != nil {
+			return "", err
+		}
 		if len(items) > 100 {
 			items = items[:100]
 		}
@@ -497,7 +610,15 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if !ok || item.Deleted || item.ExpiresAt != nil && !item.ExpiresAt.After(time.Now()) {
 			return "", errors.New("memory not found")
 		}
+		expected, _, err := m.experienceIdentity(ctx, owner, sourceSessionID, item.Kind, item.Key, entries)
+		if err != nil || expected != item.ID {
+			return "", errors.New("memory repository scope is unavailable")
+		}
 		valid, err := m.experienceItems(ctx, owner, "full", "")
+		if err != nil {
+			return "", err
+		}
+		valid, err = m.repositoryItems(ctx, owner, sourceSessionID, valid)
 		if err != nil {
 			return "", err
 		}
@@ -527,11 +648,24 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if command.Key == "" {
 			command.Key = "note-" + trajectoryDigest(command.Content)[:16]
 		}
-		id = experienceID(command.Kind, command.Key)
 	}
 	var saved Experience
 	err = m.updateCatalog(ctx, owner, "", func(current map[string]Experience) ([]Experience, error) {
+		var repository string
+		if command.Action == "remember" {
+			var err error
+			id, repository, err = m.experienceIdentity(ctx, owner, sourceSessionID, command.Kind, command.Key, current)
+			if err != nil {
+				return nil, err
+			}
+		}
 		previous, exists := current[id]
+		if command.Action != "remember" && exists {
+			expected, _, err := m.experienceIdentity(ctx, owner, sourceSessionID, previous.Kind, previous.Key, current)
+			if err != nil || expected != id {
+				return nil, errors.New("memory repository scope is unavailable")
+			}
+		}
 		if previous.Revision != command.ExpectedRevision {
 			return nil, session.ErrSequenceConflict
 		}
@@ -545,7 +679,7 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if command.Action == "remember" {
 			fact := snapshot.Events[len(snapshot.Events)-1]
 			digest := sha256.Sum256(fact.Payload)
-			saved = Experience{ID: id, Kind: command.Kind, Key: command.Key, Abstract: summary(command.Content, 240), Overview: summary(command.Content, 1200), Content: command.Content,
+			saved = Experience{ID: id, Repository: repository, Kind: command.Kind, Key: command.Key, Abstract: summary(command.Content, 240), Overview: summary(command.Content, 1200), Content: command.Content,
 				Tags: normalizeTags(command.Tags),
 				Origins: []memoryOrigin{{SessionID: sourceSessionID, SourceChecksum: hex.EncodeToString(digest[:]), Manual: true,
 					Sources: []TrajectorySource{{Seq: fact.Seq, EventID: fact.EventID, Checksum: fact.Checksum, Type: fact.Type}}}}}

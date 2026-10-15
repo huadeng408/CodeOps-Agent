@@ -4,9 +4,55 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 )
+
+type observedMemoryDeadline struct{ remaining chan time.Duration }
+
+func (m *observedMemoryDeadline) Commit(ctx context.Context, _ string) error {
+	deadline, _ := ctx.Deadline()
+	m.remaining <- time.Until(deadline)
+	return nil
+}
+
+func (*observedMemoryDeadline) Recall(context.Context, uint, string, int) (string, error) {
+	return "", nil
+}
+
+func TestRunnerReflectionHonorsExplicitGoRequestDeadline(t *testing.T) {
+	for _, profile := range []struct {
+		name          string
+		timeout, want time.Duration
+	}{{"default", 0, 30 * time.Second}, {"explicit", 180 * time.Second, 180 * time.Second}} {
+		t.Run(profile.name, func(t *testing.T) {
+			ctx := context.Background()
+			workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
+			created, err := workbench.Create(ctx, 7, "repo", "reflection deadline", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			memory := &observedMemoryDeadline{remaining: make(chan time.Duration, 1)}
+			runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "Completed"}, nil, SessionRunnerOptions{Memory: memory, MemoryCommitTimeout: profile.timeout})
+			defer runner.Close()
+			run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "deadline", SessionID: created.ID, OwnerID: 7, ExpectedSeq: 1, Content: "Complete", Actor: identity.Default()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case remaining := <-memory.remaining:
+				if remaining < profile.want-time.Second || remaining > profile.want {
+					t.Fatalf("reflection deadline = %s, want %s", remaining, profile.want)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("reflection did not receive its Go-controlled deadline")
+			}
+			waitForRunStatus(t, runner, created.ID, run.RunID, RunCompleted)
+		})
+	}
+}
 
 type canceledCommitMemory struct{}
 

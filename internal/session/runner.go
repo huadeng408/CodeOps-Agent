@@ -206,13 +206,14 @@ type SessionRunnerOptions struct {
 	QueueSize        int
 	// WorkerCount controls bounded cross-session execution concurrency.
 	// Runs from the same session remain serialized by the durable run CAS.
-	WorkerCount    int
-	Now            func() time.Time
-	Permissions    *permission.Controller
-	AgentSpawn     orchestrator.AgentSpawnHandler
-	AgentLifecycle orchestrator.AgentLifecycleHandler
-	Memory         SessionMemory
-	AgentWorkspace func(context.Context, AgentWorkspaceRequest) (string, error)
+	WorkerCount         int
+	Now                 func() time.Time
+	Permissions         *permission.Controller
+	AgentSpawn          orchestrator.AgentSpawnHandler
+	AgentLifecycle      orchestrator.AgentLifecycleHandler
+	Memory              SessionMemory
+	MemoryCommitTimeout time.Duration
+	AgentWorkspace      func(context.Context, AgentWorkspaceRequest) (string, error)
 	// Workspace resolves Go-admitted task paths before Context or model work.
 	Workspace func(context.Context, uint, string) (TaskModelWorkspace, error)
 	// AgentToolBinding resolves dynamic tools before delegation and again before
@@ -1625,7 +1626,11 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		request.MCPCatalog = r.options.MCPCatalog()
 	}
 	if request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
-		request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
+		if advanced, ok := r.options.Memory.(AdvancedSessionMemory); ok {
+			request.MemoryContextJSON, _ = advanced.RecallWithOptions(ctx, projectionOwner(events), MemoryQuery{Query: input, MaxTokens: 1200, TargetSessionID: key.sessionID})
+		} else {
+			request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
+		}
 	}
 	return request, nil
 }

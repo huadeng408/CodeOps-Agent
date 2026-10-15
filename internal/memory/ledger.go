@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -179,6 +181,12 @@ func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, opti
 		return "", err
 	}
 	items = append(items, experiences...)
+	if options.TargetSessionID != "" {
+		items, err = m.repositoryItems(ctx, ownerID, options.TargetSessionID, items)
+		if err != nil {
+			return "", err
+		}
+	}
 	if options.Detail != "" {
 		for i := range items {
 			if items[i].Kind == "trajectories" {
@@ -197,6 +205,65 @@ func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, opti
 	}
 	encoded, err := json.Marshal(result)
 	return string(encoded), err
+}
+
+func (m *LedgerMemory) repositoryItems(ctx context.Context, owner uint, targetSessionID string, items []Memory) ([]Memory, error) {
+	target, err := m.repositoryKey(ctx, owner, targetSessionID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Memory, 0, len(items))
+	for _, item := range items {
+		source, err := m.repositoryKey(ctx, owner, item.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if source == target {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func (m *LedgerMemory) repositoryKey(ctx context.Context, owner uint, id string) (string, error) {
+	snapshot, err := session.ReadVerifiedSnapshot(ctx, m.ledger, id)
+	if err != nil {
+		return "", err
+	}
+	actual, err := trajectoryOwner(snapshot.Events)
+	if err != nil || actual != owner {
+		return "", session.ErrSessionNotFound
+	}
+	var directory string
+	if snapshot.Events[0].Type == "session/created" {
+		var created struct {
+			WorkingDir string `json:"working_dir"`
+		}
+		if err := json.Unmarshal(snapshot.Events[0].Payload, &created); err != nil {
+			return "", err
+		}
+		directory = created.WorkingDir
+	} else {
+		// A CLI cd changes tool cwd, not the Session's original repository.
+		for i := 0; i < len(snapshot.Events); i++ {
+			if snapshot.Events[i].Type == "session/state" {
+				var state session.Session
+				if err := json.Unmarshal(snapshot.Events[i].Payload, &state); err != nil {
+					return "", err
+				}
+				directory = state.WorkingDir
+				break
+			}
+		}
+	}
+	if directory == "" || !filepath.IsAbs(directory) {
+		return "", errors.New("memory repository scope is unavailable")
+	}
+	directory = filepath.Clean(directory)
+	if runtime.GOOS == "windows" {
+		directory = strings.ToLower(directory)
+	}
+	return trajectoryDigest(directory), nil
 }
 
 func trajectoryOwner(events []session.Event) (uint, error) {

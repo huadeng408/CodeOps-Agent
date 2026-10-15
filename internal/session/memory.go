@@ -23,6 +23,7 @@ type MemoryQuery struct {
 	Kind            string `json:"kind,omitempty"`
 	Detail          string `json:"detail,omitempty"`
 	SourceSessionID string `json:"-"`
+	TargetSessionID string `json:"-"`
 }
 
 type MemoryCommand struct {
@@ -53,7 +54,11 @@ func (r *SessionRunner) commitSessionMemory(ctx context.Context, key runKey) {
 			return
 		}
 	}
-	commitCtx, commitCancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := r.options.MemoryCommitTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	commitCtx, commitCancel := context.WithTimeout(ctx, timeout)
 	err := r.options.Memory.Commit(commitCtx, key.sessionID)
 	commitCancel()
 	if err == nil {
@@ -153,6 +158,7 @@ func (r *SessionRunner) recallSessionMemory(ctx context.Context, events []Event,
 		result.Error = "session memory owner is unavailable"
 		return result
 	}
+	args.TargetSessionID = view.ID
 	if task, _, taskErr := projectAgentTask(events); taskErr != nil {
 		result.Error = "session memory scope is unavailable"
 		return result

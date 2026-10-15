@@ -87,7 +87,10 @@ func (a *CLIAdapter) Add(content string, tags ...string) (Memory, error) {
 	if err != nil {
 		return Memory{}, err
 	}
-	id := experienceID("preferences", key)
+	id, _, err := a.module.experienceIdentity(context.Background(), owner, a.current().ID, "preferences", key, entries)
+	if err != nil {
+		return Memory{}, err
+	}
 	_, err = a.module.Manage(context.Background(), a.current().ID, session.MemoryCommand{Action: "remember", Kind: "preferences", Key: key, Content: content, Tags: normalizeTags(tags), ExpectedRevision: entries[id].Revision})
 	if err != nil {
 		return Memory{}, err
@@ -108,6 +111,10 @@ func (a *CLIAdapter) List() []Memory {
 		return nil
 	}
 	items, err := a.module.experienceItems(context.Background(), owner, "full", "")
+	if err != nil {
+		return nil
+	}
+	items, err = a.module.repositoryItems(context.Background(), owner, a.current().ID, items)
 	if err != nil {
 		return nil
 	}
@@ -145,7 +152,7 @@ func (a *CLIAdapter) LoadRelevant(query string) []Memory {
 	if err != nil {
 		return nil
 	}
-	encoded, err := a.module.RecallWithOptions(context.Background(), owner, session.MemoryQuery{Query: query, Detail: "overview", MaxTokens: 1200})
+	encoded, err := a.module.RecallWithOptions(context.Background(), owner, session.MemoryQuery{Query: query, Detail: "overview", MaxTokens: 1200, TargetSessionID: a.current().ID})
 	if err != nil {
 		return nil
 	}

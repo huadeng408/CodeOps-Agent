@@ -79,6 +79,14 @@ func (gateway *Gateway) SetTaskAdmission(check func(context.Context, string) err
 	gateway.taskAdmission = check
 }
 
+// ReflectionTimeout preserves the default unless Go has an explicit request profile.
+func (gateway *Gateway) ReflectionTimeout() time.Duration {
+	if gateway != nil && gateway.provider.RequestTimeoutSeconds > 0 && gateway.provider.RequestTimeoutSeconds <= 600 {
+		return time.Duration(gateway.provider.RequestTimeoutSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
+
 func (gateway *Gateway) Start() error {
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()

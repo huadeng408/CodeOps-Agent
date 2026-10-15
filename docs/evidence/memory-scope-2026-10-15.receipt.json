@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "issue": 14,
+  "engineering_status": "IMPLEMENTED",
+  "verification_scope": "Go repository-bound Memory calls, immutable provenance, legacy identity and reflection deadline wiring",
+  "source_base_sha": "5442af1cabe8022953b0c1e85d97006d9fa84bd6",
+  "source_binding": {
+    "dirty_runtime_source": true,
+    "frozen_product_inputs_sha256": "8d06f2a78a18d93d39990c92884c036e36d6bf45681c92eeb60cee5ac7337c9b",
+    "test_attempt_index_sha256": "d02903e4c2c0d3cfd7f793c00da52daa185f00956f91857725db397c6e686756"
+  },
+  "scopes": {
+    "unit": "VERIFIED",
+    "integration": "VERIFIED at public Go and CLI/gRPC fixture seams",
+    "real_product": "IN_PROGRESS; no accepted Experience/restart-recall result yet",
+    "source_ci": "NOT_RUN for this implementation commit yet",
+    "release": "NOT_RUN"
+  },
+  "tests": [
+    {"command": "go test ./internal/memory ./internal/session ./internal/cli ./internal/admission ./cmd/server -run 'Memory|Reflection|Recall|Deadline' -count=1 -json", "exit_code": 0, "passed": 76, "skipped": 1, "sha256": "d8f7c6c18e7771bbaa1182b583f218363b2afe0500f54336453ea38cc90112ec"},
+    {"command": "go test -race ./internal/memory -run 'TestMemoryConcurrentReflectionPromotesOneDurableProposal|TestReflectionKeysRemainIndependentAcrossRepositories|TestNewSessionRecallsOnlyItsOwnersRepositoryMemory' -count=1 -json", "exit_code": 0, "passed": 3, "sha256": "4c3bc22d165c3cdb76176d4883c75d4d5071e9bfcf37571c1e720163da935136"},
+    {"command": "go test ./... -count=1 -json", "exit_code": 0, "passed": 1719, "skipped": 79, "sha256": "1c2e512ce1d540af25ae7826ae5dfb89fed6daab74205403e1024efd10603a08"},
+    {"command": "go vet ./...", "exit_code": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"command": "python -m pytest -q", "exit_code": 0, "passed": 2513, "skipped": 17, "warnings": 3, "sha256": "3d76da5883e387f05e443d524eeff78774b3de8230092b4b99b740dccd3e0982"},
+    {"command": "go build -o <owned-product-binary> ./cmd/server", "exit_code": 0},
+    {"command": "git diff --check", "exit_code": 0}
+  ],
+  "go_counts_include_subtests": true,
+  "all_completed_command_attempts": 35,
+  "nonzero_command_attempts_retained": 13,
+  "review": {"classification": "AI_REVIEWED", "standards_hard_findings": 0, "standards_smells": 0, "spec_source_findings": 0, "scope_expansion": 0},
+  "product_failures_retained": ["initial code task: tool round bound with no code modification", "first continuation: stale event cursor 409", "accepted continuation: tool round bound with no code modification", "initial real reflection: zero candidates, not an Experience writeback success"],
+  "unvalidated_specialties_are_not_source_gates": true,
+  "issue_closed": false
+}

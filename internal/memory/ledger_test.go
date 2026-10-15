@@ -19,13 +19,15 @@ import (
 )
 
 type memoryConversationFixture struct {
-	toolArgs string
-	result   orchestrator.ToolResult
-	calls    atomic.Int32
+	toolArgs      string
+	result        orchestrator.ToolResult
+	calls         atomic.Int32
+	memoryContext string
 }
 
 func (f *memoryConversationFixture) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	f.calls.Add(1)
+	f.memoryContext = request.MemoryContextJSON
 	if f.toolArgs != "" {
 		f.result = handlers.Tool(ctx, orchestrator.ToolCall{ID: "recall", Name: "RecallMemory", ParametersJSON: f.toolArgs})
 	}
@@ -43,10 +45,14 @@ func openMemoryLedger(t *testing.T) *session.SQLiteEventLog {
 }
 
 func runMemoryFixture(t *testing.T, ledger session.EventLog, owner uint, input string, module session.SessionMemory, fixture *memoryConversationFixture, permissions ...*permission.Controller) string {
+	return runMemoryFixtureInDirectory(t, ledger, owner, input, module, fixture, ".", permissions...)
+}
+
+func runMemoryFixtureInDirectory(t *testing.T, ledger session.EventLog, owner uint, input string, module session.SessionMemory, fixture *memoryConversationFixture, directory string, permissions ...*permission.Controller) string {
 	t.Helper()
 	ctx := context.Background()
 	workbench := session.NewWorkbench(ledger, nil)
-	view, err := workbench.Create(ctx, owner, "repo", "memory task", input)
+	view, err := workbench.CreateWithWorkingDir(ctx, owner, "repo", "memory task", input, directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,6 +427,34 @@ func TestLedgerMemoryRecallToolKeepsHarnessCallResultAndRejectsOwnerInjection(t 
 	runMemoryFixture(t, ledger, 7, "reject owner injection", module, fixture)
 	if fixture.result.ExitCode == 0 || fixture.result.Output != "" || fixture.result.Error != "invalid memory recall parameters" {
 		t.Fatalf("owner injection accepted: %+v", fixture.result)
+	}
+}
+
+func TestNewSessionRecallsOnlyItsOwnersRepositoryMemory(t *testing.T) {
+	ctx := context.Background()
+	ledger := openMemoryLedger(t)
+	module := NewLedgerMemory(ledger)
+	repository, other := t.TempDir(), t.TempDir()
+	for _, source := range []struct {
+		owner     uint
+		directory string
+		text      string
+	}{{7, repository, "repository memory SAME_REPOSITORY_ANCHOR"}, {7, other, "repository memory OTHER_REPOSITORY_SENTINEL"}, {8, repository, "repository memory FOREIGN_OWNER_SENTINEL"}} {
+		id := runMemoryFixtureInDirectory(t, ledger, source.owner, source.text, module, &memoryConversationFixture{}, source.directory)
+		if _, err := module.Manage(ctx, id, session.MemoryCommand{Action: "remember", Kind: "patterns", Key: "repository/" + id, Content: source.text}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture := &memoryConversationFixture{toolArgs: `{"query":"repository memory","max_tokens":8000}`}
+	permissions := permission.NewController(map[string]permission.Level{"RecallMemory": permission.AutoAllow}, nil)
+	runMemoryFixtureInDirectory(t, ledger, 7, "repository memory", module, fixture, repository, permissions)
+	for name, text := range map[string]string{"automatic context": fixture.memoryContext, "RecallMemory result": fixture.result.Output} {
+		if !strings.Contains(text, "SAME_REPOSITORY_ANCHOR") || strings.Contains(text, "OTHER_REPOSITORY_SENTINEL") || strings.Contains(text, "FOREIGN_OWNER_SENTINEL") {
+			t.Fatalf("%s crossed the current Session repository or lost its permitted memory: %s", name, text)
+		}
+	}
+	if fixture.result.ExitCode != 0 {
+		t.Fatalf("source-verified repository recall failed: %+v", fixture.result)
 	}
 }
 
