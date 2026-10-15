@@ -66,6 +66,7 @@
 - 并发工具入账：[五并发 CAS 缺口、Runner 协调、源码回归及新构建证据](evidence/parallel-tool-ledger-2026-10-16.md)；#17/#18 十轮任务继续独立验收。
 - 修复后的真实 Go 尝试：[两轮完成、参数错误、浏览器恢复与完整失败分母](evidence/browser-task-iteration-2026-10-16.md)；同时确认 Python 提案入口的当前缺口。
 - Python 冻结提案：[离线依赖绑定、同一 Runner／应用边界、受控 runtime 与新便携包](evidence/python-proposal-2026-10-16.md)；#18 的十轮真实浏览器任务仍单独验收。
+- 已知工具结果后的重复命令：[Python 尝试的完整失败分母、Runner 修复、旧任务显式结束及新冻结输入](evidence/repeated-command-2026-10-16.md)；新源码的十轮任务仍待完成。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
