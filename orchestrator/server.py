@@ -690,6 +690,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                 runner = self._new_runner(**({"model_gateway": model_gateway} if model_gateway is not None else {}), **({"mcp_catalog": mcp_catalog} if mcp_catalog is not None else {}))
             if harness_managed:
                 runner.harness_managed = True
+                # Go meters every product call; repository work gets a larger finite allowance.
+                runner.max_tool_rounds = 16
                 runner.harness_memory_context = memory_context
                 runner.harness_context = harness_context
                 runner.layered_context = None

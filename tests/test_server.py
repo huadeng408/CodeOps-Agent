@@ -2040,6 +2040,78 @@ def test_repeated_tool_failures_emit_recovery_guidance(monkeypatch, tmp_path) ->
         server.stop(grace=0)
 
 
+@pytest.mark.parametrize("required_reads, expected_success, expected_calls", [(7, True, 7), (40, False, 16)])
+def test_harness_converse_bounds_repository_analysis(monkeypatch, tmp_path, required_reads, expected_success, expected_calls) -> None:
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    app = OrchestratorServer(ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory")))
+    requests = []
+
+    class ModelService(orchestrator_pb2_grpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            payload = json.loads(request.payload_json)
+            requests.append(payload)
+            completed = {message["tool_call_id"] for message in payload["messages"] if message["role"] == "tool"}
+            if len(completed) == required_reads:
+                message = {"content": "Complete answer: all source evidence has been compared."}
+            elif not payload.get("tools"):
+                message = {"content": "Partial answer: required source evidence is still missing."}
+            else:
+                number = len(completed) + 1
+                message = {"tool_calls": [{"id": f"read-{number}", "type": "function", "function": {
+                    "name": "Read", "arguments": json.dumps({"path": f"source-{number}.py"}),
+                }}]}
+            return orchestrator_pb2.ModelCallResponse(
+                payload_json=json.dumps({"model": "fixture", "choices": [{"message": message}]}).encode(),
+                input_tokens=10, output_tokens=2, cost_status="unknown",
+            )
+
+    model_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+    orchestrator_pb2_grpc.add_ModelGatewayServicer_to_server(ModelService(), model_server)
+    model_port = model_server.add_insecure_port("127.0.0.1:0")
+    model_server.start()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorService(app), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    session_id = "harness-source-analysis"
+    try:
+        messages = [orchestrator_pb2.HarnessMessage(user_input=orchestrator_pb2.UserInput(
+            text="compare the required source evidence", session_id=session_id,
+            actor=_session_actor(session_id), working_dir=str(tmp_path), harness_managed=True,
+            allowed_tools=["Read"],
+            model_gateway=orchestrator_pb2.ModelGatewayBinding(
+                schema_version=1, address=f"127.0.0.1:{model_port}", capability=b"a" * 32,
+                protocol="openai", model="fixture",
+            ),
+        ))]
+        messages.extend(orchestrator_pb2.HarnessMessage(tool_result=orchestrator_pb2.ToolResult(
+            tool_name="Read", tool_call_id=f"read-{number}", output=f"source evidence {number}",
+        )) for number in range(1, required_reads + 1))
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            responses = list(orchestrator_pb2_grpc.OrchestratorStub(channel).Converse(iter(messages)))
+        assert responses[-1].done.success is expected_success
+        assert [response.tool_request.tool_call_id for response in responses if response.HasField("tool_request")] == [
+            f"read-{number}" for number in range(1, expected_calls + 1)
+        ]
+        text = "".join(
+            response.text.text for response in responses if response.HasField("text")
+        )
+        if expected_success:
+            assert "Complete answer: all source evidence has been compared." in text
+        else:
+            assert "Partial answer: required source evidence is still missing." in text
+            assert responses[-1].done.error_code == "tool_round_limit"
+            assert responses[-1].done.retryable is True
+            assert not requests[-1].get("tools")
+        assert len(requests) == expected_calls + 1
+    finally:
+        server.stop(grace=0).wait()
+        model_server.stop(grace=0).wait()
+        app.close()
+
+
 def test_tool_round_limit_gets_final_no_tool_summary(monkeypatch, tmp_path) -> None:
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
         monkeypatch.setenv(name, "")
