@@ -264,3 +264,6 @@ internal/cli/.agent/
 
 # Machine-local Docker build inputs, configuration, data and receipts.
 /deployments/docker/.local/
+
+# Machine-local Windows distribution inputs and portable product artifacts.
+/deployments/windows/.local/

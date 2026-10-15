@@ -4,7 +4,7 @@ server:
   port: "${CODE_AGENT_SERVER_PORT:8081}"
   mode: release
   allowed_origins: "${CODE_AGENT_ALLOWED_ORIGINS:http://127.0.0.1:8081}"
-  frontend_dir: "./frontend/dist"
+  frontend_dir: "${CODE_AGENT_FRONTEND_DIR:./frontend/dist}"
 
 harness:
   session_ledger_path: "${CODE_AGENT_SESSION_LEDGER_PATH:.agent/local/sessions.sqlite}"
@@ -20,4 +20,4 @@ jwt:
 log:
   level: info
   format: json
-  output_path: "./logs"
+  output_path: "${CODE_AGENT_LOG_PATH:./logs}"

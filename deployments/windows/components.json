@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "platform": "windows-amd64",
+  "python": {
+    "version": "3.13.16",
+    "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+    "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
+    "license": "PSF-2.0 and included third-party notices",
+    "release": "https://www.python.org/downloads/release/python-31316/",
+    "source": "https://www.python.org/ftp/python/3.13.16/Python-3.13.16.tar.xz"
+  },
+  "git": {
+    "version": "2.56.0.windows.2",
+    "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip",
+    "sha256": "da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be",
+    "license": "GPL-2.0-only and included third-party notices",
+    "release": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.2",
+    "source": "https://github.com/git-for-windows/git/tree/v2.56.0.windows.2"
+  }
+}

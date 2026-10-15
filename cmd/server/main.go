@@ -741,7 +741,14 @@ func readinessHandler(embeddingFn func() string, continuationFn func() session.C
 }
 
 func healthzHandlerWithContinuation(statusFn func() string, continuationFn func() session.ContinuationSupervisorStatus) gin.HandlerFunc {
+	instance := os.Getenv("CODE_AGENT_LAUNCH_ID")
+	if len(instance) != 32 || strings.Trim(instance, "0123456789abcdef") != "" {
+		instance = ""
+	}
 	return func(c *gin.Context) {
+		if instance != "" {
+			c.Header("X-CodeOps-Instance", instance)
+		}
 		body := gin.H{"status": "ok", "embedding_preflight": statusFn()}
 		if continuationFn != nil {
 			state := continuationFn()

@@ -102,6 +102,17 @@ func TestHealthzReportsEmbeddingPreflightOK(t *testing.T) {
 	}
 }
 
+func TestHealthzIdentifiesOwnedLauncherInstance(t *testing.T) {
+	t.Setenv("CODE_AGENT_LAUNCH_ID", "32e41aa56635461f90f97d0cabd2ed21")
+	router := gin.New()
+	router.GET("/healthz", healthzHandler(func() string { return "ok" }))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("X-CodeOps-Instance") != "32e41aa56635461f90f97d0cabd2ed21" {
+		t.Fatalf("launcher cannot identify its server: status=%d header=%q", recorder.Code, recorder.Header().Get("X-CodeOps-Instance"))
+	}
+}
+
 func TestHealthzReportsEmbeddingPreflightDegraded(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
