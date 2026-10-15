@@ -3,8 +3,8 @@
 范围：[GitHub #14](https://github.com/huadeng408/CodeOps-Agent/issues/14) 的
 Go 召回隔离、Experience 来源、兼容身份及反思期限接线。
 工程状态 `IMPLEMENTED`；单测与集成范围 `VERIFIED`。
-真实反思写回、进程重启后的空新 Session 召回仍在验证，#14 尚未关闭。
-本记录不声明产品或完整发布通过。
+本记录保留源码阶段的验证结果；后续真实反思写回、进程重启后的空新 Session 召回
+与跨仓库拒绝见[产品验收](memory-product-2026-10-15.md)。本记录不声明完整发布通过。
 
 ## 行为
 
@@ -46,7 +46,7 @@ SHA-256 `d02903e4c2c0d3cfd7f793c00da52daa185f00956f91857725db397c6e686756`。
 Standards：剩余硬违规 0，独立 Smell 0。Spec：剩余源码缺陷 0，范围扩张 0。
 结论属于 AI 源码审阅，不是 `HUMAN_REVIEWED` 或真实产品验收。
 
-真实产品输入已冻结，首个原任务及其续行均因工具轮次上限停止且未写代码；
+源码提交时真实产品输入已冻结，首个原任务及其续行均因工具轮次上限停止且未写代码；
 首轮真实反思返回空候选，不能视为 Experience 写回通过。原失败与事件游标冲突保留，
 后续原需求增加单轮操作范围约束继续验证，未提供实现或 patch。
 相关原始输入与产物在本机 `deployments/docker/.local/receipts/memory-product-20261015/v1/`；

@@ -26,7 +26,7 @@
 | 范围 | 仍需完成的验收 |
 | --- | --- |
 | 模型代码任务与提案 | #7–#10 的提案、批准、文件生命周期及应用中断核验已按各自范围验证；仍需 Go／Python 完整真实模型任务与多轮浏览器验收 |
-| Memory 与故障专项 | #12 取消和 #13 旧 Session/进程恢复已按各自范围验证；仍需真实反思写回、重启后的空新会话召回及完整故障矩阵 |
+| Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
 | Windows 便携交付 | 脱离开发者 PATH 的一键 EXE 和首批完整浏览器验收 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
@@ -58,7 +58,7 @@
 - #12 代码任务取消：[Go fence、资源归属、provider/tool/approval 实际取消与结果留存证据](evidence/task-cancellation-2026-10-15.md)。
 - 模型 scope 并发释放：[持久释放窗口复现、精确撤销及 Go 回归](evidence/model-scope-release-2026-10-15.md)。
 - #13 任务故障与重开：[真实任务故障、Go/Python 重启、同一旧 Session 续行及严格拒绝证据](evidence/task-recovery-2026-10-15.md)；[源码 CI 异步取消回归修正](evidence/task-recovery-ci-2026-10-15.md)。
-- #14 Memory 范围实现：[同用户同仓库、来源完整性、旧身份及共享期限的源码验证](evidence/memory-scope-2026-10-15.md)；真实反思写回与重启召回仍待验收。
+- #14 Memory：[同用户同仓库、来源完整性与旧身份的源码验证](evidence/memory-scope-2026-10-15.md)；[真实反思写回、进程重启后空新会话召回与跨仓库拒绝](evidence/memory-product-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。
 - OpenSandbox 选型依据：[固定源码调研](sandbox-options-2026-10-11.md)；当前采用用户后续选择的 OpenSandbox。

@@ -27,5 +27,7 @@ fixture 暂停第一条 scope release，等待竞争清理的释放／取消决�
 完整输出保存在本机 `.scratch/memory-product-20261015/`，摘要及 SHA-256 见
 [范围收据](model-scope-release-2026-10-15.receipt.json)。原全量 Memory/Go/Python
 结果仍绑定 [9ee7a6bb 的范围证据](memory-scope-2026-10-15.md)，不冒充本补丁的新全量结果。
-新提交的完整源码 CI 另行核对。Standards：硬违规 0／Smell 0；Spec：源码缺陷 0，
+修复提交 `819216856e4eb80a2c55931afeb6e82172b4d588` 的
+[完整源码 CI 38666102285](https://github.com/huadeng408/CodeOps-Agent/actions/runs/38666102285)
+四个 job 全部通过；原范围收据保留提交时的状态。Standards：硬违规 0／Smell 0；Spec：源码缺陷 0，
 属于现有取消契约的必要修复。均为 `AI_REVIEWED`。
