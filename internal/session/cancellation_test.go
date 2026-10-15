@@ -862,7 +862,8 @@ func TestRootCancellationAcknowledgesItsQueuedChildWorkspace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if view.Run != nil && view.Run.Status == RunCanceling && view.Run.Attempt == 0 {
+		// The queued child can finish cancellation before the observer sees its fence.
+		if view.Run != nil && view.Run.Attempt == 0 && (view.Run.Status == RunCanceling || view.Run.Status == RunCanceled && view.Run.CancellationState == "stopped") {
 			break
 		}
 		if time.Now().After(deadline) {
