@@ -127,6 +127,133 @@ func TestFileToolsWriteAndEditProduceCompleteFileAndChanges(t *testing.T) {
 	}
 }
 
+func TestFileToolsEditLFExcerptInCRLFFile(t *testing.T) {
+	root := t.TempDir()
+	executor := NewExecutor(root)
+	defer executor.Close()
+	path := filepath.Join(root, "source.go")
+	before := "// untouched\r\nfunc value() int {\r\n\treturn 1\r\n}\r\n// tail\r\n"
+	want := "// untouched\r\nfunc value() int {\r\n\treturn 2\r\n}\r\n// tail\r\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Read", Arguments: map[string]any{"path": "source.go"},
+	})
+	if err != nil || !strings.Contains(read.Output, "return 1") || strings.Contains(read.Output, "\r") {
+		t.Fatalf("Read should expose the LF excerpt: output=%q, error=%v", read.Output, err)
+	}
+	edited, err := executor.Execute(context.Background(), ToolRequest{
+		Name: "Edit", Arguments: map[string]any{
+			"path": "source.go",
+			"old":  "func value() int {\n\treturn 1\n}",
+			"new":  "func value() int {\n\treturn 2\n}",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Edit the displayed LF excerpt: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != want {
+		t.Fatalf("Edit should preserve CRLF and outside content: data=%q, error=%v", data, err)
+	}
+	if len(edited.Changes) != 1 || edited.Changes[0].Before != before || edited.Changes[0].After != want {
+		t.Fatalf("Edit changes must retain the exact file bytes: %+v", edited.Changes)
+	}
+	finalInfo, err := os.Stat(path)
+	if err != nil || finalInfo.Mode().Perm() != originalInfo.Mode().Perm() {
+		t.Fatalf("Edit changed file permissions: %v", err)
+	}
+}
+
+func TestFileToolsEditNewlineMappingKeepsExactMatchGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		before     string
+		old        string
+		new        string
+		want       string
+		replaceAll bool
+		wantErr    bool
+	}{
+		{
+			name: "LF exact match", before: "one\ntwo\n", old: "one\ntwo", new: "ONE\nTWO",
+			want: "ONE\nTWO\n",
+		},
+		{
+			name: "explicit CRLF exact match", before: "one\r\ntwo\r\n", old: "one\r\ntwo", new: "ONE\r\nTWO",
+			want: "ONE\r\nTWO\r\n",
+		},
+		{
+			name: "explicit replacement CRLF is not doubled", before: "one\r\ntwo\r\n", old: "one\ntwo", new: "ONE\r\nTWO",
+			want: "ONE\r\nTWO\r\n",
+		},
+		{
+			name: "final newline remains absent", before: "one\r\ntwo", old: "one\ntwo", new: "ONE\nTWO",
+			want: "ONE\r\nTWO",
+		},
+		{
+			name: "nonunique excerpt refuses", before: "one\r\ntwo\r\none\r\ntwo\r\n", old: "one\ntwo", new: "ONE\nTWO",
+			wantErr: true,
+		},
+		{
+			name: "explicit replace all", before: "one\r\ntwo\r\none\r\ntwo\r\n", old: "one\ntwo", new: "ONE\nTWO",
+			want: "ONE\r\nTWO\r\nONE\r\nTWO\r\n", replaceAll: true,
+		},
+		{
+			name: "changed indentation refuses", before: "one\r\n\ttwo\r\n", old: "one\n  two", new: "ONE\nTWO",
+			wantErr: true,
+		},
+		{
+			name: "mixed newlines have no inferred mapping", before: "one\r\ntwo\nthree\r\n", old: "one\ntwo", new: "ONE\nTWO",
+			wantErr: true,
+		},
+		{
+			name: "standalone CR has no inferred mapping", before: "head\rone\r\ntwo\r\n", old: "one\ntwo", new: "ONE\nTWO",
+			wantErr: true,
+		},
+		{
+			name: "raw exact match in mixed file wins", before: "head\r\none\ntwo\nfoot\r\n", old: "one\ntwo", new: "ONE\nTWO",
+			want: "head\r\nONE\nTWO\nfoot\r\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			executor := NewExecutor(root)
+			defer executor.Close()
+			path := filepath.Join(root, "file.txt")
+			if err := os.WriteFile(path, []byte(tc.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := executor.Execute(context.Background(), ToolRequest{
+				Name: "Edit", Arguments: map[string]any{
+					"path": "file.txt", "old": tc.old, "new": tc.new, "replace_all": tc.replaceAll,
+				},
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Edit error=%v, wantErr=%t", err, tc.wantErr)
+			}
+			want := tc.want
+			if tc.wantErr {
+				want = tc.before
+				if len(result.Changes) != 0 {
+					t.Fatalf("refused edit reported changes: %+v", result.Changes)
+				}
+			} else if len(result.Changes) != 1 || result.Changes[0].Before != tc.before || result.Changes[0].After != want {
+				t.Fatalf("Edit changes differ from file bytes: %+v", result.Changes)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != want {
+				t.Fatalf("file bytes=%q, want=%q, error=%v", data, want, err)
+			}
+		})
+	}
+}
+
 func TestFileToolsNormalizeAbsoluteChangePaths(t *testing.T) {
 	root := t.TempDir()
 	executor := NewExecutor(root)

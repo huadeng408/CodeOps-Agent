@@ -35,6 +35,13 @@ func (e *Executor) executeEdit(_ context.Context, args map[string]any) (ToolResu
 	before := string(data)
 	replaceAll := boolArg(args, "replace_all", "replaceAll", "all")
 	count := strings.Count(before, oldText)
+	// Read displays LF; map its exact excerpt back only for uniform CRLF files.
+	if count == 0 && strings.Contains(oldText, "\n") && !strings.Contains(oldText, "\r") &&
+		strings.Contains(before, "\r\n") && !strings.ContainsAny(strings.ReplaceAll(before, "\r\n", ""), "\r\n") {
+		oldText = strings.ReplaceAll(oldText, "\n", "\r\n")
+		newText = strings.ReplaceAll(strings.ReplaceAll(newText, "\r\n", "\n"), "\n", "\r\n")
+		count = strings.Count(before, oldText)
+	}
 	if count == 0 {
 		err := fmt.Errorf("old text not found in %s", path)
 		return ToolResult{Name: "Edit", Error: err.Error(), ExitCode: 1}, err
