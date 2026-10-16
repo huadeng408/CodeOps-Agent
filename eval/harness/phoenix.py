@@ -152,7 +152,7 @@ def _project_pages(phoenix_url: str, project: str, start_time: str, filters=()):
 
 
 def read_product_spans(phoenix_url: str, project: str, start_time: str, session_id: str, run_id: str) -> list[CapturedSpan]:
-    """Find one durable Go run and read its whole backend trace, not a subset."""
+    """Read every actual attempt trace of one durable Go run, without judging it."""
     roots = []
     filters = (("name", "agent.main"), ("attribute", "session.id:" + json.dumps(session_id)),
                ("attribute", "session.run_id:" + json.dumps(run_id)))
@@ -162,14 +162,15 @@ def read_product_spans(phoenix_url: str, project: str, start_time: str, session_
                      span.attributes.get("session.id") == session_id and span.attributes.get("session.run_id") == run_id)
     if not roots:
         return []
-    if len(roots) != 1:
-        raise PhoenixReadbackError("product Session/run matched multiple roots")
+    if len({(span.trace_id, span.span_id) for span in roots}) != len(roots):
+        raise PhoenixReadbackError("product Session/run matched duplicate roots")
     result = []
-    for page in _project_pages(phoenix_url, project, start_time, (("trace_id", roots[0].trace_id),)):
-        spans, _ = _parse_product_page(page)
-        if any(span.trace_id != roots[0].trace_id for span in spans):
-            raise PhoenixReadbackError("backend returned an unexpected trace")
-        result.extend(spans)
+    for trace_id in sorted({span.trace_id for span in roots}):
+        for page in _project_pages(phoenix_url, project, start_time, (("trace_id", trace_id),)):
+            spans, _ = _parse_product_page(page)
+            if any(span.trace_id != trace_id for span in spans):
+                raise PhoenixReadbackError("backend returned an unexpected trace")
+            result.extend(spans)
     return result
 
 

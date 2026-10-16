@@ -116,3 +116,63 @@ def test_product_readback_locates_go_run_then_reads_all_its_spans(monkeypatch) -
     assert "session.run_id" in urls[0] and "name=agent.main" in urls[0]
     assert "trace_id=" + "a" * 32 in urls[1]
     assert "cursor=child" in urls[2]
+
+
+@pytest.mark.parametrize("same_trace", [True, False])
+def test_product_readback_preserves_all_recovered_execution_attempts(monkeypatch, same_trace) -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from eval.harness import phoenix
+
+    roots, children = [], []
+    for trace_id, root_id, child_id in [("a" * 32, "b" * 16, "d" * 16),
+                                       ("a" * 32 if same_trace else "f" * 32, "c" * 16, "e" * 16)]:
+        root = _span(run_id="", instance_id="session-1", name="agent.main")
+        root["context"] = {"trace_id": trace_id, "span_id": root_id}
+        root["parent_id"] = None
+        root["attributes"].update({"session.id": "session-1", "session.run_id": "run:recovered"})
+        child = _span(run_id="", instance_id="session-1", name="execute_tool Read")
+        child["context"] = {"trace_id": trace_id, "span_id": child_id}
+        child["parent_id"] = root_id
+        roots.append(root)
+        children.append(child)
+    children[0]["status_code"] = "ERROR"
+
+    def request(url):
+        query = parse_qs(urlsplit(url).query)
+        if "name" in query:
+            return {"data": [roots[1]]} if "cursor" in query else {"data": [roots[0]], "next_cursor": "second-root"}
+        trace_id = query["trace_id"][0]
+        items = [span for pair in zip(roots, children) for span in pair if span["context"]["trace_id"] == trace_id]
+        return {"data": items[1:]} if "cursor" in query else {"data": items[:1], "next_cursor": "remaining-spans"}
+
+    monkeypatch.setattr(phoenix, "_request_json", request)
+    spans = phoenix.read_product_spans("http://phoenix", "default", "2026-10-16T00:00:00Z", "session-1", "run:recovered")
+    assert {span.span_id for span in spans} == {"b" * 16, "c" * 16, "d" * 16, "e" * 16}
+    assert len(spans) == 4
+    assert sum(span.name == "agent.main" for span in spans) == 2
+    assert sum(span.status == "ERROR" for span in spans) == 1
+
+
+@pytest.mark.parametrize("failure,reason", [("duplicate-root", "duplicate roots"),
+                                         ("foreign-trace", "unexpected trace"),
+                                         ("private-content", "sensitive fields")])
+def test_product_readback_keeps_source_refusals(monkeypatch, failure, reason) -> None:
+    from eval.harness import phoenix
+
+    root = _span(run_id="", instance_id="session-1", name="agent.main")
+    root["attributes"].update({"session.id": "session-1", "session.run_id": "run:actual"})
+
+    def request(url):
+        if "name=agent.main" in url:
+            return {"data": [root, root] if failure == "duplicate-root" else [root]}
+        child = _span(run_id="", instance_id="session-1")
+        if failure == "foreign-trace":
+            child["context"]["trace_id"] = "f" * 32
+        else:
+            child["attributes"]["gen_ai.input.messages"] = "private content"
+        return {"data": [root, child]}
+
+    monkeypatch.setattr(phoenix, "_request_json", request)
+    with pytest.raises(PhoenixReadbackError, match=reason):
+        phoenix.read_product_spans("http://phoenix", "default", "2026-10-16T00:00:00Z", "session-1", "run:actual")

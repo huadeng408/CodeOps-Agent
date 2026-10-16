@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["success", "multi-success", "multi-unknown-usage", "multi-repeated-tool", "multi-missing-round", "multi-omit-request", "multi-omit-unadmitted", "multi-unavailable", "unavailable", "missing-pins", "secret-name", "secret-event", "secret-status", "raw-prompt", "broken-sequence", "binary-mismatch", "source-mismatch", "sensitive-id"])
+@pytest.mark.parametrize("mode", ["success", "recovered-run", "multi-success", "multi-unknown-usage", "multi-repeated-tool", "multi-missing-round", "multi-omit-request", "multi-omit-unadmitted", "multi-unavailable", "unavailable", "missing-pins", "secret-name", "secret-event", "secret-status", "raw-prompt", "broken-sequence", "binary-mismatch", "source-mismatch", "sensitive-id"])
 def test_external_product_trace_command_reports_only_verified_readback(tmp_path, capsys, mode):
     from eval.product_trace import main
 
@@ -38,6 +38,11 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
                               "parent_id": None if index == 1 else "2" * 16 if index == 4 else "4" * 16 if index == 5 else "1" * 16,
                               "end_time": "2026-10-15T00:00:01Z", "attributes": attributes})
             sensitive = "sk-" + "fixture" * 5
+            if mode == "recovered-run":
+                spans[0]["status_code"] = "ERROR"
+                spans.append({"name": "agent.main", "context": {"trace_id": "a" * 32, "span_id": "6" * 16},
+                              "parent_id": None, "end_time": "2026-10-15T00:00:02Z",
+                              "attributes": {"session.id": session_id, "session.run_id": run_id}})
             if mode == "secret-name": spans[-1]["name"] = sensitive
             elif mode == "secret-event": spans[-1]["events"] = [{"attributes": {"exception.message": sensitive}}]
             elif mode == "secret-status": spans[-1]["status_message"] = sensitive
@@ -55,7 +60,7 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
                     spans.append({"name": "execute_tool Write", "context": {"trace_id": "b" * 32, "span_id": "a" * 16}, "parent_id": "6" * 16, "end_time": "2026-10-15T00:00:01Z", "attributes": {"gen_ai.tool.call.id": "tool-1", "gen_ai.tool.name": "Write"}})
                 if mode == "multi-missing-round":
                     spans = []
-            self.wfile.write(json.dumps({"data": spans[:1] if "name=agent.main" in self.path else spans}).encode())
+            self.wfile.write(json.dumps({"data": [span for span in spans if span["name"] == "agent.main"] if "name=agent.main" in self.path else spans}).encode())
 
         def log_message(self, *_args):
             pass
@@ -120,6 +125,15 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
         assert receipt["capture_state"] == "complete" and receipt["backend_readback"] is True
         assert receipt["report"]["span_count"] == (10 if mode == "multi-repeated-tool" else 9 if multi else 5) and len(receipt["input_sha256"]) == 4
         assert receipt["report"]["expected_tools"] == (2 if mode == "multi-repeated-tool" else 1)
+    elif mode == "recovered-run":
+        assert result == 3 and receipt["status"] == "BLOCKED"
+        assert receipt["capture_state"] == "partial" and receipt["backend_readback"] is True
+        assert receipt["report"]["span_count"] == 6 and receipt["report"]["verdict"] == "FAIL"
+        assert "product capture must contain exactly one Go root per requested run" in receipt["report"]["problems"]
+        assert "product tree includes an error or canceled span" in receipt["report"]["problems"]
+        assert "unavailable_runs" not in receipt["attempts"][0]
+        capture = json.loads((output / receipt["attempts"][0]["artifact"]).read_text(encoding="utf-8"))
+        assert sum(span["name"] == "agent.main" for span in capture["spans"]) == 2
     elif mode == "multi-unknown-usage":
         assert result == 3 and receipt["status"] == "BLOCKED"
         assert receipt["capture_state"] == "complete" and receipt["backend_readback"] is True
