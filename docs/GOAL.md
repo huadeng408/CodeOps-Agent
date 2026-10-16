@@ -69,7 +69,7 @@
 - 已知工具结果后的重复命令：[Python 尝试的完整失败分母、Runner 修复、旧任务显式结束及新冻结输入](evidence/repeated-command-2026-10-16.md)。
 - Python 真实多轮任务：[模型修改、项目测试、实际提案批准应用、原副本保护和未通过的 Memory／Trace 范围](evidence/python-browser-task-2026-10-16.md)；完整失败和冻结场景分母保留，#18 继续打开。
 - Go 真实多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；#17 继续打开，后续源码修复独立绑定。
-- 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；真实反思和产品错误展示待新运行验证。
+- 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；[同会话取消后真实反思写回及跨进程 fixture 修正](evidence/memory-cancellation-product-2026-10-16.md)。provider 错误展示和十轮同任务剩余范围仍待各自验证。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。

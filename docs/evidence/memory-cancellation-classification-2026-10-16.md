@@ -39,4 +39,6 @@
 
 交付实际 diff 的双轴审查也分别为 Standards 0 项、Spec 0 项；记录在同级 `delivery-standards-review.md`、`delivery-spec-review.md`，未将 AI 审查标为人工审查。可选集成原生 fixture 收据分别在 `.runtime/e2e/memory-ledger-process-459274614/` 与 `.runtime/e2e/memory-ledger-process-1710861566/`；失败根因未随本修复扩展处理。
 
-旧 Go／Python 产品任务收据保持原源码和失败结果。该源码修复不回填旧 Memory、删去失败轮次、重写 Trace 或宣称 #17／#18 整体验收通过。
+后续已定位并修正该可选 fixture 的异步读取竞态，实际源码三次各 10/10；另完成取消后同会话真实反思写回，见[产品与 fixture 后续证据](memory-cancellation-product-2026-10-16.md)。本页保留上轮命令、分母和当时的失败，不用后续结果覆盖原收据。
+
+旧 Go／Python 产品任务收据保持原源码和失败结果。该源码修复不回填旧反思、删去失败轮次、重写 Trace 或宣称 #17／#18 整体验收通过。

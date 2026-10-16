@@ -191,10 +191,15 @@ func runMemoryProcessPhase(t *testing.T, phase, directory string) {
 		observation.SessionID = views[0].ID
 		// No conversation adapter exists in this process. Recovery must only
 		// supplement the missing immutable commit, never execute the model.
-		runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), nil, nil, session.SessionRunnerOptions{Memory: module})
+		observed := &recoveredMemory{LedgerMemory: module, commits: make(chan error, 4)}
+		runner := session.NewSessionRunner(session.NewWorkbench(ledger, nil), nil, nil, session.SessionRunnerOptions{Memory: observed})
 		defer runner.Close()
 		if err := runner.Recover(ctx); err != nil {
 			t.Fatal(err)
+		}
+		// Startup queues both owners' commits; wait for both before checking recall.
+		for range 2 {
+			awaitRecoveredMemory(t, observed.commits)
 		}
 		result := decodeMemoryRecall(t, module, 7, "anchor", 1200)
 		observation.Checks["owner_isolation"] = len(result.Entries) == 1 && result.Entries[0].Memory.SessionID == observation.SessionID && !strings.Contains(result.Entries[0].Memory.Content, "foreign private")
@@ -220,6 +225,9 @@ func runMemoryProcessPhase(t *testing.T, phase, directory string) {
 		observation.Checks["source_provenance"] = buildErr == nil && trajectory.Complete && trajectory.SourceChecksum != "" && trajectory.SourceChecksum == observation.SourceChecksum
 		if err := runner.Recover(ctx); err != nil {
 			t.Fatal(err)
+		}
+		for range 2 {
+			awaitRecoveredMemory(t, observed.commits)
 		}
 		after, readErr := session.ReadVerifiedSnapshot(ctx, ledger, observation.SessionID)
 		if readErr != nil {
