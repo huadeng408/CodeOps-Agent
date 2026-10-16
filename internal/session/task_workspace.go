@@ -109,53 +109,60 @@ func (t *TaskWorkspaces) ToolWorkspace(ctx context.Context, owner uint, id, call
 }
 
 func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, currentToolID string) (TaskModelWorkspace, error) {
-	snapshot, sessionView, err := t.read(ctx, owner, id)
-	if err != nil {
-		return TaskModelWorkspace{}, err
-	}
-	view, err := t.project(ctx, snapshot.Events, sessionView)
-	if err != nil {
-		return TaskModelWorkspace{}, err
-	}
-	applications, err := taskApplications(snapshot.Events)
-	if err != nil {
-		return TaskModelWorkspace{}, err
-	}
-	for _, application := range applications {
-		if application.View.State == "unknown" || application.View.State == "partial" {
-			return TaskModelWorkspace{}, ErrSessionStateConflict
-		}
-	}
-	prepared, state, err := taskPreparation(snapshot.Events)
-	if err != nil {
-		return TaskModelWorkspace{}, err
-	}
-	expired := prepared != nil && state == "prepared" && time.Now().After(prepared.Task.LeaseExpiresAt)
-	if !view.Available || view.State != "prepared" && !expired || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
-		view.Test != nil && view.Test.State == "unknown" && !view.Test.Stopped ||
-		view.Proposal != nil && !view.Proposal.Test.Stopped {
-		return TaskModelWorkspace{}, ErrSessionStateConflict
-	}
-	if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
-		return TaskModelWorkspace{}, err
-	}
-	if expired {
-		if err := t.verifyTask(ctx, prepared.Task, snapshot.Events); err != nil {
-			return TaskModelWorkspace{}, ErrSessionStateConflict
-		}
-		renewal := taskLeaseRenewalPayload{LeaseID: prepared.Task.LeaseID, PreviousExpiresAt: prepared.Task.LeaseExpiresAt,
-			ExpiresAt: time.Now().UTC().Add(worktree.TaskLeaseTTL)}
-		if _, err := t.workbench.ledger.Append(ctx, id, int64(len(snapshot.Events)), taskLeaseRenewedEvent, renewal); err != nil {
+	for conflicts := 0; conflicts < 8; {
+		snapshot, sessionView, err := t.read(ctx, owner, id)
+		if err != nil {
 			return TaskModelWorkspace{}, err
 		}
-		t.workbench.signal(id)
-		return t.modelWorkspace(ctx, owner, id, currentToolID)
+		view, err := t.project(ctx, snapshot.Events, sessionView)
+		if err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		applications, err := taskApplications(snapshot.Events)
+		if err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		for _, application := range applications {
+			if application.View.State == "unknown" || application.View.State == "partial" {
+				return TaskModelWorkspace{}, ErrSessionStateConflict
+			}
+		}
+		prepared, state, err := taskPreparation(snapshot.Events)
+		if err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		expired := prepared != nil && state == "prepared" && time.Now().After(prepared.Task.LeaseExpiresAt)
+		if !view.Available || view.State != "prepared" && !expired || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
+			view.Test != nil && view.Test.State == "unknown" && !view.Test.Stopped ||
+			view.Proposal != nil && !view.Proposal.Test.Stopped {
+			return TaskModelWorkspace{}, ErrSessionStateConflict
+		}
+		if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		if expired {
+			if err := t.verifyTask(ctx, prepared.Task, snapshot.Events); err != nil {
+				return TaskModelWorkspace{}, ErrSessionStateConflict
+			}
+			renewal := taskLeaseRenewalPayload{LeaseID: prepared.Task.LeaseID, PreviousExpiresAt: prepared.Task.LeaseExpiresAt,
+				ExpiresAt: time.Now().UTC().Add(worktree.TaskLeaseTTL)}
+			if _, err := t.workbench.ledger.Append(ctx, id, int64(len(snapshot.Events)), taskLeaseRenewedEvent, renewal); err != nil {
+				if errors.Is(err, ErrSequenceConflict) {
+					conflicts++
+					continue
+				}
+				return TaskModelWorkspace{}, err
+			}
+			t.workbench.signal(id)
+			continue
+		}
+		workspace := TaskModelWorkspace{WorkingDir: filepath.Join(t.storage, view.WorkspaceID)}
+		if view.Dependency != nil {
+			workspace.DependencyOperationID = view.Dependency.OperationID
+		}
+		return workspace, nil
 	}
-	workspace := TaskModelWorkspace{WorkingDir: filepath.Join(t.storage, view.WorkspaceID)}
-	if view.Dependency != nil {
-		workspace.DependencyOperationID = view.Dependency.OperationID
-	}
-	return workspace, nil
+	return TaskModelWorkspace{}, ErrSequenceConflict
 }
 
 func taskToolOutcomesKnown(events []Event, currentToolID string) error {

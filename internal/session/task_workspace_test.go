@@ -236,81 +236,155 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-first native Git directory pin contract")
 	}
-	ctx := context.Background()
-	repo, storage := taskWorkspaceRepository(t), t.TempDir()
-	ledger := openWorkbenchTestLedger(t)
-	w := NewWorkbench(ledger, nil)
-	created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "parallel reads", "", repo)
-	if err != nil {
-		t.Fatal(err)
+	for _, scenario := range []string{"heartbeat", "last allowed renewal", "unknown result", "canceled run", "storage error", "continued contention"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			repo, storage := taskWorkspaceRepository(t), t.TempDir()
+			ledger := openWorkbenchTestLedger(t)
+			racing := &taskLeaseRaceLog{EventLog: ledger}
+			w := NewWorkbench(racing, nil)
+			created, err := w.CreateWithWorkingDir(ctx, 7, "repo", "parallel reads", "", repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).WithBaselineRuntime(TaskBaselineRuntime{
+				Runner:  sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage}),
+				Ready:   func(context.Context) error { return nil },
+				Acquire: func(context.Context, uint, string) error { return nil },
+				Finish:  func(context.Context, uint, string) error { return nil },
+			})
+			tasks.manager.SetAgentLeaseTTL(5 * time.Second)
+			prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
+			if err != nil || prepared.State != "prepared" {
+				t.Fatalf("prepare: %+v %v", prepared, err)
+			}
+			message, err := w.AppendUserMessage(ctx, 7, created.ID, int64(prepared.EventCount), "read concurrently")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint, err := w.CreateCheckpoint(ctx, 7, created.ID, int64(prepared.EventCount+1), message.ID, "reads")
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := continuationRequestPayloadForTest(ctx, w, created.ID, checkpoint.Hash, "request-reads", "run-reads", testRunnerActor())
+			if err != nil {
+				t.Fatal(err)
+			}
+			seq := int64(prepared.EventCount + 2)
+			appendFact := func(kind string, payload any) {
+				t.Helper()
+				if _, err := ledger.Append(ctx, created.ID, seq, kind, payload); err != nil {
+					t.Fatal(err)
+				}
+				seq++
+			}
+			appendFact(continuationEventType, payload)
+			appendFact(runLeasedEventType, runLeasePayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", WorkerID: "worker", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()})
+			for index, name := range []string{"Read", "Grep"} {
+				call := toolCallPayload{RunID: "run-reads", ToolCallID: fmt.Sprintf("read-%d", index), ToolName: name, ArgumentsJSON: `{"path":"main.go"}`}
+				appendFact("tool/call", call)
+				appendFact(commitPendingEventType, call)
+				appendFact(toolDispatchedType, call)
+			}
+			time.Sleep(time.Until(*prepared.LeaseExpiresAt) + 20*time.Millisecond)
+			storageError := errors.New("fixture storage unavailable")
+			conflicts := 0
+			var interleave func() error
+			interleave = func() error {
+				switch scenario {
+				case "unknown result":
+					appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: "Grep", OutcomeUnknown: true})
+					return nil
+				case "canceled run":
+					appendFact(runCanceledEventType, runTerminalPayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", Attempt: 1, CancellationState: "stopped"})
+					return nil
+				case "storage error":
+					return storageError
+				case "last allowed renewal":
+					if conflicts == 7 {
+						return nil
+					}
+					fallthrough
+				case "continued contention":
+					conflicts++
+					racing.beforeRenew = interleave
+				}
+				appendFact(runHeartbeatEventType, runLeasePayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", WorkerID: "worker", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()})
+				return nil
+			}
+			racing.beforeRenew = interleave
+			if scenario != "heartbeat" && scenario != "last allowed renewal" {
+				readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				workspace, err := tasks.ToolWorkspace(readCtx, 7, created.ID, "read-0")
+				want := ErrSessionStateConflict
+				if scenario == "storage error" {
+					want = storageError
+				} else if scenario == "continued contention" {
+					want = ErrSequenceConflict
+				}
+				if !errors.Is(err, want) || workspace.WorkingDir != "" {
+					t.Fatalf("unsafe or unavailable renewal was admitted: %+v %v, want %v", workspace, err, want)
+				}
+				after, err := tasks.Inspect(ctx, 7, created.ID)
+				if err != nil || !after.LeaseExpiresAt.Equal(*prepared.LeaseExpiresAt) || after.WorkspaceID != prepared.WorkspaceID {
+					t.Fatalf("refused read changed the retained lease: %+v %v", after, err)
+				}
+				return
+			}
+			for _, callID := range []string{"read-0", "read-1"} {
+				workspace, err := tasks.ToolWorkspace(ctx, 7, created.ID, callID)
+				if err != nil || workspace.WorkingDir != filepath.Join(storage, prepared.WorkspaceID) {
+					t.Fatalf("concurrent authorized %s refused: %+v %v", callID, workspace, err)
+				}
+			}
+			renewed, err := tasks.Inspect(ctx, 7, created.ID)
+			if err != nil || renewed.State != "prepared" || !renewed.LeaseExpiresAt.After(time.Now()) || renewed.WorkspaceID != prepared.WorkspaceID {
+				t.Fatalf("read admission lost the retained workspace lease: %+v %v", renewed, err)
+			}
+			seq = int64(renewed.EventCount)
+			if _, err := tasks.ModelWorkspace(ctx, 7, created.ID); !errors.Is(err, ErrSessionStateConflict) {
+				t.Fatal("new model work was admitted while tools were still pending")
+			}
+			if _, err := tasks.ToolWorkspace(ctx, 8, created.ID, "read-0"); !errors.Is(err, ErrSessionNotFound) {
+				t.Fatal("parallel reads exposed a foreign owner's workspace")
+			}
+			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "not-dispatched"); !errors.Is(err, ErrSessionStateConflict) {
+				t.Fatal("a call without its Go dispatch was admitted")
+			}
+			write := toolCallPayload{RunID: "run-reads", ToolCallID: "write", ToolName: "Write", ArgumentsJSON: `{"path":"main.go","content":"change"}`}
+			appendFact(commitPendingEventType, write)
+			appendFact(toolDispatchedType, write)
+			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); !errors.Is(err, ErrSessionStateConflict) {
+				t.Fatal("pending mutation did not fence parallel reads")
+			}
+			appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "write", ToolName: "Write", Error: "denied", ExitCode: 1})
+			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); err != nil {
+				t.Fatal("a confirmed refused mutation blocked readonly work")
+			}
+			appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: "Grep", OutcomeUnknown: true})
+			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); !errors.Is(err, ErrSessionStateConflict) {
+				t.Fatal("unknown tool outcome was silently admitted")
+			}
+		})
 	}
-	tasks := NewTaskWorkspaces(w, taskWorkspaceOwner, repo, storage).WithBaselineRuntime(TaskBaselineRuntime{
-		Runner:  sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: storage}),
-		Ready:   func(context.Context) error { return nil },
-		Acquire: func(context.Context, uint, string) error { return nil },
-		Finish:  func(context.Context, uint, string) error { return nil },
-	})
-	prepared, err := tasks.Prepare(ctx, 7, created.ID, 1, "prepare")
-	if err != nil || prepared.State != "prepared" {
-		t.Fatalf("prepare: %+v %v", prepared, err)
-	}
-	message, err := w.AppendUserMessage(ctx, 7, created.ID, int64(prepared.EventCount), "read concurrently")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint, err := w.CreateCheckpoint(ctx, 7, created.ID, int64(prepared.EventCount+1), message.ID, "reads")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := continuationRequestPayloadForTest(ctx, w, created.ID, checkpoint.Hash, "request-reads", "run-reads", testRunnerActor())
-	if err != nil {
-		t.Fatal(err)
-	}
-	seq := int64(prepared.EventCount + 2)
-	appendFact := func(kind string, payload any) {
-		t.Helper()
-		if _, err := ledger.Append(ctx, created.ID, seq, kind, payload); err != nil {
-			t.Fatal(err)
+}
+
+// Interleave an actual Ledger write at the expiry/CAS boundary, without timing a goroutine.
+type taskLeaseRaceLog struct {
+	EventLog
+	beforeRenew func() error
+}
+
+func (l *taskLeaseRaceLog) Append(ctx context.Context, id string, expected int64, kind string, payload any) (Event, error) {
+	if kind == taskLeaseRenewedEvent && l.beforeRenew != nil {
+		interleave := l.beforeRenew
+		l.beforeRenew = nil
+		if err := interleave(); err != nil {
+			return Event{}, err
 		}
-		seq++
 	}
-	appendFact(continuationEventType, payload)
-	appendFact(runLeasedEventType, runLeasePayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", WorkerID: "worker", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()})
-	for index, name := range []string{"Read", "Grep"} {
-		call := toolCallPayload{RunID: "run-reads", ToolCallID: fmt.Sprintf("read-%d", index), ToolName: name, ArgumentsJSON: `{"path":"main.go"}`}
-		appendFact("tool/call", call)
-		appendFact(commitPendingEventType, call)
-		appendFact(toolDispatchedType, call)
-	}
-	for _, callID := range []string{"read-0", "read-1"} {
-		workspace, err := tasks.ToolWorkspace(ctx, 7, created.ID, callID)
-		if err != nil || workspace.WorkingDir != filepath.Join(storage, prepared.WorkspaceID) {
-			t.Fatalf("concurrent authorized %s refused: %+v %v", callID, workspace, err)
-		}
-	}
-	if _, err := tasks.ModelWorkspace(ctx, 7, created.ID); !errors.Is(err, ErrSessionStateConflict) {
-		t.Fatal("new model work was admitted while tools were still pending")
-	}
-	if _, err := tasks.ToolWorkspace(ctx, 8, created.ID, "read-0"); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatal("parallel reads exposed a foreign owner's workspace")
-	}
-	if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "not-dispatched"); !errors.Is(err, ErrSessionStateConflict) {
-		t.Fatal("a call without its Go dispatch was admitted")
-	}
-	write := toolCallPayload{RunID: "run-reads", ToolCallID: "write", ToolName: "Write", ArgumentsJSON: `{"path":"main.go","content":"change"}`}
-	appendFact(commitPendingEventType, write)
-	appendFact(toolDispatchedType, write)
-	if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); !errors.Is(err, ErrSessionStateConflict) {
-		t.Fatal("pending mutation did not fence parallel reads")
-	}
-	appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "write", ToolName: "Write", Error: "denied", ExitCode: 1})
-	if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); err != nil {
-		t.Fatal("a confirmed refused mutation blocked readonly work")
-	}
-	appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: "Grep", OutcomeUnknown: true})
-	if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); !errors.Is(err, ErrSessionStateConflict) {
-		t.Fatal("unknown tool outcome was silently admitted")
-	}
+	return l.EventLog.Append(ctx, id, expected, kind, payload)
 }
 
 func TestTaskWorkspaceLedgerOwnsPreparationAndRecovery(t *testing.T) {
