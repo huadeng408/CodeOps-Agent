@@ -91,7 +91,11 @@ func main() {
 		// Gateway foreground facts include purpose; Budget.Reserve has no purpose parameter.
 		_, err = ledger.Append(ctx, session.VerificationAdmissionLedgerID, int64(len(events)), "admission/call_reserved", map[string]any{"owner_id": owner, "task_id": created.ID, "call_id": callID, "purpose": "foreground", "tokens": 100})
 		must(err)
-		_, err = budget.Settle(ctx, owner, callID, 20)
+		if len(os.Args) > 2 && os.Args[2] == "unknown-usage" && callID == "call-2" {
+			_, err = budget.MarkUnknown(ctx, owner, callID)
+		} else {
+			_, err = budget.Settle(ctx, owner, callID, 20)
+		}
 		must(err)
 	}
 	_, err = budget.FinishTask(ctx, owner, created.ID)

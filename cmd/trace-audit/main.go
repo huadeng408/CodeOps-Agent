@@ -103,12 +103,10 @@ func verify(sessionPath, beforePath, afterPath, runID string) error {
 	}
 	target := product.events[0].SessionID
 	owner := uint(0)
-	settled, reserved := map[string]bool{}, map[string]bool{}
 	for _, event := range after.events {
 		var fact struct {
 			OwnerID uint   `json:"owner_id"`
 			TaskID  string `json:"task_id"`
-			CallID  string `json:"call_id"`
 		}
 		if json.Unmarshal(event.Payload, &fact) != nil {
 			return session.ErrEventIntegrity
@@ -118,23 +116,15 @@ func verify(sessionPath, beforePath, afterPath, runID string) error {
 				return session.ErrEventIntegrity
 			}
 			owner = fact.OwnerID
-			reserved[fact.CallID] = true
-		}
-		if event.Type == "admission/call_settled" {
-			settled[fact.CallID] = true
 		}
 	}
-	if owner == 0 || len(reserved) == 0 {
+	if owner == 0 {
 		return errors.New("no model admissions for this product task")
-	}
-	for callID := range reserved {
-		if !settled[callID] {
-			return errors.New("product model usage is incomplete")
-		}
 	}
 	if _, err := admission.NewBudget(before).Inspect(ctx, owner); err != nil {
 		return err
 	}
+	// Stopped unknown usage permits observation; final Trace acceptance checks it separately.
 	batch, err := admission.NewBudget(after).Inspect(ctx, owner)
 	if err != nil || batch.ActiveCalls != 0 || batch.TaskID != "" {
 		return errors.New("product task is not quiescent")
@@ -151,5 +141,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, "native product audit refused")
 		os.Exit(1)
 	}
-	fmt.Println("native product audit verified")
+	fmt.Println("native product export integrity verified")
 }

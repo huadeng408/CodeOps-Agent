@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"code-agent/internal/admission"
+	"code-agent/internal/identity"
 	"code-agent/internal/session"
 )
 
 func TestNativeAuditRejectsTamperingAndIncompleteCalls(t *testing.T) {
 	fixture := filepath.Join("..", "..", "tests", "fixtures", "product_trace")
-	for _, scenario := range []string{"valid", "sequence", "payload", "reservation-only", "missing-owner", "foreign-admission-owner"} {
+	for _, scenario := range []string{"valid", "sequence", "payload", "reservation-only", "missing-owner", "foreign-admission-owner", "ended-unknown", "unknown-open-task"} {
 		t.Run(scenario, func(t *testing.T) {
 			paths := map[string]string{}
 			for _, name := range []string{"session", "before", "after"} {
@@ -49,15 +50,31 @@ func TestNativeAuditRejectsTamperingAndIncompleteCalls(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if scenario == "foreign-admission-owner" {
+			if scenario == "foreign-admission-owner" || scenario == "ended-unknown" || scenario == "unknown-open-task" {
 				ctx := context.Background()
+				owner := uint(8)
+				if scenario != "foreign-admission-owner" {
+					product, err := readExport(paths["session"], "")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, event := range product.events {
+						if event.Type == "session/continued" {
+							var fact struct{ Actor identity.Actor }
+							if err := json.Unmarshal(event.Payload, &fact); err != nil {
+								t.Fatal(err)
+							}
+							owner = admission.ActorOwner(fact.Actor)
+						}
+					}
+				}
 				ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "foreign.sqlite"))
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer ledger.Close()
 				budget := admission.NewBudget(ledger)
-				if _, err := budget.Open(ctx, 8); err != nil {
+				if _, err := budget.Open(ctx, owner); err != nil {
 					t.Fatal(err)
 				}
 				write := func(name string) {
@@ -74,14 +91,21 @@ func TestNativeAuditRejectsTamperingAndIncompleteCalls(t *testing.T) {
 					}
 				}
 				write("before")
-				if _, err := budget.Reserve(ctx, 8, "session-1", "call-1", 100); err != nil {
+				if _, err := budget.Reserve(ctx, owner, "session-1", "call-1", 100); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := budget.Settle(ctx, 8, "call-1", 20); err != nil {
+				if scenario == "foreign-admission-owner" {
+					_, err = budget.Settle(ctx, owner, "call-1", 20)
+				} else {
+					_, err = budget.MarkUnknown(ctx, owner, "call-1")
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := budget.FinishTask(ctx, 8, "session-1"); err != nil {
-					t.Fatal(err)
+				if scenario != "unknown-open-task" {
+					if _, err := budget.FinishTask(ctx, owner, "session-1"); err != nil {
+						t.Fatal(err)
+					}
 				}
 				write("after")
 			}
@@ -105,7 +129,7 @@ func TestNativeAuditRejectsTamperingAndIncompleteCalls(t *testing.T) {
 				}
 			}
 			err = verify(paths["session"], paths["before"], paths["after"], run.RunID)
-			if (err == nil) != (scenario == "valid") {
+			if (err == nil) != (scenario == "valid" || scenario == "ended-unknown") {
 				t.Fatalf("native audit scenario %s: %v", scenario, err)
 			}
 		})

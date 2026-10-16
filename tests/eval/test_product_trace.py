@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["success", "multi-success", "multi-repeated-tool", "multi-missing-round", "multi-omit-request", "multi-omit-unadmitted", "multi-unavailable", "unavailable", "missing-pins", "secret-name", "secret-event", "secret-status", "raw-prompt", "broken-sequence", "binary-mismatch", "source-mismatch", "sensitive-id"])
+@pytest.mark.parametrize("mode", ["success", "multi-success", "multi-unknown-usage", "multi-repeated-tool", "multi-missing-round", "multi-omit-request", "multi-omit-unadmitted", "multi-unavailable", "unavailable", "missing-pins", "secret-name", "secret-event", "secret-status", "raw-prompt", "broken-sequence", "binary-mismatch", "source-mismatch", "sensitive-id"])
 def test_external_product_trace_command_reports_only_verified_readback(tmp_path, capsys, mode):
     from eval.product_trace import main
 
@@ -62,7 +62,8 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
 
     fixture = Path(__file__).parents[1] / "fixtures" / "product_trace"
     if multi:
-        scenario = ["repeat-tool"] if mode == "multi-repeated-tool" else ["unadmitted-run"] if mode == "multi-omit-unadmitted" else []
+        scenario = {"multi-repeated-tool": ["repeat-tool"], "multi-omit-unadmitted": ["unadmitted-run"],
+                    "multi-unknown-usage": ["unknown-usage"]}.get(mode, [])
         subprocess.run(["go", "run", "./tests/fixtures/product_trace/generate_multirun.go", str(tmp_path), *scenario], cwd=Path(__file__).parents[2], check=True, capture_output=True, timeout=120)
         fixture = tmp_path
     files = {name: json.loads((fixture / (name + ".json")).read_text(encoding="utf-8")) for name in ("session", "before", "after")}
@@ -96,6 +97,7 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
     if mode == "sensitive-id":
         # Keep the exact canonical escaped payload bytes for native verification.
         (tmp_path / "session.json").write_bytes((fixture / "session-sensitive-id.json").read_bytes())
+    export_hashes = {name: hashlib.sha256((tmp_path / (name + ".json")).read_bytes()).hexdigest() for name in ("session", "before", "after")}
     output = tmp_path / "readback"
     server = ThreadingHTTPServer(("127.0.0.1", 0), Unavailable)
     thread = threading.Thread(target=server.serve_forever)
@@ -112,11 +114,18 @@ def test_external_product_trace_command_reports_only_verified_readback(tmp_path,
         thread.join()
         server.server_close()
     receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    assert export_hashes == {name: hashlib.sha256((tmp_path / (name + ".json")).read_bytes()).hexdigest() for name in export_hashes}
     if mode in {"success", "multi-success", "multi-repeated-tool"}:
         assert result == 0 and receipt["status"] == "VERIFIED"
         assert receipt["capture_state"] == "complete" and receipt["backend_readback"] is True
         assert receipt["report"]["span_count"] == (10 if mode == "multi-repeated-tool" else 9 if multi else 5) and len(receipt["input_sha256"]) == 4
         assert receipt["report"]["expected_tools"] == (2 if mode == "multi-repeated-tool" else 1)
+    elif mode == "multi-unknown-usage":
+        assert result == 3 and receipt["status"] == "BLOCKED"
+        assert receipt["capture_state"] == "complete" and receipt["backend_readback"] is True
+        assert receipt["report"]["verdict"] == "PASS" and receipt["report"]["span_count"] == 9
+        assert receipt["model_usage"] == {"state": "unknown", "unsettled_call_ids": ["call-2"]}
+        assert len(receipt["attempts"]) == 1 and "input_error" not in receipt
     elif mode in {"multi-omit-request", "multi-omit-unadmitted"}:
         assert result == 3 and receipt["status"] == "BLOCKED"
         assert receipt["capture_state"] == "unknown" and receipt["backend_readback"] is False

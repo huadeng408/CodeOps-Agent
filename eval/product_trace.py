@@ -41,9 +41,11 @@ def _expectation(session: dict, before: dict, after: dict, run_ids: list[str]) -
     models = {fact["call_id"]: fact["purpose"] for fact in reservations}
     if len(models) != len(reservations):
         raise ValueError("duplicate model admission identities")
+    settled = {event["payload"]["call_id"] for event in after["events"] if event["type"] == "admission/call_settled"}
     return {"session_id": session_id, "run_id": run_ids[0], "run_ids": run_ids,
             "completed": all(terminal.get(run_id) == "session/run-completed" for run_id in run_ids),
             "tool_calls_by_run": tools, "model_calls": models,
+            "unsettled_model_calls": sorted(models.keys() - settled),
             "retry_of": {fact["call_id"]: fact.get("retry_of", "") for fact in reservations}}
 
 
@@ -117,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         expected["model"] = pins["model"]
         if find_secret_leak(expected):
             raise ValueError("product call identity contains a credential shape")
+        receipt["model_usage"] = {"state": "unknown" if expected["unsettled_model_calls"] else "complete",
+                                  "unsettled_call_ids": expected["unsettled_model_calls"]}
         for attempt in range(args.attempts):
             try:
                 spans, unavailable = [], []
@@ -138,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                     receipt.update(capture_state="complete" if report["verdict"] == "PASS" and not unavailable else "partial" if spans else "unknown",
                                    backend_readback=bool(spans), report=report)
                 if report["verdict"] == "PASS" and not unavailable:
-                    receipt["status"] = "VERIFIED"
+                    if not expected["unsettled_model_calls"]:
+                        receipt["status"] = "VERIFIED"
                     break
             except Exception as error:
                 receipt["attempts"].append({"error": type(error).__name__})
