@@ -201,6 +201,60 @@ func TestBuildSessionTrajectoryDropsUnapprovedCallAfterFailedRun(t *testing.T) {
 	}
 }
 
+func TestTrajectoryCompletionAfterCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, marker string
+		complete            bool
+	}{
+		{"no tool", "stopped", "", true},
+		{"pending", "stopped", "approval/pending", true},
+		{"denied", "stopped", "approval/denied", true},
+		{"approved without result", "stopped", "approval/approved", false},
+		{"dispatched without result", "stopped", "tool/dispatched", false},
+		{"closed result", "stopped", "tool/result", true},
+		{"legacy open call", "stopped", "tool/call", false},
+		{"unknown cancellation", "unknown", "", false},
+		{"missing cancellation state", "", "", false},
+		{"unknown tool outcome", "stopped", "tool/unknown", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "events.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			const id = "canceled-then-completed"
+			appendTrajectoryEvent(t, ctx, ledger, id, "user/message", map[string]any{"content": "first task"})
+			appendTrajectoryEvent(t, ctx, ledger, id, "session/run-leased", map[string]any{"run_id": "old"})
+			if tc.marker != "" {
+				call := map[string]any{"run_id": "old", "tool_call_id": "call", "tool_name": "Bash"}
+				appendTrajectoryEvent(t, ctx, ledger, id, "tool/call", call)
+				if tc.marker != "tool/call" {
+					appendTrajectoryEvent(t, ctx, ledger, id, "approval/pending", call)
+					appendTrajectoryEvent(t, ctx, ledger, id, tc.marker, call)
+				}
+			}
+			appendTrajectoryEvent(t, ctx, ledger, id, "session/run-canceled", map[string]any{"run_id": "old", "cancellation_state": tc.state})
+			before, err := memory.BuildSessionTrajectory(ctx, ledger, id, memory.TrajectoryOptions{})
+			if err != nil || before.Complete {
+				t.Fatalf("cancellation alone promoted memory: %+v, %v", before, err)
+			}
+			appendTrajectoryEvent(t, ctx, ledger, id, "user/message", map[string]any{"content": "continue"})
+			appendTrajectoryEvent(t, ctx, ledger, id, "session/run-leased", map[string]any{"run_id": "new"})
+			appendTrajectoryEvent(t, ctx, ledger, id, "assistant/message", map[string]any{"content": "done"})
+			appendTrajectoryEvent(t, ctx, ledger, id, "session/run-completed", map[string]any{"run_id": "new"})
+			after, err := memory.BuildSessionTrajectory(ctx, ledger, id, memory.TrajectoryOptions{})
+			if err != nil || after.Complete != tc.complete {
+				t.Fatalf("later completion=%v, want %v: %+v, %v", after.Complete, tc.complete, after, err)
+			}
+			if tc.complete && !strings.Contains(after.Overview, "canceled") {
+				t.Fatalf("cancellation source lost: %+v", after)
+			}
+		})
+	}
+}
+
 func TestBuildSessionTrajectoryKeepsApprovedOrDispatchedCallFailClosed(t *testing.T) {
 	for _, marker := range []string{"approval/approved", "tool/dispatched"} {
 		t.Run(marker, func(t *testing.T) {

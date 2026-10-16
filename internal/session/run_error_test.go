@@ -39,6 +39,7 @@ func TestPublicRunErrorPreservesRecoverableTerminalReason(t *testing.T) {
 	}{
 		{errors.New("orchestrator conversation failed: tool_round_limit: no final model summary"), "tool_round_limit", "tool round limit reached; retry this task"},
 		{errors.New("orchestrator conversation failed: empty_model_response"), "empty_model_response", "model returned an empty response; retry this task"},
+		{fmt.Errorf("%w: provider_transient_unknown: private provider payload", orchestrator.ErrConversationFailed), "provider_transient_unknown", "model provider request failed temporarily; usage is unknown; the original reservation is retained"},
 		{errors.New("rpc_deadline_exceeded: private payload"), "deadline_exceeded", "model request timed out; retry this task"},
 		{errors.New("rpc_unavailable: private payload"), "orchestrator_connection_error", "agent provider connection failed; retry this task"},
 		{errors.New("rpc_cancelled: private payload"), "conversation_canceled", "conversation was canceled; retry this task"},

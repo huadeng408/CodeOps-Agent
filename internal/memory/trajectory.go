@@ -25,6 +25,7 @@ const (
 	defaultTrajectoryOverviewChars = 4000
 	trajectoryOutcomeCompleted     = "completed"
 	trajectoryOutcomeFailed        = "failed"
+	trajectoryOutcomeCanceled      = "canceled"
 	trajectoryOutcomeIncomplete    = "incomplete"
 )
 
@@ -422,9 +423,10 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		tool.dispatched = true
 		p.openTools[trajectoryToolKey(payload.RunID, payload.ToolCallID)] = tool
 		p.add(event, "code/modified: "+description)
-	case "session/run-completed", "session/run-failed":
+	case "session/run-completed", "session/run-failed", "session/run-canceled":
 		var payload struct {
-			RunID string `json:"run_id"`
+			RunID             string `json:"run_id"`
+			CancellationState string `json:"cancellation_state"`
 		}
 		if err := decodeObject(event, &payload); err != nil {
 			return err
@@ -436,19 +438,26 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		if event.Type == "session/run-failed" {
 			outcome = trajectoryOutcomeFailed
 		}
+		if event.Type == "session/run-canceled" {
+			outcome = trajectoryOutcomeCanceled
+			if payload.CancellationState != "stopped" {
+				p.uncertain = true
+			}
+		}
 		runID := strings.TrimSpace(payload.RunID)
 		p.addRun(runID)
 		if previous, exists := p.terminals[runID]; exists {
 			return trajectoryPayloadError(event, "duplicate run terminal: "+previous)
 		}
 		p.terminals[runID] = outcome
-		// A failed run may contain an explicitly pending approval that was never
+		// A failed or confirmed-stopped canceled run may have a pending call never
 		// approved, dispatched, or code-modified. The Harness cannot execute that
 		// call, so keep its audit source but release it from the open set. Calls
 		// without pending approval evidence, successful terminals, and every
 		// approved/dispatched call remain fail-closed for legacy compatibility.
+		knownStop := outcome == trajectoryOutcomeFailed || outcome == trajectoryOutcomeCanceled && payload.CancellationState == "stopped"
 		for key, tool := range p.openTools {
-			if tool.runID == runID && outcome == trajectoryOutcomeFailed && tool.pending && !tool.approved && !tool.dispatched {
+			if tool.runID == runID && knownStop && tool.pending && !tool.approved && !tool.dispatched {
 				delete(p.openTools, key)
 				p.abandonedRuns[runID] = struct{}{}
 			}

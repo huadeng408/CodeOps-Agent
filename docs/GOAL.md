@@ -25,9 +25,9 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Go 真实多轮任务仍待完成；Python 功能、项目测试和提案应用已完成，Memory／成功 Trace 仍待验收 |
+| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Go／Python 真实多轮功能、项目测试和提案应用已完成，两项任务的 Memory／成功 Trace 仍待验收 |
 | Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
-| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 #17 Go 浏览器任务、#18 Python Memory／Trace 剩余范围及 #19 故障矩阵 |
+| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 #17／#18 的 Memory／Trace 剩余范围及 #19 故障矩阵 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
 当前凭据、沙箱和后端前提在具体运行准备时核对；旧环境错误不作为本机当前事实。
@@ -68,6 +68,8 @@
 - Python 冻结提案：[离线依赖绑定、同一 Runner／应用边界、受控 runtime 与新便携包](evidence/python-proposal-2026-10-16.md)；#18 的十轮真实浏览器任务仍单独验收。
 - 已知工具结果后的重复命令：[Python 尝试的完整失败分母、Runner 修复、旧任务显式结束及新冻结输入](evidence/repeated-command-2026-10-16.md)。
 - Python 真实多轮任务：[模型修改、项目测试、实际提案批准应用、原副本保护和未通过的 Memory／Trace 范围](evidence/python-browser-task-2026-10-16.md)；完整失败和冻结场景分母保留，#18 继续打开。
+- Go 真实多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；#17 继续打开，后续源码修复独立绑定。
+- 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；真实反思和产品错误展示待新运行验证。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。

@@ -2460,6 +2460,8 @@ func publicRunErrorCode(cause error) string {
 		return "provider_transport_unknown"
 	case strings.Contains(message, "provider_timeout_unknown"):
 		return "provider_timeout_unknown"
+	case strings.Contains(message, "provider_transient_unknown"):
+		return "provider_transient_unknown"
 	case strings.Contains(message, "task_prerequisites_missing"):
 		return "task_prerequisites_missing"
 	case strings.Contains(message, "provider_authentication_error"):
@@ -2508,6 +2510,8 @@ func publicRunError(cause error) string {
 		return "model transport failed; usage is unknown; the original reservation is retained"
 	case "provider_timeout_unknown":
 		return "model request timed out; usage is unknown; the original reservation is retained"
+	case "provider_transient_unknown":
+		return "model provider request failed temporarily; usage is unknown; the original reservation is retained"
 	case "task_prerequisites_missing":
 		return "task execution prerequisites are unavailable; check the workspace and runtime"
 	}
