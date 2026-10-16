@@ -174,7 +174,7 @@ func captureBaseline(ctx context.Context, root, metadata *os.Root, reader *gitRe
 	if err := baselineMetadataUnchanged(ctx, root, metadata); err != nil {
 		return Baseline{}, err
 	}
-	head, headIndex, err := reader.headIndex()
+	head, headIndex, _, err := reader.headIndex()
 	if err != nil {
 		return Baseline{}, errors.New("baseline requires a committed HEAD")
 	}

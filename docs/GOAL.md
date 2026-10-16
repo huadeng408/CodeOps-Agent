@@ -73,6 +73,7 @@
 - #19 首批验收对账：[五类恢复场景、文件／兼容矩阵、AC01–AC09 和当前缺口](evidence/milestone-reconciliation-2026-10-16.md)；原范围与当前源码分别核对，milestone 和发布仍未通过。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
+- 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。

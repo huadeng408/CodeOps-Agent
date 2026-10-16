@@ -24,10 +24,11 @@ const TaskLeaseTTL = defaultAgentLeaseTTL
 // TaskWorkspace is a retained preparation lease, not an executing Agent. Its
 // path is derived from host-approved storage; the Ledger stores no file bodies.
 type TaskWorkspace struct {
-	LeaseID        string    `json:"lease_id"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
-	Baseline       Baseline  `json:"baseline"`
-	IndexSHA256    string    `json:"index_sha256,omitempty"`
+	LeaseID           string    `json:"lease_id"`
+	LeaseExpiresAt    time.Time `json:"lease_expires_at"`
+	Baseline          Baseline  `json:"baseline"`
+	IndexSHA256       string    `json:"index_sha256,omitempty"`
+	GitMetadataSHA256 string    `json:"git_metadata_sha256,omitempty"`
 }
 
 // TaskFileChange is a completed Go file effect reconstructed from the Ledger.
@@ -52,7 +53,7 @@ func (m *Manager) PlanTask(ctx context.Context) (TaskWorkspace, error) {
 // PrepareTask only creates a new detached, locked worktree. A failed copy is
 // retained for reconciliation; no retry overwrites or deletes an existing path.
 func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWorkspace) error {
-	if task == nil || task.IndexSHA256 != "" {
+	if task == nil || task.IndexSHA256 != "" || task.GitMetadataSHA256 != "" {
 		return errors.New("task preparation requires an unprepared lease")
 	}
 	if err := task.Validate(); err != nil {
@@ -102,7 +103,7 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 	if _, err := baselineFileInfo(metadata, "worktrees/"+task.LeaseID); !errors.Is(err, fs.ErrNotExist) {
 		return errors.New("task Git registration already exists or is unsafe")
 	}
-	// Scan all admitted bytes before any copy; this does not sanitize Git history.
+	// Scan admitted working bytes before any copy; Git objects are filtered below.
 	for _, item := range task.Baseline.Files {
 		data, exists, err := readBaselineFile(source, item.Path, maxBaselineFileBytes)
 		if err != nil || !matchesTaskFile(item, data, exists) {
@@ -154,9 +155,13 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 		return err
 	}
 	defer reader.Close()
-	head, headIndex, err := reader.headIndex()
+	head, headIndex, headObjects, err := reader.headIndex()
 	if err != nil || head != task.Baseline.HeadCommit {
 		return errors.New("task Git baseline changed before registration")
+	}
+	gitFiles, err := taskGitSnapshot(reader, task.Baseline, headIndex, headObjects, fixtures)
+	if err != nil {
+		return err
 	}
 	if err := store.Mkdir(task.LeaseID, 0700); err != nil {
 		return errors.New("task storage already exists or is unavailable")
@@ -207,8 +212,24 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 			return err
 		}
 	}
-	if err := writeGitControl(destination, ".git", "gitdir: "+filepath.ToSlash(gitDir)+"\n"); err != nil {
+	if err := destination.Mkdir(".git", 0700); err != nil {
 		return err
+	}
+	portable, err := destination.OpenRoot(".git")
+	if err != nil {
+		return err
+	}
+	defer portable.Close()
+	if err := portable.Mkdir("refs", 0700); err != nil {
+		return err
+	}
+	for name, data := range gitFiles {
+		if err := portable.MkdirAll(filepath.Dir(name), 0700); err != nil {
+			return err
+		}
+		if err := writeGitControl(portable, name, string(data)); err != nil {
+			return err
+		}
 	}
 	if err := baselineMetadataUnchanged(ctx, source, metadata); err != nil {
 		return err
@@ -231,12 +252,16 @@ func (m *Manager) PrepareTask(ctx context.Context, storage string, task *TaskWor
 		return errors.New("task Git index was not initialized")
 	}
 	task.IndexSHA256 = baselineDigest(index)
+	task.GitMetadataSHA256, err = taskGitSnapshotChecksum(ctx, portable)
+	if err != nil {
+		return err
+	}
 	releaseAdmin, err := pinTaskMetadata(ctx, admin, gitDir)
 	if err != nil {
 		return err
 	}
 	defer releaseAdmin()
-	if _, err := m.taskGitDir(metadata, destination, target, *task); err != nil {
+	if _, err := m.taskGitDir(ctx, metadata, destination, target, *task); err != nil {
 		return err
 	}
 	for _, item := range task.Baseline.Files {
@@ -420,7 +445,7 @@ func (m *Manager) VerifyTask(ctx context.Context, storage string, task TaskWorks
 		return err
 	}
 	target := filepath.Join(storage, task.LeaseID)
-	if _, err := m.taskGitDir(metadata, destination, target, task); err != nil {
+	if _, err := m.taskGitDir(ctx, metadata, destination, target, task); err != nil {
 		return err
 	}
 	admin, err := metadata.OpenRoot("worktrees/" + task.LeaseID)
@@ -502,7 +527,7 @@ func verifyTaskInventory(ctx context.Context, root *os.Root, admitted map[string
 					directory.Close()
 					return err
 				}
-				if info.IsDir() {
+				if info.IsDir() && path != ".git" {
 					directories = append(directories, path)
 				}
 			}
@@ -595,11 +620,26 @@ func openTaskRoot(name string) (*os.Root, error) {
 	return os.OpenRoot(name)
 }
 
-func (m *Manager) taskGitDir(metadata, destination *os.Root, target string, task TaskWorkspace) (string, error) {
+func (m *Manager) taskGitDir(ctx context.Context, metadata, destination *os.Root, target string, task TaskWorkspace) (string, error) {
 	gitDir := filepath.Join(m.root, ".git", "worktrees", task.LeaseID)
-	link, exists, err := readBaselineFile(destination, ".git", 4096)
-	if err != nil || !exists || !strings.HasPrefix(string(link), "gitdir: ") || !sameBaselinePath(strings.TrimRight(strings.TrimPrefix(string(link), "gitdir: "), "\r\n"), gitDir) {
-		return "", errors.New("task Git link does not match approved lease")
+	if task.GitMetadataSHA256 != "" {
+		if _, err := baselineFileInfo(destination, ".git"); err != nil {
+			return "", err
+		}
+		portable, err := destination.OpenRoot(".git")
+		if err != nil {
+			return "", err
+		}
+		checksum, err := taskGitSnapshotChecksum(ctx, portable)
+		portable.Close()
+		if err != nil || checksum != task.GitMetadataSHA256 {
+			return "", errors.New("task Git snapshot does not match prepared lease")
+		}
+	} else {
+		link, exists, err := readBaselineFile(destination, ".git", 4096)
+		if err != nil || !exists || !strings.HasPrefix(string(link), "gitdir: ") || !sameBaselinePath(strings.TrimRight(strings.TrimPrefix(string(link), "gitdir: "), "\r\n"), gitDir) {
+			return "", errors.New("task Git link does not match approved lease")
+		}
 	}
 	if _, err := baselineFileInfo(metadata, "worktrees/"+task.LeaseID); err != nil {
 		return "", err
@@ -631,6 +671,9 @@ func (task TaskWorkspace) Validate() error {
 	}
 	if task.IndexSHA256 != "" && (len(task.IndexSHA256) != 64 || strings.Trim(task.IndexSHA256, "0123456789abcdef") != "") {
 		return errors.New("invalid task index checksum")
+	}
+	if task.GitMetadataSHA256 != "" && (task.IndexSHA256 == "" || len(task.GitMetadataSHA256) != 64 || strings.Trim(task.GitMetadataSHA256, "0123456789abcdef") != "") {
+		return errors.New("invalid task Git metadata checksum")
 	}
 	baseline := task.Baseline
 	if len(baseline.Files) > maxBaselineFiles || len(baseline.Excluded) > maxBaselineFiles || len(baseline.RepositoryID) != 64 || (len(baseline.HeadCommit) != 40 && len(baseline.HeadCommit) != 64) || strings.Trim(baseline.HeadCommit, "0123456789abcdef") != "" {

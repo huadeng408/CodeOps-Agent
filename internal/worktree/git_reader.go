@@ -125,16 +125,17 @@ func (r *gitReader) EncodedObject(kind plumbing.ObjectType, hash plumbing.Hash) 
 	return encoded, err
 }
 
-func (r *gitReader) headIndex() (string, *index.Index, error) {
+func (r *gitReader) headIndex() (string, *index.Index, []plumbing.Hash, error) {
 	ref, err := storer.ResolveReference(r.Storage, plumbing.HEAD)
 	if err != nil {
-		return "", nil, errors.New("baseline requires a committed HEAD")
+		return "", nil, nil, errors.New("baseline requires a committed HEAD")
 	}
 	commit, err := object.GetCommit(r, ref.Hash())
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	result := &index.Index{Version: 2}
+	metadata := []plumbing.Hash{ref.Hash()}
 	type directory struct {
 		prefix string
 		hash   plumbing.Hash
@@ -146,14 +147,15 @@ func (r *gitReader) headIndex() (string, *index.Index, error) {
 		pending = pending[:len(pending)-1]
 		tree, err := object.GetTree(r, current.hash)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
+		metadata = append(metadata, current.hash)
 		for _, entry := range tree.Entries {
 			if err := r.ctx.Err(); err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 			if err := validateBaselinePath(entry.Name); err != nil || strings.Contains(entry.Name, "/") {
-				return "", nil, errors.New("Git tree contains an unsafe component")
+				return "", nil, nil, errors.New("Git tree contains an unsafe component")
 			}
 			name := entry.Name
 			if current.prefix != "" {
@@ -162,7 +164,7 @@ func (r *gitReader) headIndex() (string, *index.Index, error) {
 			entries++
 			pathBytes += len(name) + 1
 			if entries > 100_000 || pathBytes > 8<<20 {
-				return "", nil, errors.New("baseline Git inventory limit exceeded")
+				return "", nil, nil, errors.New("baseline Git inventory limit exceeded")
 			}
 			if entry.Mode == filemode.Dir {
 				pending = append(pending, directory{prefix: name, hash: entry.Hash})
@@ -171,7 +173,7 @@ func (r *gitReader) headIndex() (string, *index.Index, error) {
 			result.Entries = append(result.Entries, &index.Entry{Name: name, Hash: entry.Hash, Mode: entry.Mode})
 		}
 	}
-	return ref.Hash().String(), result, nil
+	return ref.Hash().String(), result, metadata, nil
 }
 
 func sourceInventory(ctx context.Context, root, metadata *os.Root, tracked map[string]bool, fold bool) ([]string, error) {

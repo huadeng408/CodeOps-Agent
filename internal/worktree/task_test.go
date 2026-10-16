@@ -145,6 +145,15 @@ func TestTaskWorkspaceCopiesCurrentBaselineAndRecovers(t *testing.T) {
 	if err := manager.PrepareTask(ctx, storage, &plan); err == nil {
 		t.Fatal("existing task was silently overwritten")
 	}
+	// Reopen an old Ledger lease without rewriting its linked metadata format.
+	if err := os.Rename(filepath.Join(target, ".git"), filepath.Join(storage, "portable-metadata")); err != nil {
+		t.Fatal(err)
+	}
+	plan.GitMetadataSHA256 = ""
+	writeBaselineFile(t, target, ".git", "gitdir: "+filepath.ToSlash(filepath.Join(root, ".git", "worktrees", plan.LeaseID))+"\n")
+	if err := NewManager(root, "HEAD").VerifyTask(ctx, storage, plan); err != nil {
+		t.Fatal("legacy linked workspace cannot be reopened:", err)
+	}
 	gitfile, err := os.ReadFile(filepath.Join(target, ".git"))
 	if err != nil {
 		t.Fatal(err)
