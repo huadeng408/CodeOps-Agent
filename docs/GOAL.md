@@ -25,9 +25,9 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Go／Python 真实多轮功能、项目测试和提案应用已完成，两项任务的 Memory／成功 Trace 仍待验收 |
+| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Python #18 的真实多轮功能、测试、应用、反思写回与 v2 Trace 已按本票范围验证，Go #17 的 Memory／Trace 仍待验收 |
 | Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
-| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 #17／#18 的 Memory／Trace 剩余范围及 #19 故障矩阵 |
+| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 Go #17 剩余范围及 #19 故障矩阵 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
 当前凭据、沙箱和后端前提在具体运行准备时核对；旧环境错误不作为本机当前事实。
@@ -67,14 +67,15 @@
 - 修复后的真实 Go 尝试：[两轮完成、参数错误、浏览器恢复与完整失败分母](evidence/browser-task-iteration-2026-10-16.md)；同时确认 Python 提案入口的当前缺口。
 - Python 冻结提案：[离线依赖绑定、同一 Runner／应用边界、受控 runtime 与新便携包](evidence/python-proposal-2026-10-16.md)；#18 的十轮真实浏览器任务仍单独验收。
 - 已知工具结果后的重复命令：[Python 尝试的完整失败分母、Runner 修复、旧任务显式结束及新冻结输入](evidence/repeated-command-2026-10-16.md)。
-- Python 真实多轮任务：[模型修改、项目测试、实际提案批准应用、原副本保护和未通过的 Memory／Trace 范围](evidence/python-browser-task-2026-10-16.md)；完整失败和冻结场景分母保留，#18 继续打开。
+- Python 真实多轮任务：[模型修改、项目测试、实际提案批准应用和原副本保护](evidence/python-browser-task-2026-10-16.md)；[后续同任务反思／v2 Trace 对账](evidence/trace-integrity-v2-2026-10-16.md)，完整失败和冻结场景分母保留。
 - Go 真实多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；#17 继续打开，后续源码修复独立绑定。
 - 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；[同会话取消后真实反思写回及跨进程 fixture 修正](evidence/memory-cancellation-product-2026-10-16.md)。provider 错误展示和十轮同任务剩余范围仍待各自验证。
 - #19 首批验收对账：[五类恢复场景、文件／兼容矩阵、AC01–AC09 和当前缺口](evidence/milestone-reconciliation-2026-10-16.md)；原范围与当前源码分别核对，milestone 和发布仍未通过。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。
-- 恢复执行的 Trace 采集：[全部实际尝试读回、原严格拒绝与真实后端完整树证据](evidence/recovered-trace-readback-2026-10-16.md)；成功任务验收继续保留，已批准的版本化验收调整另行实施。
+- 恢复执行的 Trace 采集：[全部实际尝试读回、原严格拒绝与真实后端完整树证据](evidence/recovered-trace-readback-2026-10-16.md)。
+- 已批准的 Trace 完整性 v2：[原构建／新分析器独立绑定、三批真实后端读回及 Python #18 范围对账](evidence/trace-integrity-v2-2026-10-16.md)；Python 32 条同任务经验与完整 Trace 已核对，Go 的真实 unknown／缺失仍保留，父规格与发布分别验收。
 - #16 Windows 便携包：[迁移目录／空 PATH、真实登录问答、组件 pin 与所属进程回收证据](evidence/portable-windows-2026-10-15.md)。
 - Task Workspace 准备与离线镜像边界：[范围证据](evidence/workspace-offline-2026-10-11.md)。
 - Runner 输出、生命周期与工具链：[范围证据](evidence/task-runtime-2026-10-11.md)。

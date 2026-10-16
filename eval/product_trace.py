@@ -42,14 +42,35 @@ def _expectation(session: dict, before: dict, after: dict, run_ids: list[str]) -
     if len(models) != len(reservations):
         raise ValueError("duplicate model admission identities")
     settled = {event["payload"]["call_id"] for event in after["events"] if event["type"] == "admission/call_settled"}
+    attempts, tool_facts = {run: [] for run in run_ids}, {run: {} for run in run_ids}
+    for event in relevant:
+        fact, kind = event["payload"], event["type"]
+        run = fact["run_id"]
+        if kind == "session/run-leased":
+            attempts[run].append((fact.get("attempt"), fact.get("lease_id")))
+        if kind in {"tool/call", "tool/dispatched", "tool/result", "tool/unknown", "approval/denied"}:
+            tool_facts[run].setdefault(fact["tool_call_id"], []).append({
+                "type": kind, "seq": event["seq"], "tool_name": fact["tool_name"],
+                "arguments_sha256": hashlib.sha256(fact.get("arguments_json", "").encode()).hexdigest(),
+                "decision": fact.get("decision"), "exit_code": fact.get("exit_code", 0),
+                "has_error": bool(fact.get("error")), "outcome_unknown": fact.get("outcome_unknown", False),
+                "runtime_started": bool(fact.get("runtime_id")), "stopped": fact.get("stopped", False)})
     return {"session_id": session_id, "run_id": run_ids[0], "run_ids": run_ids,
             "completed": all(terminal.get(run_id) == "session/run-completed" for run_id in run_ids),
+            "run_outcomes": {run: terminal.get(run, "unknown").removeprefix("session/run-") for run in run_ids},
+            "cancellation_states": {event["payload"]["run_id"]: event["payload"].get("cancellation_state", "unknown")
+                                    for event in relevant if event["type"] == "session/run-canceled"},
+            "attempts_by_run": {run: len(leases) for run, leases in attempts.items()},
+            "run_attempts_valid": all([number for number, _ in leases] == list(range(1, len(leases) + 1))
+                                      and all(lease for _, lease in leases) and len({lease for _, lease in leases}) == len(leases)
+                                      for leases in attempts.values()),
+            "tool_facts_by_run": tool_facts,
             "tool_calls_by_run": tools, "model_calls": models,
             "unsettled_model_calls": sorted(models.keys() - settled),
             "retry_of": {fact["call_id"]: fact.get("retry_of", "") for fact in reservations}}
 
 
-def _verify_native_exports(documents: dict[str, bytes], run_id: str) -> None:
+def _verify_native_exports(documents: dict[str, bytes], run_id: str, audit_binary: Path | None = None) -> None:
     # Verify the same immutable bytes that are hashed and interpreted below.
     with tempfile.TemporaryDirectory(prefix="product-trace-audit-") as directory:
         paths = []
@@ -57,7 +78,8 @@ def _verify_native_exports(documents: dict[str, bytes], run_id: str) -> None:
             path = Path(directory) / (key + ".json")
             path.write_bytes(documents[key])
             paths.append(str(path))
-        result = subprocess.run(["go", "run", "./cmd/trace-audit", *paths, run_id],
+        command = [str(audit_binary)] if audit_binary is not None else ["go", "run", "./cmd/trace-audit"]
+        result = subprocess.run([*command, *paths, run_id],
                                 cwd=Path(__file__).resolve().parents[1], capture_output=True, timeout=120)
         if result.returncode:
             raise ValueError("native product audit refused")
@@ -70,7 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True, action="append", help="repeat for all runs in a multi-round coding task")
     parser.add_argument("--attempts", type=int, default=6)
     parser.add_argument("--interval", type=float, default=1)
+    parser.add_argument("--contract-version", choices=("product-v1", "product-integrity-v2"), default="product-v1")
+    parser.add_argument("--runtime-manifest", help="original pinned bundle manifest, required for integrity v2")
     args = parser.parse_args(argv)
+    integrity = args.contract_version == "product-integrity-v2"
     origin = urlsplit(args.phoenix_url)
     if origin.scheme not in {"http", "https"} or not origin.hostname or origin.username or origin.password or origin.query or origin.fragment or origin.path not in {"", "/"}:
         parser.error("Phoenix must be an HTTP(S) origin without credentials")
@@ -85,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt = {"schema_version": 1, "scope": "product-trace-readback", "status": "BLOCKED", "capture_state": "unknown",
                "backend_readback": False, "backend_origin": args.phoenix_url.rstrip("/"), "project": args.project,
                "attempts": [], "input_sha256": {}}
+    if integrity:
+        receipt.update(schema_version=2, scope="product-trace-integrity")
     try:
         sources, documents = {}, {}
         for key in ("session_events", "budget_before", "budget_after", "inputs"):
@@ -106,15 +133,52 @@ def main(argv: list[str] | None = None) -> int:
         source_root = Path(__file__).resolve().parents[1]
         for name, checksum in fingerprints.items():
             source = (source_root / name).resolve()
-            if not source.is_relative_to(source_root) or hashlib.sha256(source.read_bytes()).hexdigest() != checksum:
+            if not source.is_relative_to(source_root) or (not integrity and hashlib.sha256(source.read_bytes()).hexdigest() != checksum):
                 raise ValueError("runtime source differs from frozen inputs")
+        if integrity:
+            if not args.runtime_manifest:
+                raise ValueError("original runtime manifest required")
+            manifest_path = Path(args.runtime_manifest).resolve()
+            data = manifest_path.read_bytes()
+            manifest_sha = hashlib.sha256(data).hexdigest()
+            manifest = json.loads(data.decode("utf-8-sig"))
+            compiled = manifest.get("source_files")
+            if (not isinstance(compiled, dict) or not compiled
+                    or any(not isinstance(name, str) or Path(name).is_absolute()
+                           or not (source_root / name).resolve().is_relative_to(source_root)
+                           or not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+                           for name, checksum in compiled.items())):
+                raise ValueError("pinned runtime source manifest is malformed")
+            recorded = pins.get("compiled_source_files")
+            if not isinstance(recorded, dict):
+                recorded = {name: fingerprints.get(name) for name in compiled or {}}
+            binary = Path(args.binary).resolve()
+            if (manifest_sha != pins.get("bundle_manifest_sha256") or not compiled or recorded != compiled
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(pins.get("source_commit", "")))
+                    or manifest.get("source_commit") != pins["source_commit"]
+                    or not binary.is_relative_to(manifest_path.parent)
+                    or manifest.get("files", {}).get(binary.relative_to(manifest_path.parent).as_posix()) != pins["binary_sha256"]):
+                raise ValueError("original runtime build binding differs from frozen inputs")
+            receipt["runtime_binding"] = {"manifest_sha256": manifest_sha, "source_commit": pins["source_commit"],
+                                          "source_sha256": compiled, "binary_sha256": pins["binary_sha256"]}
+            receipt["analysis_source_sha256"] = {name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+                for name in ("eval/product_trace.py", "eval/harness/trace_contract.py", "eval/harness/phoenix.py")}
         if hashlib.sha256(Path(args.binary).read_bytes()).hexdigest() != pins["binary_sha256"]:
             raise ValueError("product binary differs from frozen inputs")
-        receipt["pins_verified"] = {"source_files": len(fingerprints), "binary_sha256": pins["binary_sha256"],
+        receipt["pins_verified"] = {"source_files": len(compiled) if integrity else len(fingerprints), "binary_sha256": pins["binary_sha256"],
                                     "task_image": pins["task_image"], "model": pins["model"],
                                     "trace_backend": {key: pins["trace_backend"][key] for key in ("image", "id", "project") if key in pins["trace_backend"]}}
-        for run_id in args.run_id:
-            _verify_native_exports(documents, run_id)
+        if integrity:
+            with tempfile.TemporaryDirectory(prefix="product-trace-native-") as directory:
+                audit_binary = Path(directory) / "trace-audit.exe"
+                subprocess.run(["go", "build", "-o", str(audit_binary), "./cmd/trace-audit"], cwd=source_root,
+                               capture_output=True, check=True, timeout=120)
+                receipt["native_audit_sha256"] = hashlib.sha256(audit_binary.read_bytes()).hexdigest()
+                for run_id in args.run_id:
+                    _verify_native_exports(documents, run_id, audit_binary)
+        else:
+            for run_id in args.run_id:
+                _verify_native_exports(documents, run_id)
         expected = _expectation(sources["session_events"], sources["budget_before"], sources["budget_after"], args.run_id)
         expected["model"] = pins["model"]
         if find_secret_leak(expected):
@@ -124,13 +188,29 @@ def main(argv: list[str] | None = None) -> int:
         for attempt in range(args.attempts):
             try:
                 spans, unavailable = [], []
+                inconsistent = False
                 for run_id in args.run_id:
                     try:
-                        spans.extend(read_product_spans(args.phoenix_url, args.project, args.started_at, expected["session_id"], run_id))
+                        captured = read_product_spans(args.phoenix_url, args.project, args.started_at, expected["session_id"], run_id)
+                        if integrity:
+                            for trace_id in sorted({span.trace_id for span in captured}):
+                                previous = sorted((span for span in spans if span.trace_id == trace_id), key=lambda span: span.span_id)
+                                current = sorted((span for span in captured if span.trace_id == trace_id), key=lambda span: span.span_id)
+                                # Reuse identical full trees; retain conflicting snapshots for rejection.
+                                if current != previous:
+                                    inconsistent = inconsistent or bool(previous)
+                                    spans.extend(current)
+                        else:
+                            spans.extend(captured)
                     except Exception as error:
                         unavailable.append({"run_id": run_id, "error": type(error).__name__})
-                report = evaluate_product_trace(spans, expected)
-                capture = json.dumps({"spans": [span.to_dict() for span in spans], "report": report}, indent=2).encode()
+                report = evaluate_product_trace(spans, expected, contract_version=args.contract_version)
+                if inconsistent:
+                    report["verdict"] = "FAIL"
+                    report["problems"].append("inconsistent backend snapshots for a shared trace")
+                legacy_report = evaluate_product_trace(spans, expected) if integrity else None
+                capture = json.dumps({"spans": [span.to_dict() for span in spans], "report": report,
+                                      **({"legacy_report": legacy_report} if integrity else {})}, indent=2).encode()
                 name = f"readback-{attempt + 1}.json"
                 with (output / name).open("xb") as stream:
                     stream.write(capture)
@@ -141,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
                 if spans or not receipt["backend_readback"]:
                     receipt.update(capture_state="complete" if report["verdict"] == "PASS" and not unavailable else "partial" if spans else "unknown",
                                    backend_readback=bool(spans), report=report)
+                    if integrity:
+                        receipt["legacy_report"] = legacy_report
                 if report["verdict"] == "PASS" and not unavailable:
                     if not expected["unsettled_model_calls"]:
                         receipt["status"] = "VERIFIED"

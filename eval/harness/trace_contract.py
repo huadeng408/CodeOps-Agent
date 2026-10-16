@@ -355,8 +355,98 @@ def _matches_kind(span_name: str, kind_name: str) -> bool:
     return span_name == kind_name or span_name.startswith(kind_name + " ")
 
 
-def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str, Any]) -> dict[str, Any]:
+def _product_tool_outcomes(expected, requested, problems, missing):
+    facts_by_run = expected.get("tool_facts_by_run", {})
+    run_ids = expected.get("run_ids", [expected["run_id"]])
+    if set(facts_by_run) != set(run_ids):
+        problems.append("complete native tool facts are required")
+    dispatched, outcomes = {}, []
+    for run_id, facts in facts_by_run.items():
+        if any((run_id, call_id) not in requested for call_id in facts):
+            problems.append("native tool fact has no matching request")
+    for (run_id, call_id), name in requested.items():
+        facts = facts_by_run.get(run_id, {}).get(call_id, [])
+        calls = [fact for fact in facts if fact["type"] == "tool/call"]
+        dispatch = [fact for fact in facts if fact["type"] == "tool/dispatched"]
+        denied = [fact for fact in facts if fact["type"] == "approval/denied"]
+        results = [fact for fact in facts if fact["type"] == "tool/result"]
+        state = "unknown"
+        argument_pins = [fact.get("arguments_sha256") for fact in facts
+                         if fact["type"] in {"tool/call", "tool/dispatched", "approval/denied"}]
+        if (len(calls) != 1 or len(dispatch) > 1 or len(denied) > 1 or len(results) > 1
+                or len(set(argument_pins)) != 1
+                or any(not isinstance(pin, str) or not re.fullmatch(r"[0-9a-f]{64}", pin) for pin in argument_pins)
+                or any(fact.get("tool_name") != name for fact in facts)
+                or any(fact["seq"] <= calls[0]["seq"] for fact in facts if fact["type"] != "tool/call")):
+            problems.append("native tool facts do not match the request")
+        elif len(results) != 1:
+            missing.append("tool.result:" + run_id + "/" + call_id)
+        else:
+            result = results[0]
+            known = (not result.get("outcome_unknown") and not any(fact["type"] == "tool/unknown" for fact in facts)
+                     and (not result.get("runtime_started") or result.get("stopped") is True)
+                     and type(result.get("exit_code", 0)) is int)
+            if (denied and not dispatch and known and denied[0].get("decision") == "denied"
+                    and denied[0]["seq"] < result["seq"] and result.get("exit_code", 0) != 0
+                    and result.get("has_error") and not result.get("runtime_started")):
+                state = "denied"
+            elif dispatch and not denied and known and dispatch[0]["seq"] < result["seq"]:
+                state = "failed" if result.get("exit_code", 0) or result.get("has_error") else "succeeded"
+        if dispatch:
+            dispatched[(run_id, call_id)] = name
+        if state == "unknown":
+            problems.append("tool outcome or dispatch authorization is unknown")
+        outcomes.append({"run_id": run_id, "tool_call_id": call_id, "tool_name": name,
+                         "dispatched": bool(dispatch), "state": state})
+    return dispatched, outcomes
+
+
+def _product_attempt_roots(items, roots, expected, problems):
+    run_ids = expected.get("run_ids", [expected["run_id"]])
+    attempts = expected.get("attempts_by_run", {})
+    if (set(attempts) != set(run_ids) or expected.get("run_attempts_valid", True) is not True
+            or len(set(run_ids)) != len(run_ids)
+            or any(type(count) is not int or count < 1 for count in attempts.values())
+            or {root.attributes.get("session.run_id") for root in roots} != set(run_ids)
+            or any(sum(root.attributes.get("session.run_id") == run_id for root in roots) != count
+                   for run_id, count in attempts.items())):
+        problems.append("Go execution roots do not match the native attempt denominator")
+    contexts = {(span.trace_id, span.span_id): span for span in items}
+    owners = {}
+    for span in items:
+        current, owner, seen = span, None, set()
+        while True:
+            key = (current.trace_id, current.span_id)
+            if key in seen:
+                problems.append("product span ancestry is cyclic")
+                break
+            seen.add(key)
+            if current.name == "agent.main":
+                if owner is None:
+                    owner = current
+                elif current.attributes.get("session.run_id") != owner.attributes.get("session.run_id"):
+                    problems.append("recovered Go roots cross durable runs")
+            if not current.parent_span_id:
+                if current.name != "agent.main":
+                    problems.append("product span does not reach the Go root")
+                break
+            parent = contexts.get((current.trace_id, current.parent_span_id))
+            if parent is None:
+                problems.append("product span parent is missing or in another trace")
+                break
+            current = parent
+        if owner is None:
+            problems.append("product span does not reach the Go root")
+        else:
+            owners[(span.trace_id, span.span_id)] = owner
+    return owners
+
+
+def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str, Any], *, contract_version: str = "product-v1") -> dict[str, Any]:
     """Check the product's selected run trees against its durable denominator."""
+    if contract_version not in {"product-v1", "product-integrity-v2"}:
+        raise ValueError("unknown product Trace contract")
+    integrity = contract_version == "product-integrity-v2"
     items = list(spans)
     problems, missing = [], []
     session_id, run_id = expected["session_id"], expected["run_id"]
@@ -365,12 +455,15 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
     if tools_by_run is None:
         tools_by_run = {run_id: expected["tool_calls"]}
     tools = {(run, call_id): name for run, calls in tools_by_run.items() for call_id, name in calls.items()}
+    requested_tools = tools
+    if integrity:
+        tools, tool_outcomes = _product_tool_outcomes(expected, requested_tools, problems, missing)
     models = expected["model_calls"]
     retry_of = expected.get("retry_of", {})
     logical_calls = {call_id: purpose for call_id, purpose in models.items() if not retry_of.get(call_id)}
-    if expected.get("completed") is not True:
+    if not integrity and expected.get("completed") is not True:
         problems.append("the durable product run did not complete successfully")
-    if not tools or not models:
+    if not requested_tools or not models:
         problems.append("a coding product trace requires actual tool and model calls")
     if set(tools_by_run) != set(run_ids):
         problems.append("tool run identities do not match the durable runs")
@@ -379,27 +472,33 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
     root = roots[0] if roots else None
     if not roots:
         missing.append("agent.main")
-    elif (len(roots) != len(run_ids) or len(set(run_ids)) != len(run_ids)
+    elif not integrity and (len(roots) != len(run_ids) or len(set(run_ids)) != len(run_ids)
           or len(roots_by_trace) != len(roots)
           or {span.attributes.get("session.run_id") for span in roots} != set(run_ids)):
         problems.append("product capture must contain exactly one Go root per requested run")
     if any(span.attributes.get("session.id") != session_id for span in roots):
         problems.append("Go root does not match the durable Session/run")
-    if any(span.parent_span_id for span in roots):
+    if not integrity and any(span.parent_span_id for span in roots):
         problems.append("Go task root must not have a parent")
     by_id = {span.span_id: span for span in items}
-    if len(by_id) != len(items):
+    contexts = {(span.trace_id, span.span_id): span for span in items}
+    if len(contexts if integrity else by_id) != len(items):
         problems.append("duplicate span IDs")
+    owners = _product_attempt_roots(items, roots, expected, problems) if integrity else {}
     for span in items:
         if (not re.fullmatch(r"[0-9a-f]{32}", span.trace_id) or span.trace_id == "0" * 32
                 or not re.fullmatch(r"[0-9a-f]{16}", span.span_id) or span.span_id == "0" * 16):
             problems.append("invalid W3C span identity")
         if not span.ended:
             missing.append("unfinished span")
-        if str(span.status).upper() not in {"OK", "UNSET"}:
+        if integrity and str(span.status).upper() not in {"OK", "UNSET", "ERROR", "CANCELED", "CANCELLED"}:
+            problems.append("product span has an unknown status")
+        elif not integrity and str(span.status).upper() not in {"OK", "UNSET"}:
             problems.append("product tree includes an error or canceled span")
         if find_secret_leak(span.attributes) or find_secret_leak(span.name):
             problems.append("product tree contains a credential shape")
+        if integrity:
+            continue
         owning_root = roots_by_trace.get(span.trace_id)
         if owning_root is None:
             if roots:
@@ -415,9 +514,12 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
             if current.trace_id != span.trace_id:
                 problems.append("product parent is in another trace")
                 break
-    if len(run_ids) > 1:
-        foreground_traces = {span.trace_id for span in items if span.name == "provider.call" and span.attributes.get("model.purpose") == "foreground"}
-        if any(span.trace_id not in foreground_traces for span in roots):
+    if len(run_ids) > 1 or integrity:
+        foreground = [span for span in items if (span.name == "provider.call" or integrity and _matches_kind(span.name, "provider.call"))
+                      and span.attributes.get("model.purpose") == "foreground"]
+        foreground_runs = {owners[(span.trace_id, span.span_id)].attributes.get("session.run_id") for span in foreground
+                           if (span.trace_id, span.span_id) in owners}
+        if (integrity and set(run_ids) - foreground_runs) or (not integrity and any(span.trace_id not in {call.trace_id for call in foreground} for span in roots)):
             problems.append("a Go run has no foreground Python provider call")
     for name, calls, id_key, value_key in (
         ("execute_tool", tools, "gen_ai.tool.call.id", "gen_ai.tool.name"),
@@ -430,7 +532,7 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
                 continue
             call_id = span.attributes.get(id_key)
             if name == "execute_tool":
-                owning_root = roots_by_trace.get(span.trace_id)
+                owning_root = owners.get((span.trace_id, span.span_id)) if integrity else roots_by_trace.get(span.trace_id)
                 call_id = (owning_root.attributes.get("session.run_id") if owning_root else "", call_id)
             if call_id in observed:
                 problems.append("duplicate call spans")
@@ -439,15 +541,16 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
         if any(call_id not in calls or calls[call_id] != value for call_id, value in observed.items()):
             problems.append("call spans do not match the durable call identities")
     for span in items:
-        if span.name not in {"provider.call", "provider.attempt"}:
+        kind = next((name for name in ("provider.call", "provider.attempt") if _matches_kind(span.name, name)), "") if integrity else span.name
+        if kind not in {"provider.call", "provider.attempt"}:
             continue
         if span.attributes.get("gen_ai.request.model") != expected["model"]:
             problems.append("provider model does not match the frozen request model")
-        parent = by_id.get(span.parent_span_id)
-        if span.name == "provider.call" and span.attributes.get("model.purpose") == "foreground":
+        parent = contexts.get((span.trace_id, span.parent_span_id)) if integrity else by_id.get(span.parent_span_id)
+        if kind == "provider.call" and span.attributes.get("model.purpose") == "foreground":
             if parent is None or parent.name != "chat":
                 problems.append("foreground provider call is not a child of Python chat")
-        if span.name == "provider.attempt":
+        if kind == "provider.attempt":
             call_id, seen = span.attributes.get("model.call_id"), set()
             if span.attributes.get("model.retry_of", "") != retry_of.get(call_id, ""):
                 problems.append("provider retry lineage differs from the Ledger")
@@ -457,15 +560,29 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
                     break
                 seen.add(call_id)
                 call_id = retry_of[call_id]
-            if parent is None or parent.name != "provider.call" or parent.attributes.get("model.call_id") != call_id:
+            if (parent is None or not (parent.name == "provider.call" or integrity and _matches_kind(parent.name, "provider.call"))
+                    or parent.attributes.get("model.call_id") != call_id):
                 problems.append("provider attempt is not a child of its logical Python call")
+    if integrity:
+        outcomes = expected.get("run_outcomes", {})
+        if set(outcomes) != set(run_ids) or any(state not in {"completed", "failed", "canceled"} for state in outcomes.values()):
+            problems.append("durable execution outcomes are incomplete")
+        cancellations = expected.get("cancellation_states", {})
+        if set(cancellations) != {run for run, state in outcomes.items() if state == "canceled"} or any(state != "stopped" for state in cancellations.values()):
+            problems.append("canceled execution has unconfirmed side effects")
     verdict = VERDICT_FAIL if problems else VERDICT_INCOMPLETE if missing or not items else VERDICT_PASS
-    return {"contract_version": "product-task-v1" if len(run_ids) > 1 else "product-v1", "profile": "product", "verdict": verdict,
+    report = {"contract_version": contract_version if integrity else "product-task-v1" if len(run_ids) > 1 else "product-v1", "profile": "product", "verdict": verdict,
             "session_id": session_id, "run_id": run_id, "primary_trace_id": root.trace_id if root else "",
             "run_ids": list(run_ids), "trace_ids": sorted(roots_by_trace),
-            "span_count": len(items), "expected_tools": len(tools), "expected_model_calls": len(models),
+            "span_count": len(items), "expected_tools": len(requested_tools), "expected_model_calls": len(models),
             "expected_logical_calls": len(logical_calls),
             "missing": sorted(set(missing)), "problems": sorted(set(problems))}
+    if integrity:
+        report.update(expected_dispatched_tools=len(tools),
+                      execution={"runs": outcomes, "cancellation_states": cancellations, "tools": tool_outcomes},
+                      error_spans=[{"trace_id": span.trace_id, "span_id": span.span_id, "name": span.name, "status": span.status}
+                                   for span in items if str(span.status).upper() not in {"OK", "UNSET"}])
+    return report
 
 
 def evaluate_trace_contract(

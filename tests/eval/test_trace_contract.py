@@ -162,6 +162,130 @@ def test_product_trace_keeps_every_attempt_in_a_settled_retry(product_trace_capt
     assert report["problems"] == ["product tree includes an error or canceled span"]
 
 
+@pytest.fixture
+def product_integrity_capture(product_trace_capture):
+    spans, expected = product_trace_capture
+    expected.update(run_outcomes={"run:1": "completed"}, attempts_by_run={"run:1": 1},
+                    tool_facts_by_run={"run:1": {"tool-1": [
+                        {"type": "tool/call", "seq": 1, "tool_name": "Read", "arguments_sha256": "f" * 64},
+                        {"type": "tool/dispatched", "seq": 2, "tool_name": "Read", "arguments_sha256": "f" * 64},
+                        {"type": "tool/result", "seq": 3, "tool_name": "Read", "exit_code": 0},
+                    ]}})
+    return spans, expected
+
+
+@pytest.mark.parametrize("case", ["known-error", "failed-run", "canceled-run", "recovered-run", "denied-tool", "settled-retry"])
+def test_product_integrity_keeps_execution_outcomes_separate(product_integrity_capture, case):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_integrity_capture
+    if case == "known-error":
+        spans[2].status = "ERROR"
+        expected["tool_facts_by_run"]["run:1"]["tool-1"][-1].update(exit_code=1, has_error=True)
+    elif case in {"failed-run", "canceled-run"}:
+        expected["completed"] = False
+        expected["run_outcomes"]["run:1"] = "failed" if case == "failed-run" else "canceled"
+        if case == "canceled-run":
+            expected["cancellation_states"] = {"run:1": "stopped"}
+        spans[0].status = "ERROR"
+    elif case == "recovered-run":
+        expected["attempts_by_run"]["run:1"] = 2
+        spans.append(CapturedSpan("agent.main", "a" * 32, "8" * 16, "1" * 16, attributes=dict(spans[0].attributes)))
+        spans[0].status = "ERROR"
+    elif case == "denied-tool":
+        expected["tool_calls"]["tool-denied"] = "WebFetch"
+        expected["tool_facts_by_run"]["run:1"]["tool-denied"] = [
+            {"type": "tool/call", "seq": 4, "tool_name": "WebFetch", "arguments_sha256": "f" * 64},
+            {"type": "approval/denied", "seq": 5, "tool_name": "WebFetch", "decision": "denied", "arguments_sha256": "f" * 64},
+            {"type": "tool/result", "seq": 6, "tool_name": "WebFetch", "exit_code": 1, "has_error": True},
+        ]
+    else:
+        expected["model_calls"]["model-retry"] = "foreground"
+        expected["retry_of"] = {"model-retry": "model-1"}
+        spans[5].status = "ERROR"
+        spans.append(CapturedSpan("provider.attempt", "a" * 32, "8" * 16, "4" * 16, attributes={
+            "model.call_id": "model-retry", "model.retry_of": "model-1", "model.purpose": "foreground", "gen_ai.request.model": "fixture"}))
+    report = evaluate_product_trace(spans, expected, contract_version="product-integrity-v2")
+    assert report["contract_version"] == "product-integrity-v2" and report["verdict"] == "PASS", report
+    assert report["span_count"] == len(spans) and report["missing"] == []
+    assert report["execution"]["runs"] == expected["run_outcomes"]
+    assert report["error_spans"] == [
+        {"trace_id": s.trace_id, "span_id": s.span_id, "name": s.name, "status": s.status}
+        for s in spans if s.status not in {"OK", "UNSET"}]
+    if case == "denied-tool":
+        assert report["expected_tools"] == 2 and report["expected_dispatched_tools"] == 1
+        assert report["execution"]["tools"][-1]["state"] == "denied"
+    assert evaluate_product_trace(spans, expected)["verdict"] != "PASS"
+
+
+@pytest.mark.parametrize("case", ["missing-tool", "missing-model", "unfinished", "wrong-run", "wrong-model", "detached", "cycle",
+    "duplicate-span", "duplicate-call", "unknown-status", "missing-attempt", "extra-root", "unknown-result", "missing-result",
+    "undispatched", "denied-dispatched", "denied-executed", "runtime-still-running", "wrong-arguments", "unknown-run", "wrong-tool-fact", "foreign-parent", "cross-run-root", "cancellation-unknown", "cancellation-missing", "provider-suffix-model", "provider-suffix-parent", "secret"])
+def test_product_integrity_still_refuses_unproven_evidence(product_integrity_capture, case):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_integrity_capture
+    facts = expected["tool_facts_by_run"]["run:1"]["tool-1"]
+    if case == "missing-tool": spans.pop(2)
+    elif case == "missing-model": spans.pop()
+    elif case == "unfinished": spans[-1].ended = False
+    elif case == "wrong-run": spans[0].attributes["session.run_id"] = "run:other"
+    elif case == "wrong-model": spans[-1].attributes["gen_ai.request.model"] = "other"
+    elif case == "detached": spans[-1].parent_span_id = "f" * 16
+    elif case == "cycle": spans[1].parent_span_id = spans[3].span_id
+    elif case == "duplicate-span": spans.append(spans[-1])
+    elif case == "duplicate-call": spans.append(CapturedSpan("execute_tool Read", "a" * 32, "8" * 16, "1" * 16, attributes=dict(spans[2].attributes)))
+    elif case == "unknown-status": spans[-1].status = "UNKNOWN"
+    elif case == "missing-attempt": expected["attempts_by_run"]["run:1"] = 2
+    elif case == "extra-root": spans.append(CapturedSpan("agent.main", "a" * 32, "8" * 16, attributes=dict(spans[0].attributes)))
+    elif case == "unknown-result": facts[-1]["outcome_unknown"] = True
+    elif case == "missing-result": facts.pop()
+    elif case == "undispatched": facts.pop(1)
+    elif case == "denied-dispatched": facts.insert(1, {"type": "approval/denied", "seq": 1, "tool_name": "Read", "decision": "denied"})
+    elif case == "denied-executed":
+        facts[1].update(type="approval/denied", decision="denied")
+        facts[-1].update(exit_code=1, has_error=True)
+    elif case == "runtime-still-running": facts[-1].update(runtime_started=True, stopped=False)
+    elif case == "wrong-arguments": facts[1]["arguments_sha256"] = "a" * 64
+    elif case == "unknown-run": expected["run_outcomes"]["run:1"] = "unknown"
+    elif case == "wrong-tool-fact": facts[-1]["tool_name"] = "Write"
+    elif case == "foreign-parent": spans[0].parent_span_id = "f" * 16
+    elif case == "cross-run-root":
+        expected["run_ids"] = ["run:1", "run:2"]
+        expected["attempts_by_run"]["run:2"] = 1
+        spans.append(CapturedSpan("agent.main", "a" * 32, "8" * 16, "1" * 16, attributes={"session.id": "session-1", "session.run_id": "run:2"}))
+    elif case.startswith("cancellation-"):
+        expected["completed"] = False
+        expected["run_outcomes"]["run:1"] = "canceled"
+        if case.endswith("unknown"):
+            expected["cancellation_states"] = {"run:1": "unknown"}
+    elif case == "provider-suffix-model":
+        spans[-1].name = "provider.attempt suffix"
+        spans[-1].attributes["gen_ai.request.model"] = "other"
+    elif case == "provider-suffix-parent":
+        spans[-1].name = "provider.attempt suffix"
+        spans[-1].parent_span_id = spans[0].span_id
+    elif case == "secret": spans[-1].attributes["unsafe"] = "sk-" + "fixture" * 5
+    report = evaluate_product_trace(spans, expected, contract_version="product-integrity-v2")
+    assert report["verdict"] != "PASS", report
+
+
+def test_product_integrity_joins_separate_run_roots_in_the_same_actual_trace(product_task_trace_capture):
+    from eval.harness.trace_contract import evaluate_product_trace
+
+    spans, expected = product_task_trace_capture
+    for span in spans:
+        span.trace_id = "a" * 32
+    expected.update(run_outcomes={"run:1": "completed", "run:2": "completed"}, attempts_by_run={"run:1": 1, "run:2": 1},
+                    tool_facts_by_run={"run:1": {"tool-1": [
+                        {"type": "tool/call", "seq": 1, "tool_name": "Read", "arguments_sha256": "f" * 64},
+                        {"type": "tool/dispatched", "seq": 2, "tool_name": "Read", "arguments_sha256": "f" * 64},
+                        {"type": "tool/result", "seq": 3, "tool_name": "Read", "exit_code": 0},
+                    ]}, "run:2": {}})
+    report = evaluate_product_trace(spans, expected, contract_version="product-integrity-v2")
+    assert report["verdict"] == "PASS" and report["span_count"] == 11, report
+
+
 def _span(
     name: str,
     *,

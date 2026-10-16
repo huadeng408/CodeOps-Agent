@@ -10,7 +10,7 @@
 
 ## 实际产品任务读回
 
-`python -m eval.product_trace` 对真实产品 Session/run 使用 `product-v1` 契约：
+`python -m eval.product_trace` 默认对真实产品 Session/run 使用兼容的 `product-v1` 严格契约：
 从 Phoenix API 找到 Go 的 `agent.main`，再按 trace ID 分页读回整棵树，
 逐项核对 Go Ledger 中的工具和模型调用。Python `provider.call` 表示一次逻辑调用，
 Go `provider.attempt` 表示每次已准入的 HTTP 尝试；重试全部保留。
@@ -20,7 +20,8 @@ Go `provider.attempt` 表示每次已准入的 HTTP 尝试；重试全部保留�
 后端身份核验和原仓库保护证据。准备完整的 Session 事件及准入 Ledger 前后导出，
 包含原始序号、checksum 和 payload；只筛选 call 事件的导出不能校验完整链。
 命令内部复用 `go run ./cmd/trace-audit` 的原生事件链和预算投影，需要 Go 工具链。
-它核对当前任务所有调用已结算且任务已停止；其他已结束任务的历史 unknown 不阻塞本次读回。
+原生审计核对任务已停止；已结束的 unknown 调用允许采集，最终验收仍要求目标调用全部结算。
+其他已结束任务的历史 unknown 不阻塞本次读回。
 同一代码任务包含多轮对话时，重复 `--run-id` 提供各轮实际 run。命令核对每轮的 Go 根、
 完成状态和工具归属，并用同一任务的完整准入前后分母检查全部模型调用；只读轮次不需要伪造写入。
 整个所选任务仍须有真实代码修改及工具执行。缺一轮、遗漏调用或跨轮错误父链均不能通过。
@@ -39,3 +40,28 @@ python -m eval.product_trace --phoenix-url http://127.0.0.1:6006 --project defau
 敏感内容在允许字段筛选前检查；缺失、未结束、错误、取消、后端不可用或输入校验失败不产生成功收据，
 返回退出码 3，并保留 `partial`／`unknown` 与每次尝试。通过仅代表该次产品 Trace 范围，
 不授予发布资格；旧 Python-only eval 及独立探针仍保持各自分类。
+
+## 版本化链路完整性
+
+经用户批准，#17/#18 可显式选择 `--contract-version product-integrity-v2`，
+并提供 `--runtime-manifest <原构建的 bundle-manifest.json>`。其余导出、冻结输入、
+实际二进制与后端参数沿用上例；输出必须是新目录，原 v1 收据和冻结输入保留原样。
+
+v2 核对全部 canonical run 和 native lease 尝试分母、每次实际 Go 根、W3C 身份、
+完整父链、模型逻辑调用／尝试及工具请求／派发／结果。已派发工具必须有执行 span；
+多个 run 共用一条 trace 时仍逐 run 查找全部根，只复用内容相同的完整树；读回快照不一致时保留双方并拒绝验收。
+只有身份和参数指纹匹配的原生 approval/denied、已知拒绝结果且无 dispatch，才记为未执行。
+拒绝后出现执行 span、未知工具结果、未确认资源停止、未知取消状态、缺 span 或断链均拒绝。
+已确认停止的失败／取消，以及已知工具／模型 ERROR，原样保留在执行状态和错误列表中。
+
+新收据的 `schema_version=2`、`scope=product-trace-integrity`；`report` 是完整性结果，
+其中 `execution` 分别记录原生 run、取消和全部工具结果，`error_spans` 保留错误身份及状态。
+同一全量 span 的旧规则分析并列保存为 `legacy_report`，不覆盖历史原始 v1 收据。
+`capture_state=complete` 表示完整性通过且后端全部可用；目标模型调用有未结算 ID 时，
+最终状态仍 `BLOCKED`、退出 3。仅完整性通过且目标调用全部结算时，Trace 范围才 `VERIFIED`、退出 0。
+
+原 runtime 源码和二进制对照冻结输入及原构建 manifest 核验，记录在 `runtime_binding`；
+当前 Python 分析器的内容指纹与实际执行的 Go 原生审计二进制 SHA 分别记录。
+因此可以对历史真实运行做新版本分析，不把当前 checkout 当作当时运行，也不改写旧输入。
+原功能轮次、项目测试、提案批准／应用、真实 Memory、费用记录及完整发布要求继续分别验收。
+完整 Trace 不会把失败轮次变为完成，也不授予发布资格。
