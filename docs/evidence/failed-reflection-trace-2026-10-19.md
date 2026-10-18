@@ -1,7 +1,8 @@
 # 失败轮次反思保留 Agent 父链：源码修复
 
 工程状态：`IMPLEMENTED`；`VERIFIED` 限于下面的源码／集成范围。完整 Go 检查和
-独立审阅已完成，新真实运行时仍待验证。本修复不把原 #17 任务改成 Trace 通过，也不修改
+独立审阅已完成；后续[真实父链专项](failed-reflection-runtime-2026-10-19.md)单独记录。
+本修复不把原 #17 任务改成 Trace 通过，也不修改
 `product-integrity-v2` 分析器、原收据、失败／取消分母、Memory 事实或发布门槛。
 
 ## 原始症状与边界
@@ -53,7 +54,7 @@ gRPC 提取问题，Go 本地应通过；若只是后端筛选遗漏，真实额
 | `go test ./... -count=1 -json` | 退出 0，1,829 PASS／81 SKIP／0 FAIL；47 包通过，13 包无测试 |
 | `go vet ./...` | 退出 0，无诊断 |
 | 独立 Standards／Spec | 各 0 项发现，均为 `AI_REVIEWED`；冻结五文件候选，不含用户 AGENTS.md |
-| 修复后的真实产品／完整发布 | 未运行；原 #17 Trace 缺口保留 |
+| 修复后的真实父链专项 | 后续新包完成失败／成功两轮的实际后端核对；正常 #17 任务与完整发布未验收，见独立证据 |
 
 本机源码验证产物位于 `.scratch/failed-reflection-trace-20261019/`：原 RED、GREEN、
 定向、race、相关包及完整 Go JSONL、vet 输出、两轴审阅和短计划均保留；
