@@ -61,7 +61,7 @@
 - #14 Memory：[同用户同仓库、来源完整性与旧身份的源码验证](evidence/memory-scope-2026-10-15.md)；[真实反思写回、进程重启后空新会话召回与跨仓库拒绝](evidence/memory-product-2026-10-15.md)。
 - #15 产品 Trace：[真实浏览器代码任务、Go/Python/provider/tool/反思整树后端读回与拒绝边界](evidence/product-trace-2026-10-15.md)。
 - 待审批工具取消：[源码与失败留存](evidence/pending-tool-cancellation-2026-10-18.md)、[真实批准／取消与完整 Trace 专项](evidence/pending-tool-cancel-product-2026-10-18.md)已按各自范围验证；#17 原十轮验收继续独立进行。
-- OpenSandbox 长命令与停止核验：[十二次真实尝试的未知执行、期限修复与显式结束恢复范围](evidence/opensandbox-execution-deadline-2026-10-18.md)；原失败、#17 与发布缺口分别保留。
+- OpenSandbox 长命令与停止核验：[源码与十二次尝试的未知执行](evidence/opensandbox-execution-deadline-2026-10-18.md)、[真实长命令及同账号浏览器结束恢复](evidence/opensandbox-deadline-product-2026-10-18.md)；原失败、#17 与发布缺口分别保留。
 - 多轮 Trace 验证器：[完整轮次、父链、调用分母及部分读回留存的源码／集成证据](evidence/product-task-trace-source-2026-10-15.md)；#17/#18 真实十轮验收仍单独进行。
 - 受管代码任务工具额度：[两次真实提前停止、有限额度修复及公开协议／当前源码 CI 证据](evidence/harness-tool-allowance-2026-10-16.md)；真实十轮任务继续独立验收。
 - Windows 文件编辑换行：[真实 Read/Edit 缺口、精确匹配保护、源码回归及新构建证据](evidence/windows-edit-crlf-2026-10-16.md)；实际十轮任务仍单独验收。
