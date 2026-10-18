@@ -60,15 +60,16 @@ type modelScope struct {
 // provider payload using its existing model-policy adapters.
 type Gateway struct {
 	pb.UnimplementedModelGatewayServer
-	budget        *Budget
-	provider      ProviderConfig
-	mu            sync.Mutex
-	scopes        map[[32]byte]modelScope
-	server        *grpc.Server
-	listener      net.Listener
-	address       string
-	http          *http.Client
-	taskAdmission func(context.Context, string) error
+	budget         *Budget
+	provider       ProviderConfig
+	mu             sync.Mutex
+	scopes         map[[32]byte]modelScope
+	server         *grpc.Server
+	listener       net.Listener
+	address        string
+	http           *http.Client
+	taskAdmission  func(context.Context, string) error
+	runtimeStopped func(context.Context, string) error
 }
 
 func NewGateway(budget *Budget, provider ProviderConfig) *Gateway {
@@ -83,6 +84,13 @@ func (gateway *Gateway) SetTaskAdmission(check func(context.Context, string) err
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	gateway.taskAdmission = check
+}
+
+// SetRuntimeStopVerifier accepts only the Harness's pinned runtime observer.
+func (gateway *Gateway) SetRuntimeStopVerifier(check func(context.Context, string) error) {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	gateway.runtimeStopped = check
 }
 
 // ReflectionTimeout preserves the default unless Go has an explicit request profile.
@@ -332,6 +340,11 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 	}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
+	if gateway.runtimeStopped != nil {
+		if err := session.ConfirmTaskRuntimeStops(ctx, gateway.budget.ledger, actor, gateway.runtimeStopped); err != nil {
+			return err
+		}
+	}
 	if err := session.ModelTaskIdle(ctx, gateway.budget.ledger, actor); err != nil {
 		return err
 	}

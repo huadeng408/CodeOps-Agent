@@ -20,7 +20,7 @@ def validate_create(request):
         or request.platform is not None or request.lifecycle is not None
         or request.credential_proxy is not None or request.secure_access
         or request.extensions or request.resource_requests is not None
-        or request.entrypoint != ["sleep", "infinity"] or request.timeout != 120
+        or request.entrypoint != ["sleep", "infinity"] or request.timeout != 630
         or set(metadata) != {"codeops.operation_id", "codeops.opensandbox.policy_sha256"}
         or not re.fullmatch(r"[0-9a-f]{64}", metadata.get("codeops.operation_id", ""))
         or metadata.get("codeops.opensandbox.policy_sha256") != PROFILE["policy_sha256"]

@@ -72,7 +72,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"changed frozen input", "Python changed frozen input", "Python frozen arbitrary command", "Python frozen missing dependency", "Python frozen wrong toolchain", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"confirm stopped runtime", "long caller deadline", "changed frozen input", "Python changed frozen input", "Python frozen arbitrary command", "Python frozen missing dependency", "Python frozen wrong toolchain", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "server legacy deadline", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -113,7 +113,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				sidecarID: map[string]any{"Id": sidecarID, "Config": map[string]any{"Image": egressImage, "Env": []string{"OPENSANDBOX_EGRESS_MODE=dns+nft"}, "Labels": map[string]string{"opensandbox.io/egress-sidecar-for": sandboxID, "codeops.operation_id": strings.Repeat("7", 64), "codeops.opensandbox.policy_sha256": policy}}, "State": map[string]any{"Running": true},
 					"HostConfig": map[string]any{"ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "CapAdd": []string{"NET_ADMIN"}, "SecurityOpt": []string{"no-new-privileges=true"}, "NetworkMode": "codeops-network", "Memory": 256 << 20, "NanoCpus": 1000000000, "PidsLimit": 64, "Tmpfs": map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=64m"}}},
 				taskImage:   map[string]any{"RepoDigests": []string{taskImage}},
-				serverImage: map[string]any{"RepoDigests": []string{serverImage}, "Config": map[string]any{"Labels": map[string]string{"codeops.docker.project": "localcode"}, "Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml"}}},
+				serverImage: map[string]any{"RepoDigests": []string{serverImage}, "Config": map[string]any{"Labels": map[string]string{"codeops.docker.project": "localcode", "codeops.opensandbox.lease-seconds": "630"}, "Env": []string{"PATH=/usr/local/bin:/usr/bin", "SANDBOX_CONFIG_PATH=/app/codeops-runtime.toml"}}},
 				execdImage:  map[string]any{"RepoDigests": []string{execdImage}},
 				egressImage: map[string]any{"RepoDigests": []string{egressImage}},
 			}
@@ -134,6 +134,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			}
 			if scenario == "server legacy grouping image" {
 				delete(objects[serverImage].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string), "codeops.docker.project")
+			}
+			if scenario == "server legacy deadline" {
+				delete(objects[serverImage].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string), "codeops.opensandbox.lease-seconds")
 			}
 			if scenario == "server working directory" {
 				objects[serverID].(map[string]any)["Config"].(map[string]any)["WorkingDir"] = serverRoot
@@ -179,6 +182,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 			t.Setenv("CODE_AGENT_OPENSANDBOX_API_KEY", "fixture-lifecycle")
 			t.Setenv("CODE_AGENT_OPENSANDBOX_EXECD_TOKEN", "fixture-execd")
 			created, executed, deleted := 0, 0, 0
+			readbackStatus := http.StatusNotFound
 			operation := strings.Repeat("7", 64)
 			var ledgerTasks *session.TaskWorkspaces
 			var cliLedger *session.Manager
@@ -200,6 +204,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					var body struct {
 						Metadata map[string]string `json:"metadata"`
 						Env      map[string]string `json:"env"`
+						Timeout  int               `json:"timeout"`
 						Volumes  []struct {
 							MountPath string `json:"mountPath"`
 							ReadOnly  bool   `json:"readOnly"`
@@ -219,6 +224,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						t.Error("creation omitted the read-only workspace or offline policy")
 						w.WriteHeader(http.StatusBadRequest)
 						return
+					}
+					if scenario == "long caller deadline" && body.Timeout != 630 {
+						t.Errorf("sandbox lease truncates the approved command deadline or omits cleanup headroom: got %d seconds, want 630", body.Timeout)
 					}
 					if len(body.NetworkPolicy.Egress) != 2 || body.NetworkPolicy.Egress[0].Action != "deny" || body.NetworkPolicy.Egress[0].Target != "0.0.0.0/0" || body.NetworkPolicy.Egress[1].Action != "deny" || body.NetworkPolicy.Egress[1].Target != "::/0" {
 						t.Error("offline policy omitted explicit IPv4/IPv6 denial before upstream nameserver allowance")
@@ -292,6 +300,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						Cwd     string   `json:"cwd"`
 						UID     int      `json:"uid"`
 						GID     int      `json:"gid"`
+						Timeout int      `json:"timeout"`
 					}
 					wantArgv := []string{"go", "test", "./...", "-count=1"}
 					if scenario == "tool partial outcome" {
@@ -301,6 +310,9 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						t.Error("command or execution identity changed across the API")
 						w.WriteHeader(http.StatusBadRequest)
 						return
+					}
+					if scenario == "long caller deadline" && body.Timeout != 600000 {
+						t.Errorf("execd silently caps the caller's 300-second command: got %d milliseconds, want 600000", body.Timeout)
 					}
 					executed++
 					w.Header().Set("Content-Type", "text/event-stream")
@@ -355,7 +367,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					deleted++
 					w.WriteHeader(http.StatusNoContent)
 				case r.Method == "GET" && r.URL.Path == "/v1/sandboxes/"+sandboxID:
-					w.WriteHeader(http.StatusNotFound)
+					w.WriteHeader(readbackStatus)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -494,6 +506,10 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				request.DependencyOperationID = strings.Repeat("8", 64)
 			}
 			runCtx, cancel := context.WithCancel(context.Background())
+			if scenario == "long caller deadline" {
+				cancel()
+				runCtx, cancel = context.WithTimeout(context.Background(), 300*time.Second)
+			}
 			defer cancel()
 			if scenario == "cancellation after creation" {
 				marker := filepath.Join(t.TempDir(), "ownership-lookup")
@@ -509,7 +525,69 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 					cancel()
 				}()
 			}
-			result, err := sandbox.NewOpenSandboxRunner(config).Run(runCtx, request)
+			runtimeRunner := sandbox.NewOpenSandboxRunner(config)
+			result, err := runtimeRunner.Run(runCtx, request)
+			if scenario == "confirm stopped runtime" {
+				if err != nil || !result.Stopped || result.ExitCode != 7 || created != 1 || executed != 1 || deleted != 1 {
+					t.Fatalf("runtime fixture did not finish: %+v %v", result, err)
+				}
+				if err := runtimeRunner.ConfirmStopped(context.Background(), result.RuntimeID); err != nil {
+					t.Fatalf("exact absent runtime was not confirmed: %v", err)
+				}
+				imageLabels := objects[serverImage].(map[string]any)["Config"].(map[string]any)["Labels"].(map[string]string)
+				delete(imageLabels, "codeops.opensandbox.lease-seconds")
+				if err := writeObjects(); err != nil {
+					t.Fatal(err)
+				}
+				if err := runtimeRunner.ConfirmStopped(context.Background(), result.RuntimeID); err != nil {
+					t.Fatalf("pinned legacy server could not confirm old resource absence: %v", err)
+				}
+				imageLabels["codeops.opensandbox.lease-seconds"] = "630"
+				if err := writeObjects(); err != nil {
+					t.Fatal(err)
+				}
+				if created != 1 || executed != 1 || deleted != 1 {
+					t.Fatal("stop confirmation repeated a runtime effect")
+				}
+				for _, refusal := range []string{"physical task", "rebound name", "egress without operation label", "lifecycle present", "lifecycle unavailable", "daemon unavailable", "malformed identity"} {
+					t.Run(refusal, func(t *testing.T) {
+						runtimeID := result.RuntimeID
+						defer func() {
+							delete(objects, containerID)
+							delete(objects, "sandbox-"+sandboxID)
+							delete(objects, sidecarID)
+							delete(objects, "__daemon_unavailable__")
+							readbackStatus = http.StatusNotFound
+							if err := writeObjects(); err != nil {
+								t.Error(err)
+							}
+						}()
+						switch refusal {
+						case "physical task":
+							objects[containerID] = map[string]any{"Id": containerID}
+						case "rebound name":
+							objects["sandbox-"+sandboxID] = map[string]any{"Id": strings.Repeat("d", 64)}
+						case "egress without operation label":
+							objects[sidecarID] = map[string]any{"Id": sidecarID, "Config": map[string]any{"Labels": map[string]string{"opensandbox.io/egress-sidecar-for": sandboxID}}}
+						case "lifecycle present":
+							readbackStatus = http.StatusOK
+						case "lifecycle unavailable":
+							readbackStatus = http.StatusServiceUnavailable
+						case "daemon unavailable":
+							objects["__daemon_unavailable__"] = true
+						case "malformed identity":
+							runtimeID = "unbound-operation"
+						}
+						if err := writeObjects(); err != nil {
+							t.Fatal(err)
+						}
+						if err := runtimeRunner.ConfirmStopped(context.Background(), runtimeID); !errors.Is(err, sandbox.ErrSandboxOutcomeUnknown) {
+							t.Fatalf("unconfirmed runtime was accepted: %v", err)
+						}
+					})
+				}
+				return
+			}
 			if scenario == "cancellation after creation" {
 				if !errors.Is(err, sandbox.ErrSandboxOutcomeUnknown) || !result.Stopped || result.ExitCode != 126 || created != 1 || executed != 0 || deleted != 1 || !strings.Contains(result.RuntimeID, containerID) {
 					t.Fatalf("cancellation lost exact ownership or cleanup: %+v lifecycle=%d/%d/%d %v", result, created, executed, deleted, err)
@@ -529,7 +607,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				}
 				return
 			}
-			if scenario != "complete failed baseline" && scenario != "complete failed baseline local image IDs" && scenario != "complete failed baseline registry named sha256" && scenario != "terminal keepalive" {
+			if scenario != "long caller deadline" && scenario != "complete failed baseline" && scenario != "complete failed baseline local image IDs" && scenario != "complete failed baseline registry named sha256" && scenario != "terminal keepalive" {
 				wantExecuted, wantError := 1, sandbox.ErrSandboxOutcomeUnknown
 				wantDeleted := 1
 				if strings.HasPrefix(scenario, "replaced ") || scenario == "unsupported managed volume" {
@@ -808,11 +886,14 @@ func openSandboxDockerFixture(t *testing.T, data string) {
 	source := `package main
 import("os";"encoding/json";"fmt";"strings";"time")
 func main(){
- a:=os.Args[1:]; if len(a)>0 && a[0]=="version"{fmt.Print("28.0.0");return}; if len(a)<2 || (a[0]!="inspect" && !(a[0]=="image" && a[1]=="inspect")){os.Exit(77)}
+ a:=os.Args[1:]; if len(a)>0 && a[0]=="version"{fmt.Print("28.0.0");return}
+ list:=len(a)==6&&a[0]=="ps"&&a[1]=="--all"&&a[2]=="--quiet"&&a[3]=="--no-trunc"&&a[4]=="--filter"&&strings.HasPrefix(a[5],"label=")
+ if len(a)<2 || (!list&&a[0]!="inspect"&&!(a[0]=="image"&&a[1]=="inspect")){os.Exit(77)}
  if marker:=os.Getenv("CODEOPS_CANCEL_LOOKUP");marker!=""&&strings.HasPrefix(a[len(a)-1],"sandbox-"){if os.WriteFile(marker,[]byte("lookup"),0600)!=nil{os.Exit(80)};time.Sleep(300*time.Millisecond)}
  b,e:=os.ReadFile(os.Getenv("CODEOPS_TEST_DOCKER_OBJECTS"));if e!=nil{os.Exit(78)}
  var objects map[string]json.RawMessage;if json.Unmarshal(b,&objects)!=nil{os.Exit(79)}
  if _,bad:=objects["__daemon_unavailable__"];bad{fmt.Fprintln(os.Stderr,"Cannot connect to the Docker daemon");os.Exit(1)}
+ if list{key,want,ok:=strings.Cut(strings.TrimPrefix(a[5],"label="),"=");if !ok||(key!="codeops.operation_id"&&key!="opensandbox.io/id"&&key!="opensandbox.io/egress-sidecar-for"){os.Exit(77)};for name,value:=range objects{if len(name)!=64{continue};var object struct{ID string;Config struct{Labels map[string]string}};if json.Unmarshal(value,&object)!=nil{os.Exit(79)};if object.ID!=""&&object.Config.Labels[key]==want{fmt.Println(object.ID)}};return}
  value,ok:=objects[a[len(a)-1]];if !ok{fmt.Fprintln(os.Stderr,"error: no such object");os.Exit(1)}
  fmt.Print(string(value))
 }`

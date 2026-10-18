@@ -46,6 +46,10 @@ func TestProfileCLIPreservesApprovedToolchainAndBindsItsPolicy(t *testing.T) {
 			if json.Unmarshal(output, &profile) != nil {
 				t.Fatal("CLI produced invalid profile")
 			}
+			config, err := os.ReadFile(filepath.Join(directory, "codeops-runtime.toml"))
+			if err != nil || !strings.Contains(string(config), "max_sandbox_timeout_seconds = 630\n") {
+				t.Fatalf("server maximum would reject the bounded command lease: %s %v", config, err)
+			}
 			if toolchain == "" {
 				if _, exists := profile["toolchain"]; exists {
 					t.Fatal("legacy Go profile changed")

@@ -98,7 +98,7 @@ func render(directory, input string) error {
 	config := fmt.Sprintf(`[server]
 host = "0.0.0.0"
 port = 8080
-max_sandbox_timeout_seconds = 120
+max_sandbox_timeout_seconds = 630
 [proxy]
 resolve_internal = true
 [runtime]

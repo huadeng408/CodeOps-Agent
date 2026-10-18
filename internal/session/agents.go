@@ -551,6 +551,10 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 		}
 		current := actor
 		current.SessionID = id
+		confirmedStops, err := confirmedRuntimeStops(snapshot.Events, current)
+		if err != nil {
+			return err
+		}
 		proposal, proposalErr := taskProposal(snapshot.Events)
 		if proposalErr != nil {
 			return proposalErr
@@ -596,7 +600,7 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 				if json.Unmarshal(event.Payload, &result) != nil || result.RunID == "" || result.ToolCallID == "" {
 					return ErrEventIntegrity
 				}
-				if (result.OutcomeUnknown || result.RuntimeID != "") && !result.Stopped {
+				if (result.OutcomeUnknown || result.RuntimeID != "") && !result.Stopped && !confirmedStops[event.EventID] {
 					return ErrSessionStateConflict
 				}
 				delete(pending, invocationHistoryKey(result.RunID, result.ToolCallID))

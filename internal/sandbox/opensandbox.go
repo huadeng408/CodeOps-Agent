@@ -32,6 +32,12 @@ import (
 
 const openSandboxSourceSHA = "f89eff24bbd15ae1c37a47769f7667849e679be0"
 
+const (
+	openSandboxExecutionLimit = 10 * time.Minute
+	// Detached cleanup must finish before the server automatically expires the lease.
+	openSandboxLeaseSeconds = int(openSandboxExecutionLimit/time.Second) + 30
+)
+
 var errOpenSandboxObjectMissing = errors.New("OpenSandbox owned object is absent")
 
 type openSandboxManifest struct {
@@ -89,7 +95,7 @@ func (r *OpenSandboxRunner) Ready(ctx context.Context) error {
 	if err != nil || r.config.AllowWorkspaceWrite || (r.config.Toolchain != "go" && r.config.Toolchain != "python") || !openSandboxImagePin(r.config.Image) {
 		return ErrSandboxUnavailable
 	}
-	if r.verifyServer(ctx, manifest) != nil || !r.imagePresent(ctx, r.config.Image) {
+	if r.verifyServer(ctx, manifest, true) != nil || !r.imagePresent(ctx, r.config.Image) {
 		return ErrSandboxUnavailable
 	}
 	response, err := r.call(ctx, manifest, http.MethodGet, "/sandboxes", nil)
@@ -99,6 +105,49 @@ func (r *OpenSandboxRunner) Ready(ctx context.Context) error {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return ErrSandboxUnavailable
+	}
+	return nil
+}
+
+// ConfirmStopped observes exact retained identities without deleting resources
+// or inventing a command outcome after the execution receipt was lost.
+func (r *OpenSandboxRunner) ConfirmStopped(ctx context.Context, runtimeID string) error {
+	parts := strings.Split(runtimeID, "/")
+	if len(parts) != 3 || !openSandboxHex(parts[0], 64) || !openSandboxUUID(parts[1]) || !openSandboxHex(parts[2], 64) {
+		return ErrSandboxOutcomeUnknown
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	manifest, err := r.manifest()
+	if err != nil || r.verifyServer(ctx, manifest, false) != nil {
+		return ErrSandboxOutcomeUnknown
+	}
+	for _, id := range []string{parts[2], "sandbox-" + parts[1]} {
+		var object openSandboxContainer
+		if !errors.Is(r.inspect(ctx, &object, "inspect", id), errOpenSandboxObjectMissing) {
+			return ErrSandboxOutcomeUnknown
+		}
+	}
+	for _, selector := range []string{"codeops.operation_id=" + parts[0], "opensandbox.io/id=" + parts[1], "opensandbox.io/egress-sidecar-for=" + parts[1]} {
+		command := exec.CommandContext(ctx, "docker", "ps", "--all", "--quiet", "--no-trunc", "--filter", "label="+selector)
+		command.Env = safety.ScrubEnvironment(os.Environ())
+		command.WaitDelay = 5 * time.Second
+		buffer := &boundedBuffer{}
+		command.Stdout, command.Stderr = buffer, buffer
+		if command.Run() != nil || buffer.truncated || buffer.String() != "" {
+			return ErrSandboxOutcomeUnknown
+		}
+	}
+	response, err := r.call(ctx, manifest, http.MethodGet, "/sandboxes/"+parts[1], nil)
+	if err != nil {
+		return ErrSandboxOutcomeUnknown
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		return ErrSandboxOutcomeUnknown
 	}
 	return nil
 }
@@ -193,9 +242,9 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 			return result, err
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, openSandboxExecutionLimit)
 	defer cancel()
-	if err := r.verifyServer(ctx, manifest); err != nil {
+	if err := r.verifyServer(ctx, manifest, true); err != nil {
 		return result, fmt.Errorf("%w: %s", ErrSandboxUnavailable, err)
 	}
 	if !r.imagePresent(ctx, r.config.Image) {
@@ -214,7 +263,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 	}
 	environment := r.environment()
 	create := map[string]any{
-		"image": map[string]string{"uri": r.config.Image}, "entrypoint": []string{"sleep", "infinity"}, "timeout": 120,
+		"image": map[string]string{"uri": r.config.Image}, "entrypoint": []string{"sleep", "infinity"}, "timeout": openSandboxLeaseSeconds,
 		"resourceLimits": map[string]string{"cpu": r.config.CPULimit, "memory": strconv.FormatInt(memory, 10)},
 		"metadata":       metadata, "env": environment, "networkPolicy": map[string]any{"defaultAction": "deny", "egress": []any{map[string]string{"action": "deny", "target": "0.0.0.0/0"}, map[string]string{"action": "deny", "target": "::/0"}}},
 		"volumes": []any{map[string]any{"name": "workspace", "host": map[string]string{"path": workspace}, "mountPath": "/workspace", "readOnly": true}},
@@ -284,7 +333,7 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 
 func (r *OpenSandboxRunner) execute(ctx context.Context, manifest openSandboxManifest, id string, argv []string, cwd string, uid int) (result Result, resultErr error) {
 	result.ExitCode = 126
-	command := map[string]any{"argv": argv, "cwd": cwd, "uid": uid, "gid": uid, "timeout": 120000, "envs": r.environment()}
+	command := map[string]any{"argv": argv, "cwd": cwd, "uid": uid, "gid": uid, "timeout": openSandboxExecutionLimit.Milliseconds(), "envs": r.environment()}
 	stream, err := r.call(ctx, manifest, http.MethodPost, "/sandboxes/"+id+"/proxy/44772/command", command)
 	if err != nil {
 		return result, ErrSandboxOutcomeUnknown
@@ -415,7 +464,7 @@ func (r *OpenSandboxRunner) inspect(ctx context.Context, value any, args ...stri
 	return nil
 }
 
-func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandboxManifest) error {
+func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandboxManifest, forExecution bool) error {
 	var server openSandboxContainer
 	if r.inspect(ctx, &server, "inspect", manifest.ServerContainerID) != nil || server.ID != manifest.ServerContainerID || server.Config.Image != manifest.ServerImage || !server.State.Running {
 		return errors.New("approved runtime server identity is unavailable")
@@ -464,6 +513,9 @@ func (r *OpenSandboxRunner) verifyServer(ctx context.Context, manifest openSandb
 	}
 	if image.Config.Labels["codeops.docker.project"] != "localcode" {
 		return errors.New("approved runtime image does not enforce Docker grouping")
+	}
+	if forExecution && image.Config.Labels["codeops.opensandbox.lease-seconds"] != strconv.Itoa(openSandboxLeaseSeconds) {
+		return errors.New("approved runtime image requires the current execution deadline profile")
 	}
 	expected, actual := map[string]string{}, map[string]string{}
 	for index, entries := range [][]string{image.Config.Env, server.Config.Env} {

@@ -65,6 +65,10 @@ egress image；Python 部署另带 `codeops.opensandbox.toolchain=python`，省�
 控制服务归入 Compose project `localcode`，service 为 `opensandbox-go` 或
 `opensandbox-python`。新控制镜像必须带不可变标签 `codeops.docker.project=localcode`；
 Go 在创建前核对镜像与控制服务分组，旧镜像仅补容器标签也不能准入。
+执行命令最长十分钟，较短的调用方 deadline／取消仍立即生效；创建 lease 和
+服务端 `max_sandbox_timeout_seconds` 固定为 630 秒，为独立停止核验留出余量。
+新控制镜像必须带不可变标签 `codeops.opensandbox.lease-seconds=630`，并使用
+同轮生成的策略、配置和镜像 pin。旧 120 秒控制镜像在创建前拒绝新执行。
 API key 与 execd token 只通过进程环境传入：
 `OPENSANDBOX_SERVER_API_KEY`、`CODEOPS_EXECD_ACCESS_TOKEN`；execd token 是
 64 位小写十六进制。保存容器物理 ID，记录每项实际限制并核验。
@@ -97,6 +101,14 @@ API key 与 execd token 只通过进程环境传入：
 “停止已确认”只表示精确隔离资源已终止；中断、部分输出和未知执行仍为待核验，
 不显示成功或伪造退出码。清理使用独立的有界 context；停止未确认时保留身份与任务槽。
 重开、重启和重复请求读取同一 Ledger intent，不重新执行未知测试。
+
+模型代码任务的“结束代码任务”可触发 Go 只读核验历史未确认停止的 runtime。
+核验要求原 run 已终止、actor 与派发身份一致，原物理 task、逻辑名、operation／
+task／egress 标签资源均不存在，且固定控制服务的生命周期 API 返回 404。
+旧控制镜像仍须通过原身份、pin 和启动约束核验，只可用于这项只读恢复。
+通过后追加绑定原结果 event ID、checksum 和 runtime ID 的 Ledger 停止证明，
+只用于显式结束时释放任务槽。原命令的 unknown、输出和退出码不变；续行、
+提案、Memory 和 Trace 不据此变为通过。活跃 run、身份变化或核验不可用时继续拒绝。
 
 Python 的 Go 准备阶段只接受已批准的 [pytz 2026.5 wheel](https://files.pythonhosted.org/packages/4f/ef/c66110d46fb800dda0bf33164182dfadabe26a90e4476844d502a23dca8e/pytz-2026.5-py2.py3-none-any.whl)：
 MIT、506,342 字节，SHA-256

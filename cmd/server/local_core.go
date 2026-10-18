@@ -120,6 +120,9 @@ func runLocalCore(cfg serverconfig.Config) error {
 	}
 	provider := admission.ProviderFromEnv()
 	gateway := admission.NewGateway(admission.NewBudget(ledger), provider)
+	if taskRuntime != nil {
+		gateway.SetRuntimeStopVerifier(taskRuntime.ConfirmStopped)
+	}
 	modelWorkspace := localModelWorkspaceAdmission(workspaces, admission.NewBudget(ledger))
 	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
 		if workspaces == nil {
