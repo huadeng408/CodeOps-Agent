@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,104 @@ func TestMainAgentTraceKeepsQueuedRequestParent(t *testing.T) {
 		t.Fatalf("main session.run_id = %q, want %q", got, run.RunID)
 	}
 	assertSpanHasNoSentinel(t, mainSpan)
+}
+
+type tracedCommitMemory struct {
+	tracer        genai.Tracer
+	committed     chan context.Context
+	waitForCancel bool
+}
+
+func (m *tracedCommitMemory) Commit(ctx context.Context, _ string) error {
+	_, span := m.tracer.StartSpan(ctx, "memory.reflect", genai.OperationInvokeAgent, genai.SystemGenAI)
+	defer span.End()
+	m.committed <- ctx
+	if m.waitForCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (*tracedCommitMemory) Recall(context.Context, uint, string, int) (string, error) {
+	return "", nil
+}
+
+func TestRunnerReflectionKeepsTerminalRunTrace(t *testing.T) {
+	for _, scenario := range []struct {
+		name          string
+		err           error
+		status        RunStatus
+		waitForCancel bool
+	}{
+		{"completed", nil, RunCompleted, false},
+		{"failed", errors.New("tool round limit reached; retry this task"), RunFailed, false},
+		{"failed-shutdown", errors.New("tool round limit reached; retry this task"), RunFailed, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			tracer := newSessionTelemetryTracer(recorder)
+			t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
+			workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
+			created, err := workbench.Create(context.Background(), 7, "repo", "reflection trace", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			memory := &tracedCommitMemory{tracer: tracer, committed: make(chan context.Context, 1), waitForCancel: scenario.waitForCancel}
+			runner := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "done", err: scenario.err}, nil, SessionRunnerOptions{
+				Tracer: tracer, Memory: memory, MemoryCommitTimeout: 5 * time.Second,
+			})
+			t.Cleanup(func() { _ = runner.Close() })
+			ctx := genai.WithEvalJoinBaggage(context.Background(), "reflection-eval-run", created.ID)
+			run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{
+				RequestID: "reflection-trace", SessionID: created.ID, OwnerID: 7,
+				ExpectedSeq: int64(created.EventCount), Content: "complete the task", Actor: identity.Default(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForRunStatus(t, runner, created.ID, run.RunID, scenario.status)
+			select {
+			case commitCtx := <-memory.committed:
+				if _, ok := commitCtx.Deadline(); !ok {
+					t.Fatal("reflection lost its independent deadline")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("terminal run did not commit Memory")
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- runner.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("reflection did not stop with runner shutdown")
+			}
+			var mainSpan, reflection sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				switch span.Name() {
+				case "agent.main":
+					mainSpan = span
+				case "memory.reflect":
+					reflection = span
+				}
+			}
+			if mainSpan == nil || reflection == nil {
+				t.Fatalf("missing terminal spans: %v", spanNames(recorder.Ended()))
+			}
+			if reflection.Parent().SpanID() != mainSpan.SpanContext().SpanID() || reflection.SpanContext().TraceID() != mainSpan.SpanContext().TraceID() {
+				t.Fatalf("reflection became a separate root: parent=%s trace=%s, want agent=%s trace=%s", reflection.Parent().SpanID(), reflection.SpanContext().TraceID(), mainSpan.SpanContext().SpanID(), mainSpan.SpanContext().TraceID())
+			}
+			if got := spanStringAttribute(reflection, genai.AttrEvalRunID); got != "reflection-eval-run" {
+				t.Fatalf("reflection lost admitted run identity: %q", got)
+			}
+			if scenario.status == RunFailed && mainSpan.Status().Code != codes.Error {
+				t.Fatal("failed Agent outcome was erased")
+			}
+		})
+	}
 }
 
 func spanNames(spans []sdktrace.ReadOnlySpan) []string {

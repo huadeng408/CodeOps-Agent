@@ -1238,7 +1238,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	r.recordProgress(traceCtx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
 	if committed, committedErr := r.hasCommittedAssistant(traceCtx, key); committedErr != nil {
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, committedErr)
+		r.fail(traceCtx, key, lease, committedErr)
 		return
 	} else if committed {
 		r.recordProgress(traceCtx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
@@ -1258,7 +1258,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		cancel()
 		<-heartbeatDone
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, err)
+		r.fail(traceCtx, key, lease, err)
 		return
 	}
 	// A recovered tool_after/model_after checkpoint can legitimately have no
@@ -1270,7 +1270,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		cancel()
 		<-heartbeatDone
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, errors.New("continuation has no input or history"))
+		r.fail(traceCtx, key, lease, errors.New("continuation has no input or history"))
 		return
 	}
 	if request.AgentTask != nil {
@@ -1361,25 +1361,25 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 			runErr = errors.New("orchestrator returned an unsuccessful terminal state")
 		}
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, runErr)
+		r.fail(traceCtx, key, lease, runErr)
 		return
 	}
 	message := strings.TrimSpace(result.Message)
 	if message == "" {
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, errors.New("orchestrator returned an empty response"))
+		r.fail(traceCtx, key, lease, errors.New("orchestrator returned an empty response"))
 		return
 	}
 	if err := r.appendLeasedSurface(postRunCtx, key, lease, "assistant/message", messagePayload{
 		Author: "assistant", Content: message, RunID: key.runID,
 	}); err != nil {
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, err)
+		r.fail(traceCtx, key, lease, err)
 		return
 	}
 	if err := r.appendTerminal(postRunCtx, key, lease, runCompletedEventType, ""); err != nil {
 		genai.MarkSpanError(agentSpan)
-		r.fail(key, lease, err)
+		r.fail(traceCtx, key, lease, err)
 		return
 	}
 	r.recordCompletedProgress(postRunCtx, key)
@@ -2422,7 +2422,7 @@ func (r *SessionRunner) closePendingCommits(ctx context.Context, key runKey, lea
 	return ErrSequenceConflict
 }
 
-func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
+func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeasePayload, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if events, err := r.workbench.ledger.Events(ctx, key.sessionID); err == nil {
@@ -2438,8 +2438,8 @@ func (r *SessionRunner) fail(key runKey, lease runLeasePayload, cause error) {
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	if r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause)) == nil {
-		// Reflection has its own deadline and still stops on runner shutdown.
-		r.commitSessionMemory(r.ctx, key)
+		// Keep the Agent parent without the terminal-write deadline.
+		r.commitSessionMemory(parent, key)
 	}
 }
 
