@@ -51,6 +51,8 @@ Python wheels 使用 `requirements.lock` 的精确版本和 hash。
   Git 及附带组件的许可。固定上游 release 与对应源码链接见 manifest。
 - Python 包：完整 `.dist-info/METADATA` 和上游随 wheel 提供的 license 文件保留于
   `python/packages/`；版本、wheel hash 与声明许可见 manifest，锁文件另存于 `licenses/`。
+  wheel 缺少独立材料的四个包由 `components.json` 固定对应上游 commit 和材料 SHA-256，
+  构建时校验包版本与材料后收入 `licenses/python/`；缺包、版本变化或材料损坏时拒绝构建。
 - Go：工具链许可与专利声明在 `licenses/Go-*`；实际链接模块的版本、校验和和许可文件
   分别记录于 manifest 与 `licenses/go/`。
 - 前端：实际生产依赖的版本、npm integrity 和许可在 manifest、`licenses/frontend/`；

@@ -16,5 +16,65 @@
     "license": "GPL-2.0-only and included third-party notices",
     "release": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.2",
     "source": "https://github.com/git-for-windows/git/tree/v2.56.0.windows.2"
-  }
+  },
+  "python_notices": [
+    {
+      "name": "grpcio-tools",
+      "version": "1.71.2",
+      "source": "https://github.com/grpc/grpc/tree/c65cf153238102c16f5f11573767384ef112d17a",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "url": "https://raw.githubusercontent.com/grpc/grpc/c65cf153238102c16f5f11573767384ef112d17a/LICENSE",
+          "sha256": "590198e3f305f2c347fde64d637c65492bbef554db6c8364e149cd375e3797ee"
+        },
+        {
+          "file": "NOTICE.txt",
+          "url": "https://raw.githubusercontent.com/grpc/grpc/c65cf153238102c16f5f11573767384ef112d17a/NOTICE.txt",
+          "sha256": "693ff28ec216d5112ac1bbfe64ef539005867d1c7bd427b57d579683293b947f"
+        }
+      ]
+    },
+    {
+      "name": "langchain-core",
+      "version": "0.3.86",
+      "source": "https://github.com/langchain-ai/langchain/tree/9971fd8caafcfddddc94492cdecb02ce67b82da6",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "url": "https://raw.githubusercontent.com/langchain-ai/langchain/9971fd8caafcfddddc94492cdecb02ce67b82da6/LICENSE",
+          "sha256": "4ec67e4ca6e6721dba849b2ca82261597c86a61ee214bbf21416006b7b2d0478"
+        }
+      ]
+    },
+    {
+      "name": "langsmith",
+      "version": "0.14.8",
+      "source": "https://github.com/langchain-ai/langsmith-sdk/tree/19d52419f47c93ca2c57a0d51c58d255f5949092",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "url": "https://raw.githubusercontent.com/langchain-ai/langsmith-sdk/19d52419f47c93ca2c57a0d51c58d255f5949092/LICENSE",
+          "sha256": "34e0b9842c7a31d34e53bc7eb224e81e07a34996106e029bbc72dea2d449f496"
+        }
+      ]
+    },
+    {
+      "name": "sqlite-vec",
+      "version": "0.1.9",
+      "source": "https://github.com/asg017/sqlite-vec/tree/e9f598abfa0c06b328d8fe5da9c3760cce74be10",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/asg017/sqlite-vec/e9f598abfa0c06b328d8fe5da9c3760cce74be10/LICENSE-APACHE",
+          "sha256": "a38070a94d4afd9cd710e3ce67bd1de78097cfe1784c1f0109ac95d3c196bfdc"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/asg017/sqlite-vec/e9f598abfa0c06b328d8fe5da9c3760cce74be10/LICENSE-MIT",
+          "sha256": "6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea"
+        }
+      ]
+    }
+  ]
 }

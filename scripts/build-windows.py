@@ -48,6 +48,27 @@ def download(url: str, destination: Path, checksum: str) -> None:
         raise ValueError("downloaded component checksum mismatch")
 
 
+def include_python_notices(components: dict, destination: Path, cache: Path) -> None:
+    versions = {package["name"]: package["version"] for package in components["python_packages"]}
+    cache = cache / "python-notices"
+    cache.mkdir(parents=True, exist_ok=True)
+    for package in components["python_notices"]:
+        if versions.get(package["name"]) != package["version"]:
+            raise ValueError("Python notice version differs from the pinned package")
+        for notice in package["notices"]:
+            if (not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name)
+                        and not re.match(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", name)
+                        and not name.endswith(".")
+                        for name in (package["name"], notice["file"]))
+                    or not re.fullmatch(r"[0-9a-f]{64}", notice["sha256"])):
+                raise ValueError("unsafe Python notice path or checksum")
+            material = cache / notice["sha256"]
+            download(notice["url"], material, notice["sha256"])
+            target = destination / "licenses/python" / package["name"] / notice["file"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(material, target)
+
+
 def source_inventory() -> dict[str, str]:
     names = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--",
         "cmd", "internal", "pkg", "gen", "orchestrator", "codeagent", "frontend", "go.mod", "go.sum", "pyproject.toml",
@@ -116,6 +137,7 @@ def build(destination: Path, cache: Path) -> None:
     (destination / "licenses").mkdir()
     shutil.copyfile(ROOT / "LICENSE", destination / "licenses/CodeOps-Agent-LICENSE")
     shutil.copyfile(PROFILE / "requirements.lock", destination / "licenses/requirements.lock")
+    include_python_notices(components, destination, cache)
     shutil.copyfile(PROFILE / "README.md", destination / "README.md")
     frontend_packages = []
     lock = json.loads((ROOT / "frontend/package-lock.json").read_text(encoding="utf-8"))
