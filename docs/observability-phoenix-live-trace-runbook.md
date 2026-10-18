@@ -36,6 +36,9 @@ python -m eval.product_trace --phoenix-url http://127.0.0.1:6006 --project defau
   --binary <实际产品二进制> --output <尚不存在的收据目录>
 ```
 
+PowerShell 解析 JSON 时间可能自动产生 DateTime。`--started-at` 应传原始 RFC3339 字符串，
+或对 DateTime 显式使用 `.ToUniversalTime().ToString('o')`，避免默认本地显示格式导致后端拒绝查询。
+
 命令核对当前源码和二进制 checksum、实际 provider 的请求模型，再保存允许字段的读回和校验结果。
 敏感内容在允许字段筛选前检查；缺失、未结束、错误、取消、后端不可用或输入校验失败不产生成功收据，
 返回退出码 3，并保留 `partial`／`unknown` 与每次尝试。通过仅代表该次产品 Trace 范围，
