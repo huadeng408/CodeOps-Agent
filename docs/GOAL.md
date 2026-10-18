@@ -78,6 +78,7 @@
 - Go 真实多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；#17 继续打开，后续源码修复独立绑定。
 - 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；[同会话取消后真实反思写回及跨进程 fixture 修正](evidence/memory-cancellation-product-2026-10-16.md)。provider 错误展示和十轮同任务剩余范围仍待各自验证。
 - #19 首批验收对账：[五类恢复场景、文件／兼容矩阵、AC01–AC09 和当前缺口](evidence/milestone-reconciliation-2026-10-16.md)；原范围与当前源码分别核对，milestone 和发布仍未通过。
+- #19 现用 v5 补验：[旧 Session 重开、空新会话的原经验检索、完整失败与边界／物料核对](evidence/milestone-v5-recovery-2026-10-19.md)；工具来源验证与最终模型答复失败分别记录，完整矩阵和许可材料仍待验收。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。
