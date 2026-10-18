@@ -1229,6 +1229,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	}
 	var agentSpan genai.Span
 	if r.options.Tracer != nil {
+		traceCtx = orchestrator.WithHarnessToolTracing(traceCtx)
 		traceCtx, agentSpan = r.options.Tracer.StartSpan(traceCtx, spanName, genai.OperationInvokeAgent, genai.SystemGenAI)
 		completionCtx = traceCtx
 		agentSpan.SetAttributes(genai.AgentNameKV(agentName), attribute.String("session.id", key.sessionID), attribute.String("session.run_id", key.runID))
@@ -1957,13 +1958,26 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if err := r.appendLeasedFact(ctx, key, lease.LeaseID, toolDispatchedType, callPayload); err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool dispatch persistence failed", ExitCode: 1}, true
 	}
+	// Keep an unwound executor panic from looking like a successful execution.
+	result := orchestrator.ToolResult{Error: "tool execution did not return", ExitCode: 1}
+	if r.options.Tracer != nil {
+		var span genai.Span
+		ctx, span = r.options.Tracer.StartSpan(ctx, "execute_tool "+call.Name, genai.OperationExecuteTool, genai.SystemGenAI)
+		span.SetAttributes(genai.ToolNameKV(call.Name), genai.ToolCallIDKV(call.ID))
+		defer func() {
+			if result.Error != "" || result.ExitCode != 0 {
+				genai.MarkSpanError(span)
+				span.AddEvent("tool.error")
+			}
+			span.End()
+		}()
+	}
 	if r.tools == nil && call.Name != "RecallMemory" && call.Name != "ManageMemory" && !agentTool(call.Name) && call.Name != "AskUser" {
-		result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool execution is unavailable", ExitCode: 1}
+		result = orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool execution is unavailable", ExitCode: 1}
 		_ = r.appendLeasedSurface(ctx, key, lease, "tool/result", toolResultPayloadFrom(result, key.runID))
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", "工具执行不可用，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
-	result := orchestrator.ToolResult{}
 	if call.Name == "RecallMemory" {
 		result = r.recallSessionMemory(ctx, events, call)
 	} else if call.Name == "ManageMemory" {

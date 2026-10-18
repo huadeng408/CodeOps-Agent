@@ -78,7 +78,7 @@ func TestIndependentAgentTraceKeepsAsyncParentAndConcreteSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requiredSpans := []string{"agent.main", "agent.subagent", "artifact.publish"}
+	requiredSpans := []string{"agent.main", "agent.subagent", "execute_tool PublishArtifact", "artifact.publish"}
 	spans := map[string]sdktrace.ReadOnlySpan{}
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -100,13 +100,17 @@ func TestIndependentAgentTraceKeepsAsyncParentAndConcreteSession(t *testing.T) {
 		}
 	}
 	mainSpan, childSpan, artifactSpan := spans["agent.main"], spans["agent.subagent"], spans["artifact.publish"]
+	toolSpan := spans["execute_tool PublishArtifact"]
 	if childSpan.Parent().SpanID() != mainSpan.SpanContext().SpanID() {
 		t.Fatalf("subagent parent = %s, want %s", childSpan.Parent().SpanID(), mainSpan.SpanContext().SpanID())
 	}
-	if artifactSpan.Parent().SpanID() != childSpan.SpanContext().SpanID() {
-		t.Fatalf("artifact parent = %s, want %s", artifactSpan.Parent().SpanID(), childSpan.SpanContext().SpanID())
+	if toolSpan.Parent().SpanID() != childSpan.SpanContext().SpanID() {
+		t.Fatalf("tool parent = %s, want %s", toolSpan.Parent().SpanID(), childSpan.SpanContext().SpanID())
 	}
-	for _, span := range []sdktrace.ReadOnlySpan{mainSpan, childSpan, artifactSpan} {
+	if artifactSpan.Parent().SpanID() != toolSpan.SpanContext().SpanID() {
+		t.Fatalf("artifact parent = %s, want %s", artifactSpan.Parent().SpanID(), toolSpan.SpanContext().SpanID())
+	}
+	for _, span := range []sdktrace.ReadOnlySpan{mainSpan, childSpan, toolSpan, artifactSpan} {
 		if span.SpanContext().TraceID() != mainSpan.SpanContext().TraceID() {
 			t.Fatalf("%s trace ID = %s, want %s", span.Name(), span.SpanContext().TraceID(), mainSpan.SpanContext().TraceID())
 		}

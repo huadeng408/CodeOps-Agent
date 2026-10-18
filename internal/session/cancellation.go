@@ -225,6 +225,9 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := r.closeCanceledApprovals(ctx, key, run.leaseID); err != nil {
+		state = "unknown"
+	}
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
@@ -243,6 +246,64 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 		r.workbench.signal(key.sessionID)
 		return
 	}
+}
+
+// The owned worker has returned; cancellation denies its still-unapproved calls.
+func (r *SessionRunner) closeCanceledApprovals(ctx context.Context, key runKey, leaseID string) error {
+	events, err := r.workbench.ledger.Events(ctx, key.sessionID)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if event.Type != approvalPendingEventType {
+			continue
+		}
+		var pending toolApprovalPayload
+		if json.Unmarshal(event.Payload, &pending) != nil {
+			return ErrEventIntegrity
+		}
+		if pending.RunID != key.runID {
+			continue
+		}
+		approval, err := projectToolApproval(events, key.runID, pending.ToolCallID)
+		if err != nil {
+			return err
+		}
+		if approval.pendingEvent == nil || approval.pendingEvent.EventID != event.EventID {
+			continue
+		}
+		invocation := invocationProjection(events, key.runID, pending.ToolCallID)
+		if approval.decision != nil || invocation.dispatched != nil || invocation.result != nil {
+			continue
+		}
+		if invocation.prepared == nil || !toolApprovalMatchesCall(pending, *invocation.prepared) {
+			return ErrEventIntegrity
+		}
+		for _, fact := range events {
+			if fact.Type != commitPendingEventType && fact.Type != toolUnknownEventType {
+				continue
+			}
+			var identity struct {
+				RunID      string `json:"run_id"`
+				ToolCallID string `json:"tool_call_id"`
+			}
+			if json.Unmarshal(fact.Payload, &identity) != nil {
+				return ErrEventIntegrity
+			}
+			if identity.RunID == key.runID && identity.ToolCallID == pending.ToolCallID {
+				return ErrEventIntegrity
+			}
+		}
+		pending.Decision = ApprovalDenied
+		if err := r.appendLeasedFact(ctx, key, leaseID, approvalDeniedEventType, pending); err != nil {
+			return err
+		}
+		result := toolResultPayload{RunID: key.runID, ToolCallID: pending.ToolCallID, ToolName: pending.ToolName, Error: "tool canceled before approval", ExitCode: 1}
+		if err := r.appendLeasedSurface(ctx, key, runLeasePayload{LeaseID: leaseID}, "tool/result", result); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func unconfirmedToolStops(events []Event) bool {

@@ -399,7 +399,8 @@ func (conversation cancelingApprovalConversation) RunConversation(ctx context.Co
 func TestCancellationStopsPendingApprovalWithoutExecutingWrite(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	workbench := NewWorkbench(openWorkbenchTestLedger(t), nil)
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
 	created, err := workbench.CreateWithWorkingDir(ctx, 7, "repo", "pending approval", "", root)
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +443,28 @@ func TestCancellationStopsPendingApprovalWithoutExecutingWrite(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Identical repeated pending facts are valid Ledger input after replay.
+	for attempt := 0; ; attempt++ {
+		facts, err := ledger.Events(ctx, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var replayed Event
+		for _, fact := range facts {
+			if fact.EventID == pending.ID {
+				replayed, err = ledger.Append(ctx, created.ID, int64(len(facts)), fact.Type, json.RawMessage(fact.Payload))
+				break
+			}
+		}
+		if errors.Is(err, ErrSequenceConflict) && attempt < 15 {
+			continue
+		}
+		if err != nil || replayed.EventID == "" {
+			t.Fatalf("could not repeat pending fixture: %v", err)
+		}
+		pending.ID, pending.Seq = replayed.EventID, replayed.Seq
+		break
+	}
 	if _, err := runner.CancelRun(ctx, CancelRunCommand{RequestID: "cancel", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +496,39 @@ func TestCancellationStopsPendingApprovalWithoutExecutingWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "runtime", "approved.txt")); !os.IsNotExist(err) {
 		t.Fatalf("canceled approval wrote a file: %v", err)
+	}
+	events, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var denied, result, canceled EventView
+	for _, event := range events {
+		switch event.Type {
+		case approvalDeniedEventType:
+			if denied.ID != "" || event.Approval == nil || *event.Approval != (ToolApprovalView{RunID: run.RunID, ToolCallID: "approval-call", ToolName: "Write", ArgumentsJSON: pending.Approval.ArgumentsJSON, Decision: ApprovalDenied}) {
+				t.Fatalf("cancellation denial lost pending identity: %+v", event)
+			}
+			denied = event
+		case "tool/result":
+			if result.ID != "" || event.ToolName != "Write" || event.ToolStatus != "failed" || event.ToolOutput != "tool canceled before approval" {
+				t.Fatalf("cancellation did not retain one final unexecuted result: %+v", event)
+			}
+			result = event
+		case toolDispatchedType, commitPendingEventType:
+			t.Fatalf("canceled pending approval was dispatched: %+v", event)
+		case runCanceledEventType:
+			canceled = event
+		}
+	}
+	if denied.ID == "" || result.ID == "" || !(pending.Seq < denied.Seq && denied.Seq < result.Seq && result.Seq < canceled.Seq) {
+		t.Fatalf("cancellation omitted the ordered denial/result: denied=%+v result=%+v canceled=%+v", denied, result, canceled)
+	}
+	if _, err := runner.CancelRun(ctx, CancelRunCommand{RequestID: "cancel", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil || len(replayed) != len(events) {
+		t.Fatalf("replayed cancellation changed settled outcomes: %d -> %d, %v", len(events), len(replayed), err)
 	}
 }
 

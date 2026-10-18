@@ -394,7 +394,7 @@ func (c *Client) AskUserTimeout() time.Duration {
 	return c.askUserTimeout
 }
 
-// SetTracer injects a genai.Tracer for creating execute_tool spans.
+// SetTracer injects execution tracing for callers without Harness-owned spans.
 // When nil (the default) tool execution is not traced.
 func (c *Client) SetTracer(t genai.Tracer) {
 	if c == nil {
@@ -1026,10 +1026,17 @@ func reverseConversationMessageGroups(groups [][]ConversationMessage) {
 	}
 }
 
+type harnessToolTracingKey struct{}
+
+// WithHarnessToolTracing leaves execution spans to the Go dispatch boundary.
+func WithHarnessToolTracing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, harnessToolTracingKey{}, true)
+}
+
 // startToolSpan creates an execute_tool span as a child of the context's
 // current span. Returns the span (or nil when tracing is disabled).
 func (c *Client) startToolSpan(ctx context.Context, call ToolCall) (context.Context, genai.Span) {
-	if c == nil || c.tracer == nil {
+	if c == nil || c.tracer == nil || ctx.Value(harnessToolTracingKey{}) == true {
 		return ctx, nil
 	}
 	ctx, sp := c.tracer.StartSpan(ctx, "execute_tool "+call.Name, genai.OperationExecuteTool, genai.SystemGenAI)
