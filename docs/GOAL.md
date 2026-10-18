@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Python #18 已按本票范围验证；Go #17 的同任务 Memory 已验证，失败轮次反思的完整 Trace 仍待验收 |
+| 模型代码任务与提案 | #7–#10 的 Go 提案、批准、文件生命周期及应用中断核验已按各自范围验证；Python #18 已按本票范围验证；Go #17 原任务的完整 Trace 仍待验收，新正常任务尝试受上游 HTTP 502 阻塞 |
 | Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
 | Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 Go #17 剩余范围及 #19 故障矩阵 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
@@ -64,6 +64,8 @@
 - OpenSandbox 长命令与停止核验：[源码与十二次尝试的未知执行](evidence/opensandbox-execution-deadline-2026-10-18.md)、[真实长命令及同账号浏览器结束恢复](evidence/opensandbox-deadline-product-2026-10-18.md)；原失败、#17 与发布缺口分别保留。
 - Go 新原任务：[真实修改、项目测试、批准应用及同任务 Memory](evidence/go-browser-task-memory-2026-10-19.md)已按范围验证；完整 Trace 的失败轮次反思父链缺口及原不完整结果保留，#17 继续打开。
 - 失败轮次反思父链：[公开 Runner 接缝复现与最小上下文修复](evidence/failed-reflection-trace-2026-10-19.md)、[真实失败／完成两轮专项](evidence/failed-reflection-runtime-2026-10-19.md)已按范围验证；专项未计入正常开发轮次，原任务的完整 Trace 缺口仍保留。
+- 新 Go 正常任务与停止后恢复：[三次上游失败、完整计量分母、实际结束及旧 Session 重开](evidence/go-browser-task-outage-2026-10-19.md)；新代码任务未完成，未知用量及原预留保留。
+- 待补反思的恢复父链：[终态引用、SQLite 重开与公开 Runner 回归](evidence/memory-recovery-trace-2026-10-19.md)；源码验证与新的真实模型恢复结果分别验收。
 - 多轮 Trace 验证器：[完整轮次、父链、调用分母及部分读回留存的源码／集成证据](evidence/product-task-trace-source-2026-10-15.md)；#17/#18 真实十轮验收仍单独进行。
 - 受管代码任务工具额度：[两次真实提前停止、有限额度修复及公开协议／当前源码 CI 证据](evidence/harness-tool-allowance-2026-10-16.md)；真实十轮任务继续独立验收。
 - Windows 文件编辑换行：[真实 Read/Edit 缺口、精确匹配保护、源码回归及新构建证据](evidence/windows-edit-crlf-2026-10-16.md)；实际十轮任务仍单独验收。

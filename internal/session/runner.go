@@ -20,6 +20,7 @@ import (
 	"code-agent/internal/telemetry/genai"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -282,13 +283,23 @@ type runLeasePayload struct {
 }
 
 type runTerminalPayload struct {
-	RunID             string `json:"run_id"`
-	RequestID         string `json:"request_id"`
-	LeaseID           string `json:"lease_id"`
-	Attempt           int    `json:"attempt"`
-	Error             string `json:"error,omitempty"`
-	CancellationState string `json:"cancellation_state,omitempty"`
+	RunID             string           `json:"run_id"`
+	RequestID         string           `json:"request_id"`
+	LeaseID           string           `json:"lease_id"`
+	Attempt           int              `json:"attempt"`
+	Error             string           `json:"error,omitempty"`
+	CancellationState string           `json:"cancellation_state,omitempty"`
+	TraceContext      *runTraceContext `json:"trace_context,omitempty"`
 }
+
+type runTraceContext struct {
+	SchemaVersion int    `json:"schema_version"`
+	SessionID     string `json:"session_id"`
+	TraceParent   string `json:"traceparent"`
+	EvalRunID     string `json:"eval_run_id,omitempty"`
+}
+
+type runAgentTraceKey struct{}
 
 type toolCallPayload struct {
 	RunID         string            `json:"run_id"`
@@ -517,6 +528,7 @@ type runProjection struct {
 	order         int64
 	createdOrder  int64
 	cancelRequest *runCancelPayload
+	traceContext  *runTraceContext
 }
 
 func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, tools ToolExecutionAdapter, options SessionRunnerOptions) *SessionRunner {
@@ -1171,7 +1183,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		delete(r.activeAgentRuns, key)
 		r.agentMu.Unlock()
 	}()
-	traceCtx = executionCtx
+	traceCtx = context.WithValue(executionCtx, runAgentTraceKey{}, trace.SpanContext{})
 	events, err := r.workbench.ledger.Events(traceCtx, key.sessionID)
 	if err != nil {
 		return
@@ -1189,6 +1201,13 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		}
 		view, err := reduceSessionView(events)
 		if err == nil && view.Status != "deleted" && view.Run != nil && view.Run.RunID == key.runID {
+			if saved := run.traceContext; saved != nil && saved.SchemaVersion == 1 && saved.SessionID == key.sessionID {
+				parent := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": saved.TraceParent})
+				if spanContext := trace.SpanContextFromContext(parent); spanContext.IsValid() {
+					traceCtx = trace.ContextWithSpanContext(traceCtx, spanContext)
+					traceCtx = genai.WithEvalJoinBaggage(traceCtx, saved.EvalRunID, key.sessionID)
+				}
+			}
 			r.completeAgentTurn(traceCtx, key)
 			r.commitSessionMemory(traceCtx, key)
 		}
@@ -1230,7 +1249,12 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	var agentSpan genai.Span
 	if r.options.Tracer != nil {
 		traceCtx = orchestrator.WithHarnessToolTracing(traceCtx)
+		parentSpanContext := trace.SpanContextFromContext(traceCtx)
 		traceCtx, agentSpan = r.options.Tracer.StartSpan(traceCtx, spanName, genai.OperationInvokeAgent, genai.SystemGenAI)
+		if spanContext := trace.SpanContextFromContext(traceCtx); spanContext.IsValid() &&
+			(spanContext.TraceID() != parentSpanContext.TraceID() || spanContext.SpanID() != parentSpanContext.SpanID()) {
+			traceCtx = context.WithValue(traceCtx, runAgentTraceKey{}, spanContext)
+		}
 		completionCtx = traceCtx
 		agentSpan.SetAttributes(genai.AgentNameKV(agentName), attribute.String("session.id", key.sessionID), attribute.String("session.run_id", key.runID))
 		defer agentSpan.End()
@@ -2391,6 +2415,17 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 		return err
 	}
 	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
+	if spanContext, ok := ctx.Value(runAgentTraceKey{}).(trace.SpanContext); ok && spanContext.IsValid() {
+		payload.TraceContext = &runTraceContext{
+			SchemaVersion: 1, SessionID: key.sessionID,
+			TraceParent: fmt.Sprintf("00-%s-%s-%s", spanContext.TraceID(), spanContext.SpanID(), spanContext.TraceFlags()),
+		}
+		for _, attr := range genai.EvalJoinAttributes(ctx) {
+			if string(attr.Key) == genai.AttrEvalRunID {
+				payload.TraceContext.EvalRunID = attr.Value.AsString()
+			}
+		}
+	}
 	return r.appendLeasedFact(ctx, key, lease.LeaseID, eventType, payload)
 }
 
@@ -2423,7 +2458,7 @@ func (r *SessionRunner) closePendingCommits(ctx context.Context, key runKey, lea
 }
 
 func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeasePayload, cause error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	if events, err := r.workbench.ledger.Events(ctx, key.sessionID); err == nil {
 		if run, err := projectRun(events, key.runID); err == nil && run.cancelRequest != nil {
@@ -2714,6 +2749,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 			}
 			completed := event.CreatedAt
 			run.view.CompletedAt, run.view.LeaseUntil, run.terminal = &completed, nil, true
+			run.traceContext = payload.TraceContext
 			if event.Type == runCompletedEventType {
 				run.view.Status = RunCompleted
 			} else if event.Type == runCanceledEventType {

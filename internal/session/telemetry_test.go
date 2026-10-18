@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,7 @@ type tracedCommitMemory struct {
 	tracer        genai.Tracer
 	committed     chan context.Context
 	waitForCancel bool
+	err           error
 }
 
 func (m *tracedCommitMemory) Commit(ctx context.Context, _ string) error {
@@ -205,7 +207,7 @@ func (m *tracedCommitMemory) Commit(ctx context.Context, _ string) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	return nil
+	return m.err
 }
 
 func (*tracedCommitMemory) Recall(context.Context, uint, string, int) (string, error) {
@@ -284,6 +286,144 @@ func TestRunnerReflectionKeepsTerminalRunTrace(t *testing.T) {
 			}
 			if scenario.status == RunFailed && mainSpan.Status().Code != codes.Error {
 				t.Fatal("failed Agent outcome was erased")
+			}
+		})
+	}
+}
+
+func TestRecoveredReflectionKeepsTerminalRunTrace(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		err            error
+		status         RunStatus
+		legacy         bool
+		noop           bool
+		cancelRecovery bool
+	}{
+		{"completed", nil, RunCompleted, false, false, false},
+		{"failed", errors.New("tool round limit reached; retry this task"), RunFailed, false, false, false},
+		{"legacy", nil, RunCompleted, true, false, false},
+		{"noop", nil, RunCompleted, true, true, false},
+		{"failed-shutdown", errors.New("tool round limit reached; retry this task"), RunFailed, false, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			firstTracer := newSessionTelemetryTracer(recorder)
+			t.Cleanup(func() { _ = firstTracer.Shutdown(context.Background()) })
+			ledgerPath := filepath.Join(t.TempDir(), "sessions.sqlite")
+			ledger, err := OpenSQLiteEventLog(ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ledger.Close() })
+			workbench := NewWorkbench(ledger, nil)
+			created, err := workbench.Create(context.Background(), 7, "repo", "recovered reflection trace", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			firstMemory := &tracedCommitMemory{tracer: firstTracer, committed: make(chan context.Context, 1), err: errors.New("reflection unavailable")}
+			options := SessionRunnerOptions{Tracer: firstTracer, Memory: firstMemory, Now: func() time.Time { return now }}
+			if scenario.legacy {
+				options.Tracer = nil
+			}
+			if scenario.noop {
+				options.Tracer = &genai.NoopTracer{}
+			}
+			first := NewSessionRunner(workbench, &recordingConversationAdapter{reply: "done", err: scenario.err}, nil, options)
+			t.Cleanup(func() { _ = first.Close() })
+			ctx := genai.WithEvalJoinBaggage(context.Background(), "recovered-reflection-eval", created.ID)
+			var external genai.Span
+			if scenario.legacy {
+				ctx, external = firstTracer.StartSpan(ctx, "external-request", genai.OperationInvokeAgent, genai.SystemGenAI)
+			}
+			run, err := first.SubmitMessage(ctx, SubmitMessageCommand{
+				RequestID: "recovered-reflection-trace", SessionID: created.ID, OwnerID: 7,
+				ExpectedSeq: int64(created.EventCount), Content: "complete the task", Actor: identity.Default(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForRunStatus(t, first, created.ID, run.RunID, scenario.status)
+			select {
+			case <-firstMemory.committed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("initial terminal reflection did not run")
+			}
+			if err := first.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if external != nil {
+				external.End()
+			}
+			if err := firstTracer.Shutdown(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := ledger.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenSQLiteEventLog(ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+
+			recoveryTracer := newSessionTelemetryTracer(recorder)
+			t.Cleanup(func() { _ = recoveryTracer.Shutdown(context.Background()) })
+			memory := &tracedCommitMemory{tracer: recoveryTracer, committed: make(chan context.Context, 1), waitForCancel: scenario.cancelRecovery}
+			conversation := &recordingConversationAdapter{reply: "must not replay"}
+			recovered := NewSessionRunner(NewWorkbench(reopened, nil), conversation, nil, SessionRunnerOptions{
+				Tracer: recoveryTracer, Memory: memory, MemoryCommitTimeout: 5 * time.Second,
+				Now: func() time.Time { return now.Add(time.Hour) },
+			})
+			t.Cleanup(func() { _ = recovered.Close() })
+			if err := recovered.Recover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-memory.committed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("terminal reflection was not recovered")
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- recovered.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("recovered reflection did not stop with its runner")
+			}
+			waitForRunStatus(t, recovered, created.ID, run.RunID, scenario.status)
+			conversation.mu.Lock()
+			requests := len(conversation.requests)
+			conversation.mu.Unlock()
+			if requests != 0 {
+				t.Fatal("Memory repair replayed the conversation")
+			}
+			var main, reflection sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "agent.main" {
+					main = span
+				} else if span.Name() == "memory.reflect" {
+					reflection = span
+				}
+			}
+			if reflection == nil {
+				t.Fatal("recovered reflection span is missing")
+			}
+			if scenario.legacy {
+				if main != nil || reflection.Parent().IsValid() {
+					t.Fatal("legacy recovery invented an Agent parent")
+				}
+				return
+			}
+			if main == nil || reflection.Parent().SpanID() != main.SpanContext().SpanID() || reflection.SpanContext().TraceID() != main.SpanContext().TraceID() {
+				t.Fatal("recovered reflection lost its terminal Agent parent")
+			}
+			if got := spanStringAttribute(reflection, genai.AttrEvalRunID); got != "recovered-reflection-eval" {
+				t.Fatalf("recovered reflection lost admitted evaluation identity: %q", got)
 			}
 		})
 	}
