@@ -67,7 +67,7 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
       request.current?.abort();
       request.current = null;
     };
-  }, [refresh]);
+  }, [refresh, session?.id, session?.eventCount]);
 
   const taskId = capabilities?.budget?.tokens?.task_id;
   const finishTask = async () => {

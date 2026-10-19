@@ -679,7 +679,7 @@ function App() {
         {selectedSession?.run?.status === 'canceling' && <div className="stream-status" role="status">{selectedSession.run.cancellationState === 'unknown' ? '已请求取消，停止结果未确认，需核验受管资源。已有成果和历史保留。' : '已请求取消，正在停止任务资源…'}</div>}
         {selectedSession?.run?.status === 'canceled' && <div className="stream-status" role="status">{selectedSession.run.cancellationState === 'stopped' ? '代码任务已取消，受管资源已停止。已有成果和历史保留。' : '代码任务已取消，部分停止结果仍需核验。已有成果和历史保留。'}</div>}
         <div className="message-list" ref={messageListRef}>
-          {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} activeRun={selectedSession.run} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
+          {selectedSession ? <MessageList key={selectedSession.id} sessionId={selectedSession.id} refreshKey={refreshKey} activeRun={selectedSession.run} onChanged={refreshSelected} /> : <div className="empty-state"><strong>选择一个会话</strong><span>从左侧打开已有会话，或新建一个。</span></div>}
         </div>
         <form className="input-area" onSubmit={(event) => void handleSendMessage(event)}>
           <textarea className="input-box" placeholder="输入消息，Enter 发送，Shift+Enter 换行" disabled={!selectedSession || busy} value={message} onChange={(event) => { setMessage(event.target.value); if (selectedSession) writeLocalStorage(`codeops:draft:${selectedSession.id}`, event.target.value); }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!runActive) event.currentTarget.form?.requestSubmit(); } }} />
@@ -748,7 +748,7 @@ function SessionStatus({ session, onContinue, busy, continuationHealth, continua
   </div>;
 }
 
-function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; refreshKey: number; activeRun?: Session['run'] }) {
+function MessageList({ sessionId, refreshKey, activeRun, onChanged }: { sessionId: string; refreshKey: number; activeRun?: Session['run']; onChanged: () => Promise<void> }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [eventFilter, setEventFilter] = useState<'all' | 'messages' | 'tools' | 'approvals' | 'code' | 'progress'>('messages');
   const [loading, setLoading] = useState(true);
@@ -831,6 +831,9 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 	}, [sessionId]);
   const handleLiveEvent = useCallback((event: SessionEvent) => {
     const currentCursor = cursorRef.current;
+    if (event.seq > currentCursor) {
+      void onChanged().catch((cause) => setError(errorMessage(cause, '会话状态同步失败')));
+    }
     if (hasSequenceGap(currentCursor, [event])) {
       // A reconnect can miss a suffix if the server rotated the connection
       // between ticket issuance and replay. Re-read the canonical ledger
@@ -843,7 +846,7 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
       cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
       return merged;
     });
-  }, [loadEvents]);
+  }, [loadEvents, onChanged]);
   const socket = useWebSocket({ sessionId, after: cursor, onMessage: handleLiveEvent });
   if (loading && events.length === 0) return <div className="empty-state">正在加载事件...</div>;
   return <div className="message-stream">

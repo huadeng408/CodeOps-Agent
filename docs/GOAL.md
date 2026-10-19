@@ -39,7 +39,7 @@
 - 本机核心启动与历史：[范围证据](evidence/local-core-2026-10-09.md)。
 - Token 批次：[接口与缺口](token-budget.md)、[接入证据](evidence/token-gateway-2026-10-10.md)、[默认边界验证](evidence/model-default-admission-2026-10-12.md)。
 - 本机模型工作区准入：[范围证据](evidence/model-local-workspace-2026-10-12.md)。
-- 代码任务显式结束：[HTTP／CLI 结束边界与右侧入口证据](evidence/model-task-finish-2026-10-12.md)。
+- 代码任务显式结束：[HTTP／CLI 结束边界与右侧入口证据](evidence/model-task-finish-2026-10-12.md)；[能力随会话及后台事件更新的前端修复](evidence/task-capability-refresh-2026-10-20.md)。
 - 模型占用恢复：[真实进程退出、Linux namespace 与生产 HTTP 边界证据](evidence/model-scope-recovery-2026-10-12.md)。
 - 可结算有界重试：[Go／Python 计量、退避和 Ledger 拒绝边界证据](evidence/model-accounted-retry-2026-10-12.md)。
 - 新消息准入：[草稿保留、幂等与真实运行／人工零用量对账记录](evidence/model-message-preflight-2026-10-12.md)。

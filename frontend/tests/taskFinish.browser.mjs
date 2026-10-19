@@ -18,7 +18,7 @@ const other = { ...session, id: 'other-fixture', title: 'Other task fixture', ru
 let held = true, blocked = false, exhausted = false, refuse = true;
 let delayRefusal, releaseRefusal;
 const attempts = [], errors = [];
-const checks = { owned_control: false, refusal_retained: false, unresolved_disabled: false, refusal_session_bound: false, exhausted_finish_enabled: false, finished_preserves_budget: false, no_page_errors: false };
+const checks = { owned_control: false, refusal_retained: false, active_call_disabled: false, refusal_session_bound: false, exhausted_finish_enabled: false, finished_preserves_budget: false, no_page_errors: false };
 let failed = true;
 page.on('pageerror', error => errors.push(error.message));
 try {
@@ -34,7 +34,7 @@ try {
     else if (path.endsWith('/ws-ticket')) data = { ticket: 'fixture' };
     else if (path.endsWith('/task-workspace')) data = { available: false, state: 'unprepared', reason: 'fixture execution unavailable' };
     else if (path.endsWith('/capabilities')) data = {
-      budget: { state: blocked || exhausted ? 'blocked' : 'ready', reason: blocked ? 'a model attempt is unresolved; wait or reconcile after restart' : exhausted ? 'token batch is exhausted' : 'persistent token admission; price unknown',
+      budget: { state: blocked || exhausted ? 'blocked' : 'ready', reason: blocked ? 'a model attempt is still active; wait or recover its execution' : exhausted ? 'token batch is exhausted' : 'provider enforces budget; local usage is audited',
         tokens: { batch_id: 'original-fixture-batch', task_id: held ? session.id : undefined, limit: 100_000_000, used: exhausted ? 100_000_000 : 11, reserved: blocked ? 103 : 0, cost_status: 'unknown' } },
       execution: { state: 'blocked', reason: 'model credentials are missing' },
     };
@@ -49,7 +49,7 @@ try {
   });
   await page.goto(process.argv[2] || 'http://127.0.0.1:3000/');
   await page.locator('textarea.input-box').waitFor();
-  await page.getByText(/已用 11 \/ 100,000,000 tokens/).waitFor();
+  await page.getByText(/已确认 11 tokens，批准上限 100,000,000/).waitFor();
   const finish = page.getByRole('button', { name: '结束代码任务', exact: true });
   assert.equal(await finish.count(), 1, 'owned task has no completion control');
   checks.owned_control = true;
@@ -60,13 +60,13 @@ try {
   checks.refusal_retained = true;
   blocked = true;
   await page.getByRole('button', { name: '重新检查能力', exact: true }).click();
-  await page.getByText(/预留 103/).waitFor();
+  await page.getByText(/原预留估计 103/).waitFor();
   assert.equal(await finish.isDisabled(), true);
   assert.equal(attempts.length, 1);
-  checks.unresolved_disabled = true;
+  checks.active_call_disabled = true;
   blocked = false;
   await page.getByRole('button', { name: '重新检查能力', exact: true }).click();
-  await page.getByText(/预留 0/).waitFor();
+  await page.getByText(/原预留估计 0/).waitFor();
   delayRefusal = new Promise(resolve => { releaseRefusal = resolve; });
   await finish.click();
   await page.getByRole('button', { name: /Other task fixture/ }).click();
@@ -81,15 +81,15 @@ try {
   await page.getByRole('button', { name: /Finish task fixture/ }).click();
   exhausted = true; refuse = false;
   await page.getByRole('button', { name: '重新检查能力', exact: true }).click();
-  await page.getByText(/已用 100,000,000 \/ 100,000,000 tokens/).waitFor();
+  await page.getByText(/已确认 100,000,000 tokens，批准上限 100,000,000/).waitFor();
   assert.equal(await finish.isEnabled(), true);
   checks.exhausted_finish_enabled = true;
   await finish.click();
-  await page.getByText('代码任务已结束。历史和累计额度保留；新建会话后仍按剩余额度准入。', { exact: true }).waitFor();
+  await page.getByText('代码任务已结束。历史和用量记录保留；后续调用仍受服务商预算上限约束。', { exact: true }).waitFor();
   assert.equal(await finish.count(), 0);
   assert.equal(attempts.length, 3);
   assert.ok(attempts.every(x => x.method === 'POST' && x.path === '/api/v1/sessions/finish-fixture/task/finish'));
-  await page.getByText(/已用 100,000,000 \/ 100,000,000 tokens/).waitFor();
+  await page.getByText(/已确认 100,000,000 tokens，批准上限 100,000,000/).waitFor();
   checks.finished_preserves_budget = true;
   assert.deepEqual(errors, []);
   checks.no_page_errors = true;
