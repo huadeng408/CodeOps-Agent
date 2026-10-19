@@ -84,7 +84,7 @@
 - #24 浏览器重连：[双标签页漏事件复现、当前页游标修复、浏览器 UI 与真实 Go 本机兼容回归](evidence/browser-reconnect-2026-10-19.md)；完整长对话、真实 Go 双标签页故障与发布分别验收。
 - #25 真实产品重连：[v7 便携包、双标签页断线期间的真实模型／工具结果、当前游标补齐与 Go/Python 空闲重启](evidence/browser-reconnect-product-2026-10-19.md)已按六项声明范围验收；两次用户请求、六次实际调用及完整失败／计量分母保留，完整长对话和发布仍独立推进。
 - #26 CLI 上下文窗口：[已配置窗口传入受管子进程、显式参数优先级与传输接缝回归](evidence/cli-context-window-2026-10-19.md)；真实长对话、compaction 效果和完整发布分别验收。
-- #27 长对话专项：[启动窗口配置、v8／v9 两次独立尝试的完整失败分母、后端诊断与结束核验](evidence/product-long-dialogue-2026-10-19.md)；完整 200 轮和后续恢复场景尚未验收，本票保持 OPEN。
+- #27 长对话专项：[启动窗口配置、v8／v9／v10 三次独立尝试的完整失败分母、后端诊断与结束核验](evidence/product-long-dialogue-2026-10-19.md)；完整 200 轮和后续恢复场景尚未验收，本票保持 OPEN。
 - #28 压缩后的 Memory：[native 来源权限修复、新包真实嵌套压缩／反思写回与完整后端读回](evidence/memory-compaction-2026-10-20.md)已按范围验证；两次反思失败、首次退出检查失败及最终停止核验均保留，完整长对话和发布分别验收。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。

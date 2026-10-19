@@ -135,3 +135,51 @@ Session、源文件／运行包、资源和原批次。v9 源码为
 其中保留五条后端读回、四个未知调用、原始分母和每个未运行项。
 初期两轮的提前采集仅证明当时 23 个 span 完整，不替代最终失败分母。
 #27 保持 OPEN；后续完整尝试须重新冻结并保留本次原始结果，其他独立修复按各自范围推进。
+
+## v10／v4 独立尝试：第 4 项连续 HTTP 502
+
+新包源码为 `60b5b9b7d08bcc92ccdbb43f6dd377afb6616093`，对应[源码 CI 四项通过](https://github.com/huadeng408/CodeOps-Agent/actions/runs/39312967576)。
+官方构建仅使用既有固定缓存，退出 0；614 个源码和 3,225 个包内文件均逐项核对。
+manifest SHA-256 为 `ae5ab09a28aa81bf8162d3704f40290ef527ee2cb4d419583d06028fe8bceb47`，
+调用前冻结输入为 `76bc56b9b7f2ca49f98de0433046598f42af86bccb0d2d3dc8437569b91ad9da`。
+沿用原 200 条 prompt 字节、32,768 应用窗口、原模型／路由、原 100M 批次和精确资源；
+137 个旧 stream head、333 个原文件及四个 index 在调用前核对。独立准备复审
+Standards／Spec 各 0 项问题，AI_REVIEWED；准备检查不代替实际完整运行。
+
+新 Session `93a3c1758e4bfbb9cdbfbc913b536cc2` 由真实浏览器注册、创建并准备工作区，
+启动阶段新增调用为 0。最终仍为 `BLOCKED`：完成 3／200，第 4 项首次及唯一允许的新
+请求都失败，第 5–200 项共 196 项未运行。实际五个唯一 request／run、三个非空答复
+和两次失败全部保留，没有追加请求或合并 v8／v9／#28 的成功前缀。
+
+- native Session 导出 92 个事件；五个 `trace-audit` 均退出 0，原 admission 前缀完整。
+  实际三个只读工具、零代码修改及零 compaction；项目测试、需求复核、提案、四次刷新
+  和第 100 项重启均未运行，不能作为通过项。
+- 后端读回 5／5 树，共 47 个已结束 span，28 UNSET／19 ERROR；全部 root、父链、
+  13 个模型 call／attempt 和三个工具身份与 native 分母一致。此为停止尝试的结构诊断，
+  不代表完整代码任务 Trace、200 轮或发布合格。初期首轮 11 个 span 亦单独保留。
+- 13 次模型准入为 foreground 8、memory_reflection 5；八次结算、五次结束用量 unknown
+  （两前台、三反思），五个对应 provider attempt 均为 HTTP 502。无其他 Session 新模型
+  调用；新增已确认 100,744 tokens，累计 57,869,916。含旧项的原预留 6,506,024,576
+  保留，不能视作实际消耗；费用 unknown。预算没有 reset、手工结算或逐笔审批。
+- 五条 Memory 轨迹均经 Go 原生投影重算一致；五条 `memory_commit_unavailable` 原事件
+  保留，零 reflection proposal，当前用户原生 catalog 为空。两个已结算的反思也未成功，
+  公开错误码不能证明其底层原因，不将其当作成功或改写 #28 的原结果。
+- 所有调用停止后，实际断言结束按钮可见且启用，全程未手动点击“重新检查能力”；
+  结束返回 HTTP 200，ActiveCalls=0、TaskID 为空，用量及预留与结束前相同。该项仅补验既有
+  [前端修复的实际入口](task-capability-refresh-2026-10-20.md)，不增加本票的门禁。
+- 原 driver finally 退出 0，浏览器关闭、五个所属子进程退出，两个既有 controller 恢复
+  exited，cleanup errors 为空。只读 `final-stop-check.ps1` 再次退出 0，无额外强杀或删除。
+  新观察器仅在原停止断言前保存现场；旧两次清理观察失败的原因仍未知，原结果未改写。
+- 137 个旧 head 锚点仍匹配；旧 v8／v9 Session 各追加一条恢复事实，无新增模型调用。
+  333 个原文件、四个 index、614 份源码、冻结过程文件和 3,225 个包内文件均未改变。
+
+本轮 native 导出已完成后的首次汇总误把空 catalog 按非空数组读取，产生 TypeError；
+原空导出和错误保留，后续只读统计确认零事件。审计脚本首次直接启动缺少根目录
+PYTHONPATH，退出 1，审计主体未执行；设定本进程导入路径后 `halted-readback.py` 退出 0。
+这些观察器结果与产品本身的失败分母分别保留，没有重发模型请求或写入 Ledger。
+
+物料位于 `deployments/docker/.local/receipts/product-long-dialogue-20261020/go/v4/`。
+完整诊断 audit SHA-256 为 `e54b389725f740f38c2f8c0cbc568f9557c591101017154886379138deb8f238`；
+实际 UI 结束收据为 `0095ff65fcac7e2a03db1676b851d94e41ea6ff62b7ff7b4bf7deafe0b8f37a2`，
+最终只读停止核验为 `6e876a4a90e326905244a3503fde0b21a8f9f84a2de6bc5f9c0fca7ab0c84967`。
+#27 保持 OPEN，完整 200 轮与后续恢复仍未验收；#1 原文和 #20 暂缓决定保持。

@@ -45,3 +45,16 @@
 最终结束 fixture 收据为 `d2bb531c0192f2a5e89e97be5c1155b2aaea11d8538af1db7f106ffb64b02399`，
 重连为 `49c2fdf92e37b3d1e82005a363f7a8e2d4e27772119653ce67b4a2f55f3c8071`。
 交付记录另列独立 Standards／Spec 复审、精确提交和新鲜 CI；不把 AI_REVIEWED 称为人工复核。
+
+## v10 实际入口补验
+
+后续[独立 #27 v10／v4 尝试](product-long-dialogue-2026-10-19.md)使用本修复源码
+`60b5b9b7` 和上述相同前端构建指纹。实际会话经历三轮答复、两次失败及后台尝试；
+所有调用停止后，实际断言结束按钮可见且启用，全程未手动检查能力。
+点击结束得到 HTTP 200，native ActiveCalls=0、TaskID 为空，用量及原预留
+均未改变。实际 UI 观察收据 SHA-256 为
+`a8d3d6d711342fbc49c6dd6fb1d3fd1f7b27950d06cd3f2b638a0111cd19d5a3`，
+结束响应为 `0095ff65fcac7e2a03db1676b851d94e41ea6ff62b7ff7b4bf7deafe0b8f37a2`。
+这是该入口最终可结束状态的真实补验；首次准入、后台禁用／再启用和跨会话拒绝等
+逐步转换或边界仍由前述 fixture 分别证明。
+#27 的 3／200、全部 Memory／provider 失败及完整发布缺口保留，不由本项补验替代。
