@@ -19,6 +19,11 @@ Docker Desktop 的容器统一属于 Compose project `localcode`，用 service �
 `.local/` 整体忽略，凭据只从进程环境或已批准 secret manager 注入。
 Session Ledger 和既有 Task Workspace 存储根保持原身份，不因 Docker 整理复制或重建。
 
+full-stack 兼容浏览器测试由 `full-stack-test.ps1` 管理三项隔离服务，沿用
+`tests/e2e/full_stack_startup.ps1` 测试入口。服务固定归入 `localcode`，按
+`full-stack-test-mysql`／`redis`／`minio` 和 run identity 区分；只使用已缓存镜像，
+新测试数据保存在 `.local/data/`，停止后保留，资源收据写入 `.local/receipts/`。
+
 新增临时容器必须有明确的 owner、purpose、run/operation identity 和已知停止后的
 回收方式。优先 Compose；必要的受控 Docker API／CLI 创建也必须在创建时加入
 固定 project/service 分组标签，构建与运行物料仍使用本目录。缺少分组和生命周期

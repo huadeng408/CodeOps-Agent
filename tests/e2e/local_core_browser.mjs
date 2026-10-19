@@ -328,7 +328,8 @@ try {
     assert.equal(data.rag.state, 'degraded');
     assert.equal(data.trace.state, 'unknown');
     assert.equal(data.provider.state, 'blocked');
-    assert.equal(data.sandbox.state, 'blocked');
+    assert.equal(data.sandbox.state, profile === 'full-stack' ? 'unknown' : 'blocked');
+    if (profile === 'full-stack') assert.equal(data.sandbox.reason, 'sandbox backend has not been probed');
     assert.equal(data.budget.tokens.limit, 100_000_000);
     assert.equal(data.budget.tokens.cost_status, 'unknown');
     await page.locator('.composer-meta').getByText('前提未满足', { exact: false }).waitFor();
@@ -337,7 +338,7 @@ try {
     const response = await context.request.get(`${base}/api/v1/capabilities`);
     const { data } = await response.json();
     const row = page.locator('.capability-row').filter({ hasText: 'token 批次' });
-    const summary = row.getByText(`已用 ${data.budget.tokens.used.toLocaleString()} / ${data.budget.tokens.limit.toLocaleString()} tokens`, { exact: false });
+    const summary = row.getByText(`已确认 ${data.budget.tokens.used.toLocaleString()} tokens，批准上限 ${data.budget.tokens.limit.toLocaleString()}，原预留估计 ${data.budget.tokens.reserved.toLocaleString()}`, { exact: false });
     await summary.waitFor();
     assert.ok((await summary.innerText()).includes('费用未知'));
     await page.screenshot({ path: path.join(artifacts, '02-token-budget.png') });
@@ -352,6 +353,8 @@ try {
     await page.screenshot({ path: path.join(artifacts, '03-execution-blocked.png') });
   });
   await check('unreachable capability service shows unknown rather than cached readiness', async () => {
+    const capabilityCount = await page.locator('.capability-panel .capability-state').count();
+    assert.ok(capabilityCount > 0);
     await stop();
     const sockets = new Set();
     const stalled = createServer(socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
@@ -361,7 +364,7 @@ try {
       await page.getByRole('button', { name: '重新检查能力', exact: true }).click();
       await page.getByText('无法确认能力状态，请检查服务连接后重试。', { exact: true }).waitFor();
       const states = await page.locator('.capability-panel .capability-state').allTextContents();
-      assert.equal(states.length, 8);
+      assert.equal(states.length, capabilityCount);
       assert.ok(states.every(state => state === 'UNKNOWN'));
       await page.screenshot({ path: path.join(artifacts, '04-capability-unknown.png') });
     } finally {

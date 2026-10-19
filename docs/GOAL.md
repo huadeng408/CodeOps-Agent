@@ -1,6 +1,6 @@
 # CodeOps-Agent Goal
 
-执行状态：`ACTIVE`。当前 Windows 产品 milestone 和完整发布目标尚待验收。
+执行状态：`ACTIVE`。Windows milestone 1 的首批范围已按 #19 验收；完整发布目标继续推进。
 各任务按声明范围分别记录单测、集成、产品与发布结果；工作约定见
 [AGENTS.md](../AGENTS.md)。
 完整发布验收状态：`BLOCKED`。发布所需的真实运行时 E2E 和七条 lane 证据仍待齐备；
@@ -25,9 +25,8 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| 模型代码任务与提案 | Go #17 与 Python #18 的真实任务、提案、同任务 Memory 和完整 Trace 已按各自范围验证；首批完整分母、故障和兼容矩阵仍由 #19 汇总验收 |
-| Memory 与故障专项 | #12 取消、#13 旧 Session/进程恢复和 #14 真实反思／重启召回已按各自范围验证；完整故障矩阵仍单独验收 |
-| Windows 便携交付与任务验收 | #16 一键 EXE 已按便携范围验证；仍需 #19 首批完整故障与兼容矩阵 |
+| Memory 与故障专项 | 完整长期故障、长对话与恢复矩阵；#19 的五类首批产品场景已按原范围验收 |
+| 可选 Cloudflare #20 | 实际 Free 账户、部署目标及条件能力的独立验收；不作为 Windows 首批 milestone 的门禁 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
 当前凭据、沙箱和后端前提在具体运行准备时核对；旧环境错误不作为本机当前事实。
@@ -60,26 +59,27 @@
 - #13 任务故障与重开：[真实任务故障、Go/Python 重启、同一旧 Session 续行及严格拒绝证据](evidence/task-recovery-2026-10-15.md)；[源码 CI 异步取消回归修正](evidence/task-recovery-ci-2026-10-15.md)。
 - #14 Memory：[同用户同仓库、来源完整性与旧身份的源码验证](evidence/memory-scope-2026-10-15.md)；[真实反思写回、进程重启后空新会话召回与跨仓库拒绝](evidence/memory-product-2026-10-15.md)。
 - #15 产品 Trace：[真实浏览器代码任务、Go/Python/provider/tool/反思整树后端读回与拒绝边界](evidence/product-trace-2026-10-15.md)。
-- 待审批工具取消：[源码与失败留存](evidence/pending-tool-cancellation-2026-10-18.md)、[真实批准／取消与完整 Trace 专项](evidence/pending-tool-cancel-product-2026-10-18.md)已按各自范围验证；#17 原十轮验收继续独立进行。
+- 待审批工具取消：[源码与失败留存](evidence/pending-tool-cancellation-2026-10-18.md)、[真实批准／取消与完整 Trace 专项](evidence/pending-tool-cancel-product-2026-10-18.md)已按各自范围验证；该专项不计入正常开发轮次。
 - OpenSandbox 长命令与停止核验：[源码与十二次尝试的未知执行](evidence/opensandbox-execution-deadline-2026-10-18.md)、[真实长命令及同账号浏览器结束恢复](evidence/opensandbox-deadline-product-2026-10-18.md)；原失败、#17 与发布缺口分别保留。
-- Go 新原任务：[真实修改、项目测试、批准应用及同任务 Memory](evidence/go-browser-task-memory-2026-10-19.md)已按范围验证；完整 Trace 的失败轮次反思父链缺口及原不完整结果保留，#17 继续打开。
+- Go 新原任务：[真实修改、项目测试、批准应用及同任务 Memory](evidence/go-browser-task-memory-2026-10-19.md)已按范围验证；该轮 Trace 父链缺口及原不完整结果保留，后续完整任务见下方 v5 收口。
 - 失败轮次反思父链：[公开 Runner 接缝复现与最小上下文修复](evidence/failed-reflection-trace-2026-10-19.md)、[真实失败／完成两轮专项](evidence/failed-reflection-runtime-2026-10-19.md)已按范围验证；专项未计入正常开发轮次，原任务的完整 Trace 缺口仍保留。
 - 新 Go 正常任务与停止后恢复：[三次上游失败、完整计量分母、实际结束及旧 Session 重开](evidence/go-browser-task-outage-2026-10-19.md)；新代码任务未完成，未知用量及原预留保留。
 - 待补反思的恢复父链：[终态引用、SQLite 重开与公开 Runner 回归](evidence/memory-recovery-trace-2026-10-19.md)；源码验证与新的真实模型恢复结果分别验收。
 - Go 正常任务收口：[v5 真实浏览器任务、最终回归、两文件批准应用、同任务 Memory 与全部轮次的完整 v2 Trace](evidence/go-browser-task-trace-v5-2026-10-19.md)；旧失败、拒绝和 legacy FAIL 保留，#19 与发布继续独立验收。
-- 多轮 Trace 验证器：[完整轮次、父链、调用分母及部分读回留存的源码／集成证据](evidence/product-task-trace-source-2026-10-15.md)；#17/#18 真实十轮验收仍单独进行。
+- 多轮 Trace 验证器：[完整轮次、父链、调用分母及部分读回留存的源码／集成证据](evidence/product-task-trace-source-2026-10-15.md)；验证器与两个公开任务的 runtime 证据分别验收。
 - 受管代码任务工具额度：[两次真实提前停止、有限额度修复及公开协议／当前源码 CI 证据](evidence/harness-tool-allowance-2026-10-16.md)；真实十轮任务继续独立验收。
-- Windows 文件编辑换行：[真实 Read/Edit 缺口、精确匹配保护、源码回归及新构建证据](evidence/windows-edit-crlf-2026-10-16.md)；实际十轮任务仍单独验收。
+- Windows 文件编辑换行：[真实 Read/Edit 缺口、精确匹配保护、源码回归及新构建证据](evidence/windows-edit-crlf-2026-10-16.md)；该修复与真实多轮任务结果分别绑定。
 - 并发工具入账：[五并发 CAS 缺口、Runner 协调、源码回归及新构建证据](evidence/parallel-tool-ledger-2026-10-16.md)；#17/#18 十轮任务继续独立验收。
 - 修复后的真实 Go 尝试：[两轮完成、参数错误、浏览器恢复与完整失败分母](evidence/browser-task-iteration-2026-10-16.md)；同时确认 Python 提案入口的当前缺口。
-- Python 冻结提案：[离线依赖绑定、同一 Runner／应用边界、受控 runtime 与新便携包](evidence/python-proposal-2026-10-16.md)；#18 的十轮真实浏览器任务仍单独验收。
+- Python 冻结提案：[离线依赖绑定、同一 Runner／应用边界、受控 runtime 与新便携包](evidence/python-proposal-2026-10-16.md)；该实现与正式多轮任务分别验证。
 - 已知工具结果后的重复命令：[Python 尝试的完整失败分母、Runner 修复、旧任务显式结束及新冻结输入](evidence/repeated-command-2026-10-16.md)。
 - Python 真实多轮任务：[模型修改、项目测试、实际提案批准应用和原副本保护](evidence/python-browser-task-2026-10-16.md)；[后续同任务反思／v2 Trace 对账](evidence/trace-integrity-v2-2026-10-16.md)，完整失败和冻结场景分母保留。
-- Go 真实多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；#17 继续打开，后续源码修复独立绑定。
-- 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；[同会话取消后真实反思写回及跨进程 fixture 修正](evidence/memory-cancellation-product-2026-10-16.md)。provider 错误展示和十轮同任务剩余范围仍待各自验证。
-- #19 首批验收对账：[五类恢复场景、文件／兼容矩阵、AC01–AC09 和当前缺口](evidence/milestone-reconciliation-2026-10-16.md)；原范围与当前源码分别核对，milestone 和发布仍未通过。
-- #19 现用 v5 补验：[旧 Session 重开、空新会话的原经验检索、完整失败与边界／物料核对](evidence/milestone-v5-recovery-2026-10-19.md)；工具来源验证与最终模型答复失败分别记录，完整矩阵和许可材料仍待验收。
-- Windows 随包材料：[四个 Python 包的固定许可材料、拒绝边界、完整回归与实际离线组装](evidence/windows-python-notices-2026-10-19.md)；新包构建与原 v5 保护已核对，产品、整体物料及发布继续独立验收。
+- Go 早期多轮任务：[十轮完成、完整失败分母、项目测试、实际提案应用及未通过的 Memory／Trace 范围](evidence/go-browser-task-2026-10-16.md)；该轮失败保留，后续 v5 完整收口独立绑定。
+- 取消后的 Memory 与 provider 分类：[终态投影、未知副作用拒绝和固定公开错误的源码验证](evidence/memory-cancellation-classification-2026-10-16.md)；[同会话取消后真实反思写回及跨进程 fixture 修正](evidence/memory-cancellation-product-2026-10-16.md)。源码／产品分类与正式多轮任务分别验收。
+- #19 早期对账：[五类恢复场景、文件／兼容矩阵、AC01–AC09 和当轮缺口](evidence/milestone-reconciliation-2026-10-16.md)；当时未通过的结论保留，当前状态见下方首批验收结论。
+- #19 v5 早期补验：[旧 Session 重开、空新会话的原经验检索、完整失败与边界／物料核对](evidence/milestone-v5-recovery-2026-10-19.md)；该轮最终模型答复失败保留，后续矩阵和许可核验见下方首批验收结论。
+- Windows 随包材料：[四个 Python 包的固定许可材料、拒绝边界、完整回归与实际离线组装](evidence/windows-python-notices-2026-10-19.md)；许可组装与其后产品／整体物料验收分别记录，完整发布范围保留。
+- #19 首批验收通过：[五类恢复、完成的空新会话 Memory 答复及故障 Trace 缺口](evidence/milestone-v5-matrix-2026-10-19.md)、[文件／兼容、full-stack、许可包重开和 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)；旧失败、unknown、父规格和完整发布范围保留。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。
