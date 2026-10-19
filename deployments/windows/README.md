@@ -25,6 +25,10 @@ OpenSandbox 配置使用标准 `%ProgramFiles%\Docker\Docker\resources\bin\docke
 启动窗口显示本轮 URL；输入 `exit` 或关闭该窗口结束产品。仅关闭浏览器标签不会结束服务。
 未提供 `JWT_SECRET` 时使用每次启动的随机密钥，重启后需重新登录，持久身份和历史保留。
 
+上下文窗口可在启动进程环境中设置 `CODE_AGENT_CONTEXT_WINDOW`（例如 `32768`）；
+未设置或为空时沿用 `256000`。它复用 Python 的 `--context-window` 整数语义，
+显式 CLI 参数优先；窗口用于 Context 压力与 compaction，不代表服务商实际模型上限或计费用量。
+
 ## 构建
 
 在源码根目录使用已有构建工具准备前端，然后组装到一个尚不存在的目录：

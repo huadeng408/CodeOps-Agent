@@ -916,7 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--working-dir", default=".")
     parser.add_argument("--max-tokens", type=int, default=1_000_000)
     parser.add_argument("--max-cost", type=float, default=5.0)
-    parser.add_argument("--context-window", type=int, default=256_000)
+    parser.add_argument("--context-window", type=int, default=read_env("CODE_AGENT_CONTEXT_WINDOW") or "256000")
     parser.add_argument(
         "--context-backend",
         choices=("sqlite", "redis", "mysql"),

@@ -13,9 +13,45 @@ from codeagent import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall, Usage
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
-from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig, _render_context_envelope
+from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig, _render_context_envelope, build_parser
 
 _CREDENTIAL_LABEL = "OPENAI_" + "API_KEY"
+
+
+@pytest.mark.parametrize(
+    ("value", "argv", "expected"),
+    [
+        (None, [], 256000),
+        ("", [], 256000),
+        (" \t ", [], 256000),
+        ("32768", [], 32768),
+        (" 32768 ", [], 32768),
+        ("32768", ["--context-window", "65536"], 65536),
+        ("invalid", ["--context-window=4096"], 4096),
+    ],
+)
+def test_context_window_uses_startup_environment(monkeypatch, value, argv, expected) -> None:
+    if value is None:
+        monkeypatch.delenv("CODE_AGENT_CONTEXT_WINDOW", raising=False)
+    else:
+        monkeypatch.setenv("CODE_AGENT_CONTEXT_WINDOW", value)
+
+    args = build_parser().parse_args(argv)
+
+    assert args.context_window == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "argv"),
+    [("invalid", []), ("32768", ["--context-window", "invalid"])],
+)
+def test_context_window_keeps_integer_validation(monkeypatch, value, argv) -> None:
+    monkeypatch.setenv("CODE_AGENT_CONTEXT_WINDOW", value)
+
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(argv)
+
+    assert error.value.code == 2
 
 
 def test_history_preserves_tool_call_pairing_for_provider_requests() -> None:
