@@ -89,3 +89,49 @@ TDD 在既有 public server CLI／parser 接缝运行：设置 32768 的首轮 R
 Memory 的压缩后轨迹拒绝另见 [#28 修复范围](memory-compaction-2026-10-20.md)，
 不能把其短专项或源码结果计作本票的 200 轮通过。后续完整运行另行固定新版本和输入；
 本轮原 SHA、结果、失败、分母和 checksum 不覆盖。
+
+## v9 新独立尝试：第 4 项上游失败
+
+2026-10-20 的新尝试沿用原 200 条 prompt 字节和 32,768 应用窗口，单独冻结新账户、
+Session、源文件／运行包、资源和原批次。v9 源码为
+`e83822f3a13cf667283aebeceaf7bdd9dd5467e8`，包含 #28 的 Memory 修复；
+其 manifest SHA-256 为 `764d135f6abe6ea5c0f34148f5059da768c0d5f61395da10c4a628331f5c835c`，
+本次输入 SHA-256 为 `82beeb505062c21c825222ad37cc38f17689eada8c7c7479cce92bc6d3a9c3d1`。
+当时 checkout 为 `1c0f510e47cf4f0cd226d180a742d8d7651c40c3`；两份说明文档的差异没有
+进入 runtime。613 个实际源码和 3,225 个包内文件均匹配原构建；两个 commit 的源码／
+文档 CI 分别为 [39294067131](https://github.com/huadeng408/CodeOps-Agent/actions/runs/39294067131)
+和 [39306734167](https://github.com/huadeng408/CodeOps-Agent/actions/runs/39306734167)，均为四项通过。
+
+完整产品范围仍为 `BLOCKED`：完成 3／200，第 4 项首次及唯一允许的新请求均失败，
+第 5–200 项共 196 项未运行。新 Session 为 `ea4354c19cc55c206202f3d2bdf8d6f7`；
+实际 5 个唯一 request／run、3 个非空 assistant 答复和两次失败均保留。不能合并原 v8 的
+74 项或 #28 的短专项来补足本次分母，也没有在重试上界后继续发送。
+
+- native 导出 93 个事件，全部 5 个 run 的 `trace-audit` 退出 0。4 次实际只读工具
+  （3 Read／1 Glob），0 代码修改；尚未发生 compaction，也未到项目测试、需求复核、
+  提案及任何计划内刷新／重启边界，上述范围均未运行。
+- 实际后端 5／5 条树共 48 个已结束 span，33 UNSET／15 ERROR；父链、root、
+  13 个模型 call／attempt 和 4 个工具身份与完整 native 分母一致。
+  此为停止尝试的诊断采集，未运行完整代码修改任务的 Trace 资格检查。
+- 13 次模型准入包含 foreground 8、memory_reflection 5。9 次已结算，4 次结束调用
+  用量 unknown（两次前台、两次反思），原预留保留；实际 provider attempt 包含前台
+  HTTP 502／503 及反思 HTTP 503。没有新增其他 Session 的 provider 调用。
+  新增已确认 111,183 tokens，累计 57,769,172；含历史的预留为 6,006,024,576，
+  费用未知，不把预留当作实际消耗，也不要求重新批准常规模型预算。
+- 5 条已提交 Memory 轨迹逐条经当前 Go 原生投影重算一致；实际反思 proposal／catalog
+  更新 2 次，另 3 次 `memory_commit_unavailable` 保留。第 3 项的反思失败发生在已结算
+  调用之后，公开错误码不能确定底层原因；不将其升级为成功反思或修改 #28 的原结果。
+- 实际 UI 结束返回 200；结束后 ActiveCalls=0、TaskID 为空、累计用量与结束前一致。
+  driver finally 原退出 1，短轮询仍报告两个进程；浏览器和两项控制服务已关闭。
+  后续只读 `final-stop-check.ps1` 退出 0，原 launcher 与包内进程均不存在、两个精确
+  controller 均 exited，无额外强杀／删除。两个退出码及原错误分别保留。
+- 135 个旧 stream 前缀未变；旧 v8 Session 仅多一条恢复事实，无新增模型调用。
+  333 个受保护文件、4 个 index 和 v9 的 3,225 个 runtime 文件保持不变；没有 host
+  Task Workspace 编辑、Ledger reset、手工结算或清理其他环境／业务数据。
+
+本次收据位于 `deployments/docker/.local/receipts/product-long-dialogue-20261020/go/v3/`。
+只读 `halted-readback.py` 退出 0，诊断 audit SHA-256
+`204f16b7049423ae16d92dcf674c1f4f11d1149fc272e460d0b38ea143cbeb87`；
+其中保留五条后端读回、四个未知调用、原始分母和每个未运行项。
+初期两轮的提前采集仅证明当时 23 个 span 完整，不替代最终失败分母。
+#27 保持 OPEN；后续完整尝试须重新冻结并保留本次原始结果，其他独立修复按各自范围推进。
