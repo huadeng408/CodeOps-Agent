@@ -83,6 +83,7 @@
 - #20 可选静态预览：[独立构建、无 API 的本机浏览器及普通登录 fixture 回归](evidence/cloudflare-static-preview-2026-10-19.md)；账户／Free 计划、线上部署与其他条件能力分别待验收，不改变首批 milestone 结论。
 - #24 浏览器重连：[双标签页漏事件复现、当前页游标修复、浏览器 UI 与真实 Go 本机兼容回归](evidence/browser-reconnect-2026-10-19.md)；完整长对话、真实 Go 双标签页故障与发布分别验收。
 - #25 真实产品重连：[v7 便携包、双标签页断线期间的真实模型／工具结果、当前游标补齐与 Go/Python 空闲重启](evidence/browser-reconnect-product-2026-10-19.md)已按六项声明范围验收；两次用户请求、六次实际调用及完整失败／计量分母保留，完整长对话和发布仍独立推进。
+- #26 CLI 上下文窗口：[已配置窗口传入受管子进程、显式参数优先级与传输接缝回归](evidence/cli-context-window-2026-10-19.md)；真实长对话、compaction 效果和完整发布分别验收。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。

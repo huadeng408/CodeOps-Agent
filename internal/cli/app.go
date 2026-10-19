@@ -104,11 +104,25 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		levels[tool] = level
 	}
 
+	orchestratorArgs := append([]string{}, cfg.OrchestratorArgs...)
+	explicitContextWindow := false
+	for _, arg := range orchestratorArgs {
+		if arg == "--context-window" || strings.HasPrefix(arg, "--context-window=") {
+			explicitContextWindow = true
+			break
+		}
+	}
+	if cfg.ContextWindow > 0 && !explicitContextWindow {
+		if len(orchestratorArgs) == 0 {
+			orchestratorArgs = config.Default(cfg.ProjectRoot).OrchestratorArgs
+		}
+		orchestratorArgs = append(orchestratorArgs, "--context-window", strconv.Itoa(cfg.ContextWindow))
+	}
 	orchestratorManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:                cfg.OrchestratorAddr,
 		AutoStart:              cfg.OrchestratorAutoStart,
 		Command:                cfg.OrchestratorCommand,
-		Args:                   cfg.OrchestratorArgs,
+		Args:                   orchestratorArgs,
 		ProjectRoot:            cfg.ProjectRoot,
 		WorkingDir:             cfg.WorkingDir,
 		MemoryDir:              cfg.MemoryDir,
