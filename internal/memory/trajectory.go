@@ -115,17 +115,45 @@ func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, o
 	for _, event := range surface {
 		activeSurface[event.EventID] = struct{}{}
 	}
+	covered := make(map[string]bool, len(activeSurface))
+	for id := range activeSurface {
+		covered[id] = true
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type != "context/compaction" || event.SurfaceOp == nil || event.SurfaceOp.Op != "compact" || !covered[event.EventID] {
+			continue
+		}
+		var payload struct {
+			Sources []struct {
+				EventID string `json:"event_id"`
+			} `json:"sources"`
+		}
+		if json.Unmarshal(event.Payload, &payload) != nil || len(payload.Sources) == 0 {
+			return SessionTrajectory{}, ErrTrajectoryIntegrity
+		}
+		for _, source := range payload.Sources {
+			covered[source.EventID] = true
+		}
+	}
+	// Validate retained log-only facts with their verified compacted tool pairs.
+	// The hidden tool facts still cannot become Memory sources or text.
+	hiddenTools := make(map[string]struct{})
 	selected := make([]session.Event, 0, len(events))
 	for _, event := range trajectoryBranch(events) {
 		if event.SurfaceOp != nil {
 			if _, ok := activeSurface[event.EventID]; !ok {
-				continue
+				if !covered[event.EventID] || event.Type != "tool/call" && event.Type != "tool/result" {
+					continue
+				}
+				hiddenTools[event.EventID] = struct{}{}
 			}
 		}
 		selected = append(selected, event)
 	}
 
 	projection := trajectoryProjection{
+		hiddenTools:   hiddenTools,
 		openTools:     make(map[string]trajectoryTool),
 		abandonedRuns: make(map[string]struct{}),
 		runs:          make(map[string]struct{}),
@@ -249,6 +277,7 @@ func sameTrajectoryMemory(existing, next Memory) bool {
 }
 
 type trajectoryProjection struct {
+	hiddenTools     map[string]struct{}
 	firstSeq        int64
 	lastSeq         int64
 	haveSource      bool
@@ -356,10 +385,11 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		p.addRun(payload.RunID)
 	case "tool/result":
 		var payload struct {
-			RunID      string `json:"run_id"`
-			ToolCallID string `json:"tool_call_id"`
-			ToolName   string `json:"tool_name"`
-			ExitCode   int32  `json:"exit_code"`
+			RunID          string `json:"run_id"`
+			ToolCallID     string `json:"tool_call_id"`
+			ToolName       string `json:"tool_name"`
+			ExitCode       int32  `json:"exit_code"`
+			OutcomeUnknown bool   `json:"outcome_unknown"`
 		}
 		if err := decodeObject(event, &payload); err != nil {
 			return err
@@ -372,6 +402,7 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 		if !exists || tool.toolName != payload.ToolName {
 			return trajectoryPayloadError(event, "tool result has no matching call")
 		}
+		p.uncertain = p.uncertain || payload.OutcomeUnknown
 		delete(p.openTools, key)
 		p.addRun(payload.RunID)
 		p.add(event, fmt.Sprintf("Tool result: %s (exit %d)", safeTrajectoryText(safeIdentifier(payload.ToolName)), payload.ExitCode))
@@ -524,6 +555,9 @@ func (p *trajectoryProjection) consume(event session.Event) error {
 }
 
 func (p *trajectoryProjection) add(event session.Event, line string) {
+	if _, hidden := p.hiddenTools[event.EventID]; hidden {
+		return
+	}
 	if !p.haveSource {
 		p.firstSeq = event.Seq
 		p.haveSource = true
