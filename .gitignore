@@ -183,6 +183,7 @@ internal/cli/.agent/
 /\.playwright-cli/
 /ui-prototypes/
 /frontend/node_modules/
+/frontend/dist-preview/
 /brainstorm-portal-layout.png
 /phoenix-v0.1-playwright-mcp*
 /resume-backend-developer.html

@@ -1,0 +1,8 @@
+{
+  "name": "codeops-agent-preview",
+  "compatibility_date": "2026-10-19",
+  "assets": {
+    "directory": "../../frontend/dist-preview",
+    "not_found_handling": "single-page-application"
+  }
+}

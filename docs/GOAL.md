@@ -80,6 +80,7 @@
 - #19 v5 早期补验：[旧 Session 重开、空新会话的原经验检索、完整失败与边界／物料核对](evidence/milestone-v5-recovery-2026-10-19.md)；该轮最终模型答复失败保留，后续矩阵和许可核验见下方首批验收结论。
 - Windows 随包材料：[四个 Python 包的固定许可材料、拒绝边界、完整回归与实际离线组装](evidence/windows-python-notices-2026-10-19.md)；许可组装与其后产品／整体物料验收分别记录，完整发布范围保留。
 - #19 首批验收通过：[五类恢复、完成的空新会话 Memory 答复及故障 Trace 缺口](evidence/milestone-v5-matrix-2026-10-19.md)、[文件／兼容、full-stack、许可包重开和 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)；旧失败、unknown、父规格和完整发布范围保留。
+- #20 可选静态预览：[独立构建、无 API 的本机浏览器及普通登录 fixture 回归](evidence/cloudflare-static-preview-2026-10-19.md)；账户／Free 计划、线上部署与其他条件能力分别待验收，不改变首批 milestone 结论。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。

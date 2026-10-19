@@ -882,14 +882,16 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 }
 
 function AppWithAuth() {
-  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>('checking');
+  const staticPreview = import.meta.env.MODE === 'static-preview';
+  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>(staticPreview ? 'anonymous' : 'checking');
   useEffect(() => {
+    if (staticPreview) return;
     void api.currentUser().then(() => setAuthState('authenticated')).catch(() => setAuthState('anonymous'));
-  }, []);
+  }, [staticPreview]);
   if (authState === 'checking') {
     return <div className="loading-screen">正在验证登录...</div>;
   }
-  if (authState === 'anonymous') return <LoginPage onLoginSuccess={() => setAuthState('authenticated')} />;
+  if (authState === 'anonymous') return <LoginPage staticPreview={staticPreview} onLoginSuccess={() => setAuthState('authenticated')} />;
   return <App />;
 }
 

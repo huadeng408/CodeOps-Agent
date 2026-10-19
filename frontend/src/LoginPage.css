@@ -161,3 +161,5 @@ body[data-ds-dark-theme] .error-message {
 .form-group input:focus { border-color: #84b9ff; }
 .submit-btn { border-radius: 6px; background: #cfe2ff; color: #102039; }
 .submit-btn:hover:not(:disabled) { background: #e2edff; box-shadow: none; transform: none; }
+.preview-notice { color: #c4cad2; font-size: 13px; line-height: 1.6; }
+.preview-notice a { color: #84b9ff; }
