@@ -87,15 +87,6 @@ function hasSequenceGap(after: number, incoming: SessionEvent[]): boolean {
   return false;
 }
 
-function persistedSessionCursor(sessionId: string, cursor: number): void {
-  try {
-    localStorage.setItem(`codeops:ledger-cursor:${sessionId}`, String(cursor));
-  } catch {
-    // Storage can be disabled in private browsing; ledger recovery remains
-    // authoritative and does not depend on this diagnostic hint.
-  }
-}
-
 function sessionMessageRequestKey(sessionId: string): string {
   return `codeops:message-request:${sessionId}`;
 }
@@ -775,7 +766,6 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
     setEvents((previous) => {
         const merged = mergeSessionEvents(previous, data);
         cursorRef.current = merged.reduce((max, event) => Math.max(max, event.seq), -1);
-        persistedSessionCursor(sessionId, cursorRef.current);
         return merged;
       });
       setError('');
@@ -829,7 +819,6 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
 				setEvents((previous) => {
 					const merged = mergeSessionEvents(previous, [decided]);
 					cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
-					persistedSessionCursor(sessionId, cursorRef.current);
 					return merged;
 				});
 			}
@@ -852,7 +841,6 @@ function MessageList({ sessionId, refreshKey, activeRun }: { sessionId: string; 
       setEvents((previous) => {
       const merged = mergeSessionEvents(previous, [event]);
       cursorRef.current = merged.reduce((max, item) => Math.max(max, item.seq), -1);
-      persistedSessionCursor(sessionId, cursorRef.current);
       return merged;
     });
   }, [loadEvents]);

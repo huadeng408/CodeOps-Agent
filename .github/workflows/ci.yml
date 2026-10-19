@@ -76,6 +76,14 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Browser reconnect regression
+        run: |
+          node node_modules/vite/bin/vite.js preview --host 127.0.0.1 --port 4174 --strictPort &
+          preview_pid=$!
+          trap 'kill "$preview_pid" 2>/dev/null || true; wait "$preview_pid" 2>/dev/null || true' EXIT
+          curl --fail --silent --output /dev/null --retry 10 --retry-delay 1 --retry-connrefused http://127.0.0.1:4174/
+          node tests/webSocketReconnect.browser.mjs http://127.0.0.1:4174
       - run: npm run build:preview
 
   windows-startup:

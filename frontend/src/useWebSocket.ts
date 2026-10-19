@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SessionEvent } from './types';
 import { api } from './api';
-import { persistedCursor } from './ledgerCursor';
 
 interface UseWebSocketOptions {
   sessionId: string | null;
@@ -52,7 +51,8 @@ export function useWebSocket({ sessionId, after = -1, onMessage }: UseWebSocketO
         const { ticket } = await api.issueWebSocketTicket(sessionId);
         if (stopped || connectionGeneration !== generation) return;
         const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const resumeAfter = persistedCursor(sessionId, afterRef.current);
+        // Another tab's stored cursor does not mean this tab received its events.
+        const resumeAfter = afterRef.current;
         const url = `${scheme}://${window.location.host}/api/v1/sessions/${encodeURIComponent(sessionId)}/ws?ticket=${encodeURIComponent(ticket)}&after=${resumeAfter}`;
         const currentSocket = new WebSocket(url);
         socket = currentSocket;
