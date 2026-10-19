@@ -58,6 +58,7 @@
 - 模型 scope 并发释放：[持久释放窗口复现、精确撤销及 Go 回归](evidence/model-scope-release-2026-10-15.md)。
 - #13 任务故障与重开：[真实任务故障、Go/Python 重启、同一旧 Session 续行及严格拒绝证据](evidence/task-recovery-2026-10-15.md)；[源码 CI 异步取消回归修正](evidence/task-recovery-ci-2026-10-15.md)。
 - #14 Memory：[同用户同仓库、来源完整性与旧身份的源码验证](evidence/memory-scope-2026-10-15.md)；[真实反思写回、进程重启后空新会话召回与跨仓库拒绝](evidence/memory-product-2026-10-15.md)。
+- Memory 反思诊断：[固定失败阶段、错误类别白名单及隐私回归](evidence/memory-reflection-diagnostics-2026-10-20.md)；旧失败原因和 #27 完整验收分别保留。
 - #15 产品 Trace：[真实浏览器代码任务、Go/Python/provider/tool/反思整树后端读回与拒绝边界](evidence/product-trace-2026-10-15.md)。
 - 待审批工具取消：[源码与失败留存](evidence/pending-tool-cancellation-2026-10-18.md)、[真实批准／取消与完整 Trace 专项](evidence/pending-tool-cancel-product-2026-10-18.md)已按各自范围验证；该专项不计入正常开发轮次。
 - OpenSandbox 长命令与停止核验：[源码与十二次尝试的未知执行](evidence/opensandbox-execution-deadline-2026-10-18.md)、[真实长命令及同账号浏览器结束恢复](evidence/opensandbox-deadline-product-2026-10-18.md)；原失败、#17 与发布缺口分别保留。

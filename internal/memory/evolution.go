@@ -17,6 +17,8 @@ import (
 	"code-agent/internal/identity"
 	"code-agent/internal/session"
 	"code-agent/internal/telemetry/genai"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type MemoryReflector func(context.Context, *pb.MemoryReflectionRequest) (*pb.MemoryReflectionResponse, error)
@@ -281,9 +283,11 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 	}
 	ctx = genai.WithEvalInstance(ctx, commit.Trajectory.SessionID)
 	ctx, span := m.startSpan(ctx, "memory.reflect", genai.OperationInvokeAgent)
+	failureStage, errorCode := "catalog_read", "reflection_failed"
 	if span != nil {
 		defer func() {
 			if err != nil {
+				span.SetAttributes(attribute.String("memory.reflection.failure_stage", failureStage), attribute.String("memory.reflection.error_code", errorCode))
 				genai.MarkSpanError(span)
 			}
 			span.End()
@@ -294,6 +298,7 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 	if err != nil || applied[sourceID] {
 		return err
 	}
+	failureStage = "sources"
 	actor, err := actorFromMemoryEvents(snapshot.Events)
 	if err != nil {
 		return err
@@ -328,6 +333,7 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 		}
 		request.Sources = append(request.Sources, &pb.MemorySource{EventId: source.EventID, Checksum: source.Checksum, Text: text})
 	}
+	failureStage = "proposal_read"
 	var response *pb.MemoryReflectionResponse
 	for _, event := range snapshot.Events {
 		if event.Type != "memory/reflection-proposed" {
@@ -343,13 +349,26 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 		}
 	}
 	if response == nil {
+		failureStage = "reflector"
 		response, err = m.reflector(ctx, request)
-		if err != nil || response == nil || response.ErrorCode != "" {
+		if err != nil || response == nil {
+			errorCode = "reflection_unavailable"
 			return errors.New("memory reflection unavailable")
 		}
+		if response.ErrorCode != "" {
+			// Only fixed protocol categories may cross into content-free telemetry.
+			errorCode = "reflection_error"
+			switch response.ErrorCode {
+			case "invalid_reflection_sources", "reflection_provider_unavailable", "reflection_invalid_or_unavailable", "model_gateway_response_invalid":
+				errorCode = response.ErrorCode
+			}
+			return errors.New("memory reflection unavailable")
+		}
+		failureStage = "validation"
 		if err = validateReflection(request, response); err != nil {
 			return err
 		}
+		failureStage = "proposal_write"
 		for attempt := 0; attempt < 8; attempt++ {
 			current, readErr := session.ReadVerifiedSnapshot(ctx, m.ledger, request.SessionId)
 			if readErr != nil {
@@ -391,9 +410,11 @@ func (m *LedgerMemory) reflectTrajectory(ctx context.Context, snapshot session.L
 			return err
 		}
 	}
+	failureStage = "validation"
 	if err := validateReflection(request, response); err != nil {
 		return err
 	}
+	failureStage = "catalog_write"
 	return m.updateCatalog(ctx, owner, sourceID, func(entries map[string]Experience) ([]Experience, error) {
 		current, err := session.ReadVerifiedSnapshot(ctx, m.ledger, request.SessionId)
 		if err != nil {
