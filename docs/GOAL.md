@@ -25,7 +25,7 @@
 
 | 范围 | 仍需完成的验收 |
 | --- | --- |
-| Memory 与故障专项 | #27 的完整 200 assistant-turn／compaction 仍待通过；#28 压缩后 Memory 的新包反思待验收；完整长期故障与恢复矩阵仍保留，#19 的五类首批产品场景已按原范围验收 |
+| Memory 与故障专项 | #27 的完整 200 assistant-turn／compaction 仍待通过；完整长期故障与恢复矩阵仍保留，#19 的五类首批产品场景已按原范围验收 |
 | 可选 Cloudflare #20 | 按用户要求暂缓；实际 Free 账户、部署目标及条件能力仍待独立验收，不作为 Windows 首批 milestone 的门禁 |
 | 专项与发布 | 下列长期能力和发布指标的对应真实证据；源码 CI、fixture 和独立探针只证明各自范围 |
 
@@ -85,7 +85,7 @@
 - #25 真实产品重连：[v7 便携包、双标签页断线期间的真实模型／工具结果、当前游标补齐与 Go/Python 空闲重启](evidence/browser-reconnect-product-2026-10-19.md)已按六项声明范围验收；两次用户请求、六次实际调用及完整失败／计量分母保留，完整长对话和发布仍独立推进。
 - #26 CLI 上下文窗口：[已配置窗口传入受管子进程、显式参数优先级与传输接缝回归](evidence/cli-context-window-2026-10-19.md)；真实长对话、compaction 效果和完整发布分别验收。
 - #27 长对话专项：[启动窗口配置、原 v8 的完整失败分母、后端诊断与安全结束](evidence/product-long-dialogue-2026-10-19.md)；完整 200 轮和后续恢复场景尚未验收，本票保持 OPEN。
-- #28 压缩后的 Memory：[native 配对与来源权限修复、未知结果拒绝及源码证据](evidence/memory-compaction-2026-10-20.md)；新包的真实 compaction／反思与后端读回仍待独立验收，原长对话运行及失败保留。
+- #28 压缩后的 Memory：[native 来源权限修复、新包真实嵌套压缩／反思写回与完整后端读回](evidence/memory-compaction-2026-10-20.md)已按范围验证；两次反思失败、首次退出检查失败及最终停止核验均保留，完整长对话和发布分别验收。
 - Trace 读回的 unknown 边界：[已停止调用允许采集、最终结算门禁及完整回归](evidence/trace-readback-unknown-2026-10-16.md)；原严格 Trace 结果保留，采集与验收状态分别记录。
 - 工作区续租竞争：[正常 Ledger 并发写入、有限重读及安全拒绝回归](evidence/task-lease-contention-2026-10-16.md)；原十轮任务的 Memory／Trace 缺口保留。
 - 沙箱 Git 元数据：[自包含 HEAD 快照、凭据／旧 lease 边界及真实浏览器四项只读 Git 验证](evidence/portable-task-git-2026-10-16.md)；原任务失败及完整 Trace／Memory 缺口分别保留。
