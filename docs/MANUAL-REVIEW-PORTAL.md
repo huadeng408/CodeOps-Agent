@@ -6,7 +6,7 @@
 
 ## 1. 文本仲裁
 
-当前唯一可用的权威输入是：
+本节所述文本仲裁工作包使用以下固定输入：
 
 - `data/eval/techdocs/reviews/beeapi-openai-relay-recovery-20260813-01/qrels.sol-review-arbitrated.jsonl`
 - `data/eval/techdocs/queries.text.jsonl`
@@ -49,8 +49,10 @@ python orchestrator/eval/dispute_worksheet.py `
 
 ## 3. 多模态证据复核
 
-此项目前被阻塞：仓库没有候选、PDF 页面图、页面级证据或多模态 qrels。不要
-制造测试候选来绕过该状态。
+原人工 bbox 审核范围仍缺少可签名复核的真实候选和对应来源材料；不要制造测试候选绕过该要求。
+仓库已有 [DocVQA 公开开发集的 120 条页面关联](../data/eval/multimodal/docvqa-public-dev-page-qrels-v1/README.md)，
+它们来自公开上游标签，不是本项目的人工决定，没有 evidence-element／bbox 标注，
+不能满足本节人工 bbox 审核、HUMAN_REVIEWED 或隐藏 holdout 的要求。
 
 后续的真实候选必须由 MinerU 加显式 OCR 处理 PDF，不能使用 Tika。受控人工
 流程需要每条候选的 `ACCEPT`、`CORRECT` 或 `REJECT` 决定；只有 `CORRECT`
@@ -58,7 +60,7 @@ python orchestrator/eval/dispute_worksheet.py `
 
 ## 4. Holdout 声明
 
-当前 split 为 180 条开发集、0 条 holdout、状态 `BLOCKED`。不能将现有 180
+本工作台对应的 TechDocs 文本 split 为 180 条开发集、0 条 holdout、状态 `BLOCKED`。不能将现有 180
 条重新命名为 holdout。页面只收集未来独立来源的许可与规划信息，并导出
 `UNSUBMITTED_HOLDOUT_INTAKE.json`；它不会创建 split、qrels 或评测指标。
 

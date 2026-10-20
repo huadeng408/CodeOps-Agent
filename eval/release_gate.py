@@ -134,7 +134,8 @@ def _non_runtime_path(path: str) -> bool:
 
 
 def _source_pin_matches_runtime(
-    repo_root: Path, source_sha: str, current_sha: str, *, dependency_tree: bool = False
+    repo_root: Path, source_sha: str, current_sha: str, *, dependency_tree: bool = False,
+    lane: str = "",
 ) -> bool:
     """Keep provenance while allowing changes to non-runtime documentation."""
 
@@ -175,7 +176,13 @@ def _source_pin_matches_runtime(
         modes = metadata.split()[:2]
         if len(modes) != 2 or modes[0] not in {":000000", ":100644"} or modes[1] not in {"000000", "100644"}:
             return False
-        if not _non_runtime_path(path):
+        # The fixed workflow fault runner never loads browser source or fixtures.
+        workflow_browser_file = (
+            lane == "workflow" and not dependency_tree
+            and path.startswith(("frontend/src/", "frontend/tests/"))
+            and PurePosixPath(path).suffix in {".ts", ".tsx", ".css", ".mjs"}
+        )
+        if not _non_runtime_path(path) and not workflow_browser_file:
             return False
 
     # An unchanged instruction symlink can still load a changed documentation blob.
@@ -220,6 +227,22 @@ def _source_pin_matches_runtime(
     return True
 
 
+def documentation_only_change(repo_root: str | Path, source_sha: str, current_sha: str) -> bool:
+    """Confirm a regular explanatory-document diff, including instruction links."""
+    root = Path(repo_root).resolve()
+    if not _source_pin_matches_runtime(root, source_sha, current_sha):
+        return False
+    try:
+        changed = subprocess.run(
+            ["git", "-C", str(root), "diff", "--name-only", "-z", source_sha, current_sha, "--"],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.split("\0")
+    except (OSError, UnicodeError, subprocess.CalledProcessError):
+        return False
+    paths = changed[:-1] if changed[-1] == "" else []
+    return bool(paths) and all(PurePosixPath(path).suffix == ".md" and _non_runtime_path(path) for path in paths)
+
+
 def _read_receipts(data_root: Path, lane: str) -> tuple[list[dict[str, Any]], GateCheck | None]:
     receipt_dir = data_root / lane / "receipts"
     if not receipt_dir.is_dir():
@@ -256,13 +279,14 @@ def _receipt_base(
     *,
     repo_root: Path,
     current_sha: str,
+    lane: str,
     require_verified: bool = True,
 ) -> tuple[bool, str]:
     if require_verified and payload.get("status") != "VERIFIED":
         return False, f"status is {payload.get('status', '<missing>')!r}"
     source_pin = payload.get("source_pin")
     if not isinstance(source_pin, dict) or not _source_pin_matches_runtime(
-        repo_root, str(source_pin.get("git_sha", "")), current_sha
+        repo_root, str(source_pin.get("git_sha", "")), current_sha, lane=lane
     ):
         return False, "source_pin.git_sha is not current HEAD or a runtime-equivalent source ancestor"
     if source_pin.get("dirty_hash") != EMPTY_DIRTY_HASH or source_pin.get("untracked_files") != 0:
@@ -289,11 +313,12 @@ def _find_lane_receipt(
     *,
     repo_root: Path,
     current_sha: str,
+    lane: str,
     predicate,
 ) -> tuple[dict[str, Any] | None, str]:
     reasons: list[str] = []
     for payload in receipts:
-        ok, reason = _receipt_base(payload, repo_root=repo_root, current_sha=current_sha)
+        ok, reason = _receipt_base(payload, repo_root=repo_root, current_sha=current_sha, lane=lane)
         if not ok:
             reasons.append(f"{Path(str(payload.get('__path', 'receipt'))).name}: {reason}")
             continue
@@ -305,7 +330,7 @@ def _find_lane_receipt(
         detail = "source-bound receipt satisfies the lane contract"
         source_sha = payload["source_pin"]["git_sha"]
         if source_sha != current_sha:
-            detail += f"; runtime inputs unchanged since {source_sha}"
+            detail += f"; runtime scope {lane}: inputs unchanged since {source_sha}"
         return payload, detail
     return None, "; ".join(reasons) if reasons else "no receipt satisfies the lane contract"
 
@@ -642,7 +667,7 @@ def evaluate_release(
             checks.append(loading_check)
             continue
         _, detail = _find_lane_receipt(
-            receipts, repo_root=root, current_sha=current_sha, predicate=predicate
+            receipts, repo_root=root, current_sha=current_sha, lane=lane, predicate=predicate
         )
         checks.append(_check(f"evidence.{lane}", "source-bound receipt" in detail, detail))
 

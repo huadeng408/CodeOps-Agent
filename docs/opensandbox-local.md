@@ -148,8 +148,10 @@ CLI 的 Shell、Git 与可执行 Hook 共用配置中所选 Runner。Python CLI 
 invocation，阶段结束保存 runtime 身份及停止状态，再进入下一阶段；unknown 不执行
 后置 Hook。fork／rewind 保留调用事实和有效消息配对，不能借历史切换重放副作用。
 
-当前批准 Python 任务镜像没有 Git，结构化 Git 在创建前拒绝。Go 隔离 worktree 的
-Windows Git 管理路径可能不可访问，保留实际错误，不扩大挂载。OpenSandbox 的后台
+当前批准 Python 任务镜像没有 Git，结构化 Git 在创建前拒绝。新 Go Task Workspace
+使用自包含的浅 Git 快照，不挂载宿主 Git 管理目录；旧 linked 工作区保持原格式，
+仍可能因 Windows 管理路径不可访问而失败，不自动迁移或扩大挂载。边界与范围见
+[可移植 Git 证据](evidence/portable-task-git-2026-10-16.md)。OpenSandbox 的后台
 job／PTY 等未支持接口明确拒绝；已有 Docker／WSL 路由继续使用隔离执行。
 
 ## 恢复与验收

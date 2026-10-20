@@ -257,6 +257,7 @@ internal/cli/.agent/
 !/docs/archive/research/codex-claude-official-comparison.md
 !/docs/archive/research/production-agent-harness-assessment.md
 /docs/design/
+/docs/archive/policy-cleanup-2026-10-20/local-only/
 /docs/qrels/BUILD-*.md
 /docs/qrels/RUN-*.md
 

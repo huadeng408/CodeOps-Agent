@@ -32,5 +32,20 @@
 [#23：取消、故障重开与 CLI](https://github.com/huadeng408/CodeOps-Agent/issues/23) 是 #6 的子任务。
 当前采用 OpenSandbox，沿用已选 A 右侧测试卡片；各票的范围证据从 Goal 进入。
 
+## 后续产品专项
+
+| 正式任务 | 证据入口 |
+| --- | --- |
+| [#24：浏览器重连漏事件修复](https://github.com/huadeng408/CodeOps-Agent/issues/24) | [源码与浏览器回归](evidence/browser-reconnect-2026-10-19.md) |
+| [#25：真实双标签页重连与空闲重启](https://github.com/huadeng408/CodeOps-Agent/issues/25) | [真实产品范围](evidence/browser-reconnect-product-2026-10-19.md) |
+| [#26：CLI 配置的上下文窗口](https://github.com/huadeng408/CodeOps-Agent/issues/26) | [传输接缝回归](evidence/cli-context-window-2026-10-19.md) |
+| [#27：200 轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27) | [最新完整失败分母与修复边界](evidence/product-long-dialogue-2026-10-20.md) |
+| [#28：压缩后的 Memory 写回](https://github.com/huadeng408/CodeOps-Agent/issues/28) | [真实写回范围](evidence/memory-compaction-2026-10-20.md) |
+
+## 可选能力
+
+[#20：Cloudflare Free](https://github.com/huadeng408/CodeOps-Agent/issues/20) 按用户要求暂缓，
+不作为本机开发或首批 milestone 的前提。当前状态与依赖仍以正式 Issue 为准。
+
 发布时任务与依赖快照保留在 [历史原文](archive/policy-cleanup-2026-10-14/docs--refactor-tickets.md)，
 其 `DESIGNED` 状态描述发布时情况。[归档清单](archive/policy-cleanup-2026-10-14/manifest.json)保存原文校验值。

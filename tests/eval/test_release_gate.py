@@ -289,12 +289,54 @@ def test_release_gate_keeps_receipts_across_explanatory_document_commits(tmp_pat
     assert all(source_sha in check.detail for check in report.checks if check.name.startswith("evidence."))
 
 
+def test_browser_source_change_retains_only_the_independent_workflow_receipt(tmp_path: Path) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    target = repo / "frontend" / "src" / "App.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const title = 'Updated label';\n", encoding="utf-8")
+    subprocess.run(["git", "add", "frontend"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "browser label"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+    lanes = {check.name: check for check in report.checks if check.name.startswith("evidence.")}
+
+    assert report.status is GateStatus.BLOCKED
+    assert lanes["evidence.workflow"].status == "PASS"
+    assert source_sha in lanes["evidence.workflow"].detail
+    assert "workflow" in lanes["evidence.workflow"].detail
+    assert all(check.status == "BLOCKED" for name, check in lanes.items() if name != "evidence.workflow")
+
+
+def test_workflow_scope_still_rejects_a_changed_instruction_link_target(tmp_path: Path) -> None:
+    repo, _ = _git_repo(tmp_path)
+    subprocess.run(["git", "config", "core.symlinks", "false"], cwd=repo, check=True)
+    target = repo / "frontend" / "src" / "App.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text("original rules\n", encoding="utf-8")
+    _git_symlink(repo, "AGENTS.md", "frontend/src/App.tsx")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "linked instruction"], cwd=repo, check=True)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    _passing_receipts(repo, sha)
+    target.write_text("changed rules\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "instruction body changed"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+
+    assert next(check for check in report.checks if check.name == "git.clean").status == "PASS"
+    assert next(check for check in report.checks if check.name == "evidence.workflow").status == "BLOCKED"
+
+
 @pytest.mark.parametrize("path", [
     "app.go", "settings.toml", "go.mod", "requirements.txt", "AGENTS.md", "AGENT.md", "CLAUDE.md",
     "CONTEXT.md", "docs/SKILL.md", "docs/agents/policy.md", "docs/AGENTS/policy.md",
     "docs/prompts/task.md", "docs/GOAL.md", "docs/release-gate.md", "data/eval/workflow/inputs.json",
     "runtime/data/eval/demo/receipts/input.json", "runtime/data/eval/workflow/receipts/input.json",
     "data/eval/demo/receipts/input.json",
+    "frontend/src/AGENTS.md", "frontend/package.json", "frontend/src/runtime.py",
+    "eval/harness/fault_injection.py", "orchestrator/workflows/engine.py", "unclassified/new.ts",
 ])
 def test_release_gate_rejects_changed_runtime_inputs(tmp_path: Path, path: str) -> None:
     repo, source_sha = _git_repo(tmp_path)

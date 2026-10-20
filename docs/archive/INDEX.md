@@ -4,6 +4,19 @@ This tree is historical context, not an execution entry. New conversations read 
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
 
+## Policy and navigation cleanup — 2026-10-20
+
+Nine tracked originals are retained byte-for-byte in [policy-cleanup-2026-10-20/](policy-cleanup-2026-10-20/).
+The [manifest](policy-cleanup-2026-10-20/manifest.json) records source paths, sizes and SHA-256 checksums.
+They include the previous Goal, ticket navigation, two reuse reports and CSV, local-core and OpenSandbox
+operator pages, RAG cutover runbook and manual-review instructions. Original statements are historical.
+Current links remain at their ordinary entries; the long reuse CSV is available only in this archive.
+
+Twelve additional machine-local originals were moved into the ignored `local-only/` subdirectory:
+nine retired design pages, two old assessment/research copies, and the obsolete design checker bytecode.
+The local manifest preserves every original identity and checksum. These private copies are not required
+by a fresh clone. Restore only an explicitly chosen original to a non-conflicting path after checksum verification.
+
 ## Policy and navigation cleanup — 2026-10-14
 
 Twelve originals are retained byte-for-byte in [policy-cleanup-2026-10-14/](policy-cleanup-2026-10-14/).
@@ -110,4 +123,5 @@ These remain gitignored. Canonical audited receipts stay in `data/eval/`. Regene
 
 ## Leave at docs root
 
-`GOAL.md`, `DESIGN-MAP.md`, `provider-configuration.md`, `release-gate.md`, `MANUAL-REVIEW-PORTAL.md`, `manual-review-portal.html`, `observability-phoenix-live-trace-runbook.md`, `adr/`, `design/`, `releases/`.
+`GOAL.md`, `DESIGN-MAP.md`, `provider-configuration.md`, `release-gate.md`, `MANUAL-REVIEW-PORTAL.md`, `manual-review-portal.html`, `observability-phoenix-live-trace-runbook.md`, `adr/`, `releases/`.
+The retired local `design/` tree is historical and no longer belongs at the active docs root.

@@ -26,9 +26,11 @@ guess or remap identities from the full-stack service. Existing full-stack data
 stays on the existing `configs/server.yaml` path; migrate only with an explicit,
 reviewed identity mapping and import procedure.
 
-`GET /api/v1/capabilities` requires authentication and reports history as ready,
-execution as blocked, optional RAG as degraded, and unverified trace export as
-unknown. Missing execution prerequisites return 503 and retain the browser draft.
+`GET /api/v1/capabilities` requires authentication. History is ready, optional
+RAG is degraded, and unverified trace export is unknown. Execution becomes ready
+when the provider, supervised orchestrator, approved sandbox and Go budget
+admission are available; otherwise the response identifies the missing prerequisite.
+Missing execution prerequisites return 503 and retain the browser draft.
 Optional service routes also return authenticated 503 responses.
 
 The browser's right-hand review panel shows these statuses and their reasons,

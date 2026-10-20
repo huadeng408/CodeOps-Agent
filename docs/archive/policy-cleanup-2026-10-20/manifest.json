@@ -1,0 +1,56 @@
+[
+  {
+    "source": "docs/GOAL.md",
+    "archive": "docs--GOAL.md",
+    "bytes": 20158,
+    "sha256": "fe8c2a12ec47d7154a898f1ffb5eaaa685b2aab119e5d24ef9507db7e511f33c"
+  },
+  {
+    "source": "docs/refactor-tickets.md",
+    "archive": "docs--refactor-tickets.md",
+    "bytes": 3343,
+    "sha256": "31600c1f78b1e96c15567b0e2fd105e7e31579a4424b7b4afdf15877a5fa0972"
+  },
+  {
+    "source": "docs/reuse-components.md",
+    "archive": "docs--reuse-components.md",
+    "bytes": 21571,
+    "sha256": "7311fa146f1e417053cc16a75be984327225678f3fdbab0d01717f91948278fd"
+  },
+  {
+    "source": "docs/reuse-landscape.md",
+    "archive": "docs--reuse-landscape.md",
+    "bytes": 164750,
+    "sha256": "146ac7008241e799bb0e8ad5e5620d5cb4b9553d7cea7bb8a64855beab2c9468"
+  },
+  {
+    "source": "docs/reuse-landscape.csv",
+    "archive": "docs--reuse-landscape.csv",
+    "bytes": 127533,
+    "sha256": "057548dcbbb6665df53cd83939fb79d0090e79f1d6e589063df9a1d0244ea2f3"
+  },
+  {
+    "source": "docs/local-core.md",
+    "archive": "docs--local-core.md",
+    "bytes": 2788,
+    "sha256": "570c3fecae12492259f6164880540df7f3e3d42092a8a58bd199871650b41ae5"
+  },
+  {
+    "source": "docs/opensandbox-local.md",
+    "archive": "docs--opensandbox-local.md",
+    "bytes": 12275,
+    "sha256": "dd8a81ef518f99d56a9d2141573ac21d368bf84ff09526ab158acfef61e2e038"
+  },
+  {
+    "source": "docs/releases/RAG-CUTOVER-techdocs-v2.md",
+    "archive": "docs--releases--RAG-CUTOVER-techdocs-v2.md",
+    "bytes": 16745,
+    "sha256": "306fb6e3999c4cd237bec8c68a8ea99fb0692541ae34cef0f645ee23fa7a7225"
+  },
+  {
+    "source": "docs/MANUAL-REVIEW-PORTAL.md",
+    "archive": "docs--MANUAL-REVIEW-PORTAL.md",
+    "bytes": 3456,
+    "sha256": "85c32935c856f866bf9f7d05e957d3f34256758ec65d6cc7c22a344b1658c586"
+  }
+]

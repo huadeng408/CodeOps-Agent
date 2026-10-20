@@ -42,7 +42,7 @@ The gate requires all of the following:
 
 Every accepted receipt must include a run ID, trace ID, source Git pin,
 artifact root and SHA-256 evidence pin. The source pin may equal `HEAD` or an
-ancestor whose runtime inputs have identical final Git content and file modes.
+ancestor whose lane runtime inputs have identical final Git content and file modes.
 The gate compares that source with the current tree, rather than requiring a
 particular number of intervening commits. JSON directly under a supported
 `data/eval/<lane>/receipts/` directory and regular,
@@ -50,6 +50,13 @@ non-executable explanatory Markdown (`README.md` and ordinary `docs/` pages)
 may differ. Loaded instructions, Goal/acceptance policy, design/agent guidance,
 prompts/templates, source, configuration, dependencies and task inputs remain
 protected; symlink/executable-mode or unknown changes refuse inheritance.
+The current lane-specific exception is the deterministic three-stage workflow
+fault-injection runner: it does not load browser source or browser fixtures, so
+regular `.ts`, `.tsx`, `.css` and `.mjs` files under `frontend/src/` or
+`frontend/tests/` do not invalidate that lane. Other lanes retain the conservative
+whole-tree check until their dependencies are confirmed. This is a gate-owned
+scope, not a receipt-supplied exclusion list. Workflow source, configuration,
+dependencies, task inputs, instructions and unknown paths remain protected.
 Existing runtime symlinks are resolved in the Git tree; changed targets or
 unconfirmed external/dangling/cyclic targets also refuse inheritance.
 The same pin still requires confirmed inputs. Submodule pins and dirty or
@@ -57,7 +64,7 @@ untracked child files are checked recursively regardless of local Git ignore
 settings; uninitialized or unconfirmed dependencies refuse release.
 Dependency trees receive the same link confirmation; their file layouts do
 not inherit the explanatory-document exemptions of this repository.
-The report records current HEAD and the original equivalent source for each
+The report records current HEAD, lane scope and the original equivalent source for each
 accepted older receipt. Original receipts and their artifact hashes are not
 rewritten. `SMOKE_PASS`, missing
 fingerprints, missing official scorer output, stale source pins and malformed
@@ -83,3 +90,14 @@ evidence for the current runtime inputs. Unchanged inputs can retain their
 original verified run after the binding check; changed or unconfirmed inputs
 require new evidence. Fixtures and development smoke runs are not eligible
 evidence.
+
+## CI scope
+
+Ordinary CI always runs the change-scope and documentation/workflow contract
+checks. A complete diff containing only regular explanatory Markdown can skip
+the four full jobs while keeping their check names. The classifier reuses source
+binding, including instruction symlink checks; loaded instructions, Goal/design
+policy, code, configuration, dependencies and unknown changes run full CI.
+Missing history, an unconfirmed comparison or a failed scope job also runs full
+CI. Superseded/cancelled workflows still stop. Manual dispatch has no confirmed
+comparison and therefore runs the full suite.

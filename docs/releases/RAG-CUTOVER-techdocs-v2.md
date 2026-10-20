@@ -16,7 +16,7 @@
 
 切换前必须全部满足，缺一不可：
 
-- [ ] **BGE-M3 revision 已锁定为真实不可变 commit。** `configs/server.yaml` 的 `embedding.model_revision` 当前是占位符 `BAAI/bge-m3@8f1b7f9d4c2a6e5b0d9c8f7a6b5c4d3e2f1a0b9c`，必须替换为下载并验证过的真实 HF commit；embedding 服务 `/health` 必须上报该 revision 与 `dimensions: 1024`，`pkg/embedding/preflight.go` 的 `ValidateEmbeddingContract` 通过。
+- [ ] **BGE-M3 revision 已锁定为真实不可变 commit。** 从本次实际使用的配置读取 `embedding.model_revision`；`configs/server.yaml` 已提供真实 commit pin，不因旧运行记录而覆盖它。核对实际下载内容以及 embedding 服务 `/health` 上报的同一 revision 与 `dimensions: 1024`，并通过 `pkg/embedding/preflight.go` 的 `ValidateEmbeddingContract`。
 - [ ] **v2 物理索引已创建。** `knowledge_base_v2_bge_m3` 存在，mapping 为 `KnowledgeV2Mapping(1024)`（`vector` 为原生 `dense_vector`，`dims: 1024`，`index: true`，`similarity: cosine`），无视觉向量字段。
 - [ ] **语料已导入。** v2 索引 chunk 数 > 0；MySQL `knowledge_document` 有对应记录；MinIO `uploads` bucket 对象数可读；v2 中 distinct `document_id` 与 MySQL 文档数一致（无 orphan、无未导入源）。
 - [ ] **contamination 报告干净。** `results/contamination/<日期>.jsonl` 已生成且**阻塞项为 0**（格式见 §2.4）。
@@ -30,22 +30,26 @@
 
 从仓库根目录执行（只读，不改任何数据；输出用 `Tee-Object` 落盘）：
 
+为本次运行设置 `$contaminationReport`、`$expectedAliasTarget` 和 `$mysqlPassword`；
+报告与 alias 状态先实际核对，密码从批准的进程环境或 secret manager 注入。
+命令中的端点和数据库名也是部署参数，不能把旧日期或默认账户当作当前环境证据。
+
 ```powershell
 $cutoverDir = "results/releases/cutover-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 New-Item -ItemType Directory -Force -Path $cutoverDir | Out-Null
 
 powershell -ExecutionPolicy Bypass -File scripts/rag/preflight-cutover.ps1 `
-    -ContaminationReport results/contamination/2026-08-02.jsonl `
+    -ContaminationReport $contaminationReport `
     -EsBaseUrl http://127.0.0.1:9200 `
     -LegacyIndex knowledge_base `
     -V2Index knowledge_base_v2_bge_m3 `
     -ReadAlias knowledge_base_current `
-    -ExpectedAliasTarget knowledge_base `
+    -ExpectedAliasTarget $expectedAliasTarget `
     -ExpectedVectorDims 1024 `
     -EmbeddingServiceUrl http://127.0.0.1:8009 `
     -PhoenixUrl http://127.0.0.1:6006 `
     -MySqlHost 127.0.0.1 -MySqlPort 3306 -MySqlUser codeagent `
-    -MySqlPassword codeagent -MySqlDatabase codeagent `
+    -MySqlPassword $mysqlPassword -MySqlDatabase codeagent `
     -MySqlCountQuery "SELECT COUNT(*) FROM knowledge_document" `
     -MinioAlias localcode-preflight -MinioBucket uploads `
     | Tee-Object -FilePath "$cutoverDir/preflight.log"

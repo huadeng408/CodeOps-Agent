@@ -14,8 +14,50 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    name: Change scope and documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, Node 24
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6, Node 24
+        with:
+          python-version: "3.12"
+      - name: Select validation scope
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}
+        run: python -m scripts.ci_scope >> "$GITHUB_OUTPUT"
+      - name: Install declared lightweight test dependencies
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          import tomllib
+          with open("pyproject.toml", "rb") as source:
+              dependencies = tomllib.load(source)["project"]["optional-dependencies"]["test"]
+          requirements = [item for item in dependencies if item.startswith(("pytest>", "pyyaml>"))]
+          assert len(requirements) == 2
+          subprocess.run([sys.executable, "-m", "pip", "install", *requirements], check=True)
+          PY
+      - name: Check documentation and workflow contracts
+        run: python -m pytest -q tests/eval/test_ci_scope.py tests/eval/test_release_gate_workflow.py tests/eval/test_release_evidence.py
+      - name: Check documentation whitespace
+        if: steps.scope.outputs.full == 'false'
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}
+        run: git diff --check "$CI_BASE_SHA" "$CI_HEAD_SHA"
+
   go:
     name: Go
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.full != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -37,6 +79,8 @@ jobs:
 
   python:
     name: Python
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.full != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -61,6 +105,8 @@ jobs:
 
   frontend:
     name: Frontend
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.full != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -90,6 +136,8 @@ jobs:
 
   windows-startup:
     name: Windows startup contracts
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.full != 'false') }}
     runs-on: windows-2025
     timeout-minutes: 5
     steps:

@@ -24,8 +24,15 @@ def test_ci_provisions_dependencies_for_go_subprocesses_and_python_collection() 
     assert 'pip install -e ".[test,rag,eval]"' in python_commands
     assert python_commands.index("pip install") < python_commands.index("python -m pytest -q")
     assert python_commands.index("go mod download") < python_commands.index("python -m pytest -q")
-    expected_runners = {"go": "ubuntu-24.04", "python": "ubuntu-24.04", "frontend": "ubuntu-24.04", "windows-startup": "windows-2025"}
-    assert {name: job["runs-on"] for name, job in workflow["jobs"].items()} == expected_runners
+    required_jobs = {"go", "python", "frontend", "windows-startup"}
+    assert required_jobs <= workflow["jobs"].keys()
+    for name in required_jobs:
+        family = "windows-" if name == "windows-startup" else "ubuntu-"
+        assert workflow["jobs"][name]["runs-on"].startswith(family)
+        assert workflow["jobs"][name]["needs"] == "scope"
+        assert workflow["jobs"][name]["if"] == (
+            "${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.full != 'false') }}"
+        )
     windows_commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["windows-startup"]["steps"])
     assert "python -m pytest -q tests/test_docker_desktop_startup.py" in windows_commands
     assert "python -m pip install $pytestRequirement" in windows_commands
@@ -58,17 +65,13 @@ def test_release_gate_checkout_fetches_history_for_runtime_equivalent_receipts()
     """The hosted gate must resolve runtime-equivalent source ancestors."""
 
     repository_root = Path(__file__).resolve().parents[2]
-    lines = (repository_root / ".github" / "workflows" / "release-gate.yml").read_text(
-        encoding="utf-8"
-    ).splitlines()
-    checkout_step = lines.index("      - name: Check out source")
-    next_step = next(
-        index
-        for index in range(checkout_step + 1, len(lines))
-        if lines[index].startswith("      - name:")
+    workflow = yaml.load(
+        (repository_root / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
     )
-
-    assert "          fetch-depth: 0" in lines[checkout_step:next_step]
+    checkout = next(step for step in workflow["jobs"]["release-gate"]["steps"]
+                    if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == "0"
 
 
 def test_release_gate_cancels_superseded_runs_per_ref() -> None:
