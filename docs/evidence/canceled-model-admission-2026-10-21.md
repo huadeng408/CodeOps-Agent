@@ -2,7 +2,8 @@
 
 范围为 [#27](https://github.com/huadeng408/CodeOps-Agent/issues/27) 的旧任务恢复入口，
 源码基点为 `cd89460a69c565064cafdb551c00794344911a2a`。
-本记录只验收 Go 实现、HTTP 边界和一次性账本副本；真实账本尚未执行封存。
+本记录分别验收 Go 实现、HTTP 边界、一次性账本副本及用户批准后的实际封存；
+不代表独立 200 轮产品或完整发布验收通过。
 
 ## 行为与边界
 
@@ -17,7 +18,7 @@ Session 的状态和原始事件、unknown、消耗、预留及费用状态均�
 HTTP 接口为 `POST /api/v1/sessions/:id/task/abandon`，沿用真实 JWT 和所有者检查。
 该操作不声称外部资源已停止，也不把失败尝试升级为验收通过。
 
-## 验证
+## 源码与副本验证
 
 - 核心公开 SessionRunner／SQLite 接缝：7 个叶子用例 PASS，退出 0；覆盖未知历史 lease、缺取消、活跃调用、活跃 scope、缺工具结果、未确认停止及其他 actor。
 - Handler 生命周期及所有者边界：4 个叶子用例 PASS，退出 0。
@@ -48,6 +49,28 @@ HTTP 接口为 `POST /api/v1/sessions/:id/task/abandon`，沿用真实 JWT 和�
 `canonical-all-prefixes-unchanged.json` SHA-256 为
 `c9afc0c689dde383a33456a718a18eae54552124da72b8e48038f23a9322d1e8`。
 
-产品／真实模型／发布验证未运行；未新增 Docker 资源，也未替换原产品包。
-原尝试仍为 137/200，取消 unknown 与任务槽均保留；实际封存及后续独立
-200 轮产品验收仍待完成，不能拼接不同尝试。
+上述源码与副本验证阶段未运行产品／真实模型／发布验证，未新增 Docker 资源，
+也未替换原产品包。当时原尝试仍为 137/200，取消 unknown 与任务槽均保留。
+
+## 用户批准后的实际封存
+
+2026-10-21，用户明确批准封存旧测试任务并继续。源码为
+`43b29c8c81713744d142dd4344b37d5440c27517`；已核对一次性操作程序与源码指纹，
+在原账本执行同一 Go Gateway 封存入口。预检查、实际执行及旧版读取器均退出 0。
+
+原账本全部 32,536 个事件的所有列逐一比较不变，仍覆盖原 140 条流；
+只新增一条 `admission/task_finished`、`purpose: "abandoned"` 的事实，
+零起始序号为 5132，checksum 为
+`85baf0102728e37042206c0e0d2e894a42d0ef5e2619fc433b450ce5a54fb98e`。
+旧模型准入身份永久关闭，任务槽已释放；未派发模型或工具。
+
+原 Session 的 3510 个事件和 `canceling/unknown` 原样保留；原尝试完成 137/200，
+整体验收未通过。
+封存时原批次、69,621,825 已确认 tokens、6,506,024,576 未知预留及费用状态均未变；
+这些数字是该次操作的审计快照，不是后续调用余额。封存不代替取消确认或计量结算。
+
+本机原始收据为 `.scratch/cancellation-recovery-20261020/live-retirement-receipt.json`，
+SHA-256 为 `a6767201da1900b2164afb1817b19ab96fc59fa3d35a9b8db704686a5c0b4f99`；
+逐列保留核对与命令退出码见同目录 `live-retirement-audit.json`。
+独立 Standards／Spec 对实际封存结果及新冻结输入均为 AI_REVIEWED、各 0 项发现。
+完整 200 轮继续使用独立新会话，原失败尝试不与它拼接，验收结果另行记录。

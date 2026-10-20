@@ -17,7 +17,7 @@
 | 范围 | 下一步与验收边界 |
 | --- | --- |
 | [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 完成独立的 200 assistant-turn／compaction 与恢复验收；最新失败与源码修复见下方证据，不能拼接不同尝试 |
-| 故障恢复与 Memory | 解决原 event_integrity 触发原因、旧取消 unknown 和保留任务槽；验证压缩后的约束保留、真实产品续行及持久存储故障恢复，不手改 Ledger 或虚构结算 |
+| 故障恢复与 Memory | 验证压缩后的约束保留、真实产品续行及持久存储故障恢复；旧任务已封存模型准入并释放任务槽，原 event_integrity 失败与取消 unknown 保留，不手改 Ledger 或虚构结算 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
 
@@ -30,7 +30,7 @@
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
 - 当前长对话与失败终态修复：[2026-10-20 范围记录](evidence/product-long-dialogue-2026-10-20.md)。
 - 当前输入的压缩保留：[源码修复与离线复现](evidence/compaction-active-input-2026-10-20.md)。
-- 旧取消任务的模型准入：[封存操作与副本验证](evidence/canceled-model-admission-2026-10-21.md)；真实账本尚未执行。
+- 旧取消任务的模型准入：[已批准的实际封存与副本验证](evidence/canceled-model-admission-2026-10-21.md)。
 - 压缩后的 Memory：[真实写回与 Trace](evidence/memory-compaction-2026-10-20.md)、
   [反思失败诊断](evidence/memory-reflection-diagnostics-2026-10-20.md)。
 - 浏览器重连：[真实双标签页与空闲重启](evidence/browser-reconnect-product-2026-10-19.md)。
