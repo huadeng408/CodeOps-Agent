@@ -4088,7 +4088,14 @@ class ConversationRunner:
                 }
                 if retain_ratio is not None:
                     select_kwargs["retain_ratio"] = retain_ratio
-                selected = select_range(current, **select_kwargs)
+                selection_messages = current
+                if getattr(self, "harness_managed", False):
+                    # Only canonical history can be replaced; live messages have no Ledger refs.
+                    for index in range(history_start, len(current)):
+                        if not current[index].source_events:
+                            selection_messages = current[:index + 1]
+                            break
+                selected = select_range(selection_messages, **select_kwargs)
                 if selected is None:
                     return current
                 selected_start, selected_end = selected

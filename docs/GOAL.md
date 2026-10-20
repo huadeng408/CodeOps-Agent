@@ -29,6 +29,7 @@
 - 首批 Windows milestone：[五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
 - 当前长对话与失败终态修复：[2026-10-20 范围记录](evidence/product-long-dialogue-2026-10-20.md)。
+- 当前输入的压缩保留：[源码修复与离线复现](evidence/compaction-active-input-2026-10-20.md)。
 - 压缩后的 Memory：[真实写回与 Trace](evidence/memory-compaction-2026-10-20.md)、
   [反思失败诊断](evidence/memory-reflection-diagnostics-2026-10-20.md)。
 - 浏览器重连：[真实双标签页与空闲重启](evidence/browser-reconnect-product-2026-10-19.md)。

@@ -1,6 +1,6 @@
 from orchestrator.context.compactor import Compactor
 from orchestrator.graph.main_graph import build_graph
-from orchestrator.llm.client import ChatMessage
+from orchestrator.llm.client import ChatMessage, ChatResponse, ToolCall
 from orchestrator.memory.manager import MemoryManager
 from orchestrator.runtime.conversation import ConversationRunner
 from orchestrator.runtime.tools import ToolRegistry
@@ -9,6 +9,60 @@ from orchestrator.todo.manager import TodoManager
 from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.llm.providers.openai import OpenAIClient
 import json
+import pytest
+
+
+@pytest.mark.parametrize("history_count", [0, 8])
+def test_harness_compaction_keeps_active_input_after_large_tool_batch(tmp_path, history_count):
+    from codeagent import orchestrator_pb2 as pb
+
+    class ReadThenAnswer:
+        model = "fixture"
+
+        def __init__(self):
+            self.requests = []
+
+        async def chat(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ChatResponse(tool_calls=[
+                    ToolCall(id=f"read-{i}", name="Read", arguments={"path": f"file-{i}.go"})
+                    for i in range(6)
+                ])
+            return ChatResponse(text="analysis complete")
+
+    llm = ReadThenAnswer()
+    runner = ConversationRunner(
+        graph=build_graph(), llm=llm,
+        tool_registry=ToolRegistry(str(tmp_path), allowed_tools=["Read"]),
+        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
+        harness_managed=True,
+        compactor=Compactor(max_chars=20000, max_messages=100, compaction_retries=0,
+                            tool_result_threshold=100000),
+    )
+    responses = list(runner.run(
+        "Analyze these files without modifying them",
+        iter([pb.HarnessMessage(tool_result=pb.ToolResult(
+            tool_name="Read", tool_call_id=f"read-{i}", output="source line\n" * 1000,
+        )) for i in range(6)]),
+        history=[{"role": "user" if i % 2 == 0 else "assistant", "content": "earlier fact " * 80,
+                  "event_id": f"event-{i}", "event_checksum": str(i) * 64} for i in range(history_count)],
+    ))
+
+    assert responses[-1].done.success
+    assert len(llm.requests) == 2
+    updates = [response.compaction_update for response in responses
+               if response.HasField("compaction_update")]
+    assert bool(updates) == bool(history_count)
+    followup = llm.requests[1].messages
+    assert [message.content for message in followup if message.role == "user"][-1] == (
+        "Analyze these files without modifying them"
+    )
+    assert [message.tool_call_id for message in followup if message.role == "tool"] == [
+        f"read-{i}" for i in range(6)
+    ]
+    assert all(update.removed_messages == len(update.source_events) for update in updates)
 
 
 def test_compaction_preserves_anthropic_system_prefix_and_canonical_count(tmp_path):
