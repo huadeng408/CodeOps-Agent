@@ -55,6 +55,7 @@
 - PDF 入口统一走 MinerU 的显式 OCR；Tika 只处理 DOCX、PPTX、XLSX 等非 PDF Office 文档。
 - BeeAPI/OpenAI relay 的所有本地进程和 shard 合计并发保持在 1–10；HTTP 429 只允许有界退避，无法恢复就保持 `BLOCKED`。
 - 用户已在服务商设置 1 亿 token 硬上限，常规模型调用在此预算内直接推进，无需逐笔批准。Go Ledger 保留已确认消耗、未确认用量和原预留；已结束调用的计量 unknown 不阻塞新的独立调用或已停止任务的结束，不虚构零消耗或费用。仍在执行的调用、防重复派发、权限、工具结果和沙箱边界继续由 Go 强制。
+- 需要验证模型能力时，使用用户已批准的真实大模型 API；本机凭据位置由当前会话或本地配置提供，凭据注入沿用下方本地运行约定。
 - `AI_REVIEWED`、`DISPUTED` 与 `HUMAN_REVIEWED` 不可互换；只有真实逐条人工复核才能产生 `HUMAN_REVIEWED`。
 - 评测输入、prompt 和 receipt 不得包含答案、gold/qrels、patch 或修复提示；失败实例及其分母必须保留。
 - 生产发布缺少 trust root、pin、凭据或外部服务时拒绝发布，并在内部记录中明确标为 `BLOCKED`。
