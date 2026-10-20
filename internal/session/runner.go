@@ -2472,9 +2472,21 @@ func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeaseP
 		"error_type": errorTypeName(cause),
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
-	if r.appendTerminal(ctx, key, lease, runFailedEventType, publicRunError(cause)) == nil {
-		// Keep the Agent parent without the terminal-write deadline.
-		r.commitSessionMemory(parent, key)
+	cancel()
+	// Failure annotations must not consume the terminal write's budget.
+	for attempt := 0; attempt < 2; attempt++ {
+		terminalCtx, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+		err := r.appendTerminal(terminalCtx, key, lease, runFailedEventType, publicRunError(cause))
+		stop()
+		if err == nil {
+			// Keep the Agent parent without the terminal-write deadline.
+			r.commitSessionMemory(parent, key)
+			return
+		}
+		// A timed-out close may have persisted its last marker; re-read it.
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrSequenceConflict) {
+			return
+		}
 	}
 }
 
