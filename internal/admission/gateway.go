@@ -328,6 +328,16 @@ func (gateway *Gateway) BindExistingTask(ctx context.Context, owner uint, taskID
 
 // FinishTask is an explicit operator action, never a per-turn or restart reset.
 func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) error {
+	return gateway.finishTask(ctx, actor, false)
+}
+
+// AbandonCanceledTask retires model admission after a durable cancellation.
+// Session cancellation and resource uncertainty remain unchanged and auditable.
+func (gateway *Gateway) AbandonCanceledTask(ctx context.Context, actor identity.Actor) error {
+	return gateway.finishTask(ctx, actor, true)
+}
+
+func (gateway *Gateway) finishTask(ctx context.Context, actor identity.Actor, abandon bool) error {
 	if gateway.budget == nil || actor.Validate() != nil {
 		return ErrInvalidAdmission
 	}
@@ -340,13 +350,19 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 	}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
-	if gateway.runtimeStopped != nil {
+	if !abandon && gateway.runtimeStopped != nil {
 		if err := session.ConfirmTaskRuntimeStops(ctx, gateway.budget.ledger, actor, gateway.runtimeStopped); err != nil {
 			return err
 		}
 	}
-	if err := session.ModelTaskIdle(ctx, gateway.budget.ledger, actor); err != nil {
-		return err
+	if abandon {
+		if err := session.ModelTaskAdmissionAbandonable(ctx, gateway.budget.ledger, actor); err != nil {
+			return err
+		}
+	} else {
+		if err := session.ModelTaskIdle(ctx, gateway.budget.ledger, actor); err != nil {
+			return err
+		}
 	}
 	for _, scope := range gateway.scopes {
 		if scope.taskID == root {
@@ -370,7 +386,11 @@ func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) er
 			return err
 		}
 	}
-	_, err = gateway.budget.FinishTask(ctx, ActorOwner(actor), root)
+	purpose := ""
+	if abandon {
+		purpose = "abandoned"
+	}
+	_, err = gateway.budget.finishTask(ctx, ActorOwner(actor), root, purpose)
 	return err
 }
 

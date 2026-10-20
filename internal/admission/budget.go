@@ -540,6 +540,10 @@ func (budget *Budget) markUnknown(ctx context.Context, owner uint, callID string
 // FinishTask releases a stopped task while preserving known and unknown usage.
 // Live requests and process scopes remain fenced; completion never settles usage.
 func (budget *Budget) FinishTask(ctx context.Context, owner uint, taskID string) (Batch, error) {
+	return budget.finishTask(ctx, owner, taskID, "")
+}
+
+func (budget *Budget) finishTask(ctx context.Context, owner uint, taskID, purpose string) (Batch, error) {
 	if !validID(taskID) {
 		return Batch{}, ErrInvalidAdmission
 	}
@@ -560,7 +564,7 @@ func (budget *Budget) FinishTask(ctx context.Context, owner uint, taskID string)
 		if state.taskHasScopes(owner, taskID) {
 			return state.Batch, ErrTaskBusy
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_finished", budgetFact{OwnerID: owner, TaskID: taskID})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_finished", budgetFact{OwnerID: owner, TaskID: taskID, Purpose: purpose})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}

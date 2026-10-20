@@ -176,6 +176,18 @@ Unknown model accounting can remain after task completion; its original facts
 and reservations stay available. Missing tool outcomes and unconfirmed tool/Hook stops in ordinary
 or legacy CLI histories refuse completion without rewriting those outcomes.
 
+Authenticated `POST /api/v1/sessions/:id/task/abandon` separately retires model
+admission for a root whose latest run has a durable cancellation request.
+Unfinished linked runs need their own cancellation fence; all other tool-result,
+runtime, test, application, child-task, active-call and process-scope checks remain.
+It appends `admission/task_finished` with `purpose: "abandoned"`, preserving
+compatibility with existing Ledger readers. The original Session, cancellation
+uncertainty, batch, usage and reservations remain unchanged. This irreversible
+operator action prevents future model admission under the old task identity;
+it neither confirms resource cleanup nor qualifies the canceled run. Ordinary
+`task/finish` remains strict. [Scoped checks](evidence/canceled-model-admission-2026-10-21.md)
+record source and disposable-copy verification separately from live activation.
+
 Model scope bindings and releases are lifecycle facts in the same admission
 Ledger. A scope ID is a capability digest; the capability itself remains
 transient. Scope facts can precede the first admitted call without creating a

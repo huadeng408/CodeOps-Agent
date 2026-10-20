@@ -533,9 +533,22 @@ func undispatchedRepeatRefusal(events []Event, call toolCallPayload) bool {
 
 // ModelTaskIdle refuses completion while a linked agent can still produce work.
 func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) error {
+	return modelTaskIdle(ctx, ledger, actor, false)
+}
+
+// ModelTaskAdmissionAbandonable permits a durable cancel fence for admission
+// retirement only. It does not confirm foreign resource cleanup or a stopped run.
+func ModelTaskAdmissionAbandonable(ctx context.Context, ledger EventLog, actor identity.Actor) error {
+	return modelTaskIdle(ctx, ledger, actor, true)
+}
+
+func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, allowCancelFence bool) error {
 	root, err := ModelTaskRoot(ctx, ledger, actor)
 	if err != nil {
 		return err
+	}
+	if allowCancelFence && root != actor.SessionID {
+		return ErrInvalidSessionInput
 	}
 	actor.SessionID = root
 	var inspect func(string) error
@@ -580,11 +593,21 @@ func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) e
 			if err != nil {
 				return ErrSessionStateConflict
 			}
-			for _, run := range runs {
-				if !run.terminal || run.view.Status == RunCanceled && run.view.CancellationState == "unknown" {
+			if allowCancelFence && id == root {
+				view, err := reduceSessionView(snapshot.Events)
+				if err != nil || view.Run == nil || runs[view.Run.RunID].cancelRequest == nil {
 					return ErrSessionStateConflict
 				}
 			}
+			for _, run := range runs {
+				if !run.terminal || run.view.Status == RunCanceled && run.view.CancellationState == "unknown" {
+					if !allowCancelFence || run.cancelRequest == nil {
+						return ErrSessionStateConflict
+					}
+				}
+			}
+		} else if allowCancelFence {
+			return ErrSessionStateConflict
 		}
 		pending := map[string]bool{}
 		for _, event := range snapshot.Events {

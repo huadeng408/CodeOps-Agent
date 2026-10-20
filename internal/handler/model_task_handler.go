@@ -19,6 +19,14 @@ func NewModelTaskHandler(workbench session.WorkbenchModule, gateway *admission.G
 }
 
 func (h *ModelTaskHandler) Finish(c *gin.Context) {
+	h.closeAdmission(c, false)
+}
+
+func (h *ModelTaskHandler) Abandon(c *gin.Context) {
+	h.closeAdmission(c, true)
+}
+
+func (h *ModelTaskHandler) closeAdmission(c *gin.Context, abandon bool) {
 	owner, err := authenticatedOwner(c)
 	if err != nil {
 		writeSessionError(c, err, "authentication required")
@@ -37,9 +45,18 @@ func (h *ModelTaskHandler) Finish(c *gin.Context) {
 		writeSessionError(c, err, "authentication required")
 		return
 	}
-	if err := h.gateway.FinishTask(c.Request.Context(), actor); err != nil {
+	if abandon {
+		err = h.gateway.AbandonCanceledTask(c.Request.Context(), actor)
+	} else {
+		err = h.gateway.FinishTask(c.Request.Context(), actor)
+	}
+	if err != nil {
 		writeSessionError(c, err, "task completion is unavailable", h.workbench)
 		return
 	}
-	writeSessionData(c, http.StatusOK, gin.H{"sessionId": c.Param("id")})
+	data := gin.H{"sessionId": c.Param("id")}
+	if abandon {
+		data["admissionState"] = "abandoned"
+	}
+	writeSessionData(c, http.StatusOK, data)
 }
