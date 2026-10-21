@@ -17,7 +17,7 @@
 | 范围 | 下一步与验收边界 |
 | --- | --- |
 | [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 以本轮 Memory、审计写入与失败收尾修复完成新的独立 200 assistant-turn／compaction 与恢复验收；不能拼接不同尝试 |
-| 故障恢复与 Memory | 验证压缩后目标可检索及真实产品续行；本轮失败测试的两个工具结果缺口和取消 unknown 仍需经 Go 恢复，普通结束被拒；不手改 Ledger、虚构结果或结算 |
+| 故障恢复与 Memory | 验证压缩后目标可检索及真实产品续行；本轮失败任务的显式准入封存已通过源码及账本副本验证，真实封存待单独批准；两个工具结果缺口和取消 unknown 保留，普通结束仍拒绝 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
 
@@ -33,6 +33,7 @@
   前次记录见 [2026-10-20](evidence/product-long-dialogue-2026-10-20.md)。
 - 当前输入的压缩保留：[源码修复与离线复现](evidence/compaction-active-input-2026-10-20.md)。
 - 旧取消任务的模型准入：[已批准的实际封存与副本验证](evidence/canceled-model-admission-2026-10-21.md)。
+- 本轮丢失 Read 结果的取消任务：[严格封存边界与副本验证](evidence/canceled-file-read-admission-2026-10-21.md)。
 - 压缩后的 Memory：[真实写回与 Trace](evidence/memory-compaction-2026-10-20.md)、
   [反思失败诊断](evidence/memory-reflection-diagnostics-2026-10-20.md)。
 - 浏览器重连：[真实双标签页与空闲重启](evidence/browser-reconnect-product-2026-10-19.md)。

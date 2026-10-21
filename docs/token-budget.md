@@ -178,7 +178,12 @@ or legacy CLI histories refuse completion without rewriting those outcomes.
 
 Authenticated `POST /api/v1/sessions/:id/task/abandon` separately retires model
 admission for a root whose latest run has a durable cancellation request.
-Unfinished linked runs need their own cancellation fence; all other tool-result,
+Unfinished linked runs need their own cancellation fence. Only this explicit
+retirement can retain a missing built-in plain-file `Read` result when its
+unique preparation, pending, dispatch, unknown and exact commit closure agree,
+and dispatch preceded that run's cancellation request. PDF reads can launch
+MinerU and are excluded, as are MCP bindings, unconfirmed runtimes, contradictory
+results and incomplete or mismatched audit facts. All other tool-result,
 runtime, test, application, child-task, active-call and process-scope checks remain.
 It appends `admission/task_finished` with `purpose: "abandoned"`, preserving
 compatibility with existing Ledger readers. The original Session, cancellation
@@ -187,6 +192,9 @@ operator action prevents future model admission under the old task identity;
 it neither confirms resource cleanup nor qualifies the canceled run. Ordinary
 `task/finish` remains strict. [Scoped checks](evidence/canceled-model-admission-2026-10-21.md)
 record source and disposable-copy verification separately from live activation.
+The [missing file-read checks](evidence/canceled-file-read-admission-2026-10-21.md)
+preserve the lost outcome as unknown; they do not permit ordinary completion,
+continuation, replay or relaxed Trace acceptance.
 
 Model scope bindings and releases are lifecycle facts in the same admission
 Ledger. A scope ID is a capability digest; the capability itself remains

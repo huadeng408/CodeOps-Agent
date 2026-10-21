@@ -609,6 +609,21 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 		} else if allowCancelFence {
 			return ErrSessionStateConflict
 		}
+		abandonableReads := map[string]bool{}
+		if allowCancelFence {
+			for _, event := range snapshot.Events {
+				if event.Type != toolUnknownEventType {
+					continue
+				}
+				var call toolCallPayload
+				if json.Unmarshal(event.Payload, &call) != nil {
+					return ErrEventIntegrity
+				}
+				if canceledPlainFileRead(snapshot.Events, call) {
+					abandonableReads[invocationHistoryKey(call.RunID, call.ToolCallID)] = true
+				}
+			}
+		}
 		pending := map[string]bool{}
 		for _, event := range snapshot.Events {
 			switch event.Type {
@@ -616,6 +631,9 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 				var call toolCallPayload
 				if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" {
 					return ErrEventIntegrity
+				}
+				if abandonableReads[invocationHistoryKey(call.RunID, call.ToolCallID)] {
+					continue
 				}
 				pending[invocationHistoryKey(call.RunID, call.ToolCallID)] = true
 			case "tool/result":
@@ -633,7 +651,7 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 					return ErrEventIntegrity
 				}
 				// Older repeat guards could reject a new identity before any dispatch.
-				if !undispatchedRepeatRefusal(snapshot.Events, call) {
+				if !undispatchedRepeatRefusal(snapshot.Events, call) && !abandonableReads[invocationHistoryKey(call.RunID, call.ToolCallID)] {
 					return ErrSessionStateConflict
 				}
 			}

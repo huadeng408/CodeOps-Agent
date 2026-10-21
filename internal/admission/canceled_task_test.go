@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,16 @@ func TestAbandonCanceledAdmissionPreservesForeignCleanupUnknown(t *testing.T) {
 	}
 }
 
+func TestAbandonCanceledAdmissionRetainsMissingFileReadOutcome(t *testing.T) {
+	testCanceledAdmission(t, "missing file read result")
+}
+
+func TestAbandonCanceledAdmissionRejectsUnverifiedFileReads(t *testing.T) {
+	for _, suffix := range []string{"PDF", "PDF alias", "MCP", "unconfirmed runtime", "mismatched dispatch", "duplicate dispatch", "missing preparation", "missing closure", "wrong closure", "uncanceled history", "late dispatch", "active call", "live scope"} {
+		t.Run(suffix, func(t *testing.T) { testCanceledAdmission(t, "missing file read result: "+suffix) })
+	}
+}
+
 func testCanceledAdmission(t *testing.T, scenario string) {
 	ctx := context.Background()
 	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
@@ -54,7 +66,8 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 	})
 	first := session.NewSessionRunner(workbench, conversation, read, session.SessionRunnerOptions{WorkerID: "earlier-process"})
 	t.Cleanup(func() { _ = first.Close() })
-	if _, err := first.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "earlier", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "earlier", Actor: actor}); err != nil {
+	earlierRun, err := first.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "earlier", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "earlier", Actor: actor})
+	if err != nil {
 		t.Fatal(err)
 	}
 	waitView := func(want func(session.RunView) bool) session.SessionView {
@@ -93,6 +106,72 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("current worker did not start")
 	}
+	if strings.HasSuffix(scenario, "late dispatch") {
+		if _, err := second.CancelRun(ctx, session.CancelRunCommand{RequestID: "cancel", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.HasPrefix(scenario, "missing file read result") {
+		readRunID := run.RunID
+		if strings.HasSuffix(scenario, "uncanceled history") {
+			readRunID = earlierRun.RunID
+		}
+		call := map[string]any{"run_id": readRunID, "tool_call_id": "lost-read", "tool_name": "Read", "arguments_json": `{"path":"source.go"}`}
+		if strings.HasSuffix(scenario, "PDF") {
+			call["arguments_json"] = `{"path":"document.PDF"}`
+		}
+		if strings.HasSuffix(scenario, "PDF alias") {
+			call["arguments_json"] = `{"PATH":"source.go","file":"folder\\..\\document.PDF"}`
+		}
+		if strings.HasSuffix(scenario, "MCP") {
+			call["mcp_binding"] = map[string]any{"name": "Read", "server": "external"}
+		}
+		commit := maps.Clone(call)
+		commit["commit_id"] = readRunID + "\x00lost-read"
+		var pending session.Event
+		for _, kind := range []string{"tool/call", "commit_pending", "tool/dispatched", "tool/unknown", "commit_done"} {
+			if kind == "tool/call" && strings.HasSuffix(scenario, "missing preparation") || kind == "commit_done" && strings.HasSuffix(scenario, "missing closure") {
+				continue
+			}
+			events, err := ledger.Events(ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event session.Event
+			payload := maps.Clone(call)
+			if kind == "commit_pending" || kind == "commit_done" {
+				payload = maps.Clone(commit)
+			}
+			if kind == "commit_done" {
+				payload["pending_seq"], payload["pending_checksum"] = pending.Seq, pending.Checksum
+				if strings.HasSuffix(scenario, "wrong closure") {
+					payload["pending_checksum"] = "unrelated intent"
+				}
+			}
+			if kind == "tool/dispatched" && strings.HasSuffix(scenario, "mismatched dispatch") {
+				payload["arguments_json"] = `{"path":"different.go"}`
+			}
+			if kind == "tool/unknown" && strings.HasSuffix(scenario, "unconfirmed runtime") {
+				payload["runtime_id"] = "unconfirmed-runtime"
+			}
+			if kind == "tool/call" {
+				event, err = ledger.AppendSurface(ctx, created.ID, int64(len(events)), kind, payload, session.SurfaceOperation{Op: "append"})
+			} else {
+				event, err = ledger.Append(ctx, created.ID, int64(len(events)), kind, payload)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "commit_pending" {
+				pending = event
+			}
+			if kind == "tool/dispatched" && strings.HasSuffix(scenario, "duplicate dispatch") {
+				if _, err := ledger.Append(ctx, created.ID, event.Seq+1, kind, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
 	if scenario == "missing tool result" || scenario == "unconfirmed tool stop" {
 		appendFact := func(kind string, payload any) {
 			t.Helper()
@@ -126,7 +205,7 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scenario != "active call" {
+	if scenario != "active call" && !strings.HasSuffix(scenario, ": active call") {
 		before, err = budget.MarkUnknown(ctx, owner, "retained-unknown")
 		if err != nil {
 			t.Fatal(err)
@@ -141,7 +220,7 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	defer gateway.Close()
-	if scenario == "live scope" {
+	if scenario == "live scope" || strings.HasSuffix(scenario, ": live scope") {
 		other := admission.NewGateway(budget, admission.ProviderConfig{})
 		if err := other.Start(); err != nil {
 			t.Fatal(err)
@@ -165,7 +244,7 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 		requestActor.Subject = "foreign actor"
 	}
 	err = gateway.AbandonCanceledTask(ctx, requestActor)
-	if scenario != "canceled" {
+	if scenario != "canceled" && scenario != "missing file read result" {
 		if err == nil {
 			t.Fatal("unfenced work or an unconfirmed source retired admission")
 		}
