@@ -3,7 +3,8 @@
 范围为 [#27](https://github.com/huadeng408/CodeOps-Agent/issues/27) 的 Go 恢复边界，
 基点 `93e291a2067f601e02edb4aa9a59baecbf09e276`。
 工程状态为 IMPLEMENTED；源码回归、不可变原生导出和一次性账本副本分别通过。
-真实账本尚未封存；独立 200 轮产品验证和完整发布未运行，本记录不授予其资格。
+准备阶段的源码／副本验证与下方用户批准后的实际封存分别记录；
+独立 200 轮产品验证和完整发布未运行，本记录不授予其资格。
 
 ## 行为与安全边界
 
@@ -66,3 +67,24 @@ checksum 为 `b48cf94e9fc17fdf21ee2221701b6545d5f6804272d9c0e80a7fef6aff21aca1`�
 逐列核对见 `copy-audit.json`，实际操作前的只读指纹见 `activation-pins.json`。
 此前对另一旧测试任务的批准及实际封存见 [独立记录](canceled-model-admission-2026-10-21.md)，
 不重复执行，也不作为本轮任务不可逆封存的授权。
+
+## 用户批准后的实际封存
+
+2026-10-21，用户明确批准仅封存本轮失败 Session `831ad344…` 的模型准入并继续独立 200 轮。
+重新核对固定源码、操作程序与全部指纹，已有一致性备份的全部原事件列也与真实账本一致；
+以原程序经 Go Gateway 执行实际封存。只读预检、`--apply` 及旧版原生读取器均退出 0。
+
+真实账本原有 142 条流、40,199 个事件的全部 10 列逐一比较不变，只新增一条
+`admission/task_finished`、`purpose: abandoned`，零起始序号为 7167，checksum 为
+`4886a7c0ed89eda6641da0666a19b3a1c6a804bfdef82d100818ae6b3e95c172`。
+原 Session 的 5465 个事件、`canceling/unknown`、原 180/200 未通过、两个 Read 结果缺口，
+以及原批次、87,306,321 已确认 tokens、6,706,024,576 未知预留与未知费用状态全部保留。
+这些数字只是操作时的快照，不是后续调用余额。
+
+任务槽已释放，旧模型身份再次预留被拒；封存重放不增加事实。操作没有派发模型或工具，
+不确认原资源停止，不代替原任务、Trace 或产品验收。此前的旧 e1… 封存没有重复执行。
+
+本机实际收据为 `.scratch/readonly-admission-retirement-20261021/live-retirement-receipt.json`，
+SHA-256 为 `ddd17aa8a8f82a7474e01d909f7cce0b09b6e72aab6e7ae863491c91f20d8345`；
+逐列核对及退出码见同目录 `live-retirement-audit.json`，独立 200 轮准备见
+[新运行准备](product-long-dialogue-preparation-2026-10-21.md)。
