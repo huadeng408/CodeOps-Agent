@@ -111,6 +111,30 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 	}
+	appendFact := func(kind string, payload any) session.Event {
+		t.Helper()
+		for attempt := 0; attempt < 16; attempt++ {
+			events, err := ledger.Events(ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event session.Event
+			if kind == "tool/call" {
+				event, err = ledger.AppendSurface(ctx, created.ID, int64(len(events)), kind, payload, session.SurfaceOperation{Op: "append"})
+			} else {
+				event, err = ledger.Append(ctx, created.ID, int64(len(events)), kind, payload)
+			}
+			if errors.Is(err, session.ErrSequenceConflict) {
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			return event
+		}
+		t.Fatal("fixture append remained contended:", session.ErrSequenceConflict)
+		return session.Event{}
+	}
 	if strings.HasPrefix(scenario, "missing file read result") {
 		readRunID := run.RunID
 		if strings.HasSuffix(scenario, "uncanceled history") {
@@ -133,11 +157,6 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 			if kind == "tool/call" && strings.HasSuffix(scenario, "missing preparation") || kind == "commit_done" && strings.HasSuffix(scenario, "missing closure") {
 				continue
 			}
-			events, err := ledger.Events(ctx, created.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var event session.Event
 			payload := maps.Clone(call)
 			if kind == "commit_pending" || kind == "commit_done" {
 				payload = maps.Clone(commit)
@@ -154,35 +173,16 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 			if kind == "tool/unknown" && strings.HasSuffix(scenario, "unconfirmed runtime") {
 				payload["runtime_id"] = "unconfirmed-runtime"
 			}
-			if kind == "tool/call" {
-				event, err = ledger.AppendSurface(ctx, created.ID, int64(len(events)), kind, payload, session.SurfaceOperation{Op: "append"})
-			} else {
-				event, err = ledger.Append(ctx, created.ID, int64(len(events)), kind, payload)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			event := appendFact(kind, payload)
 			if kind == "commit_pending" {
 				pending = event
 			}
 			if kind == "tool/dispatched" && strings.HasSuffix(scenario, "duplicate dispatch") {
-				if _, err := ledger.Append(ctx, created.ID, event.Seq+1, kind, payload); err != nil {
-					t.Fatal(err)
-				}
+				appendFact(kind, payload)
 			}
 		}
 	}
 	if scenario == "missing tool result" || scenario == "unconfirmed tool stop" {
-		appendFact := func(kind string, payload any) {
-			t.Helper()
-			events, err := ledger.Events(ctx, created.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := ledger.Append(ctx, created.ID, int64(len(events)), kind, payload); err != nil {
-				t.Fatal(err)
-			}
-		}
 		appendFact("tool/dispatched", map[string]any{"run_id": run.RunID, "tool_call_id": "pending-shell", "tool_name": "Bash"})
 		if scenario == "unconfirmed tool stop" {
 			appendFact("tool/result", map[string]any{"run_id": run.RunID, "tool_call_id": "pending-shell", "tool_name": "Bash", "runtime_id": "unconfirmed-runtime", "outcome_unknown": true})
