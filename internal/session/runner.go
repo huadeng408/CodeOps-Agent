@@ -2049,7 +2049,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 
 func isReadOnlyTool(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "Read", "Glob", "Grep", "RecallMemory":
+	case "Read", "ReadSpill", "Glob", "Grep", "RecallMemory":
 		return true
 	default:
 		return false

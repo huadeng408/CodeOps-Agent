@@ -236,9 +236,13 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-first native Git directory pin contract")
 	}
-	for _, scenario := range []string{"heartbeat", "last allowed renewal", "unknown result", "canceled run", "storage error", "continued contention"} {
+	for _, scenario := range []string{"heartbeat", "last allowed renewal", "unknown result", "canceled run", "storage error", "continued contention", "spill"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
+			readTool := "Grep"
+			if scenario == "spill" {
+				readTool = "ReadSpill"
+			}
 			repo, storage := taskWorkspaceRepository(t), t.TempDir()
 			ledger := openWorkbenchTestLedger(t)
 			racing := &taskLeaseRaceLog{EventLog: ledger}
@@ -280,8 +284,11 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 			}
 			appendFact(continuationEventType, payload)
 			appendFact(runLeasedEventType, runLeasePayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", WorkerID: "worker", Attempt: 1, LeaseUntil: time.Now().Add(time.Minute).UTC()})
-			for index, name := range []string{"Read", "Grep"} {
+			for index, name := range []string{"Read", readTool} {
 				call := toolCallPayload{RunID: "run-reads", ToolCallID: fmt.Sprintf("read-%d", index), ToolName: name, ArgumentsJSON: `{"path":"main.go"}`}
+				if name == "ReadSpill" {
+					call.ArgumentsJSON = `{"locator":"spill://0000000000000000000000000000000000000000000000000000000000000001","start":1,"limit":1}`
+				}
 				appendFact("tool/call", call)
 				appendFact(commitPendingEventType, call)
 				appendFact(toolDispatchedType, call)
@@ -293,7 +300,7 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 			interleave = func() error {
 				switch scenario {
 				case "unknown result":
-					appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: "Grep", OutcomeUnknown: true})
+					appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: readTool, OutcomeUnknown: true})
 					return nil
 				case "canceled run":
 					appendFact(runCanceledEventType, runTerminalPayload{RunID: "run-reads", RequestID: "request-reads", LeaseID: "lease-reads", Attempt: 1, CancellationState: "stopped"})
@@ -313,7 +320,7 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 				return nil
 			}
 			racing.beforeRenew = interleave
-			if scenario != "heartbeat" && scenario != "last allowed renewal" {
+			if scenario != "heartbeat" && scenario != "last allowed renewal" && scenario != "spill" {
 				readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				workspace, err := tasks.ToolWorkspace(readCtx, 7, created.ID, "read-0")
@@ -362,7 +369,7 @@ func TestTaskWorkspaceAdmitsConcurrentDispatchedReads(t *testing.T) {
 			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); err != nil {
 				t.Fatal("a confirmed refused mutation blocked readonly work")
 			}
-			appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: "Grep", OutcomeUnknown: true})
+			appendFact("tool/result", toolResultPayload{RunID: "run-reads", ToolCallID: "read-1", ToolName: readTool, OutcomeUnknown: true})
 			if _, err := tasks.ToolWorkspace(ctx, 7, created.ID, "read-0"); !errors.Is(err, ErrSessionStateConflict) {
 				t.Fatal("unknown tool outcome was silently admitted")
 			}
