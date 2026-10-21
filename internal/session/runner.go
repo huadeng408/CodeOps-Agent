@@ -2250,6 +2250,12 @@ func toolResultSucceeded(payload toolResultPayload) bool {
 func (r *SessionRunner) appendLeasedSurface(ctx context.Context, key runKey, lease runLeasePayload, eventType string, payload any) error {
 	r.appendMu.Lock()
 	defer r.appendMu.Unlock()
+	if eventType == "tool/result" {
+		// Waiting for another writer must not consume an observed result's audit budget.
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+	}
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
@@ -2292,6 +2298,11 @@ func (r *SessionRunner) appendLeasedFact(ctx context.Context, key runKey, leaseI
 func (r *SessionRunner) appendLeasedFactEvent(ctx context.Context, key runKey, leaseID, eventType string, payload any) (Event, error) {
 	r.appendMu.Lock()
 	defer r.appendMu.Unlock()
+	if eventType == codeModifiedEventType {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+	}
 	for attempt := 0; attempt < 16; attempt++ {
 		events, err := r.workbench.ledger.Events(ctx, key.sessionID)
 		if err != nil {
@@ -2474,8 +2485,29 @@ func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeaseP
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	cancel()
 	// Failure annotations must not consume the terminal write's budget.
-	for attempt := 0; attempt < 2; attempt++ {
+	previousPending, stalled := -1, 0
+	for {
 		terminalCtx, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+		events, readErr := r.workbench.ledger.Events(terminalCtx, key.sessionID)
+		if readErr != nil {
+			stop()
+			stalled++
+			if stalled < 2 && (errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, ErrSequenceConflict)) {
+				continue
+			}
+			return
+		}
+		pending := len(pendingCommits(events, key.runID))
+		if previousPending >= 0 && pending >= previousPending {
+			stalled++
+		} else {
+			stalled = 0
+		}
+		if stalled >= 2 {
+			stop()
+			return
+		}
+		previousPending = pending
 		err := r.appendTerminal(terminalCtx, key, lease, runFailedEventType, publicRunError(cause))
 		stop()
 		if err == nil {
@@ -2483,7 +2515,7 @@ func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeaseP
 			r.commitSessionMemory(parent, key)
 			return
 		}
-		// A timed-out close may have persisted its last marker; re-read it.
+		// Retry durable closure progress; retain the fence after two stalled attempts.
 		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrSequenceConflict) {
 			return
 		}

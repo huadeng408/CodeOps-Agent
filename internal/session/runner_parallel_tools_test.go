@@ -16,6 +16,95 @@ type parallelReadonlyConversation struct {
 	results chan []orchestrator.ToolResult
 }
 
+type queuedResultAuditLog struct {
+	EventLog
+	toolStarted chan struct{}
+	blocked     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func (log *queuedResultAuditLog) Append(ctx context.Context, id string, seq int64, kind string, payload any) (Event, error) {
+	if kind == runHeartbeatEventType {
+		select {
+		case <-log.toolStarted:
+			log.once.Do(func() {
+				close(log.blocked)
+				select {
+				case <-log.release:
+				case <-ctx.Done():
+				}
+			})
+		default:
+		}
+	}
+	return log.EventLog.Append(ctx, id, seq, kind, payload)
+}
+
+func TestSessionRunnerAuditsResultsAfterWaitingForAnotherWriter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	base := openWorkbenchTestLedger(t)
+	ledger := &queuedResultAuditLog{EventLog: base, toolStarted: make(chan struct{}), blocked: make(chan struct{}), release: make(chan struct{})}
+	var started, release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(ledger.release) }) })
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "queued audits", "Read sources")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := parallelReadonlyConversation{results: make(chan []orchestrator.ToolResult, 1)}
+	runner := NewSessionRunner(workbench, conversation, ToolExecutionFunc(func(ctx context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+		started.Do(func() { close(ledger.toolStarted) })
+		select {
+		case <-ledger.blocked:
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: "Source read successfully"}
+		case <-ctx.Done():
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "read canceled", ExitCode: 1}
+		}
+	}), SessionRunnerOptions{WorkerID: "queued-audit", LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Millisecond})
+	t.Cleanup(func() { _ = runner.Close() })
+	run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "queued-audit", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(created.EventCount), Content: "Read sources", Actor: testRunnerActor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ledger.blocked:
+	case <-ctx.Done():
+		t.Fatal("fixture never blocked the audit writer")
+	}
+	time.Sleep(6 * time.Second)
+	release.Do(func() { close(ledger.release) })
+	select {
+	case results := <-conversation.results:
+		for _, result := range results {
+			if result.Error != "" || result.ExitCode != 0 {
+				t.Fatalf("known read result lost while waiting for another writer: %+v", result)
+			}
+		}
+	case <-ctx.Done():
+		t.Fatal("queued results did not finish")
+	}
+	_ = waitForRunStatus(t, runner, created.ID, run.RunID, RunCompleted)
+	snapshot, err := ReadVerifiedSnapshot(ctx, base, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := 0
+	for _, event := range snapshot.Events {
+		if event.Type == toolUnknownEventType {
+			t.Fatal("a known result became unknown while waiting for a writer")
+		}
+		if event.Type == "tool/result" {
+			results++
+		}
+	}
+	if results != 5 {
+		t.Fatalf("native results=%d, want five without replay", results)
+	}
+}
+
 func (c parallelReadonlyConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	results := make([]orchestrator.ToolResult, 5)
 	start := make(chan struct{})

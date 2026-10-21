@@ -2,6 +2,7 @@ package genai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -127,7 +128,7 @@ func NewTelemetry(ctx context.Context) Tracer {
 	}
 
 	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exp),
+		sdktrace.WithBatcher(retryTransportExporter{SpanExporter: exp}),
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(provider)
@@ -138,6 +139,18 @@ func NewTelemetry(ctx context.Context) Tracer {
 	}
 	log.Printf("[telemetry] OTLP exporter ready, sending traces to %s", host)
 	return t
+}
+
+type retryTransportExporter struct{ sdktrace.SpanExporter }
+
+func (exporter retryTransportExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	err := exporter.SpanExporter.ExportSpans(ctx, spans)
+	var transportErr *url.Error
+	if ctx.Err() == nil && errors.As(err, &transportErr) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// A closed connection can be non-temporary; retry the same span identities once.
+		return exporter.SpanExporter.ExportSpans(ctx, spans)
+	}
+	return err
 }
 
 // StartSpan creates a new gen_ai span with the standard attribute set. The

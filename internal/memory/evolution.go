@@ -560,12 +560,12 @@ func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail, 
 				}
 			}
 			branch := map[string]string{}
-			active := map[string]bool{}
-			for _, fact := range snapshot.Surface {
-				active[fact.EventID] = true
+			covered, err := compactedSurfaceSources(snapshot)
+			if err != nil {
+				return nil, err
 			}
 			for _, fact := range trajectoryBranch(snapshot.Events) {
-				if fact.SurfaceOp == nil || active[fact.EventID] {
+				if fact.SurfaceOp == nil || covered[fact.EventID] {
 					branch[fact.EventID] = fact.Checksum
 				}
 			}

@@ -99,6 +99,144 @@ func decodeMemoryRecall(t *testing.T, module *LedgerMemory, owner uint, query st
 	return result
 }
 
+func compactMemoryTestHistory(t *testing.T, ledger session.EventLog, sessionID string) {
+	t.Helper()
+	ctx := context.Background()
+	events, err := ledger.Events(ctx, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.NewWorkbench(ledger, nil).AppendUserMessage(ctx, 7, sessionID, int64(len(events)), "review an unrelated file"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := session.ReadVerifiedSnapshot(ctx, ledger, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sources []map[string]string
+	for _, event := range snapshot.Surface[:len(snapshot.Surface)-1] {
+		sources = append(sources, map[string]string{"event_id": event.EventID, "checksum": event.Checksum})
+	}
+	_, err = ledger.AppendSurface(ctx, sessionID, int64(len(snapshot.Events)), "context/compaction", map[string]any{
+		"run_id": "later-review", "summary": "Only the recent file review is needed in model history.",
+		"sources": sources, "reported_sources": sources,
+		"input_event_id": snapshot.Surface[len(snapshot.Surface)-1].EventID,
+	}, session.SurfaceOperation{Op: "compact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLedgerMemoryRetainsCompletedGoalAcrossContextOnlyCompaction(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		compactions int
+		newCommit   bool
+	}{{"compacted", 1, false}, {"nested", 2, false}, {"newer completed task", 1, true}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ledger := openMemoryLedger(t)
+			module := NewLedgerMemory(ledger)
+			sessionID := runMemoryFixture(t, ledger, 7, "preservekapparequirement", module, &memoryConversationFixture{})
+			before := decodeMemoryRecall(t, module, 7, "preservekapparequirement", 1200)
+			if len(before.Entries) != 1 {
+				t.Fatal("completed goal was not initially recallable")
+			}
+			ctx := context.Background()
+			workbench := session.NewWorkbench(ledger, nil)
+			for step := 0; step < scenario.compactions; step++ {
+				compactMemoryTestHistory(t, ledger, sessionID)
+			}
+			if scenario.newCommit {
+				events, err := ledger.Events(ctx, sessionID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runner := session.NewSessionRunner(workbench, &memoryConversationFixture{}, nil, session.SessionRunnerOptions{Memory: module})
+				t.Cleanup(func() { _ = runner.Close() })
+				accepted, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{RequestID: "later-task", SessionID: sessionID,
+					OwnerID: 7, ExpectedSeq: int64(len(events)), Content: "unrelated followup", Actor: identity.Default()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					view, err := workbench.Get(ctx, 7, sessionID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if view.Run != nil && view.Run.RunID == accepted.RunID && view.Run.Status == session.RunCompleted {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("later task did not complete")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if err := runner.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := session.ReadVerifiedSnapshot(ctx, ledger, sessionID); err != nil {
+				t.Fatal("fixture compaction did not verify", err)
+			}
+			after := decodeMemoryRecall(t, module, 7, "preservekapparequirement", 1200)
+			if len(after.Entries) != 1 || after.Entries[0].Memory.SourceChecksum != before.Entries[0].Memory.SourceChecksum ||
+				after.Entries[0].Memory.SourceURI != before.Entries[0].Memory.SourceURI {
+				t.Fatalf("context-only compaction made the original completed goal unavailable: %+v", after.Stats)
+			}
+			if _, err := ledger.Rewind(ctx, sessionID, 1); err != nil {
+				t.Fatal(err)
+			}
+			if rewound := decodeMemoryRecall(t, module, 7, "preservekapparequirement", 1200); len(rewound.Entries) != 0 {
+				t.Fatal("compaction recall revived a rewound goal")
+			}
+		})
+	}
+}
+
+func TestLedgerMemoryRetainsReflectedExperienceAcrossContextOnlyCompaction(t *testing.T) {
+	ctx := context.Background()
+	ledger := openMemoryLedger(t)
+	var calls atomic.Int32
+	module := NewLedgerMemory(ledger, reflectionFixture(&calls, false))
+	id := runMemoryFixture(t, ledger, 7, "source-verified ledger testing", module, &memoryConversationFixture{})
+	query := session.MemoryQuery{Query: "source-verified", Kind: "preferences", Detail: "full", MaxTokens: 2000}
+	recall := func(stage string) RecallResult {
+		encoded, err := module.RecallWithOptions(ctx, 7, query)
+		if err != nil {
+			t.Fatalf("%s recall: %v", stage, err)
+		}
+		var result RecallResult
+		if err := json.Unmarshal([]byte(encoded), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := recall("initial")
+	if len(before.Entries) != 1 || calls.Load() != 1 {
+		t.Fatal("reflection did not produce one source-verified experience")
+	}
+	compactMemoryTestHistory(t, ledger, id)
+	after := recall("compacted")
+	if len(after.Entries) != 1 || after.Entries[0].Memory.SourceChecksum != before.Entries[0].Memory.SourceChecksum {
+		t.Fatal("context-only compaction hid a verified reflected experience")
+	}
+	if _, err := ledger.Rewind(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := module.RecallWithOptions(ctx, 7, query)
+	if errors.Is(err, ErrTrajectoryIntegrity) && encoded == "" {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rewound RecallResult
+	if json.Unmarshal([]byte(encoded), &rewound) != nil || len(rewound.Entries) != 0 {
+		t.Fatal("compaction recall revived a rewound experience")
+	}
+}
+
 func TestLedgerMemoryAutomaticCommitScopeBudgetAndIdempotency(t *testing.T) {
 	ledger := openMemoryLedger(t)
 	module := NewLedgerMemory(ledger)

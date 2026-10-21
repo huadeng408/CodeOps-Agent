@@ -160,21 +160,20 @@ func (m *LedgerMemory) RecallWithOptions(ctx context.Context, ownerID uint, opti
 		if err != nil || actualOwner != ownerID {
 			return "", session.ErrSessionNotFound
 		}
-		commit, event, err := activeTrajectoryCommit(snapshot, ownerID)
+		err = visitActiveTrajectoryCommits(snapshot, ownerID, func(commit trajectoryCommit, event session.Event) (bool, error) {
+			item := trajectoryMemory(commit.Trajectory)
+			item.CreatedAt, item.UpdatedAt = event.CreatedAt, event.CreatedAt
+			item, err = normalizeMemory(item)
+			if err != nil {
+				return false, err
+			}
+			item.Checksum = checksumMemory(item)
+			items = append(items, item)
+			return true, nil
+		})
 		if err != nil {
 			return "", err
 		}
-		if commit == nil {
-			continue
-		}
-		item := trajectoryMemory(commit.Trajectory)
-		item.CreatedAt, item.UpdatedAt = event.CreatedAt, event.CreatedAt
-		item, err = normalizeMemory(item)
-		if err != nil {
-			return "", err
-		}
-		item.Checksum = checksumMemory(item)
-		items = append(items, item)
 	}
 	experiences, err := m.experienceItems(ctx, ownerID, options.Detail, options.SourceSessionID)
 	if err != nil {
@@ -213,10 +212,15 @@ func (m *LedgerMemory) repositoryItems(ctx context.Context, owner uint, targetSe
 		return nil, err
 	}
 	filtered := make([]Memory, 0, len(items))
+	repositories := map[string]string{targetSessionID: target}
 	for _, item := range items {
-		source, err := m.repositoryKey(ctx, owner, item.SessionID)
-		if err != nil {
-			return nil, err
+		source, found := repositories[item.SessionID]
+		if !found {
+			source, err = m.repositoryKey(ctx, owner, item.SessionID)
+			if err != nil {
+				return nil, err
+			}
+			repositories[item.SessionID] = source
 		}
 		if source == target {
 			filtered = append(filtered, item)
@@ -288,12 +292,22 @@ func trajectoryOwner(events []session.Event) (uint, error) {
 }
 
 func activeTrajectoryCommit(snapshot session.LedgerSnapshot, ownerID uint) (*trajectoryCommit, session.Event, error) {
+	var commit *trajectoryCommit
+	var event session.Event
+	err := visitActiveTrajectoryCommits(snapshot, ownerID, func(candidate trajectoryCommit, source session.Event) (bool, error) {
+		commit, event = &candidate, source
+		return false, nil
+	})
+	return commit, event, err
+}
+
+func visitActiveTrajectoryCommits(snapshot session.LedgerSnapshot, ownerID uint, visit func(trajectoryCommit, session.Event) (bool, error)) error {
 	if _, _, err := latestTrajectoryCommit(snapshot.Events, ownerID); err != nil {
-		return nil, session.Event{}, err
+		return err
 	}
-	active := make(map[string]bool)
-	for _, e := range snapshot.Surface {
-		active[e.EventID] = true
+	covered, err := compactedSurfaceSources(snapshot)
+	if err != nil {
+		return err
 	}
 	branch := trajectoryBranch(snapshot.Events)
 	branchIDs := make(map[string]bool)
@@ -306,33 +320,38 @@ func activeTrajectoryCommit(snapshot session.LedgerSnapshot, ownerID uint) (*tra
 			continue
 		}
 		var commit trajectoryCommit
-		if err := json.Unmarshal(e.Payload, &commit); err != nil {
-			return nil, session.Event{}, ErrTrajectoryIntegrity
-		}
-		prefix, err := snapshot.Prefix(e.Seq)
-		if err != nil {
-			return nil, session.Event{}, err
-		}
-		derived, err := buildSessionTrajectory(prefix, e.SessionID, TrajectoryOptions{})
-		if err != nil || !derived.Complete || derived.SourceChecksum != commit.Trajectory.SourceChecksum {
-			return nil, session.Event{}, ErrTrajectoryIntegrity
+		if json.Unmarshal(e.Payload, &commit) != nil || commit.SchemaVersion != 1 || commit.OwnerID != ownerID ||
+			commit.Trajectory.SessionID != e.SessionID || !commit.Trajectory.Complete || commit.Trajectory.LastSeq >= e.Seq ||
+			commit.Trajectory.SourceChecksum != checksumTrajectory(commit.Trajectory) || !trajectorySourcesValid(snapshot.Events, commit.Trajectory.Sources, e.Seq) {
+			return ErrTrajectoryIntegrity
 		}
 		valid := true
-		for _, source := range derived.Sources {
+		for _, source := range commit.Trajectory.Sources {
 			fact, sourceErr := resolveTrajectorySource(snapshot.Events, source)
 			if sourceErr != nil {
-				return nil, session.Event{}, sourceErr
+				return sourceErr
 			}
-			if !branchIDs[fact.EventID] || fact.SurfaceOp != nil && !active[fact.EventID] {
+			// Compaction ancestors remain evidence; rewound facts are not covered.
+			if !branchIDs[fact.EventID] || fact.SurfaceOp != nil && !covered[fact.EventID] {
 				valid = false
 				break
 			}
 		}
 		if valid {
-			return &commit, e, nil
+			prefix, err := snapshot.Prefix(e.Seq)
+			if err != nil {
+				return err
+			}
+			derived, err := buildSessionTrajectory(prefix, e.SessionID, TrajectoryOptions{})
+			if err != nil || !derived.Complete || derived.SourceChecksum != commit.Trajectory.SourceChecksum {
+				return ErrTrajectoryIntegrity
+			}
+			if more, err := visit(commit, e); err != nil || !more {
+				return err
+			}
 		}
 	}
-	return nil, session.Event{}, nil
+	return nil
 }
 
 func latestTrajectoryCommit(events []session.Event, ownerID uint) (*trajectoryCommit, session.Event, error) {

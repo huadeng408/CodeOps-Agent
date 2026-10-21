@@ -115,26 +115,9 @@ func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, o
 	for _, event := range surface {
 		activeSurface[event.EventID] = struct{}{}
 	}
-	covered := make(map[string]bool, len(activeSurface))
-	for id := range activeSurface {
-		covered[id] = true
-	}
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
-		if event.Type != "context/compaction" || event.SurfaceOp == nil || event.SurfaceOp.Op != "compact" || !covered[event.EventID] {
-			continue
-		}
-		var payload struct {
-			Sources []struct {
-				EventID string `json:"event_id"`
-			} `json:"sources"`
-		}
-		if json.Unmarshal(event.Payload, &payload) != nil || len(payload.Sources) == 0 {
-			return SessionTrajectory{}, ErrTrajectoryIntegrity
-		}
-		for _, source := range payload.Sources {
-			covered[source.EventID] = true
-		}
+	covered, err := compactedSurfaceSources(snapshot)
+	if err != nil {
+		return SessionTrajectory{}, err
 	}
 	// Validate retained log-only facts with their verified compacted tool pairs.
 	// The hidden tool facts still cannot become Memory sources or text.
@@ -196,6 +179,31 @@ func buildSessionTrajectory(snapshot session.LedgerSnapshot, sessionID string, o
 	}
 	trajectory.SourceChecksum = checksumTrajectory(trajectory)
 	return trajectory, nil
+}
+
+func compactedSurfaceSources(snapshot session.LedgerSnapshot) (map[string]bool, error) {
+	covered := make(map[string]bool, len(snapshot.Surface))
+	for _, event := range snapshot.Surface {
+		covered[event.EventID] = true
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != "context/compaction" || event.SurfaceOp == nil || event.SurfaceOp.Op != "compact" || !covered[event.EventID] {
+			continue
+		}
+		var payload struct {
+			Sources []struct {
+				EventID string `json:"event_id"`
+			} `json:"sources"`
+		}
+		if json.Unmarshal(event.Payload, &payload) != nil || len(payload.Sources) == 0 {
+			return nil, ErrTrajectoryIntegrity
+		}
+		for _, source := range payload.Sources {
+			covered[source.EventID] = true
+		}
+	}
+	return covered, nil
 }
 
 // Follow rollback anchors backwards so abandoned log-only facts are excluded
