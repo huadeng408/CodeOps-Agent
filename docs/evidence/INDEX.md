@@ -6,7 +6,7 @@
 
 | 范围 | 入口 |
 | --- | --- |
-| 首批 Windows 产品 | [五类恢复与 Memory](milestone-v5-matrix-2026-10-19.md)、[兼容／物料及 AC01–AC09](milestone-v5-compatibility-2026-10-19.md) |
+| 首批 Windows 产品 | [父规格逐项审计](milestone-parent-acceptance-2026-10-21.md)、[五类恢复与 Memory](milestone-v5-matrix-2026-10-19.md)、[兼容／物料及 AC01–AC09](milestone-v5-compatibility-2026-10-19.md) |
 | 长对话与压缩 | [本轮失败与修复](product-long-dialogue-2026-10-21.md)、[前次终态修复](product-long-dialogue-2026-10-20.md)、[当前输入保留](compaction-active-input-2026-10-20.md)、[早期独立尝试](product-long-dialogue-2026-10-19.md)、[压缩后的 Memory](memory-compaction-2026-10-20.md) |
 | 浏览器及 CLI | [真实双标签页重连／重启](browser-reconnect-product-2026-10-19.md)、[上下文窗口](cli-context-window-2026-10-19.md)、[能力状态刷新](task-capability-refresh-2026-10-20.md) |
 | 真实代码任务 | [Go v5](go-browser-task-trace-v5-2026-10-19.md)、[Python](python-browser-task-2026-10-16.md)、[Trace v2 对账](trace-integrity-v2-2026-10-16.md) |

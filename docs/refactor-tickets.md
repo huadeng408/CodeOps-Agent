@@ -39,7 +39,7 @@
 | [#24：浏览器重连漏事件修复](https://github.com/huadeng408/CodeOps-Agent/issues/24) | [源码与浏览器回归](evidence/browser-reconnect-2026-10-19.md) |
 | [#25：真实双标签页重连与空闲重启](https://github.com/huadeng408/CodeOps-Agent/issues/25) | [真实产品范围](evidence/browser-reconnect-product-2026-10-19.md) |
 | [#26：CLI 配置的上下文窗口](https://github.com/huadeng408/CodeOps-Agent/issues/26) | [传输接缝回归](evidence/cli-context-window-2026-10-19.md) |
-| [#27：200 轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27) | [最新完整失败分母与修复边界](evidence/product-long-dialogue-2026-10-20.md) |
+| [#27：200 轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27) | [最新完整失败分母与修复边界](evidence/product-long-dialogue-2026-10-21.md) |
 | [#28：压缩后的 Memory 写回](https://github.com/huadeng408/CodeOps-Agent/issues/28) | [真实写回范围](evidence/memory-compaction-2026-10-20.md) |
 
 ## 可选能力

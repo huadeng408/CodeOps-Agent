@@ -26,7 +26,8 @@
 
 ## 证据链接
 
-- 首批 Windows milestone：[五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
+- 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
+  [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
 - 当前长对话、Memory 与失败审计：[本轮失败及修复范围](evidence/product-long-dialogue-2026-10-21.md)；
   前次记录见 [2026-10-20](evidence/product-long-dialogue-2026-10-20.md)。
