@@ -29,12 +29,13 @@
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
-- 当前长对话、Memory 与失败审计：[本轮失败及修复范围](evidence/product-long-dialogue-2026-10-21.md)；
-  前次记录见 [2026-10-20](evidence/product-long-dialogue-2026-10-20.md)。
+- 当前独立长对话：[已核验范围与待完成边界](evidence/product-long-dialogue-v7-2026-10-21.md)、
+  [构建与冻结输入](evidence/product-long-dialogue-preparation-2026-10-21.md)。
+- 失败尝试与修复：[2026-10-21](evidence/product-long-dialogue-2026-10-21.md)、
+  [2026-10-20](evidence/product-long-dialogue-2026-10-20.md)。
 - 当前输入的压缩保留：[源码修复与离线复现](evidence/compaction-active-input-2026-10-20.md)。
 - 旧取消任务的模型准入：[已批准的实际封存与副本验证](evidence/canceled-model-admission-2026-10-21.md)。
 - 本轮丢失 Read 结果的取消任务：[严格封存边界与副本验证](evidence/canceled-file-read-admission-2026-10-21.md)。
-- 独立重跑准备：[v13 构建、v7 输入与观察检查](evidence/product-long-dialogue-preparation-2026-10-21.md)。
 - 压缩后的 Memory：[真实写回与 Trace](evidence/memory-compaction-2026-10-20.md)、
   [反思失败诊断](evidence/memory-reflection-diagnostics-2026-10-20.md)。
 - 浏览器重连：[真实双标签页与空闲重启](evidence/browser-reconnect-product-2026-10-19.md)。
