@@ -16,7 +16,7 @@
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 模型路由当前返回 HTTP 402，连接恢复后重新冻结独立 200 轮；不能拼接不同尝试 |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 路由已恢复，同一 Session 的原 200 项验证正在运行；继续后续恢复、实施与最终收尾，不能拼接不同尝试 |
 | 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
@@ -29,7 +29,8 @@
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
-- 最新独立长对话：[v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、
+- 最新独立长对话：[v9 的首轮刷新及阶段核验](evidence/product-long-dialogue-v9-2026-10-22.md)、
+  [v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、
   [v7 阶段证据、完整失败分母与正常收尾](evidence/product-long-dialogue-v7-2026-10-21.md)、
   [构建与冻结输入](evidence/product-long-dialogue-preparation-2026-10-21.md)。
 - 模型连接：[独立单请求的 HTTP 402、完整分母与正常收尾](evidence/provider-route-recovery-2026-10-22.md)。
