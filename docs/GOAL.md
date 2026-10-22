@@ -29,7 +29,8 @@
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
-- 最新独立长对话：[阶段证据、完整失败分母与正常收尾](evidence/product-long-dialogue-v7-2026-10-21.md)、
+- 最新独立长对话：[v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、
+  [v7 阶段证据、完整失败分母与正常收尾](evidence/product-long-dialogue-v7-2026-10-21.md)、
   [构建与冻结输入](evidence/product-long-dialogue-preparation-2026-10-21.md)。
 - 模型连接：[独立单请求的 HTTP 402、完整分母与正常收尾](evidence/provider-route-recovery-2026-10-22.md)。
 - 失败尝试与修复：[2026-10-21](evidence/product-long-dialogue-2026-10-21.md)、
