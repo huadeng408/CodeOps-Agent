@@ -1,4 +1,5 @@
 from orchestrator.context.compactor import Compactor
+from orchestrator.context.compaction import compact_surface
 from orchestrator.graph.main_graph import build_graph
 from orchestrator.llm.client import ChatMessage, ChatResponse, ToolCall
 from orchestrator.memory.manager import MemoryManager
@@ -65,7 +66,7 @@ def test_harness_compaction_keeps_active_input_after_large_tool_batch(tmp_path, 
     assert all(update.removed_messages == len(update.source_events) for update in updates)
 
 
-def test_compaction_preserves_anthropic_system_prefix_and_canonical_count(tmp_path):
+def test_compaction_preserves_anthropic_system_prefix_and_canonical_count():
     from orchestrator.prompts.system import build_with_cache_breaks
 
     prefix = build_with_cache_breaks(
@@ -73,50 +74,39 @@ def test_compaction_preserves_anthropic_system_prefix_and_canonical_count(tmp_pa
         provider="anthropic",
     )
     assert len(prefix) == 2
-    history = ConversationRunner._history_messages([
-        {"role": "user", "content": f"fact-{i} " + "x" * 80,
-         "event_id": f"event-{i}", "event_checksum": str(i) * 64}
-        for i in range(8)
-    ], bounded=False)
-    runner = ConversationRunner(
-        graph=build_graph(), llm=None, tool_registry=ToolRegistry(),
-        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
-        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
-        compactor=Compactor(max_chars=100000, max_messages=100),
-    )
-    current = runner._compact_messages([*prefix, *history], force=True)
-    update = list(runner._emit_compaction_updates())[0].compaction_update
+    history = [ChatMessage(
+        role="user", content=f"fact-{i} " + "x" * 80,
+        source_events=((f"event-{i}", str(i) * 64),),
+    ) for i in range(8)]
+    compactor = Compactor(max_chars=100000, max_messages=100)
+    result = compact_surface([*prefix, *history], compactor=compactor, force=True)
+    current = result.messages
+    update = result.updates[0]
     assert current[:2] == prefix
-    assert update.removed_messages == len(update.source_events)
+    assert update["removed_messages"] == len(update["source_events"])
     assert current[2].source_events == tuple(
-        (ref.event_id, ref.checksum) for ref in update.source_events
+        (ref["event_id"], ref["checksum"]) for ref in update["source_events"]
     )
     # A sourced system summary is history, not part of the runtime prefix.
-    current = runner._compact_messages(current, force=True)
-    assert current[:2] == prefix
-    assert len(list(runner._emit_compaction_updates())) == 1
+    result = compact_surface(current, compactor=compactor, force=True)
+    assert result.messages[:2] == prefix
+    assert len(result.updates) == 1
 
 
-def test_compaction_preserves_exact_canonical_sources_across_recompaction(tmp_path):
-    history = [{"role": "user", "content": f"fact-{i} " + "x" * 80,
-                "event_id": f"event-{i}", "event_checksum": str(i) * 64}
-               for i in range(8)]
-    messages = ConversationRunner._history_messages(history, bounded=False)
-    assert getattr(messages[0], "source_events", ()) == (("event-0", "0" * 64),)
-    runner = ConversationRunner(
-        graph=build_graph(), llm=None, tool_registry=ToolRegistry(),
-        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
-        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
-        compactor=Compactor(max_chars=100000, max_messages=100),
-    )
+def test_compaction_preserves_exact_canonical_sources_across_recompaction():
+    messages = [ChatMessage(
+        role="user", content=f"fact-{i} " + "x" * 80,
+        source_events=((f"event-{i}", str(i) * 64),),
+    ) for i in range(8)]
+    compactor = Compactor(max_chars=100000, max_messages=100)
     current = [ChatMessage(role="system", content="rules"), *messages]
     for _ in range(2):
         before = [ref for message in current for ref in getattr(message, "source_events", ())]
-        current = runner._compact_messages(current, force=True)
-        updates = list(runner._emit_compaction_updates())
-        assert len(updates) == 1
-        update = updates[0].compaction_update
-        sources = [(ref.event_id, ref.checksum) for ref in update.source_events]
+        result = compact_surface(current, compactor=compactor, force=True)
+        current = result.messages
+        assert len(result.updates) == 1
+        update = result.updates[0]
+        sources = [(ref["event_id"], ref["checksum"]) for ref in update["source_events"]]
         assert sources
         assert sources == list(current[1].source_events)
         assert [ref for message in current for ref in message.source_events] == before

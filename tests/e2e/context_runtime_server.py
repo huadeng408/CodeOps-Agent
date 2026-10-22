@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from orchestrator.llm.client import (
+    ChatMessage,
     ChatRequest,
     ChatResponse,
     LLMClient,
@@ -54,6 +57,12 @@ class DeterministicContextLLM(LLMClient):
             ),
             "",
         )
+
+        if latest_user.startswith("Summarize the preceding conversation for a future agent turn."):
+            return ChatResponse(
+                text="Historical context retained for the next agent turn.",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
 
         if latest_user == "RESUME_AFTER_RESTART":
             recovered = all(
@@ -159,6 +168,47 @@ class DeterministicContextLLM(LLMClient):
         )
 
 
+def start_gateway_provider(llm: DeterministicContextLLM) -> ThreadingHTTPServer | None:
+    """Expose the model double to the real Go admission Gateway in these tests."""
+    address = os.environ.get("CODE_AGENT_CONTEXT_E2E_PROVIDER_ADDRESS", "").strip()
+    if not address:
+        return None
+    host, port = address.rsplit(":", 1)
+    if host != "127.0.0.1" or not isinstance(llm, DeterministicContextLLM):
+        raise ValueError("the Gateway fixture requires a loopback deterministic provider")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            response = asyncio.run(llm.chat(ChatRequest(
+                model=payload["model"],
+                messages=[
+                    ChatMessage(role=item["role"], content=item.get("content", ""))
+                    for item in payload["messages"]
+                ],
+            )))
+            body = json.dumps({
+                "model": llm.model,
+                "choices": [{"message": {"role": "assistant", "content": response.text}}],
+                "usage": {
+                    "prompt_tokens": response.usage.input_tokens,
+                    "completion_tokens": response.usage.output_tokens,
+                },
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    provider = ThreadingHTTPServer((host, int(port)), Handler)
+    threading.Thread(target=provider.serve_forever, daemon=True).start()
+    return provider
+
+
 def main() -> None:
     args = build_parser().parse_args()
     context_window = int(os.environ.get("CODE_AGENT_CONTEXT_E2E_WINDOW", args.context_window))
@@ -231,6 +281,7 @@ def main() -> None:
         app.hooks.register("e2e-hook-stopping", "turn_stopping", record_hook)
         app.hooks.register("e2e-hook-session-end", "session_end", record_hook)
     llm = build_e2e_llm()
+    provider = start_gateway_provider(llm)
     app.llm = llm
     app.fast_llm = llm
     app.provider_clients = (
@@ -238,7 +289,12 @@ def main() -> None:
         if route_receipt
         else {"default": llm}
     )
-    app.serve()
+    try:
+        app.serve()
+    finally:
+        if provider is not None:
+            provider.shutdown()
+            provider.server_close()
 
 
 if __name__ == "__main__":

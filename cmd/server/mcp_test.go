@@ -14,6 +14,7 @@ import (
 
 	codeagentpb "code-agent/gen/codeagentpb"
 
+	"code-agent/internal/admission"
 	"code-agent/internal/identity"
 	"code-agent/internal/mcp"
 	"code-agent/internal/orchestrator"
@@ -112,13 +113,8 @@ func TestContinuationMCPUsesOwnedTaskWorkspace(t *testing.T) {
 	if !ok {
 		t.Fatal("approved MCP binding missing")
 	}
-	runner := session.NewSessionRunner(workbench, repositoryMCPConversation{manager: manager, t: t}, executors, session.SessionRunnerOptions{WorkerID: "mcp-test", Workspace: func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
-		workspace, err := tasks.ModelWorkspace(ctx, owner, id)
-		if err == nil {
-			err = executors.PrepareWorkspace(ctx, id, workspace.WorkingDir)
-		}
-		return workspace, err
-	}, MCPCatalog: func() *codeagentpb.MCPToolCatalog {
+	gate := localModelWorkspaceAdmission(tasks, admission.NewBudget(ledger), executors.PrepareWorkspace)
+	runner := session.NewSessionRunner(workbench, repositoryMCPConversation{manager: manager, t: t}, executors, session.SessionRunnerOptions{WorkerID: "mcp-test", Workspace: gate, MCPCatalog: func() *codeagentpb.MCPToolCatalog {
 		tool := manager.ListTools()[0]
 		return &codeagentpb.MCPToolCatalog{SchemaVersion: 1, Tools: []*codeagentpb.MCPToolDefinition{{Name: tool.Name, Server: tool.Server, InputSchemaJson: string(tool.InputSchema), InputSchemaSha256: tool.InputSchemaSHA256, ServerConfigSha256: tool.ServerConfigSHA256}}}
 	},

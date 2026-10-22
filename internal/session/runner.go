@@ -1199,18 +1199,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		if run.cancelRequest != nil {
 			return
 		}
-		view, err := reduceSessionView(events)
-		if err == nil && view.Status != "deleted" && view.Run != nil && view.Run.RunID == key.runID {
-			if saved := run.traceContext; saved != nil && saved.SchemaVersion == 1 && saved.SessionID == key.sessionID {
-				parent := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": saved.TraceParent})
-				if spanContext := trace.SpanContextFromContext(parent); spanContext.IsValid() {
-					traceCtx = trace.ContextWithSpanContext(traceCtx, spanContext)
-					traceCtx = genai.WithEvalJoinBaggage(traceCtx, saved.EvalRunID, key.sessionID)
-				}
-			}
-			r.completeAgentTurn(traceCtx, key)
-			r.commitSessionMemory(traceCtx, key)
-		}
+		r.completeRun(traceCtx, key)
 		return
 	}
 	if run.cancelRequest != nil {
@@ -1222,10 +1211,12 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		return
 	}
 	completionCtx := traceCtx
+	var agentSpan genai.Span
 	defer func() {
-		ctx, stop := context.WithTimeout(context.WithoutCancel(completionCtx), 5*time.Second)
-		defer stop()
-		r.completeAgentTurn(ctx, key)
+		r.completeRun(completionCtx, key)
+		if agentSpan != nil {
+			agentSpan.End()
+		}
 	}()
 	deletions, stopWatching := r.workbench.watchDeletion(key.sessionID)
 	defer stopWatching()
@@ -1246,7 +1237,6 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	if strings.HasPrefix(key.sessionID, "agent-") {
 		spanName, agentName = "agent.subagent", "subagent"
 	}
-	var agentSpan genai.Span
 	if r.options.Tracer != nil {
 		traceCtx = orchestrator.WithHarnessToolTracing(traceCtx)
 		parentSpanContext := trace.SpanContextFromContext(traceCtx)
@@ -1257,7 +1247,6 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		}
 		completionCtx = traceCtx
 		agentSpan.SetAttributes(genai.AgentNameKV(agentName), attribute.String("session.id", key.sessionID), attribute.String("session.run_id", key.runID))
-		defer agentSpan.End()
 	}
 	r.recordProgress(traceCtx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
 	if committed, committedErr := r.hasCommittedAssistant(traceCtx, key); committedErr != nil {
@@ -1266,9 +1255,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		return
 	} else if committed {
 		r.recordProgress(traceCtx, key, lease, progressMilestone, "恢复完成", "已恢复已提交的回复，正在完成本次运行。", 0, 0)
-		if r.appendTerminal(traceCtx, key, lease, runCompletedEventType, "") == nil {
-			r.commitSessionMemory(traceCtx, key)
-		}
+		_ = r.appendTerminal(traceCtx, key, lease, runCompletedEventType, "")
 		return
 	}
 	runCtx, cancel := context.WithCancel(traceCtx)
@@ -1407,8 +1394,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		return
 	}
 	r.recordCompletedProgress(postRunCtx, key)
-	r.completeAgentTurn(postRunCtx, key)
-	r.commitSessionMemory(postRunCtx, key)
+	completionCtx = postRunCtx
 }
 
 func (r *SessionRunner) requeueAfterLease(parent context.Context, key runKey, lease runLeasePayload) error {
@@ -2418,13 +2404,36 @@ func latestRunSourceSeq(events []Event, runID string) int64 {
 	return -1
 }
 
-func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
-	// Close the commit protocol before the terminal run fact. A crash before
-	// this point leaves commit_pending durable; recovery will fence the same
-	// mutating invocation instead of running it twice.
-	if err := r.closePendingCommits(ctx, key, lease); err != nil {
-		return err
+func (r *SessionRunner) completeRun(parent context.Context, key runKey) {
+	readCtx, stopRead := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	events, readErr := r.workbench.ledger.Events(readCtx, key.sessionID)
+	stopRead()
+	var run runProjection
+	if readErr == nil {
+		run, readErr = projectRun(events, key.runID)
 	}
+	if saved := run.traceContext; saved != nil && saved.SchemaVersion == 1 && saved.SessionID == key.sessionID {
+		traceCtx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": saved.TraceParent})
+		if spanContext := trace.SpanContextFromContext(traceCtx); spanContext.IsValid() {
+			parent = trace.ContextWithSpanContext(parent, spanContext)
+			parent = genai.WithEvalJoinBaggage(parent, saved.EvalRunID, key.sessionID)
+		}
+	}
+	// Subagent bookkeeping also runs after non-terminal attempts.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	r.completeAgentTurn(ctx, key)
+	cancel()
+	if readErr != nil || !run.terminal || run.cancelRequest != nil {
+		return
+	}
+	view, err := reduceSessionView(events)
+	if err == nil && view.Status != "deleted" && view.Run != nil && view.Run.RunID == key.runID {
+		// Memory owns its deadline, separate from terminal writes and Subagent cleanup.
+		r.commitSessionMemory(parent, key)
+	}
+}
+
+func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
 	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
 	if spanContext, ok := ctx.Value(runAgentTraceKey{}).(trace.SpanContext); ok && spanContext.IsValid() {
 		payload.TraceContext = &runTraceContext{
@@ -2437,7 +2446,45 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 			}
 		}
 	}
-	return r.appendLeasedFact(ctx, key, lease.LeaseID, eventType, payload)
+	// Each closure attempt owns its deadline; earlier annotations cannot consume it.
+	previousPending, stalled := -1, 0
+	var lastErr error
+	for {
+		terminalCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		events, err := r.workbench.ledger.Events(terminalCtx, key.sessionID)
+		if err != nil {
+			stop()
+			stalled++
+			if stalled < 2 && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrSequenceConflict)) {
+				continue
+			}
+			return err
+		}
+		pending := len(pendingCommits(events, key.runID))
+		if previousPending >= 0 && pending >= previousPending {
+			stalled++
+		} else {
+			stalled = 0
+		}
+		if stalled >= 2 {
+			stop()
+			return lastErr
+		}
+		previousPending = pending
+		// A terminal fact never bypasses the durable commit fence.
+		err = r.closePendingCommits(terminalCtx, key, lease)
+		if err == nil {
+			err = r.appendLeasedFact(terminalCtx, key, lease.LeaseID, eventType, payload)
+		}
+		stop()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrSequenceConflict) {
+			return err
+		}
+		lastErr = err
+	}
 }
 
 func (r *SessionRunner) closePendingCommits(ctx context.Context, key runKey, lease runLeasePayload) error {
@@ -2484,42 +2531,7 @@ func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeaseP
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	cancel()
-	// Failure annotations must not consume the terminal write's budget.
-	previousPending, stalled := -1, 0
-	for {
-		terminalCtx, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-		events, readErr := r.workbench.ledger.Events(terminalCtx, key.sessionID)
-		if readErr != nil {
-			stop()
-			stalled++
-			if stalled < 2 && (errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, ErrSequenceConflict)) {
-				continue
-			}
-			return
-		}
-		pending := len(pendingCommits(events, key.runID))
-		if previousPending >= 0 && pending >= previousPending {
-			stalled++
-		} else {
-			stalled = 0
-		}
-		if stalled >= 2 {
-			stop()
-			return
-		}
-		previousPending = pending
-		err := r.appendTerminal(terminalCtx, key, lease, runFailedEventType, publicRunError(cause))
-		stop()
-		if err == nil {
-			// Keep the Agent parent without the terminal-write deadline.
-			r.commitSessionMemory(parent, key)
-			return
-		}
-		// Retry durable closure progress; retain the fence after two stalled attempts.
-		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrSequenceConflict) {
-			return
-		}
-	}
+	_ = r.appendTerminal(parent, key, lease, runFailedEventType, publicRunError(cause))
 }
 
 func errorTypeName(cause error) string {

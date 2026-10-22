@@ -7,7 +7,13 @@ from .backends import (
     build_context_store,
 )
 from .budget import BudgetStatus, TokenBudget
-from .compaction import CompactionRequest, CompactionSummarizer, LLMCompactionSummarizer
+from .compaction import (
+    CompactionRequest,
+    CompactionResult,
+    CompactionSummarizer,
+    LLMCompactionSummarizer,
+    compact_surface,
+)
 from .compactor import Compactor
 from .gitdiff import GitDiffSnapshot, load_git_diff_context, load_git_diff_snapshot
 from .memory import (
@@ -21,6 +27,7 @@ from .memory import (
 __all__ = [
     "BudgetStatus",
     "CompactionRequest",
+    "CompactionResult",
     "CompactionSummarizer",
     "Compactor",
     "ContextEvent",
@@ -35,6 +42,7 @@ __all__ = [
     "SQLiteContextStore",
     "TokenBudget",
     "build_context_store",
+    "compact_surface",
     "load_git_diff_context",
     "load_git_diff_snapshot",
 ]

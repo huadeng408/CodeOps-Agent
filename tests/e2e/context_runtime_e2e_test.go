@@ -18,6 +18,8 @@ import (
 	"time"
 
 	codeagentpb "code-agent/gen/codeagentpb"
+	"code-agent/internal/admission"
+	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
 	"code-agent/internal/session"
 	"code-agent/internal/tools"
@@ -258,6 +260,8 @@ func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
 		pythonPath += string(os.PathListSeparator) + inherited
 	}
 	t.Setenv("PYTHONPATH", pythonPath)
+	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
+	sessionID := sessionManager.Current().ID
 
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
@@ -269,6 +273,7 @@ func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      15 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(manager.Stop)
 
@@ -276,17 +281,21 @@ func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start real Python orchestrator: %v", err)
 	}
+	client.OnCompaction = contextE2EPersistCompaction(sessionManager)
 	history := make([]orchestrator.ConversationMessage, 0, 24)
 	for index := 0; index < 24; index++ {
+		content := fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160))
+		sessionManager.Append(session.RoleUser, content)
 		history = append(history, orchestrator.ConversationMessage{
 			Role:    "user",
-			Content: fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160)),
+			Content: content,
 		})
 	}
+	sessionManager.Append(session.RoleUser, "COMPACTION_CHECK")
 	response, err := client.ConverseWithHistory(
 		context.Background(),
 		"COMPACTION_CHECK",
-		"context-compaction-e2e",
+		sessionID,
 		history,
 	)
 	if err != nil {
@@ -306,7 +315,7 @@ func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
 		var count int
 		if err := database.QueryRow(
 			"SELECT COUNT(*) FROM context_events WHERE session_id = ? AND kind = ?",
-			"context-compaction-e2e",
+			sessionID,
 			kind,
 		).Scan(&count); err != nil {
 			t.Fatalf("count %s events: %v", kind, err)
@@ -319,7 +328,7 @@ func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
 	receipt := map[string]any{
 		"status":         "VERIFIED",
 		"git_sha":        gitSHA,
-		"session_id":     "context-compaction-e2e",
+		"session_id":     sessionID,
 		"response_pid":   contextE2EProcessID(t, response, "COMPACTION_OK:"),
 		"context_window": 512,
 		"event_kinds":    []string{"compaction/start", "compaction/summary", "compaction/end"},
@@ -352,6 +361,7 @@ func TestContextCompactionPersistsIntoGoSessionAcrossRestart(t *testing.T) {
 		pythonPath += string(os.PathListSeparator) + inherited
 	}
 	t.Setenv("PYTHONPATH", pythonPath)
+	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
 
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
@@ -363,14 +373,10 @@ func TestContextCompactionPersistsIntoGoSessionAcrossRestart(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      15 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(manager.Stop)
 
-	sessionManager := session.NewManager(
-		session.NewSQLiteEventStore(filepath.Join(projectRoot, ".agent", "session.sqlite")),
-	)
-	t.Cleanup(func() { _ = sessionManager.Close() })
-	sessionManager.NewSession(projectRoot)
 	for index := 0; index < 24; index++ {
 		sessionManager.Append(
 			session.RoleUser,
@@ -383,19 +389,7 @@ func TestContextCompactionPersistsIntoGoSessionAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start real Python orchestrator: %v", err)
 	}
-	persist := func(update *codeagentpb.CompactionUpdate) error {
-		if update == nil {
-			return errors.New("nil compaction update")
-		}
-		_, _, ok := sessionManager.ReplaceMessages(
-			update.GetSummary(),
-			int(update.GetKeepRecentMessages()),
-		)
-		if !ok {
-			return errors.New("Go session compaction commit failed")
-		}
-		return nil
-	}
+	persist := contextE2EPersistCompaction(sessionManager)
 	client.OnCompaction = persist
 
 	current := sessionManager.Current()
@@ -474,6 +468,7 @@ func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
 		pythonPath += string(os.PathListSeparator) + inherited
 	}
 	t.Setenv("PYTHONPATH", pythonPath)
+	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
 
 	processManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
@@ -485,14 +480,10 @@ func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      15 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(processManager.Stop)
 
-	sessionManager := session.NewManager(
-		session.NewSQLiteEventStore(filepath.Join(projectRoot, ".agent", "session.sqlite")),
-	)
-	t.Cleanup(func() { _ = sessionManager.Close() })
-	sessionManager.NewSession(projectRoot)
 	for index := 0; index < 24; index++ {
 		sessionManager.Append(
 			session.RoleUser,
@@ -504,19 +495,7 @@ func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start real Python orchestrator: %v", err)
 	}
-	persist := func(update *codeagentpb.CompactionUpdate) error {
-		if update == nil {
-			return errors.New("nil compaction update")
-		}
-		_, _, ok := sessionManager.ReplaceMessages(
-			update.GetSummary(),
-			int(update.GetKeepRecentMessages()),
-		)
-		if !ok {
-			return errors.New("Go session manual compaction commit failed")
-		}
-		return nil
-	}
+	persist := contextE2EPersistCompaction(sessionManager)
 	client.OnCompaction = persist
 
 	current := sessionManager.Current()
@@ -575,6 +554,51 @@ func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
 	}
 	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
 		t.Fatalf("write manual compaction receipt: %v", err)
+	}
+}
+
+// Only the upstream model is a double; Gateway, budget and Session Ledger are real.
+func contextE2EAdmittedSession(t *testing.T, projectRoot string) (*session.Manager, orchestrator.ModelScopeFactory) {
+	t.Helper()
+	store := session.NewSQLiteEventStore(filepath.Join(projectRoot, ".agent", "session.sqlite"))
+	manager := session.NewManager(store)
+	t.Cleanup(func() { _ = manager.Close() })
+	current := manager.NewSession(projectRoot)
+	actor, err := identity.Default().BindSession(current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound := manager.SetActor(actor); bound.Actor.Validate() != nil {
+		t.Fatal("persist fixture Session actor")
+	}
+	ledger, err := store.Ledger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerAddress := contextE2EAddress(t)
+	t.Setenv("CODE_AGENT_E2E_PROVIDER", "deterministic")
+	t.Setenv("CODE_AGENT_CONTEXT_E2E_PROVIDER_ADDRESS", providerAddress)
+	gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{
+		Protocol: "openai", BaseURL: "http://" + providerAddress + "/v1",
+		Model: "deterministic-context-e2e", APIKey: "fixture-only",
+		InputLimit: 100_000, OutputLimit: 4096,
+	})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gateway.Close)
+	return manager, gateway.BindActor
+}
+
+func contextE2EPersistCompaction(manager *session.Manager) func(*codeagentpb.CompactionUpdate) error {
+	return func(update *codeagentpb.CompactionUpdate) error {
+		if update == nil {
+			return errors.New("nil compaction update")
+		}
+		if _, _, ok := manager.ReplaceMessages(update.GetSummary(), int(update.GetKeepRecentMessages())); !ok {
+			return errors.New("Go session compaction commit failed")
+		}
+		return nil
 	}
 }
 

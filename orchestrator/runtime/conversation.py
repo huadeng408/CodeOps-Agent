@@ -17,13 +17,14 @@ from orchestrator.agents.deep_agent import DeepAgentManager
 from orchestrator.agents.process import ProcessAgentExecutor
 from orchestrator.context import (
     BudgetStatus,
-    CompactionRequest,
     CompactionSummarizer,
     Compactor,
     LayeredContext,
     TokenBudget,
     load_git_diff_context,
+    compact_surface,
 )
+from orchestrator.context.compaction import _strip_leading_tool_messages
 from orchestrator.graph.main_graph import MainGraph
 from orchestrator.graph.nodes import GraphState
 from orchestrator.graph.sub_agent_graph import SubAgentState, build_sub_agent_graph
@@ -279,20 +280,6 @@ class ConversationCheckpoint:
     @property
     def resumable(self) -> bool:
         return not self.state.done
-
-
-def _strip_leading_tool_messages(window: list[ChatMessage]) -> list[ChatMessage]:
-    """Drop tool messages at the head of *window*, which have nothing to answer.
-
-    A ``tool`` message is only meaningful directly after the assistant message
-    whose ``tool_calls`` it responds to. At the head of a compacted window that
-    assistant message is gone, and providers that enforce the pairing reject the
-    whole request rather than ignoring the stray message.
-    """
-    start = 0
-    while start < len(window) and window[start].role == "tool":
-        start += 1
-    return window[start:]
 
 
 @dataclass(slots=True)
@@ -3992,9 +3979,7 @@ class ConversationRunner:
         retain_ratio: float | None = None,
         cancel_event: threading.Event | None = None,
     ) -> list[ChatMessage]:
-        if self.compactor is None:
-            return messages
-        if len(messages) <= 2:
+        if self.compactor is None or len(messages) <= 2:
             return messages
         model = str(getattr(getattr(self, "llm", None), "model", ""))
         provider = self._detect_provider()
@@ -4004,298 +3989,31 @@ class ConversationRunner:
             if configured_route is not None and configured_route.client is self.llm
             else None
         )
-        route_context_window = (
+        context_window = (
             getattr(getattr(active_route, "model_info", None), "context_window", None)
             or getattr(self, "context_window", None)
         )
-        select_range = getattr(self.compactor, "select_compaction_range", None)
-        if callable(select_range):
-            # Match DeepSeek Harness ordering: pressure is evaluated against
-            # the original surface before the optional model-free prune.  A
-            # large tool result must not mutate an otherwise healthy session.
-            try:
-                should_compact = self.compactor.should_compact(
-                    messages,
-                    model=model,
-                    context_window=route_context_window,
-                    provider=provider,
-                    force=force,
-                )
-            except TypeError:
-                should_compact = self.compactor.should_compact(messages)
-            if not should_compact:
-                return messages
 
-            pruner = getattr(self.compactor, "prune_tool_results", None)
-            if callable(pruner):
-                original_messages = messages
-                pruned = pruner(original_messages)
-                if pruned != original_messages:
-                    original_chars = sum(
-                        len(message_content_text(message.content))
-                        for message in messages
-                        if message.role == "tool"
-                    )
-                    pruned_chars = sum(
-                        len(message_content_text(message.content))
-                        for message in pruned
-                        if message.role == "tool"
-                    )
-                    messages = pruned
-                    if session_id.strip():
-                        self._persist_event(
-                            session_id,
-                            "tool_result/prune",
-                            {
-                                "count": sum(
-                                    1
-                                    for before, after in zip(original_messages, pruned)
-                                    if before is not after
-                                ),
-                                "original_chars": original_chars,
-                                "pruned_chars": pruned_chars,
-                                "threshold": self.compactor.tool_result_threshold,
-                            },
-                        )
-                    try:
-                        should_compact = self.compactor.should_compact(
-                            messages,
-                            model=model,
-                            context_window=route_context_window,
-                            provider=provider,
-                        )
-                    except TypeError:
-                        should_compact = self.compactor.should_compact(messages)
-                    if not should_compact:
-                        return messages
+        def record_event(kind: str, payload: dict[str, Any]) -> bool:
+            self._persist_event(session_id, kind, payload)
+            return not bool(self._context_persistence_error)
 
-            current = list(messages)
-            max_attempts = 1 if force else self.compactor.compaction_retries + 1
-            for attempt in range(max_attempts):
-                # Anthropic splits static and dynamic runtime instructions.
-                # Sourced system summaries belong to history, not this prefix.
-                history_start = 1
-                while (history_start < len(current)
-                       and current[history_start].role == "system"
-                       and not current[history_start].source_events):
-                    history_start += 1
-                select_kwargs = {
-                    "history_start": history_start,
-                    "model": model,
-                    "context_window": route_context_window,
-                    "provider": provider,
-                    "force": force,
-                }
-                if retain_ratio is not None:
-                    select_kwargs["retain_ratio"] = retain_ratio
-                selection_messages = current
-                if getattr(self, "harness_managed", False):
-                    # Only canonical history can be replaced; live messages have no Ledger refs.
-                    for index in range(history_start, len(current)):
-                        if not current[index].source_events:
-                            selection_messages = current[:index + 1]
-                            break
-                selected = select_range(selection_messages, **select_kwargs)
-                if selected is None:
-                    return current
-                selected_start, selected_end = selected
-                compactable = current[selected_start : selected_end + 1]
-                recent = current[selected_end + 1 :]
-                before_tokens = self.compactor.estimate_tokens(current)
-                lifecycle_started = False
-                if session_id.strip():
-                    self._persist_event(
-                        session_id,
-                        "compaction/start",
-                        {
-                            "range": [selected_start, selected_end],
-                            "trigger": trigger,
-                            "attempt": attempt + 1,
-                            "provider": provider,
-                            "model": model,
-                        },
-                    )
-                    lifecycle_started = not bool(self._context_persistence_error)
-                try:
-                    summary, summary_mode = self._build_compaction_summary(
-                        current,
-                        selected_start,
-                        compactable,
-                        provider=provider,
-                        model=model,
-                        cancel_event=cancel_event,
-                    )
-                except Exception:
-                    if lifecycle_started:
-                        self._persist_event(
-                            session_id,
-                            "compaction/end",
-                            {"status": "failed"},
-                        )
-                    raise
-                source_events = tuple(dict.fromkeys(
-                    ref for message in compactable for ref in message.source_events
-                ))
-                summary_message = ChatMessage(role="system", content=summary, source_events=source_events)
-                current = [*current[:selected_start], summary_message, *recent]
-                after_tokens = self.compactor.estimate_tokens(current)
-                if session_id.strip():
-                    self._persist_event(
-                        session_id,
-                        "compaction/summary",
-                        {
-                            "replaced_tokens": self.compactor.estimate_tokens(compactable),
-                            "summary_tokens": self.compactor.estimate_tokens([summary_message]),
-                            "summary_sha256": self._digest_value(summary),
-                            "attempt": attempt + 1,
-                            "summary_mode": summary_mode,
-                            "provider": provider,
-                            "model": model,
-                        },
-                    )
-                    self._persist_event(
-                        session_id,
-                        "compaction/end",
-                        {
-                            "status": "completed",
-                            "replaced_tokens": max(0, before_tokens - after_tokens),
-                            "summary_tokens": self.compactor.estimate_tokens([summary_message]),
-                            "summary_mode": summary_mode,
-                            "provider": provider,
-                            "model": model,
-                        },
-                    )
-                self._queue_compaction_update(
-                    summary=summary,
-                    removed_messages=len(compactable),
-                    keep_recent_messages=len(recent),
-                    estimated_before_tokens=before_tokens,
-                    estimated_after_tokens=after_tokens,
-                    trigger=trigger,
-                    source_events=source_events,
-                )
-                if force:
-                    return current
-                try:
-                    still_needed = self.compactor.should_compact(
-                        current,
-                        model=model,
-                        context_window=route_context_window,
-                        provider=provider,
-                    )
-                except TypeError:
-                    still_needed = self.compactor.should_compact(current)
-                if not still_needed:
-                    return current
-            return current
-
-        # Compatibility path for old injected compactors used by downstream
-        # callers.  New production compactors always expose range selection.
-        try:
-            legacy_should_compact = self.compactor.should_compact(messages)
-        except (AttributeError, TypeError):
-            legacy_should_compact = True
-        if not legacy_should_compact:
-            return messages
-        system = messages[0]
-        compactable = messages[1:]
-        summary = self.compactor.compact_history([self._message_for_compaction(message) for message in compactable])
-        recent_count = min(max(1, self.compactor.max_messages // 2), len(compactable))
-        recent = compactable[-recent_count:]
-
-        # ── Preserve tool-call adjacency ──────────────────────────────
-        # Some providers (DeepSeek) require that every tool message
-        # immediately follows the assistant message whose tool_calls it
-        # answers.  When compaction drops older messages, walk backwards
-        # from the start of the "recent" window and include any orphaned
-        # assistant(tool_calls) / tool pairs so no tool message is left
-        # without its preceding assistant.
-        orphan_start = None
-        for i, msg in enumerate(recent):
-            if msg.role == "tool":
-                orphan_start = i
-                break
-        if orphan_start is not None:
-            # An earlier version guarded this with ``orphan_start > 0``, which
-            # excluded the only case that is actually broken: when the window
-            # *begins* with a tool result there is no assistant message in front
-            # of it at all.  DeepSeek rejects that request outright — "Messages
-            # with role 'tool' must be a response to a preceding message with
-            # 'tool_calls'", HTTP 400 — which kills the instance mid-solve. The
-            # comment above the old guard described ``orphan_start == 0`` while
-            # the code tested for its complement.
-            anchored = any(
-                msg.role == "assistant" and msg.tool_calls
-                for msg in recent[:orphan_start]
-            )
-            if not anchored:
-                # Walk backwards for the assistant message whose tool_calls this
-                # answers, and re-slice from there so the pair travels together.
-                search_start = len(compactable) - len(recent) - 1
-                for idx in range(search_start, -1, -1):
-                    candidate = compactable[idx]
-                    if candidate.role == "assistant" and candidate.tool_calls:
-                        recent = compactable[idx:]
-                        break
-                # If no anchor exists anywhere, the tool results are
-                # unattributable. Dropping them loses a little context; sending
-                # them loses the whole instance.
-                recent = _strip_leading_tool_messages(recent)
-
-        return [system, ChatMessage(role="system", content=summary), *recent]
-
-    def _build_compaction_summary(
-        self,
-        current: list[ChatMessage],
-        selected_start: int,
-        compactable: list[ChatMessage],
-        *,
-        provider: str,
-        model: str,
-        cancel_event: threading.Event | None,
-    ) -> tuple[str, str]:
-        """Prefer an injected LLM summary, with deterministic fail-closed fallback."""
-        deterministic = self.compactor.compact_history(
-            [self._message_for_compaction(message) for message in compactable]
+        registry = getattr(self, "tool_registry", None)
+        result = compact_surface(
+            messages, compactor=self.compactor, model=model, provider=provider,
+            context_window=context_window,
+            harness_managed=getattr(self, "harness_managed", False),
+            trigger=trigger, force=force, retain_ratio=retain_ratio,
+            summarizer=getattr(self, "compaction_summarizer", None),
+            tool_schemas=(lambda: registry.openai_schemas()) if registry is not None else None,
+            summary_target=self._compaction_summary_target(provider, model),
+            cancel_event=cancel_event,
+            record_event=record_event if session_id.strip() else None,
         )
-        summarizer = getattr(self, "compaction_summarizer", None)
-        if summarizer is None:
-            return deterministic, "deterministic"
-        try:
-            tools: tuple[dict[str, Any], ...] = ()
-            registry = getattr(self, "tool_registry", None)
-            if registry is not None:
-                try:
-                    tools = tuple(registry.openai_schemas())
-                except Exception:
-                    tools = ()
-            candidate = summarizer.summarize(
-                CompactionRequest(
-                    prefix_messages=tuple(current[:selected_start]),
-                    messages=tuple(compactable),
-                    tools=tools,
-                    provider=provider,
-                    model=model,
-                    target=self._compaction_summary_target(provider, model),
-                    cancel_event=cancel_event,
-                )
-            )
-        except RequestInterrupted:
-            raise
-        except Exception:
-            return deterministic, "deterministic-fallback"
-        if not isinstance(candidate, str) or not candidate.strip():
-            return deterministic, "deterministic-fallback"
-        framed = "[Compacted conversation history]\n" + candidate.strip()
-        replaced_tokens = self.compactor.estimate_tokens(
-            [self._message_for_compaction(message) for message in compactable]
-        )
-        summary_tokens = self.compactor.estimate_tokens(
-            [{"role": "system", "content": framed}]
-        )
-        if summary_tokens >= replaced_tokens:
-            return deterministic, "deterministic-fallback"
-        return framed, "llm"
+        pending = getattr(self, "_pending_compaction_updates", None)
+        if pending is not None:
+            pending.extend(result.updates)
+        return result.messages
 
     def _compaction_summary_target(self, provider: str, model: str) -> str:
         configured = str(getattr(self, "compaction_summary_target", "") or "").strip()
@@ -4313,14 +4031,6 @@ class ConversationRunner:
                 return option_target
         option_target = str(getattr(options, "compaction_summary_target", "") or "").strip()
         return option_target or "conversation history"
-
-    @staticmethod
-    def _message_for_compaction(message: ChatMessage) -> dict[str, object]:
-        return {
-            "role": message.role,
-            "content": message_content_text(message.content),
-            "tool_calls": list(message.tool_calls),
-        }
 
     def _run_sub_agent(
         self,
@@ -4405,33 +4115,6 @@ class ConversationRunner:
             }))
         finally:
             graph.close()
-
-    def _queue_compaction_update(
-        self,
-        *,
-        summary: str,
-        removed_messages: int,
-        keep_recent_messages: int,
-        estimated_before_tokens: int,
-        estimated_after_tokens: int,
-        trigger: str,
-        source_events: tuple[tuple[str, str], ...] = (),
-    ) -> None:
-        pending = getattr(self, "_pending_compaction_updates", None)
-        if pending is None:
-            return
-        pending.append(
-            {
-                "summary": summary,
-                "removed_messages": max(0, int(removed_messages)),
-                "keep_recent_messages": max(0, int(keep_recent_messages)),
-                "estimated_before_tokens": max(0, int(estimated_before_tokens)),
-                "estimated_after_tokens": max(0, int(estimated_after_tokens)),
-                "trigger": trigger,
-                "source_events": [{"event_id": event_id, "checksum": checksum}
-                                  for event_id, checksum in source_events],
-            }
-        )
 
     def _emit_compaction_updates(self) -> Iterator[orchestrator_pb2.OrchestratorMessage]:
         pending = getattr(self, "_pending_compaction_updates", None)

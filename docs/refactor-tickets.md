@@ -42,6 +42,15 @@
 | [#27：200 轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27) | [最新完整失败分母与修复边界](evidence/product-long-dialogue-2026-10-21.md) |
 | [#28：压缩后的 Memory 写回](https://github.com/huadeng408/CodeOps-Agent/issues/28) | [真实写回范围](evidence/memory-compaction-2026-10-20.md) |
 
+## Module 深化
+
+规格 [#31](https://github.com/huadeng408/CodeOps-Agent/issues/31) 覆盖三个独立改动：
+[#32 Context 压缩](https://github.com/huadeng408/CodeOps-Agent/issues/32)、
+[#33 Task Workspace 准入](https://github.com/huadeng408/CodeOps-Agent/issues/33)、
+[#34 Session 终态收尾](https://github.com/huadeng408/CodeOps-Agent/issues/34)。
+[#35 汇总验证与审查](https://github.com/huadeng408/CodeOps-Agent/issues/35) 依赖前三项。
+各票保留既有授权、Session Ledger 与兼容契约；源码和跨进程 fixture 验证不替代产品或发布验收。
+
 ## 可选能力
 
 [#20：Cloudflare Free](https://github.com/huadeng408/CodeOps-Agent/issues/20) 按用户要求暂缓，

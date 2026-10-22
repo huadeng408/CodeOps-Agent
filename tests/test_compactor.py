@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from codeagent import orchestrator_pb2
-from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
+from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer, compact_surface
 from orchestrator.context.compactor import Compactor
 from orchestrator.graph.main_graph import build_graph
 from orchestrator.llm.client import ChatMessage, ChatResponse, RequestInterrupted, StreamDelta, ToolCall
@@ -356,22 +356,21 @@ def test_compaction_events_are_persisted_but_hidden_from_layered_prompt(tmp_path
     store.close()
 
 
-def test_runner_pressure_compaction_records_lifecycle_and_hides_events(tmp_path) -> None:
+def test_context_pressure_compaction_records_lifecycle_and_hides_events(tmp_path) -> None:
     from orchestrator.context import LayeredContext, SQLiteContextStore
 
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     context = LayeredContext(store, tmp_path)
-    runner = ConversationRunner.__new__(ConversationRunner)
-    runner.compactor = Compactor(
+    compactor = Compactor(
         context_window=80,
         pressure_ratio=0.8,
         retain_ratio=0.16,
         compaction_retries=2,
     )
-    runner.llm = type("Model", (), {"model": "test-model"})()
-    runner.context_window = None
-    runner.layered_context = context
-    runner._context_persistence_error = ""
+
+    def record_event(kind, payload):
+        store.append("session", kind, payload)
+        return True
 
     messages = [ChatMessage(role="system", content="system")]
     messages.extend(
@@ -379,10 +378,10 @@ def test_runner_pressure_compaction_records_lifecycle_and_hides_events(tmp_path)
         for index in range(8)
     )
 
-    compacted = runner._compact_messages(messages, session_id="session")
+    result = compact_surface(messages, compactor=compactor, model="test-model", record_event=record_event)
     events = store.events("session")
 
-    assert len(compacted) < len(messages)
+    assert len(result.messages) < len(messages)
     assert len(events) % 3 == 0
     assert len(events) <= 9
     assert [event.kind for event in events[:3]] == [
@@ -409,19 +408,13 @@ def test_tool_result_pruner_keeps_head_and_tail_without_model_call() -> None:
 
 def test_pressure_compaction_does_not_prune_below_threshold() -> None:
     """Tool-result pruning is a pressure pass, not an unconditional mutation."""
-    runner = ConversationRunner.__new__(ConversationRunner)
-    runner.compactor = Compactor(
+    compactor = Compactor(
         context_window=10_000,
         pressure_ratio=0.8,
         tool_result_threshold=20,
         tool_result_head=8,
         tool_result_tail=4,
     )
-    runner.llm = type("Model", (), {"model": "reasoner"})()
-    runner.context_window = None
-    runner._active_route = None
-    runner.layered_context = None
-    runner._context_persistence_error = ""
 
     original = "HEAD-" + ("middle-" * 20) + "-TAIL"
     messages = [
@@ -430,11 +423,12 @@ def test_pressure_compaction_does_not_prune_below_threshold() -> None:
         ChatMessage(role="tool", content=original, tool_call_id="call-1"),
     ]
 
-    compacted = runner._compact_messages(messages, session_id="below-pressure")
+    result = compact_surface(messages, compactor=compactor, model="reasoner")
 
-    assert compacted == messages
-    assert compacted[-1].content == original
-    assert "[tool result pruned" not in compacted[-1].content
+    assert result.messages == messages
+    assert result.messages[-1].content == original
+    assert "[tool result pruned" not in result.messages[-1].content
+    assert result.updates == []
 
 
 def test_context_overflow_error_is_retryable_only_after_forced_progress() -> None:
@@ -525,25 +519,17 @@ def test_llm_compaction_summarizer_stops_before_provider_when_cancelled() -> Non
         )
 
 
-def test_runner_prefers_llm_compaction_summary_and_audits_metadata(tmp_path) -> None:
-    from orchestrator.context import LayeredContext, SQLiteContextStore
-
+def test_context_prefers_llm_compaction_summary_and_audits_metadata() -> None:
     class SummaryAdapter:
         def summarize(self, request):
             self.request = request
             return "short llm summary"
 
-    store = SQLiteContextStore(tmp_path / "context.sqlite")
-    context = LayeredContext(store, tmp_path)
-    runner = ConversationRunner.__new__(ConversationRunner)
-    runner.compactor = Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16)
-    runner.compaction_summarizer = SummaryAdapter()
-    runner.llm = type("Model", (), {"model": "reasoner"})()
-    runner.context_window = None
-    runner.layered_context = context
-    runner._active_route = None
-    runner._context_persistence_error = ""
-    runner._pending_compaction_updates = []
+    events = []
+
+    def record_event(kind, payload):
+        events.append((kind, payload))
+        return True
 
     messages = [ChatMessage(role="system", content="system")]
     messages.extend(
@@ -551,37 +537,34 @@ def test_runner_prefers_llm_compaction_summary_and_audits_metadata(tmp_path) -> 
         for index in range(8)
     )
 
-    compacted = runner._compact_messages(messages, session_id="session")
+    result = compact_surface(
+        messages,
+        compactor=Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16),
+        model="reasoner", summarizer=SummaryAdapter(), record_event=record_event,
+    )
 
-    assert compacted[1].content == "[Compacted conversation history]\nshort llm summary"
-    summary_event = next(event for event in store.events("session") if event.kind == "compaction/summary")
-    assert summary_event.payload["summary_mode"] == "llm"
-    assert summary_event.payload["provider"] == ""
-    assert summary_event.payload["model"] == "reasoner"
-    assert summary_event.payload["summary_sha256"]
-    assert "short llm summary" not in repr(summary_event.payload)
-    store.close()
+    assert result.messages[1].content == "[Compacted conversation history]\nshort llm summary"
+    summary = next(payload for kind, payload in events if kind == "compaction/summary")
+    assert summary["summary_mode"] == "llm"
+    assert summary["provider"] == ""
+    assert summary["model"] == "reasoner"
+    assert summary["summary_sha256"] == "b9b46d76f90ce6112e79b8bf715a3ffcec873fbc41052c2d1e1c3ff6b1218d7f"
+    assert "short llm summary" not in repr(summary)
 
 
-@pytest.mark.parametrize("returned", ["", "x" * 10_000])
-def test_runner_falls_back_when_llm_compaction_summary_is_invalid(tmp_path, returned: str) -> None:
-    from orchestrator.context import LayeredContext, SQLiteContextStore
-
+@pytest.mark.parametrize("returned", ["", "x" * 10_000, RuntimeError("summary unavailable")])
+def test_context_falls_back_when_llm_compaction_summary_is_invalid(returned) -> None:
     class SummaryAdapter:
         def summarize(self, request):
+            if isinstance(returned, Exception):
+                raise returned
             return returned
 
-    store = SQLiteContextStore(tmp_path / "context.sqlite")
-    context = LayeredContext(store, tmp_path)
-    runner = ConversationRunner.__new__(ConversationRunner)
-    runner.compactor = Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16)
-    runner.compaction_summarizer = SummaryAdapter()
-    runner.llm = type("Model", (), {"model": "reasoner"})()
-    runner.context_window = None
-    runner.layered_context = context
-    runner._active_route = None
-    runner._context_persistence_error = ""
-    runner._pending_compaction_updates = []
+    events = []
+
+    def record_event(kind, payload):
+        events.append((kind, payload))
+        return True
 
     messages = [ChatMessage(role="system", content="system")]
     messages.extend(
@@ -589,10 +572,82 @@ def test_runner_falls_back_when_llm_compaction_summary_is_invalid(tmp_path, retu
         for index in range(8)
     )
 
-    compacted = runner._compact_messages(messages, session_id="session")
+    result = compact_surface(
+        messages,
+        compactor=Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16),
+        model="reasoner", summarizer=SummaryAdapter(), record_event=record_event,
+    )
 
-    assert "[Compacted conversation history]" in compacted[1].content
-    assert "short llm summary" not in compacted[1].content
-    summary_event = next(event for event in store.events("session") if event.kind == "compaction/summary")
-    assert summary_event.payload["summary_mode"] == "deterministic-fallback"
-    store.close()
+    assert "[Compacted conversation history]" in result.messages[1].content
+    assert "short llm summary" not in result.messages[1].content
+    summary = next(payload for kind, payload in events if kind == "compaction/summary")
+    assert summary["summary_mode"] == "deterministic-fallback"
+
+
+@pytest.mark.parametrize("audit_available", [True, False])
+def test_context_cancellation_closes_only_a_recorded_compaction(audit_available) -> None:
+    events = []
+
+    def record_event(kind, payload):
+        if audit_available:
+            events.append((kind, payload))
+        return audit_available
+
+    class CanceledSummary:
+        def summarize(self, request):
+            assert [kind for kind, _ in events] == (["compaction/start"] if audit_available else [])
+            raise RequestInterrupted("canceled during summary")
+
+    messages = [ChatMessage(role="system", content="instructions")]
+    messages.extend(ChatMessage(role="user", content="historical fact " * 50) for _ in range(4))
+
+    with pytest.raises(RequestInterrupted, match="canceled during summary"):
+        compact_surface(
+            messages, compactor=Compactor(context_window=80), force=True,
+            summarizer=CanceledSummary(), record_event=record_event,
+        )
+
+    assert [kind for kind, _ in events] == (
+        ["compaction/start", "compaction/end"] if audit_available else []
+    )
+    if audit_available:
+        assert events[-1][1] == {"status": "failed"}
+
+
+def test_runner_does_not_publish_a_partial_compaction_when_a_later_summary_is_canceled(tmp_path) -> None:
+    class NoCallClient:
+        model = "fixture"
+
+        async def chat(self, request):
+            raise AssertionError("canceled compaction must not dispatch a model turn")
+
+    class CancelSecondSummary:
+        def __init__(self):
+            self.requests = 0
+
+        def summarize(self, request):
+            self.requests += 1
+            if self.requests == 1:
+                return "earlier facts"
+            raise RequestInterrupted("canceled during second summary")
+
+    summarizer = CancelSecondSummary()
+    runner = ConversationRunner(
+        graph=build_graph(), llm=NoCallClient(), tool_registry=ToolRegistry(),
+        todo_manager=TodoManager(), memory_manager=MemoryManager(str(tmp_path / "memory")),
+        skills=SkillManager(), project_root=str(tmp_path), working_dir=str(tmp_path),
+        harness_managed=True, compactor=Compactor(context_window=16, compaction_retries=1),
+        compaction_summarizer=summarizer,
+    )
+
+    responses = list(runner.run(
+        "continue the current task", iter(()),
+        history=[{"role": "user", "content": "historical fact " * 50,
+                  "event_id": f"event-{index}", "event_checksum": str(index) * 64}
+                 for index in range(3)],
+    ))
+
+    assert summarizer.requests == 2
+    assert responses[-1].done.success is False
+    assert any(response.HasField("text") and response.text.text == "[interrupted]" for response in responses)
+    assert not any(response.HasField("compaction_update") for response in responses)

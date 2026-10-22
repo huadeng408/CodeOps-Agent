@@ -94,7 +94,10 @@ func TestReopenedTaskCanContinueAfterItsModelHolderProcessDied(t *testing.T) {
 	}
 	actor := identity.Default()
 	command := session.SubmitMessageCommand{RequestID: "after-restart", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(prepared.EventCount), Content: "continue", Actor: actor}
-	runner := session.NewSessionRunner(workbench, &admissionConversation{}, nil, session.SessionRunnerOptions{Workspace: localModelWorkspaceAdmission(tasks, budget)})
+	executors := newContinuationToolExecutors(storage)
+	defer executors.Close()
+	executors.taskWorkspaces, executors.taskOwner = tasks, func(context.Context) (uint, error) { return 7, nil }
+	runner := session.NewSessionRunner(workbench, &admissionConversation{}, nil, session.SessionRunnerOptions{Workspace: localModelWorkspaceAdmission(tasks, budget, executors.PrepareWorkspace)})
 	if _, err := runner.SubmitMessage(ctx, command); !errors.Is(err, admission.ErrRelayBusy) {
 		t.Fatalf("live model holder was not fenced: %v", err)
 	}
@@ -105,7 +108,7 @@ func TestReopenedTaskCanContinueAfterItsModelHolderProcessDied(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = holder.Wait()
-	if _, err := localModelWorkspaceAdmission(tasks, budget)(ctx, 8, created.ID); !errors.Is(err, session.ErrSessionNotFound) {
+	if _, err := localModelWorkspaceAdmission(tasks, budget, executors.PrepareWorkspace)(ctx, 8, created.ID); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("foreign owner reached recovery: %v", err)
 	}
 	foreign, err := budget.Inspect(ctx, 7)
@@ -121,9 +124,10 @@ func TestReopenedTaskCanContinueAfterItsModelHolderProcessDied(t *testing.T) {
 	}
 	workbench = session.NewWorkbench(ledger, nil)
 	tasks = newTasks()
+	executors.taskWorkspaces = tasks
 	budget = admission.NewBudget(ledger)
 	adapter := &admissionConversation{}
-	runner = session.NewSessionRunner(workbench, adapter, nil, session.SessionRunnerOptions{Workspace: localModelWorkspaceAdmission(tasks, budget)})
+	runner = session.NewSessionRunner(workbench, adapter, nil, session.SessionRunnerOptions{Workspace: localModelWorkspaceAdmission(tasks, budget, executors.PrepareWorkspace)})
 	defer runner.Close()
 	if _, err := runner.SubmitMessage(ctx, command); err != nil {
 		t.Fatalf("confirmed dead model holder prevented the same task from continuing: %v", err)

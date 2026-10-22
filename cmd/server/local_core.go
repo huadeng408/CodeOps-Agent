@@ -120,25 +120,10 @@ func runLocalCore(cfg serverconfig.Config) error {
 	}
 	provider := admission.ProviderFromEnv()
 	gateway := admission.NewGateway(admission.NewBudget(ledger), provider)
+	defer gateway.Close()
 	if taskRuntime != nil {
 		gateway.SetRuntimeStopVerifier(taskRuntime.ConfirmStopped)
 	}
-	modelWorkspace := localModelWorkspaceAdmission(workspaces, admission.NewBudget(ledger))
-	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
-		if workspaces == nil {
-			return session.ErrContinuationUnavailable
-		}
-		owner, err := identity.OwnerID(ctx)
-		if err != nil {
-			return err
-		}
-		_, err = modelWorkspace(ctx, owner, id)
-		return err
-	})
-	if err := gateway.Start(); err != nil {
-		return errors.New("model admission initialization unavailable")
-	}
-	defer gateway.Close()
 	if workspaces != nil {
 		// The existing task scope fences proposal testing without another model call.
 		workspaces.WithProposalScope(gateway.BindExistingTask)
@@ -162,19 +147,20 @@ func runLocalCore(cfg serverconfig.Config) error {
 		}
 	}
 	executors.SetMCPManager(repositoryMCP)
-	admitWorkspace := modelWorkspace
-	modelWorkspace = func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
-		workspace, err := admitWorkspace(ctx, owner, id)
-		if err != nil {
-			return session.TaskModelWorkspace{}, err
-		}
-		if err := executors.PrepareWorkspace(ctx, id, workspace.WorkingDir); err != nil {
-			return session.TaskModelWorkspace{}, err
-		}
-		return workspace, nil
-	}
 	executors.SetTracer(telemetry)
 	defer executors.Close()
+	modelWorkspace := localModelWorkspaceAdmission(workspaces, admission.NewBudget(ledger), executors.PrepareWorkspace)
+	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
+		owner, err := identity.OwnerID(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = modelWorkspace(ctx, owner, id)
+		return err
+	})
+	if err := gateway.Start(); err != nil {
+		return errors.New("model admission initialization unavailable")
+	}
 	target := strings.TrimSpace(os.Getenv("CODE_AGENT_ORCHESTRATOR_ADDR"))
 	if target == "" {
 		target = "127.0.0.1:50051"
@@ -238,13 +224,16 @@ func runLocalCore(cfg serverconfig.Config) error {
 	return serveHTTPServer(&http.Server{Addr: net.JoinHostPort(host, cfg.Server.Port), Handler: router, ReadHeaderTimeout: 5 * time.Second})
 }
 
-func localModelWorkspaceAdmission(workspaces *session.TaskWorkspaces, budget *admission.Budget) func(context.Context, uint, string) (session.TaskModelWorkspace, error) {
+func localModelWorkspaceAdmission(workspaces *session.TaskWorkspaces, budget *admission.Budget, prepareWorkspace func(context.Context, string, string) error) func(context.Context, uint, string) (session.TaskModelWorkspace, error) {
 	return func(ctx context.Context, owner uint, id string) (session.TaskModelWorkspace, error) {
+		if workspaces == nil || budget == nil || prepareWorkspace == nil {
+			return session.TaskModelWorkspace{}, session.ErrContinuationUnavailable
+		}
 		batch, err := budget.Inspect(ctx, owner)
 		if err != nil {
 			return session.TaskModelWorkspace{}, err
 		}
-		if batch.ActiveCalls != 0 && batch.TaskID == id && workspaces != nil {
+		if batch.ActiveCalls != 0 && batch.TaskID == id {
 			if _, err := workspaces.Inspect(ctx, owner, id); err != nil {
 				return session.TaskModelWorkspace{}, err
 			}
@@ -262,7 +251,14 @@ func localModelWorkspaceAdmission(workspaces *session.TaskWorkspaces, budget *ad
 		if batch.TaskID != "" && batch.TaskID != id {
 			return session.TaskModelWorkspace{}, admission.ErrTaskBusy
 		}
-		return workspaces.ModelWorkspace(ctx, owner, id)
+		workspace, err := workspaces.ModelWorkspace(ctx, owner, id)
+		if err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		if err := prepareWorkspace(ctx, id, workspace.WorkingDir); err != nil {
+			return session.TaskModelWorkspace{}, err
+		}
+		return workspace, nil
 	}
 }
 

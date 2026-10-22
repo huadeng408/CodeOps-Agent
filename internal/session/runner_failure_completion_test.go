@@ -12,14 +12,20 @@ import (
 	"code-agent/internal/orchestrator"
 )
 
-type failingReadConversation struct{ calls int }
+type knownReadConversation struct {
+	calls   int
+	success bool
+}
 
-func (conversation failingReadConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+func (conversation knownReadConversation) RunConversation(ctx context.Context, _ orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
 	for index := 0; index < max(1, conversation.calls); index++ {
 		result := handlers.Tool(ctx, orchestrator.ToolCall{ID: fmt.Sprintf("known-read-%d", index), Name: "Read", ParametersJSON: `{"path":"source.go"}`})
 		if result.Error != "" || result.ExitCode != 0 {
 			return orchestrator.ConversationResult{}, context.Canceled
 		}
+	}
+	if conversation.success {
+		return orchestrator.ConversationResult{Success: true, Message: "Read completed"}, nil
 	}
 	return orchestrator.ConversationResult{}, ErrEventIntegrity
 }
@@ -63,7 +69,7 @@ func TestSessionRunnerCompletesFailureWhileCommitClosureMakesProgress(t *testing
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	runner := NewSessionRunner(workbench, failingReadConversation{calls: 7}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	runner := NewSessionRunner(workbench, knownReadConversation{calls: 7}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
 		executions.Add(1)
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: "Read completed"}
 	}), SessionRunnerOptions{WorkerID: "progressing-close", LeaseDuration: time.Minute})
@@ -95,6 +101,53 @@ func TestSessionRunnerCompletesFailureWhileCommitClosureMakesProgress(t *testing
 	}
 }
 
+func TestSessionRunnerCompletesSuccessWhileCommitClosureMakesProgress(t *testing.T) {
+	ctx := context.Background()
+	base := openWorkbenchTestLedger(t)
+	ledger := &boundedCommitClosureLog{EventLog: base, perContextLimit: 3}
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "bounded success closure", "Read source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var executions atomic.Int32
+	runner := NewSessionRunner(workbench, knownReadConversation{calls: 7, success: true}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+		executions.Add(1)
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: "Read completed"}
+	}), SessionRunnerOptions{WorkerID: "successful-close", LeaseDuration: time.Minute})
+	t.Cleanup(func() { _ = runner.Close() })
+	run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "successful-close", SessionID: created.ID, OwnerID: 7,
+		ExpectedSeq: int64(created.EventCount), Content: "Read source", Actor: testRunnerActor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForRunStatus(t, runner, created.ID, run.RunID, RunCompleted)
+	if executions.Load() != 7 {
+		t.Fatalf("tool executions=%d, want seven without replay", executions.Load())
+	}
+	snapshot, err := ReadVerifiedSnapshot(ctx, base, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, failed, done := 0, 0, 0
+	for _, event := range snapshot.Events {
+		switch event.Type {
+		case commitDoneEventType:
+			done++
+		case runCompletedEventType:
+			completed++
+			if done != 7 {
+				t.Fatalf("terminal preceded commit closure: done=%d, want seven", done)
+			}
+		case runFailedEventType:
+			failed++
+		}
+	}
+	if completed != 1 || failed != 0 || done != 7 {
+		t.Fatalf("completed=%d failed=%d done=%d, want one successful terminal and seven retained commits", completed, failed, done)
+	}
+}
+
 func TestSessionRunnerStopsFailureClosureWithoutDurableProgress(t *testing.T) {
 	ctx := context.Background()
 	base := openWorkbenchTestLedger(t)
@@ -105,7 +158,7 @@ func TestSessionRunnerStopsFailureClosureWithoutDurableProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	runner := NewSessionRunner(workbench, failingReadConversation{}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	runner := NewSessionRunner(workbench, knownReadConversation{}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
 		executions.Add(1)
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: "Read completed"}
 	}), SessionRunnerOptions{WorkerID: "stalled-close", LeaseDuration: time.Minute})
@@ -189,7 +242,7 @@ func TestSessionRunnerPersistsFailureAfterCleanupReadTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	runner := NewSessionRunner(workbench, failingReadConversation{}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	runner := NewSessionRunner(workbench, knownReadConversation{}, ToolExecutionFunc(func(_ context.Context, _ identity.Actor, _ string, call orchestrator.ToolCall) orchestrator.ToolResult {
 		executions.Add(1)
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: "Read completed"}
 	}), SessionRunnerOptions{WorkerID: "cleanup-timeout", LeaseDuration: time.Minute})

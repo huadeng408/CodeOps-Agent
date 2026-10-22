@@ -6,6 +6,7 @@
 
 | 范围 | 入口 |
 | --- | --- |
+| Context、准入与 Session 架构 | [Module 深化与范围验证](module-deepening-2026-10-22.md) |
 | 首批 Windows 产品 | [父规格逐项审计](milestone-parent-acceptance-2026-10-21.md)、[五类恢复与 Memory](milestone-v5-matrix-2026-10-19.md)、[兼容／物料及 AC01–AC09](milestone-v5-compatibility-2026-10-19.md) |
 | 长对话与压缩 | [v9 首轮刷新与阶段核验](product-long-dialogue-v9-2026-10-22.md)、[v8 第 1 项失败与完整分母](product-long-dialogue-v8-2026-10-22.md)、[v7 最终结果与阶段证据](product-long-dialogue-v7-2026-10-21.md)、[构建与冻结输入](product-long-dialogue-preparation-2026-10-21.md)、[旧失败与修复](product-long-dialogue-2026-10-21.md)、[前次终态修复](product-long-dialogue-2026-10-20.md)、[当前输入保留](compaction-active-input-2026-10-20.md)、[早期独立尝试](product-long-dialogue-2026-10-19.md)、[压缩后的 Memory](memory-compaction-2026-10-20.md) |
 | 模型连接 | [独立单请求的 HTTP 402 与正常收尾](provider-route-recovery-2026-10-22.md) |

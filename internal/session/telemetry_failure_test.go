@@ -24,6 +24,9 @@ func TestIndependentAgentAndArtifactFailuresSetContentFreeStatus(t *testing.T) {
 		if task.Status != "failed" {
 			t.Fatalf("task status = %s", task.Status)
 		}
+		if err := runner.Close(); err != nil {
+			t.Fatal(err)
+		}
 		assertContentFreeErrorSpan(t, recorder.Ended(), "agent.subagent")
 	})
 
