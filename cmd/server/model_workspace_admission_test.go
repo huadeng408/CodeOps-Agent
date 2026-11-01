@@ -109,7 +109,7 @@ func TestBrowserContinuationWaitsForActiveReflectionWithoutUsageReconciliation(t
 		t.Fatal(err)
 	}
 	defer gateway.Close()
-	gateway.SetTaskAdmission(func(ctx context.Context, id string) error { _, err := gate(ctx, 7, id); return err })
+	gateway.SetTaskAdmission(func(ctx context.Context, id, _ string) error { _, err := gate(ctx, 7, id); return err })
 	binding, release, err := gateway.Bind(7, created.ID, created.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestWorkspacePreparationFailurePreventsModelAndContinuationDispatch(t *test
 	}))
 	defer upstream.Close()
 	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL, Model: "fixture-model", APIKey: "fixture-authority", InputLimit: 100, OutputLimit: 3})
-	gateway.SetTaskAdmission(func(ctx context.Context, id string) error { _, err := gate(ctx, 7, id); return err })
+	gateway.SetTaskAdmission(func(ctx context.Context, id, _ string) error { _, err := gate(ctx, 7, id); return err })
 	if err := gateway.Start(); err != nil {
 		t.Fatal(err)
 	}

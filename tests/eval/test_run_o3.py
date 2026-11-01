@@ -71,6 +71,8 @@ def test_execution_preflight_requires_healthy_services_and_pinned_live_corpus(
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler signature
+            # Drain the HTTP/1.0 request before closing; unread bytes can reset the response.
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             requests.append(self.path)
             if self.path == "/knowledge_base_v2_bge_m3/_search":
                 body = json.dumps(

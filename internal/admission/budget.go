@@ -22,6 +22,7 @@ var (
 	ErrCallReserved     = errors.New("model call is already reserved; do not dispatch again")
 	ErrRelayBusy        = errors.New("verification model concurrency limit reached")
 	ErrTaskClosed       = errors.New("verification task has already finished")
+	ErrWallClockBudget  = errors.New("evaluation wall-clock budget exhausted")
 )
 
 type Batch struct {
@@ -44,6 +45,7 @@ type budgetFact struct {
 	OwnerID         uint             `json:"owner_id,omitempty"`
 	Limit           int64            `json:"limit_tokens,omitempty"`
 	TaskID          string           `json:"task_id,omitempty"`
+	SessionID       string           `json:"session_id,omitempty"`
 	ScopeID         string           `json:"scope_id,omitempty"`
 	Process         *scopeProcess    `json:"process,omitempty"`
 	RecoveredScopes []recoveredScope `json:"recovered_scopes,omitempty"`
@@ -171,6 +173,9 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if fact.Process != nil && !fact.Process.valid() {
 				return state, session.ErrEventIntegrity
 			}
+			if fact.SessionID != "" && !validID(fact.SessionID) {
+				return state, session.ErrEventIntegrity
+			}
 			state.scopes[fact.ScopeID] = fact
 		case "admission/scopes_recovered":
 			if fact.OwnerID == 0 || !validID(fact.TaskID) || len(fact.RecoveredScopes) == 0 || state.outstanding() != 0 || fact.ScopeID != "" || fact.CallID != "" || fact.Tokens != 0 || fact.Process != nil {
@@ -216,6 +221,9 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 				if !exists || bound.OwnerID != fact.OwnerID || bound.TaskID != fact.TaskID || bound.Process == nil {
 					return state, session.ErrEventIntegrity
 				}
+				if fact.SessionID != bound.SessionID {
+					return state, session.ErrEventIntegrity
+				}
 				process = bound.Process
 			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
@@ -242,11 +250,13 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			request.unknown = true
 			request.boundViolated = request.boundViolated || fact.BoundViolated || fact.Tokens > request.reserved
 			state.calls[fact.CallID] = request
-		case "admission/task_finished":
+		case "admission/task_finished", "admission/task_yielded":
 			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || state.outstanding() != 0 || state.taskHasScopes(fact.OwnerID, fact.TaskID) {
 				return state, session.ErrEventIntegrity
 			}
-			state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
+			if event.Type == "admission/task_finished" {
+				state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
+			}
 			state.TaskID, state.TaskOwnerID = "", 0
 		default:
 			return state, session.ErrEventIntegrity
@@ -284,11 +294,17 @@ func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
 }
 
 // Scope facts coordinate idle checks across processes without creating a token batch.
-func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scopeID, eventType string) error {
+func (budget *Budget) recordScope(ctx context.Context, owner uint, taskID, scopeID, eventType string, sessionIDs ...string) error {
 	if owner == 0 || !validID(taskID) || !validID(scopeID) || (eventType != session.VerificationAdmissionScopeBoundEventType && eventType != "admission/scope_released") {
 		return ErrInvalidAdmission
 	}
 	fact := budgetFact{OwnerID: owner, TaskID: taskID, ScopeID: scopeID}
+	if len(sessionIDs) > 1 || len(sessionIDs) == 1 && !validID(sessionIDs[0]) {
+		return ErrInvalidAdmission
+	}
+	if len(sessionIDs) == 1 {
+		fact.SessionID = sessionIDs[0]
+	}
 	if eventType == session.VerificationAdmissionScopeBoundEventType {
 		process, err := currentScopeProcess()
 		if err != nil {
@@ -445,12 +461,16 @@ func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID st
 			if !exists || bound.OwnerID != owner || bound.TaskID != taskID || bound.Process == nil {
 				return state.Batch, ErrInvalidAdmission
 			}
+			fact.SessionID = bound.SessionID
 		}
 		if state.TaskID != "" && (state.TaskID != taskID || state.TaskOwnerID != owner) {
 			return state.Batch, ErrTaskBusy
 		}
 		if state.outstanding() >= concurrency {
 			return state.Batch, ErrRelayBusy
+		}
+		if err := budget.checkEvaluationReservation(ctx, state, owner, taskID, tokens); err != nil {
+			return state.Batch, err
 		}
 		// The approved provider enforces the budget; reservations remain audit estimates.
 		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/call_reserved", fact)
@@ -544,6 +564,16 @@ func (budget *Budget) FinishTask(ctx context.Context, owner uint, taskID string)
 }
 
 func (budget *Budget) finishTask(ctx context.Context, owner uint, taskID, purpose string) (Batch, error) {
+	return budget.releaseTask(ctx, owner, taskID, "admission/task_finished", purpose)
+}
+
+// YieldTask releases only scheduling ownership. The authenticated Go caller must
+// first prove that the task's run, tools, children and runtimes are quiescent.
+func (budget *Budget) YieldTask(ctx context.Context, owner uint, taskID string) (Batch, error) {
+	return budget.releaseTask(ctx, owner, taskID, "admission/task_yielded", "")
+}
+
+func (budget *Budget) releaseTask(ctx context.Context, owner uint, taskID, eventType, purpose string) (Batch, error) {
 	if !validID(taskID) {
 		return Batch{}, ErrInvalidAdmission
 	}
@@ -553,6 +583,9 @@ func (budget *Budget) finishTask(ctx context.Context, owner uint, taskID, purpos
 			return Batch{}, err
 		}
 		if state.closedTasks[taskKey(owner, taskID)] {
+			if eventType == "admission/task_yielded" {
+				return state.Batch, ErrTaskClosed
+			}
 			return state.Batch, nil
 		}
 		if state.TaskID != taskID || state.TaskOwnerID != owner {
@@ -564,7 +597,7 @@ func (budget *Budget) finishTask(ctx context.Context, owner uint, taskID, purpos
 		if state.taskHasScopes(owner, taskID) {
 			return state.Batch, ErrTaskBusy
 		}
-		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_finished", budgetFact{OwnerID: owner, TaskID: taskID, Purpose: purpose})
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, eventType, budgetFact{OwnerID: owner, TaskID: taskID, Purpose: purpose})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}

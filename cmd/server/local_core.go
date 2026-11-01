@@ -150,7 +150,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 	executors.SetTracer(telemetry)
 	defer executors.Close()
 	modelWorkspace := localModelWorkspaceAdmission(workspaces, admission.NewBudget(ledger), executors.PrepareWorkspace)
-	gateway.SetTaskAdmission(func(ctx context.Context, id string) error {
+	gateway.SetTaskAdmission(func(ctx context.Context, id, _ string) error {
 		owner, err := identity.OwnerID(ctx)
 		if err != nil {
 			return err

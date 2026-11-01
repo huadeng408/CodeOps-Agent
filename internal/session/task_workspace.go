@@ -114,6 +114,13 @@ func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, cur
 		if err != nil {
 			return TaskModelWorkspace{}, err
 		}
+		grade, err := ReadEvaluationGrade(snapshot.Events)
+		if err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		if grade != nil {
+			return TaskModelWorkspace{}, ErrSessionStateConflict
+		}
 		view, err := t.project(ctx, snapshot.Events, sessionView)
 		if err != nil {
 			return TaskModelWorkspace{}, err
@@ -138,6 +145,9 @@ func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, cur
 			return TaskModelWorkspace{}, ErrSessionStateConflict
 		}
 		if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
+			return TaskModelWorkspace{}, err
+		}
+		if err := t.borrowedAgentsAdmissible(ctx, owner, id, snapshot.Events, currentToolID); err != nil {
 			return TaskModelWorkspace{}, err
 		}
 		if expired {

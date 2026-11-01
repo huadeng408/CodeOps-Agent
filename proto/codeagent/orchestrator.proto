@@ -113,6 +113,8 @@ message UserInput {
   ModelGatewayBinding model_gateway = 12;
   // Presence distinguishes the Go catalog from the legacy workspace manifest.
   MCPToolCatalog mcp_catalog = 13;
+  // Optional Go-admitted evaluation data. The normal product leaves it empty.
+  string evaluation_context_json = 14;
 }
 
 message MCPToolCatalog {

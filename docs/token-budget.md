@@ -33,6 +33,22 @@ module.
 - The authenticated owner must match when settling or completing a task.
   Ledger replay checks both the hash chain and admission transitions.
 
+An explicit `Gateway.YieldTask` can relinquish scheduling ownership without
+finishing the original task. Go requires an authenticated root, expired or
+terminal runs, no unresolved tool effects, children, proposals or runtimes, no
+active calls and no retained scope for that task. An expired lease alone is not
+enough. The admission Ledger appends `admission/task_yielded`; the original
+Session and its checkpoints stay unchanged, and confirmed usage, unknown usage
+and original reservations remain. The original task can acquire the same batch
+slot again after the intervening task releases it. Concurrent tasks and
+duplicate calls remain fenced.
+
+This event requires the updated Ledger reader. An older Harness refuses an
+unknown event rather than silently ignoring it. Do not activate yielding on a
+Ledger needed by an older frozen acceptance runtime without explicitly deciding
+how that runtime's validation will continue. Implementing or testing this
+operation on a disposable Ledger does not authorize changing a retained run.
+
 The Go caller remains responsible for authenticating the owner, issuing task
 and attempt identities, confirming the provider's upper bound, and obtaining
 attributable usage. Input totals must include cache tokens once; output totals
@@ -73,6 +89,20 @@ against it; the input bound and actual request output cap remain enforced.
 An absent or zero total retains the original strict input/output accounting
 bounds. Invalid, negative, overflowing or insufficient totals refuse dispatch.
 The model payload cannot supply or change this Go-owned setting.
+
+OpenAI-compatible totals are reconciled when present. Grok may expose reasoning
+separately from visible `completion_tokens`; Go adds it only when the unique
+`total_tokens` exactly equals input plus visible output plus reasoning. A relay
+that already includes reasoning in completion is counted once. A missing total
+with positive Grok reasoning, contradictory totals, malformed reasoning details
+or repeated accounting fields retain unknown usage and the original reservation.
+Known text-only responses can also check their derived visible-answer count;
+tool/function output remains included in the total budget without assuming its
+token count is answer text. Other models keep the included-reasoning convention. This follows the explicit
+counters rather than guessing from the answer text or calculating currency.
+The [xAI Chat Completions contract](https://docs.x.ai/developers/rest-api-reference/inference/chat-completions)
+also describes a visible-output cap, so it is not proof of a reasoning-inclusive
+upper bound; the separate confirmed total-bound requirement above still applies.
 
 An optional Go-only `CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS` profile sets the
 upstream request deadline in whole seconds from 1 to 600. An absent setting keeps
@@ -230,6 +260,34 @@ accounting gap that can be settled later and does not reopen the completed scope
 Full coding tasks, product fault recovery, reflection writeback, cross-session
 recall and complete Trace readback are accepted under their own later tickets,
 not implicit dependencies of #3. Current scope evidence is linked from the Goal.
+
+## Go-owned OpenAI streaming
+
+`CODE_AGENT_MODEL_RESPONSE_MODE=sse` enables OpenAI-compatible SSE transport;
+leaving it unset retains JSON. Other values or Anthropic plus SSE refuse admission.
+Go fixes `stream=true` and `stream_options.include_usage=true`, while retaining the
+admitted model, reasoning effort, token limits, deadlines and shared budget.
+Python still receives one completed JSON response, without new network authority.
+
+The Gateway assembles text, reasoning and function-tool argument fragments before
+returning any payload. It requires a consistent identity, a finished choice and
+the stream terminator; final usage must validate before settlement. Cancellation,
+truncation, ambiguous accounting or missing usage retain unknown consumption and
+the original reservation. They never release partial tool calls or trigger an
+unaccounted replay. Reassembled JSON is bounded to 16 MiB; event framing is bounded
+separately to 128 MiB. SSE request mode is recorded in the effective model profile.
+
+SSE evaluation bindings use payload schema version 2. Version 1 remains valid for
+the original JSON profile. Older binaries reject version 2 instead of resuming a
+streaming trial with an unpinned transport; continue these trials with the newer
+runtime. This changes evaluation-binding metadata, not the protobuf/gRPC response.
+The original long-dialogue Session and full release acceptance remain independent.
+
+BeeAPI recommends streaming for gateway errors and notes that usage may arrive
+only in the final chunk ([troubleshooting](https://beeapi.ai/docs/06-troubleshooting/errors),
+[Chat Completions](https://beeapi.ai/docs/03-api/openai)). This motivates a controlled
+transport comparison; successful fixture checks alone do not prove that SSE fixes
+a real provider failure or satisfies the experiment tickets.
 
 ## Reproducible checks
 

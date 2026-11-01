@@ -26,6 +26,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "load config:", err)
 		os.Exit(1)
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--eval-trial" {
+		if err := cli.RunEvaluation(ctx, cfg, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			os.Exit(3)
+		}
+		return
+	}
 
 	app := cli.NewApp(cfg, os.Stdin, os.Stdout, os.Stderr)
 	if err := app.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

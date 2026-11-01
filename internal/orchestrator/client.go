@@ -166,16 +166,17 @@ type ConversationRequest struct {
 	NewTurn bool
 	// SurfaceSHA256 binds a resumed run to the immutable checkpoint Surface.
 	// Legal tool/result suffixes may grow while this identity remains stable.
-	SurfaceSHA256     string
-	Actor             ActorIdentity
-	History           []ConversationMessage
-	State             *codeagentpb.PlanTodoSnapshot
-	HarnessManaged    bool
-	MemoryContextJSON string
-	ContextEnvelope   *codeagentpb.ContextEnvelope
-	AgentTask         *codeagentpb.AgentTask
-	AllowedTools      []string
-	MCPCatalog        *codeagentpb.MCPToolCatalog
+	SurfaceSHA256         string
+	Actor                 ActorIdentity
+	History               []ConversationMessage
+	State                 *codeagentpb.PlanTodoSnapshot
+	HarnessManaged        bool
+	MemoryContextJSON     string
+	ContextEnvelope       *codeagentpb.ContextEnvelope
+	AgentTask             *codeagentpb.AgentTask
+	AllowedTools          []string
+	MCPCatalog            *codeagentpb.MCPToolCatalog
+	EvaluationContextJSON string
 }
 
 type ConversationResult struct {
@@ -188,14 +189,15 @@ type ConversationResult struct {
 // from writing deltas, state, tool results, or Subagent lifecycle facts into
 // another Session.
 type ConversationHandlers struct {
-	Tool           ToolHandler
-	Event          EventHandler
-	AskUser        AskUserHandler
-	TextDelta      func(delta string)
-	Compaction     func(update *codeagentpb.CompactionUpdate) error
-	PlanTodo       func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error
-	AgentSpawn     AgentSpawnHandler
-	AgentLifecycle AgentLifecycleHandler
+	MemoryContextSent func(context.Context, string) error
+	Tool              ToolHandler
+	Event             EventHandler
+	AskUser           AskUserHandler
+	TextDelta         func(delta string)
+	Compaction        func(update *codeagentpb.CompactionUpdate) error
+	PlanTodo          func(plan *codeagentpb.PlanUpdate, todo *codeagentpb.TodoUpdate) error
+	AgentSpawn        AgentSpawnHandler
+	AgentLifecycle    AgentLifecycleHandler
 }
 
 type ToolProgress struct {
@@ -544,10 +546,23 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	if c == nil || c.client == nil {
 		return nil, errors.New("orchestrator client is nil")
 	}
+	actor, sessionID, err := c.actorForSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("bind actor to session: %w", err)
+	}
+	return c.CompactConversation(ctx, ConversationRequest{SessionID: sessionID, Actor: actor, History: history}, ConversationHandlers{Compaction: c.OnCompaction})
+}
+
+// CompactConversation keeps actor, canonical history and persistence scoped to
+// one request, including when the Client connection serves multiple Sessions.
+func (c *Client) CompactConversation(ctx context.Context, request ConversationRequest, handlers ConversationHandlers) (*codeagentpb.CompactionUpdate, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("orchestrator client is nil")
+	}
 	ctx, cancel := context.WithTimeout(ctx, c.ConversationTimeout())
 	defer cancel()
 	ctx = c.injectTraceMetadata(ctx)
-	actor, sessionID, err := c.actorForSession(sessionID)
+	actor, sessionID, err := bindActorToSession(request.Actor, request.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("bind actor to session: %w", err)
 	}
@@ -557,8 +572,8 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	}
 	defer release()
 
-	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(history))
-	for _, item := range trimConversationHistory(history) {
+	historyPayload := make([]*codeagentpb.ConversationMessage, 0, len(request.History))
+	for _, item := range conversationRequestHistory(request) {
 		historyPayload = append(historyPayload, &codeagentpb.ConversationMessage{
 			Role: item.Role, Content: item.Content, CreatedAt: item.CreatedAt,
 			SchemaVersion: item.SchemaVersion, Name: item.Name, ToolCallId: item.ToolCallID, IsError: item.IsError,
@@ -575,9 +590,9 @@ func (c *Client) Compact(ctx context.Context, sessionID string, history []Conver
 	if err != nil {
 		return nil, fmt.Errorf("compact orchestrator history: %w", err)
 	}
-	if update != nil && strings.TrimSpace(update.GetSummary()) != "" && c.OnCompaction != nil {
-		if err := c.OnCompaction(update); err != nil {
-			return nil, fmt.Errorf("persist compaction update: %w", err)
+	if update != nil && strings.TrimSpace(update.GetSummary()) != "" && handlers.Compaction != nil {
+		if err := handlers.Compaction(update); err != nil {
+			return nil, fmt.Errorf("persist compaction update: %w: %w", ErrCompactionPersistence, err)
 		}
 	}
 	return update, nil
@@ -706,23 +721,29 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 	if err := stream.Send(&codeagentpb.HarnessMessage{
 		Payload: &codeagentpb.HarnessMessage_UserInput{
 			UserInput: &codeagentpb.UserInput{
-				Text:              request.Input,
-				SessionId:         sessionID,
-				WorkingDir:        request.WorkingDir,
-				History:           historyPayload,
-				PlanTodoState:     request.State,
-				Actor:             actorProto(actor),
-				HarnessManaged:    request.HarnessManaged,
-				MemoryContextJson: request.MemoryContextJSON,
-				ContextEnvelope:   request.ContextEnvelope,
-				AgentTask:         request.AgentTask,
-				AllowedTools:      request.AllowedTools,
-				ModelGateway:      binding,
-				McpCatalog:        request.MCPCatalog,
+				Text:                  request.Input,
+				SessionId:             sessionID,
+				WorkingDir:            request.WorkingDir,
+				History:               historyPayload,
+				PlanTodoState:         request.State,
+				Actor:                 actorProto(actor),
+				HarnessManaged:        request.HarnessManaged,
+				MemoryContextJson:     request.MemoryContextJSON,
+				ContextEnvelope:       request.ContextEnvelope,
+				AgentTask:             request.AgentTask,
+				AllowedTools:          request.AllowedTools,
+				ModelGateway:          binding,
+				McpCatalog:            request.MCPCatalog,
+				EvaluationContextJson: request.EvaluationContextJSON,
 			},
 		},
 	}); err != nil {
 		return "", fmt.Errorf("send user input: %w", err)
+	}
+	if handlers.MemoryContextSent != nil {
+		if err := handlers.MemoryContextSent(ctx, request.MemoryContextJSON); err != nil {
+			return "", fmt.Errorf("persist memory injection: %w", err)
+		}
 	}
 	defer func() { _ = stream.CloseSend() }()
 
@@ -854,14 +875,7 @@ func (c *Client) runConversation(ctx context.Context, request ConversationReques
 				continue
 			}
 			if !payload.Done.GetSuccess() {
-				reason := strings.TrimSpace(payload.Done.GetMessage())
-				if reason == "" {
-					reason = "unspecified failure"
-				}
-				if code := strings.TrimSpace(payload.Done.GetErrorCode()); code != "" {
-					reason = code + ": " + reason
-				}
-				return "", fmt.Errorf("%w: %s", ErrConversationFailed, reason)
+				return "", failedConversation(strings.TrimSpace(payload.Done.GetErrorCode()))
 			}
 			if payload.Done.Message != "" {
 				parts = append(parts, payload.Done.Message)

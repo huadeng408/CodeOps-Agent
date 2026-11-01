@@ -1702,6 +1702,7 @@ def test_compact_forwards_structured_tool_history(monkeypatch, tmp_path) -> None
 
 
 def test_server_persists_langgraph_checkpoint_in_project_agent_dir(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("CODE_AGENT_MODEL_ADMISSION", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "")
     app = OrchestratorServer(
         ServerConfig(project_root=str(tmp_path), memory_dir=str(tmp_path / "memory"))
@@ -1710,6 +1711,29 @@ def test_server_persists_langgraph_checkpoint_in_project_agent_dir(monkeypatch, 
         checkpoint = tmp_path / ".agent" / "checkpoints.sqlite"
         assert checkpoint.exists()
         assert app.graph._checkpointer is not None
+    finally:
+        app.close()
+
+
+def test_harness_bootstrap_keeps_python_facts_out_of_task_inventory(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", "required")
+    project = tmp_path / "prepared-task"
+    project.mkdir()
+    app = OrchestratorServer(
+        ServerConfig(
+            project_root=str(project),
+            working_dir=str(project),
+            memory_dir=str(tmp_path / "runtime-memory"),
+            context_backend="sqlite",
+        )
+    )
+    try:
+        assert app.graph.checkpoint_path is None
+        assert app.context_store is None
+        assert app.layered_context is None
+        assert not (project / ".agent").exists()
+        assert app.memory is None
+        assert not (tmp_path / "runtime-memory").exists()
     finally:
         app.close()
 

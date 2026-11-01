@@ -52,6 +52,11 @@ Memory attributable to evidence in the Session Ledger or another approved
 source.
 _Avoid_: copied transcript, unverified citation
 
+**Frozen Memory View**:
+A fixed, attributable selection of prior Memory available to an evaluation
+Session. New Session facts remain auditable but do not expand that selection.
+_Avoid_: live shared memory
+
 **Checkpoint**:
 A durable recovery anchor for a known Session state. Restoring a Checkpoint
 changes the active Surface without deleting later Session Ledger facts.

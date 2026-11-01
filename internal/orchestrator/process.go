@@ -51,13 +51,14 @@ type ManagedProcess interface {
 type ProcessStarter func(ctx context.Context) (ManagedProcess, error)
 
 type ProcessManager struct {
-	cfg      ProcessConfig
-	mu       sync.Mutex
-	client   *Client
-	process  ManagedProcess
-	exitCh   chan error // receives the exit error of the current process
-	owned    bool
-	stopping bool
+	cfg           ProcessConfig
+	mu            sync.Mutex
+	client        *Client
+	process       ManagedProcess
+	exitCh        chan error // receives the exit error of the current process
+	owned         bool
+	stopping      bool
+	startupStages *startupStages
 
 	// starter launches a fresh orchestrator process. Defaults to the
 	// exec-based launcher; overridable for tests.
@@ -93,8 +94,8 @@ func NewProcessManager(cfg ProcessConfig) *ProcessManager {
 	if cfg.ConversationTimeout <= 0 {
 		cfg.ConversationTimeout = 5 * time.Minute
 	}
-	m := &ProcessManager{cfg: cfg}
-	m.starter = defaultProcessStarter(cfg)
+	m := &ProcessManager{cfg: cfg, startupStages: &startupStages{}}
+	m.starter = defaultProcessStarter(cfg, m.startupStages)
 	return m
 }
 
@@ -165,7 +166,7 @@ func (m *ProcessManager) acquireLocked(ctx context.Context) (*Client, error) {
 func (m *ProcessManager) ensureStartedLocked(ctx context.Context) (*Client, error) {
 	proc, exit, err := m.launchLocked(ctx)
 	if err != nil {
-		return nil, err
+		return nil, &startupFailure{reason: "launch_failed", childStage: m.startupStages.value(), cause: err}
 	}
 
 	client, err := NewClient(m.cfg.Address)
@@ -175,7 +176,7 @@ func (m *ProcessManager) ensureStartedLocked(ctx context.Context) (*Client, erro
 	}
 	client.SetConversationTimeout(m.cfg.ConversationTimeout)
 	client.SetModelScopeFactory(m.cfg.ModelScopeFactory)
-	if err := m.waitUntilHealthy(ctx, client); err != nil {
+	if err := m.waitUntilHealthy(ctx, client, exit); err != nil {
 		_ = client.Close()
 		m.reapProcessLocked(proc, exit)
 		return nil, err
@@ -192,6 +193,7 @@ func (m *ProcessManager) ensureStartedLocked(ctx context.Context) (*Client, erro
 // goroutine so the process is always reaped exactly once. The caller must hold
 // m.mu (the starter itself is allowed to block briefly).
 func (m *ProcessManager) launchLocked(ctx context.Context) (ManagedProcess, chan error, error) {
+	m.startupStages.reset()
 	proc, err := m.starter(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -406,9 +408,10 @@ func (m *ProcessManager) Owned() bool {
 
 // defaultProcessStarter returns the production starter that spawns the Python
 // orchestrator as a subprocess configured from cfg.
-func defaultProcessStarter(cfg ProcessConfig) ProcessStarter {
+func defaultProcessStarter(cfg ProcessConfig, stages *startupStages) ProcessStarter {
 	return func(ctx context.Context) (ManagedProcess, error) {
 		cmd := buildOrchestratorCmd(cfg)
+		cmd.Stdout, cmd.Stderr = stages, stages
 		injectTraceContext(ctx, cmd)
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("start orchestrator: %w", err)
@@ -449,6 +452,7 @@ func buildOrchestratorCmd(cfg ProcessConfig) *exec.Cmd {
 		filtered = append(filtered, item)
 	}
 	cmd.Env = append(filtered, "CODE_AGENT_MODEL_ADMISSION=required")
+	cmd.Env = append(cmd.Env, "CODE_AGENT_STARTUP_DIAGNOSTICS=1")
 	if cfg.RequireHarnessWorktree {
 		cmd.Env = append(cmd.Env, "CODE_AGENT_REQUIRE_HARNESS_WORKTREE=1")
 	}
@@ -477,12 +481,20 @@ func (p *osProcess) Kill() error {
 	return p.cmd.Process.Kill()
 }
 
-func (m *ProcessManager) waitUntilHealthy(ctx context.Context, client *Client) error {
+func (m *ProcessManager) waitUntilHealthy(ctx context.Context, client *Client, exit <-chan error) error {
 	deadline := time.Now().Add(m.cfg.StartupTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-exit:
+			if err == nil {
+				err = errors.New("orchestrator exited before health")
+			}
+			return &startupFailure{reason: "process_exited", childStage: m.startupStages.value(), cause: err}
+		default:
+		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return &startupFailure{reason: "context_canceled", childStage: m.startupStages.value(), cause: ctx.Err()}
 		}
 		if healthy(ctx, client) {
 			return nil
@@ -491,9 +503,9 @@ func (m *ProcessManager) waitUntilHealthy(ctx context.Context, client *Client) e
 		time.Sleep(100 * time.Millisecond)
 	}
 	if lastErr != nil {
-		return fmt.Errorf("orchestrator did not become healthy: %w", lastErr)
+		return &startupFailure{reason: "health_deadline", childStage: m.startupStages.value(), cause: lastErr}
 	}
-	return errors.New("orchestrator did not become healthy")
+	return &startupFailure{reason: "health_deadline", childStage: m.startupStages.value(), cause: errors.New("orchestrator did not become healthy")}
 }
 
 func healthy(ctx context.Context, client *Client) bool {

@@ -50,6 +50,27 @@ type openSandboxManifest struct {
 	PolicySHA256      string `json:"policy_sha256"`
 }
 
+// OpenSandboxIdentity is the non-secret, approved control-plane identity.
+// Ready still has to pass before any task is admitted.
+type OpenSandboxIdentity struct {
+	ManifestSHA256    string `json:"manifest_sha256"`
+	SourceSHA         string `json:"source_sha"`
+	PolicySHA256      string `json:"policy_sha256"`
+	ServerContainerID string `json:"server_container_id"`
+	ServerImage       string `json:"server_image"`
+	ExecdImage        string `json:"execd_image"`
+	EgressImage       string `json:"egress_image"`
+	TaskImage         string `json:"task_image"`
+}
+
+func (r *OpenSandboxRunner) ApprovedIdentity(ctx context.Context) (OpenSandboxIdentity, error) {
+	manifest, err := r.manifest()
+	if err != nil || r.Ready(ctx) != nil {
+		return OpenSandboxIdentity{}, ErrSandboxUnavailable
+	}
+	return OpenSandboxIdentity{r.config.OpenSandboxManifestSHA256, manifest.SourceSHA, manifest.PolicySHA256, manifest.ServerContainerID, manifest.ServerImage, manifest.ExecdImage, manifest.EgressImage, r.config.Image}, nil
+}
+
 type openSandboxContainer struct {
 	ID     string `json:"Id"`
 	Config struct {

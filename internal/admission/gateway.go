@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,14 +35,18 @@ import (
 )
 
 type ProviderConfig struct {
+	ResponseMode          string // Empty keeps JSON; sse is an explicit Go-owned OpenAI transport profile.
+	ProviderSessionID     string // Trusted opaque provider routing key; never placed on the model surface.
+	ReportedModel         string // Optional exact response ID; never changes the requested model.
 	Protocol              string
 	BaseURL               string
 	Model                 string
 	APIKey                string
 	InputLimit            int64
 	OutputLimit           int64
-	TotalLimit            int64 // Optional accounting bound when the answer cap excludes reasoning.
-	RequestTimeoutSeconds int64 // Zero retains the default request deadline.
+	TotalLimit            int64  // Optional accounting bound when the answer cap excludes reasoning.
+	RequestTimeoutSeconds int64  // Zero retains the default request deadline.
+	ReasoningEffort       string // Optional Go-owned OpenAI-compatible request override.
 }
 
 const modelRetryDelayLimitSeconds = 10
@@ -68,7 +73,7 @@ type Gateway struct {
 	listener       net.Listener
 	address        string
 	http           *http.Client
-	taskAdmission  func(context.Context, string) error
+	taskAdmission  func(context.Context, string, string) error
 	runtimeStopped func(context.Context, string) error
 }
 
@@ -79,8 +84,9 @@ func NewGateway(budget *Budget, provider ProviderConfig) *Gateway {
 	}}
 }
 
-// SetTaskAdmission is configured by Go; the capability's Ledger root supplies the task ID.
-func (gateway *Gateway) SetTaskAdmission(check func(context.Context, string) error) {
+// SetTaskAdmission is configured by Go; both IDs come from the authenticated
+// capability. A child shares the task budget but has its own execution context.
+func (gateway *Gateway) SetTaskAdmission(check func(context.Context, string, string) error) {
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	gateway.taskAdmission = check
@@ -246,7 +252,7 @@ func (gateway *Gateway) Bind(owner uint, taskID, sessionID string) (*pb.ModelGat
 	}
 	if gateway.budget != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := gateway.budget.recordScope(ctx, owner, taskID, scope.id, session.VerificationAdmissionScopeBoundEventType)
+		err := gateway.budget.recordScope(ctx, owner, taskID, scope.id, session.VerificationAdmissionScopeBoundEventType, sessionID)
 		cancel()
 		if err != nil {
 			stopScope()
@@ -329,6 +335,55 @@ func (gateway *Gateway) BindExistingTask(ctx context.Context, owner uint, taskID
 // FinishTask is an explicit operator action, never a per-turn or restart reset.
 func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) error {
 	return gateway.finishTask(ctx, actor, false)
+}
+
+// CheckTaskYield is a read-only operator preflight; it never finalizes a Session.
+func (gateway *Gateway) CheckTaskYield(ctx context.Context, actor identity.Actor) error {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	return gateway.checkTaskYield(ctx, actor)
+}
+
+func (gateway *Gateway) checkTaskYield(ctx context.Context, actor identity.Actor) error {
+	if gateway.budget == nil || actor.Validate() != nil {
+		return ErrInvalidAdmission
+	}
+	root, err := session.ModelTaskRoot(ctx, gateway.budget.ledger, actor)
+	if err != nil {
+		return err
+	}
+	if root != actor.SessionID {
+		return ErrInvalidAdmission
+	}
+	if err := session.ModelTaskYieldable(ctx, gateway.budget.ledger, actor); err != nil {
+		return err
+	}
+	state, err := gateway.budget.read(ctx, ActorOwner(actor))
+	if err != nil {
+		return err
+	}
+	if state.TaskID != root || state.TaskOwnerID != ActorOwner(actor) {
+		return ErrInvalidAdmission
+	}
+	if state.ActiveCalls != 0 {
+		return ErrUsageUnknown
+	}
+	if state.taskHasScopes(ActorOwner(actor), root) {
+		return ErrTaskBusy
+	}
+	return nil
+}
+
+// YieldTask clears scheduling ownership only after the same read-only checks.
+// The original Session and the task's future ability to reacquire are retained.
+func (gateway *Gateway) YieldTask(ctx context.Context, actor identity.Actor) error {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	if err := gateway.checkTaskYield(ctx, actor); err != nil {
+		return err
+	}
+	_, err := gateway.budget.YieldTask(ctx, ActorOwner(actor), actor.SessionID)
+	return err
 }
 
 // AbandonCanceledTask retires model admission after a durable cancellation.
@@ -427,6 +482,20 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		result.ErrorCode = "model_prerequisites_missing"
 		return result, nil
 	}
+	_, evaluationDeadline, err := gateway.budget.evaluationBudget(ctx, scope.taskID)
+	if err != nil {
+		result.ErrorCode = admissionErrorCode(err)
+		return result, nil
+	}
+	if !evaluationDeadline.IsZero() {
+		if !time.Now().Before(evaluationDeadline) {
+			result.ErrorCode = admissionErrorCode(ErrWallClockBudget)
+			return result, nil
+		}
+		var stopEvaluation context.CancelFunc
+		ctx, stopEvaluation = context.WithDeadline(ctx, evaluationDeadline)
+		defer stopEvaluation()
+	}
 	ctx, cancel := context.WithTimeout(ctx, config.invocationTimeout())
 	defer cancel()
 	stopScopeWatch := context.AfterFunc(scope.ctx, cancel)
@@ -475,13 +544,26 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		}
 	}
 	payload["stream"] = false
+	if config.ResponseMode == "sse" {
+		payload["stream"] = true
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	} else {
+		delete(payload, "stream_options")
+	}
 	if config.Protocol == "openai" {
-		// The completion limit includes reasoning output on reasoning models.
+		// Provider cap semantics vary; reconcile all returned usage before settlement.
 		payload["max_completion_tokens"] = config.OutputLimit
 		delete(payload, "max_tokens")
 	} else {
 		payload["max_tokens"] = config.OutputLimit
 		delete(payload, "max_completion_tokens")
+	}
+	if err := config.applyRequestProfile(payload); err != nil {
+		return nil, err
+	}
+	effectiveProfile := config.EvaluationProfile()
+	if effort, ok := payload["reasoning_effort"].(string); ok && validReasoningEffort(effort) {
+		effectiveProfile.ReasoningEffort = effort
 	}
 	if n, exists := payload["n"]; exists && n != float64(1) {
 		return nil, status.Error(codes.InvalidArgument, "multiple model choices are not admitted")
@@ -504,7 +586,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			result.ErrorCode = "model_gateway_unavailable"
 			return result, nil
 		}
-		if checkTask != nil && checkTask(ctx, scope.taskID) != nil {
+		if checkTask != nil && checkTask(ctx, scope.taskID, scope.sessionID) != nil {
 			result.ErrorCode = "task_prerequisites_missing"
 			return result, nil
 		}
@@ -542,6 +624,12 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			return result, nil
 		}
 		upstream.Header.Set("Content-Type", "application/json")
+		if config.ResponseMode == "sse" {
+			upstream.Header.Set("Accept", "text/event-stream")
+		}
+		if config.ProviderSessionID != "" {
+			upstream.Header.Set("X-Trace-Id", config.ProviderSessionID)
+		}
 		if config.Protocol == "anthropic" {
 			upstream.Header.Set("x-api-key", config.APIKey)
 			upstream.Header.Set("anthropic-version", "2023-06-01")
@@ -563,14 +651,40 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			result.ErrorCode = "provider_http_unknown"
 			return result, nil
 		}
-		data, err := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
+		var data []byte
+		if config.ResponseMode == "sse" && response.StatusCode == http.StatusOK {
+			data, err = readOpenAIStream(response, config.Model)
+		} else {
+			data, err = io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
+		}
 		if err != nil || len(data) > 16<<20 {
+			if config.ResponseMode == "sse" {
+				reason := "stream_read_unknown"
+				var protocolError streamProtocolError
+				var providerError *streamProviderError
+				if errors.As(err, &providerError) {
+					reason = "provider_stream_error"
+					metadata, _ := json.Marshal(map[string]any{"error": providerError.metadata})
+					logProviderFailure(response.StatusCode, metadata, config.APIKey)
+				} else if errors.As(err, &protocolError) {
+					reason = string(protocolError)
+				} else if errors.Is(err, io.ErrUnexpectedEOF) {
+					reason = "incomplete_stream"
+				}
+				if config.APIKey != "" && strings.Contains(reason, config.APIKey) {
+					reason = "unknown"
+				}
+				log.Printf("model stream failure: http_status=%d reason=%s", response.StatusCode, reason)
+			}
 			result.ErrorCode = "provider_response_unknown"
 			var timeout net.Error
 			if errors.As(err, &timeout) && timeout.Timeout() {
 				result.ErrorCode = "provider_timeout_unknown"
 			}
 			return result, nil
+		}
+		if response.StatusCode != http.StatusOK {
+			logProviderFailure(response.StatusCode, data, config.APIKey)
 		}
 		failure := "provider_http"
 		if response.StatusCode == http.StatusTooManyRequests {
@@ -580,7 +694,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		} else if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			failure = "provider_authentication"
 		}
-		usage, err := normalizeUsage(config.Protocol, data)
+		usage, err := normalizeUsage(config.Protocol, config.Model, data)
 		if err != nil {
 			result.ErrorCode = "provider_usage_unknown"
 			if response.StatusCode != http.StatusOK {
@@ -588,7 +702,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			}
 			return result, nil
 		}
-		if usage.input > config.InputLimit || (config.TotalLimit == 0 && usage.output > config.OutputLimit) || usage.input+usage.output > config.tokenLimit() {
+		if usage.input > config.InputLimit || (config.TotalLimit == 0 && usage.output > config.OutputLimit) || usage.visibleOutput != nil && *usage.visibleOutput > config.OutputLimit || usage.input+usage.output > config.tokenLimit() {
 			result.ErrorCode = "provider_bound_violated"
 			auditCtx, cancel := newAuditContext()
 			defer cancel()
@@ -614,6 +728,10 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		decoder.UseNumber()
 		if decoder.Decode(&decoded) != nil {
 			result.ErrorCode = "provider_response_unknown"
+			return result, nil
+		}
+		if err := gateway.recordEvaluationModel(auditCtx, scope.taskID, callID, decoded, effectiveProfile); err != nil {
+			result.ErrorCode = "provider_model_identity_unconfirmed"
 			return result, nil
 		}
 		canonical, err := json.Marshal(decoded)
@@ -662,6 +780,38 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	return result, nil
 }
 
+func logProviderFailure(status int, data []byte, key string) {
+	var envelope struct {
+		Error struct{ Type, Code, Param json.RawMessage }
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		envelope.Error.Type, envelope.Error.Code, envelope.Error.Param = nil, nil, nil
+	}
+	// Only fixed labels survive; provider messages can echo credentials.
+	safe := func(raw json.RawMessage) string {
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return "unknown"
+		}
+		if key != "" && strings.Contains(value, key) {
+			return "unknown"
+		}
+		switch value {
+		case "server_error", "internal_error", "api_error", "new_api_error", "upstream_error", "invalid_request_error",
+			"authentication_error", "permission_error", "not_found_error", "overloaded_error", "rate_limit_error",
+			"rate_limit_exceeded", "insufficient_quota", "insufficient_user_quota", "insufficient_token_quota",
+			"no_available_channel", "model_not_found", "unsupported_parameter", "invalid_parameter", "invalid_api_key",
+			"context_length_exceeded", "bad_response_status_code", "timeout",
+			"model", "messages", "temperature", "max_tokens", "max_completion_tokens", "reasoning_effort",
+			"tools", "tool_choice", "parallel_tool_calls", "response_format", "stream":
+			return value
+		}
+		return "unknown"
+	}
+	log.Printf("model provider failure: http_status=%d type=%s code=%s param=%s", status,
+		safe(envelope.Error.Type), safe(envelope.Error.Code), safe(envelope.Error.Param))
+}
+
 func retryAfterDelay(values []string, now time.Time) (time.Duration, bool) {
 	// Retry-After is a single value; joining field lines can synthesize an HTTP-date.
 	if len(values) > 1 {
@@ -685,6 +835,18 @@ func retryAfterDelay(values []string, now time.Time) (time.Duration, bool) {
 }
 
 func (config ProviderConfig) Validate() error {
+	if err := config.ValidateResponseProfile(); err != nil {
+		return err
+	}
+	if err := config.ValidateRoutingProfile(); err != nil {
+		return err
+	}
+	if err := config.ValidateIdentityProfile(); err != nil {
+		return err
+	}
+	if err := config.ValidateReasoningProfile(); err != nil {
+		return err
+	}
 	if _, err := providerEndpoint(config); err != nil {
 		return err
 	}
@@ -743,7 +905,10 @@ func providerEndpoint(config ProviderConfig) (string, error) {
 	}
 }
 
-type tokenUsage struct{ input, output, cached int64 }
+type tokenUsage struct {
+	input, output, cached int64
+	visibleOutput         *int64
+}
 
 func accountingJSONFields(data []byte, uniqueNames ...string) (map[string]json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -776,13 +941,13 @@ func accountingJSONFields(data []byte, uniqueNames ...string) (map[string]json.R
 	return fields, nil
 }
 
-func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
+func normalizeUsage(protocol, model string, data []byte) (tokenUsage, error) {
 	// Duplicate accounting fields cannot establish usage, even when a later value is smaller.
 	response, err := accountingJSONFields(data, "usage")
 	if err != nil {
 		return tokenUsage{}, ErrUsageUnknown
 	}
-	uniqueNames := []string{"prompt_tokens", "completion_tokens", "prompt_tokens_details"}
+	uniqueNames := []string{"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details"}
 	if protocol == "anthropic" {
 		uniqueNames = []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}
 	}
@@ -847,13 +1012,65 @@ func normalizeUsage(protocol string, data []byte) (tokenUsage, error) {
 	if cached < 0 || cached > input {
 		return tokenUsage{}, ErrUsageUnknown
 	}
-	return tokenUsage{input: input, output: output, cached: cached}, nil
+	var reasoning int64
+	reasoningKnown := false
+	if raw, ok := usage["completion_tokens_details"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		details, err := accountingJSONFields(raw, "reasoning_tokens")
+		if err != nil {
+			return tokenUsage{}, ErrUsageUnknown
+		}
+		if raw, ok := details["reasoning_tokens"]; ok {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &reasoning) != nil || reasoning < 0 || reasoning > VerificationTokenLimit {
+				return tokenUsage{}, ErrUsageUnknown
+			}
+			reasoningKnown = true
+		}
+	}
+	if _, ok := usage["total_tokens"]; ok {
+		total, err := read("total_tokens")
+		if err != nil {
+			return tokenUsage{}, ErrUsageUnknown
+		}
+		if total != input+output {
+			// Grok can report visible output separately; the total must prove the extra reasoning.
+			if !strings.HasPrefix(model, "grok-") || reasoning == 0 || total != input+output+reasoning {
+				return tokenUsage{}, ErrUsageUnknown
+			}
+			output += reasoning
+		}
+	} else if strings.HasPrefix(model, "grok-") && reasoning > 0 {
+		return tokenUsage{}, ErrUsageUnknown
+	}
+	if reasoning > output {
+		return tokenUsage{}, ErrUsageUnknown
+	}
+	var visible *int64
+	if reasoningKnown {
+		var choices []struct {
+			Message struct {
+				Content      *string
+				ToolCalls    []json.RawMessage `json:"tool_calls"`
+				FunctionCall json.RawMessage   `json:"function_call"`
+			}
+		}
+		if json.Unmarshal(response["choices"], &choices) == nil && len(choices) == 1 {
+			message := choices[0].Message
+			// Function tokens are not subject to the visible-answer cap either.
+			if message.Content != nil && len(message.ToolCalls) == 0 && (len(message.FunctionCall) == 0 || bytes.Equal(bytes.TrimSpace(message.FunctionCall), []byte("null"))) {
+				value := output - reasoning
+				visible = &value
+			}
+		}
+	}
+	return tokenUsage{input: input, output: output, cached: cached, visibleOutput: visible}, nil
 }
 
 func admissionErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrBudgetExhausted):
 		return "token_budget_exhausted"
+	case errors.Is(err, ErrWallClockBudget):
+		return "wall_clock_budget_exhausted"
 	case errors.Is(err, ErrUsageUnknown):
 		return "token_usage_unknown"
 	case errors.Is(err, ErrTaskBusy):

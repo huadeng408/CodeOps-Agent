@@ -85,23 +85,41 @@ func (a *App) handleAgentsCommand(ctx context.Context, fields []string) {
 }
 
 type cliAgentTools struct {
-	cfg    config.Config
-	mu     sync.Mutex
-	items  map[string]*tools.Executor
-	tracer genai.Tracer
-	mcp    *mcp.Manager
-	mcps   map[string]*mcp.Manager
+	cfg        config.Config
+	mu         sync.Mutex
+	items      map[string]*tools.Executor
+	tracer     genai.Tracer
+	mcp        *mcp.Manager
+	mcps       map[string]*mcp.Manager
+	production *evaluationProduction
 }
 
 func (a *cliAgentTools) Execute(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
 	return a.ExecuteInWorkingDir(ctx, actor, sessionID, a.cfg.WorkingDir, call)
 }
 
-func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Actor, sessionID, dir string, call orchestrator.ToolCall) orchestrator.ToolResult {
+func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, actor identity.Actor, sessionID, dir string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	dependency := a.cfg.Sandbox.DependencyOperationID
+	if a.production != nil {
+		workspace, err := a.production.toolWorkspace(ctx, actor, sessionID, dir, call)
+		if err != nil {
+			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "production task workspace admission unavailable", ExitCode: 1}
+		}
+		dependency = workspace.DependencyOperationID
+	}
 	a.mu.Lock()
 	executor := a.items[sessionID]
 	if executor == nil {
 		executor = tools.NewExecutor(dir)
+		if a.production != nil {
+			spill, err := tools.NewTaskSpillStore(a.cfg.Sandbox.TrustRoot, sessionID)
+			if err != nil {
+				a.mu.Unlock()
+				_ = executor.Close()
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "production spill storage unavailable", ExitCode: 1}
+			}
+			executor.SetSpillStore(spill)
+		}
 		executor.SetTracer(a.tracer)
 		mcpManager := a.mcp
 		if mcpManager != nil {
@@ -124,7 +142,11 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 			Directories: a.cfg.SkillDirectories, UserDSHDir: filepath.Join(user, ".dsh", "skills"), UserAgentsDir: filepath.Join(user, ".agents", "skills"), GlobalDir: filepath.Join(user, ".agent", "skills")})
 		executor.SetSkillsManager(skillManager)
 		if a.cfg.Sandbox.Enabled || a.cfg.Sandbox.Toolchain != "" || strings.EqualFold(strings.TrimSpace(string(a.cfg.Sandbox.Backend)), string(sandbox.BackendOpenSandbox)) {
-			executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{Backend: a.cfg.Sandbox.Backend, WSLDistro: a.cfg.Sandbox.WSLDistro, TrustRoot: dir, Image: a.cfg.Sandbox.Image, Toolchain: a.cfg.Sandbox.Toolchain, AllowWorkspaceWrite: a.cfg.Sandbox.AllowWorkspaceWrite,
+			trustRoot := dir
+			if strings.EqualFold(strings.TrimSpace(string(a.cfg.Sandbox.Backend)), string(sandbox.BackendOpenSandbox)) {
+				trustRoot = a.cfg.Sandbox.TrustRoot
+			}
+			executor.SetSandbox(sandbox.NewSandboxRunner(sandbox.Config{Backend: a.cfg.Sandbox.Backend, WSLDistro: a.cfg.Sandbox.WSLDistro, TrustRoot: trustRoot, Image: a.cfg.Sandbox.Image, Toolchain: a.cfg.Sandbox.Toolchain, AllowWorkspaceWrite: a.cfg.Sandbox.AllowWorkspaceWrite,
 				MemoryLimit: a.cfg.Sandbox.MemoryLimit, CPULimit: a.cfg.Sandbox.CPULimit, PidsLimit: a.cfg.Sandbox.PidsLimit, TmpfsSize: a.cfg.Sandbox.TmpfsSize,
 				OpenSandboxManifest: a.cfg.Sandbox.OpenSandboxManifest, OpenSandboxManifestSHA256: a.cfg.Sandbox.OpenSandboxManifestSHA256}))
 		}
@@ -141,7 +163,7 @@ func (a *cliAgentTools) ExecuteInWorkingDir(ctx context.Context, _ identity.Acto
 	result, err := executor.Execute(ctx, tools.ToolRequest{
 		Name: call.Name, Arguments: arguments, OwnerSessionID: sessionID,
 		OperationID:           call.OperationID,
-		DependencyOperationID: a.cfg.Sandbox.DependencyOperationID,
+		DependencyOperationID: dependency,
 		MCPServer:             call.MCPServer, MCPInputSchemaSHA256: call.MCPInputSchemaSHA256, MCPServerConfigSHA256: call.MCPServerConfigSHA256,
 	})
 	out := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Output: result.Output, Error: result.Error, ExitCode: int32(result.ExitCode), Truncated: result.Truncated}

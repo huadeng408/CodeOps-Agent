@@ -773,33 +773,44 @@ func TestOrchestratorClientReturnsErrorForUnsuccessfulDone(t *testing.T) {
 	if !errors.Is(err, orchestrator.ErrConversationFailed) {
 		t.Fatalf("converse error = %v, want ErrConversationFailed", err)
 	}
-	if result.Success || result.Message != "" || !strings.Contains(err.Error(), "checkpoint persistence unavailable") {
+	if result.Success || result.Message != "" || strings.Contains(err.Error(), "checkpoint persistence unavailable") || orchestrator.FailureDetails(err)["terminal_code"] != "orchestrator_terminal_unknown" {
 		t.Fatalf("failed conversation result=%+v error=%v", result, err)
 	}
 }
 
 type errorCodeOrchestratorServer struct {
 	codeagentpb.UnimplementedOrchestratorServer
+	code string
 }
 
 func (s *errorCodeOrchestratorServer) Converse(stream codeagentpb.Orchestrator_ConverseServer) error {
 	if _, err := stream.Recv(); err != nil && err != io.EOF {
 		return err
 	}
+	code := s.code
+	if code == "" {
+		code = "provider_runtime_error"
+	}
 	return stream.Send(&codeagentpb.OrchestratorMessage{
 		Payload: &codeagentpb.OrchestratorMessage_Done{
-			Done: &codeagentpb.Done{Success: false, Message: "agent provider failed; retry this task", ErrorCode: "provider_runtime_error", Retryable: true},
+			Done: &codeagentpb.Done{Success: false, Message: "agent provider failed; retry this task", ErrorCode: code, Retryable: true},
 		},
 	})
 }
 
 func TestOrchestratorClientPreservesDoneErrorCode(t *testing.T) {
+	for _, code := range []string{"provider_runtime_error", "token_budget_exhausted", "wall_clock_budget_exhausted"} {
+		t.Run(code, func(t *testing.T) { testOrchestratorClientPreservesDoneErrorCode(t, code) })
+	}
+}
+
+func testOrchestratorClientPreservesDoneErrorCode(t *testing.T, code string) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := grpc.NewServer()
-	codeagentpb.RegisterOrchestratorServer(server, &errorCodeOrchestratorServer{})
+	codeagentpb.RegisterOrchestratorServer(server, &errorCodeOrchestratorServer{code: code})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 	client, err := orchestrator.NewClient(listener.Addr().String())
@@ -808,8 +819,8 @@ func TestOrchestratorClientPreservesDoneErrorCode(t *testing.T) {
 	}
 	defer client.Close()
 	_, err = client.RunConversation(context.Background(), orchestrator.ConversationRequest{Input: "resume", SessionID: "error-code-session", Actor: orchestrator.ActorIdentity{ActorID: "actor-error-code", Subject: "user-error-code", TenantID: "tenant-error-code", Roles: []string{"USER"}}}, orchestrator.ConversationHandlers{})
-	if !strings.Contains(err.Error(), "provider_runtime_error") {
-		t.Fatalf("error = %v, want stable provider_runtime_error code", err)
+	if orchestrator.ConversationFailureCode(err) != code {
+		t.Fatalf("safe code = %s, want %s", orchestrator.ConversationFailureCode(err), code)
 	}
 }
 

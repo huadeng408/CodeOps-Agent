@@ -16,7 +16,8 @@
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 路由已恢复，同一 Session 的原 200 项验证正在运行；继续后续恢复、实施与最终收尾，不能拼接不同尝试 |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原 200 项范围保留；最新 run 的租约已过期且无终态。本轮经用户批准仅让出准入槽，原 Session／checkpoint／计量不变；后续需新版 runtime，不能直接续接旧源码的正式验收 |
+| [#36 Agent 对照实验](https://github.com/huadeng408/CodeOps-Agent/issues/36) | 公共入口、隔离、共同预算、独立 OpenSandbox 评分及恢复协议已实现并回归；Context 8 次为 7 次通过、1 次提供方未知。预算、真实故障和多轮序列受提供方 5xx／返回模型 ID 变化阻塞，未运行项保留；[本轮证据](evidence/agent-evaluation-experiments-2026-10-31.md) |
 | 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |

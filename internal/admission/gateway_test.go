@@ -47,7 +47,7 @@ func TestGatewayRefusesUnadmittedTaskBeforeReservationOrHTTP(t *testing.T) {
 	gateway := admission.NewGateway(budget, admission.ProviderConfig{Protocol: "openai", BaseURL: upstream.URL,
 		Model: "fixture-model", APIKey: "fixture-only", InputLimit: 100, OutputLimit: 3})
 	runtime := sandbox.NewOpenSandboxRunner(sandbox.Config{TrustRoot: t.TempDir()})
-	gateway.SetTaskAdmission(func(ctx context.Context, _ string) error { return runtime.Ready(ctx) })
+	gateway.SetTaskAdmission(func(ctx context.Context, _, _ string) error { return runtime.Ready(ctx) })
 	if err := gateway.Start(); err != nil {
 		t.Fatal(err)
 	}

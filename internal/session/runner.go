@@ -216,16 +216,20 @@ type SessionRunnerOptions struct {
 	Memory              SessionMemory
 	MemoryCommitTimeout time.Duration
 	AgentWorkspace      func(context.Context, AgentWorkspaceRequest) (string, error)
+	// ReadOnlyAgentWorkspace admits production exploration through its signed
+	// parent dispatch and prepared leaf; it does not allocate writable checkouts.
+	ReadOnlyAgentWorkspace func(context.Context, identity.Actor, string, orchestrator.ToolCall) (TaskModelWorkspace, error)
 	// Workspace resolves Go-admitted task paths before Context or model work.
 	Workspace func(context.Context, uint, string) (TaskModelWorkspace, error)
 	// AgentToolBinding resolves dynamic tools before delegation and again before
 	// every child call. Static Agent Card tools remain local policy.
-	AgentToolBinding func(string) (AgentToolBinding, bool)
-	MCPCatalog       func() *codeagentpb.MCPToolCatalog
-	CancelModelCalls func(context.Context, CancelRunCommand) error
-	AgentApproval    func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
-	AgentWorkerCount int
-	Tracer           genai.Tracer
+	AgentToolBinding   func(string) (AgentToolBinding, bool)
+	MCPCatalog         func() *codeagentpb.MCPToolCatalog
+	CancelModelCalls   func(context.Context, CancelRunCommand) error
+	AgentApproval      func(context.Context, *codeagentpb.AgentToolApproval) (ApprovalDecision, error)
+	AgentWorkerCount   int
+	Tracer             genai.Tracer
+	EvaluationObserver func(context.Context, EvaluationBoundary)
 }
 
 type SessionRunner struct {
@@ -935,15 +939,37 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 		return errors.New("session runner requires a workbench")
 	}
 	r.lifecycleMu.RLock()
+	closed := r.closed
+	r.lifecycleMu.RUnlock()
+	if closed {
+		return ErrSessionRunnerClosed
+	}
+	ids, err := r.workbench.ledger.SessionIDs(ctx)
+	if err != nil {
+		return err
+	}
+	return r.recoverSessions(ctx, ids)
+}
+
+// RecoverSession reopens only the authorized Session, without scheduling other
+// retained workloads that happen to share the canonical Ledger.
+func (r *SessionRunner) RecoverSession(ctx context.Context, owner uint, sessionID string) error {
+	if r == nil || r.workbench == nil || r.workbench.ledger == nil {
+		return errors.New("session runner requires a workbench")
+	}
+	if _, err := r.workbench.Get(ctx, owner, sessionID); err != nil {
+		return err
+	}
+	return r.recoverSessions(ctx, []string{sessionID})
+}
+
+func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string) error {
+	r.lifecycleMu.RLock()
 	if r.closed {
 		r.lifecycleMu.RUnlock()
 		return ErrSessionRunnerClosed
 	}
 	r.lifecycleMu.RUnlock()
-	ids, err := r.workbench.ledger.SessionIDs(ctx)
-	if err != nil {
-		return err
-	}
 	var recoverErrs []error
 	for _, sessionID := range ids {
 		if err := ctx.Err(); err != nil {
@@ -1303,6 +1329,9 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	var blocked atomic.Bool
 	retryRunIDs := normalizedRetryRunIDs(request.RetryOfRunID, request.RetryOfRunIDs)
 	handlers := orchestrator.ConversationHandlers{
+		MemoryContextSent: func(ctx context.Context, payload string) error {
+			return r.recordEvaluationMemoryInjection(ctx, key, lease, payload)
+		},
 		AgentSpawn:     r.options.AgentSpawn,
 		AgentLifecycle: r.options.AgentLifecycle,
 		Compaction: func(update *codeagentpb.CompactionUpdate) error {
@@ -1335,7 +1364,11 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 			return result
 		},
 	}
-	result, runErr := r.conversation.RunConversation(runCtx, request, handlers)
+	request, runErr := r.forceEvaluationCompaction(runCtx, key, lease, request, handlers)
+	var result orchestrator.ConversationResult
+	if runErr == nil {
+		result, runErr = r.conversation.RunConversation(runCtx, request, handlers)
+	}
 	postRunCtx := context.WithoutCancel(runCtx)
 	cancel()
 	<-heartbeatDone
@@ -1379,6 +1412,10 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	if message == "" {
 		genai.MarkSpanError(agentSpan)
 		r.fail(traceCtx, key, lease, errors.New("orchestrator returned an empty response"))
+		return
+	}
+	if err := r.completeEvaluationRetry(postRunCtx, key); err != nil {
+		r.fail(traceCtx, key, lease, err)
 		return
 	}
 	if err := r.appendLeasedSurface(postRunCtx, key, lease, "assistant/message", messagePayload{
@@ -1639,12 +1676,23 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if r.options.MCPCatalog != nil {
 		request.MCPCatalog = r.options.MCPCatalog()
 	}
-	if request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
+	evaluation, err := r.evaluationBinding(ctx, events)
+	if err != nil {
+		return orchestrator.ConversationRequest{}, err
+	}
+	if (evaluation == nil || evaluation.Policy.MemoryRead) && request.AgentTask == nil && r.options.Memory != nil && strings.TrimSpace(input) != "" && r.options.Permissions != nil && r.options.Permissions.CheckFor(request.Actor, "RecallMemory", map[string]any{"query": input}) == permission.Approve {
+		var memoryErr error
 		if advanced, ok := r.options.Memory.(AdvancedSessionMemory); ok {
-			request.MemoryContextJSON, _ = advanced.RecallWithOptions(ctx, projectionOwner(events), MemoryQuery{Query: input, MaxTokens: 1200, TargetSessionID: key.sessionID})
+			request.MemoryContextJSON, memoryErr = advanced.RecallWithOptions(ctx, projectionOwner(events), MemoryQuery{Query: input, MaxTokens: 1200, TargetSessionID: key.sessionID})
 		} else {
-			request.MemoryContextJSON, _ = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
+			request.MemoryContextJSON, memoryErr = r.options.Memory.Recall(ctx, projectionOwner(events), input, 1200)
 		}
+		if err := r.recordEvaluationMemory(ctx, key, lease, evaluation, "automatic", "RecallMemory", "", request.MemoryContextJSON, memoryErr == nil, false); err != nil {
+			return orchestrator.ConversationRequest{}, err
+		}
+	}
+	if err := r.applyEvaluationContext(ctx, key, lease, &request, evaluation); err != nil {
+		return orchestrator.ConversationRequest{}, err
 	}
 	return request, nil
 }
@@ -1809,6 +1857,11 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if policyErr != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
 	}
+	evaluation, evaluationErr := r.evaluationBinding(ctx, events)
+	if evaluationErr != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "evaluation policy unavailable", ExitCode: 1}, true
+	}
+	policyAllowed = policyAllowed && evaluationAllowsTool(evaluation, events, call)
 	bindingChanged := false
 	if delegatedBinding == nil && r.options.AgentToolBinding != nil {
 		if binding, ok := r.options.AgentToolBinding(call.Name); ok {
@@ -1955,11 +2008,14 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未获批准", "工具执行未获批准，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
+	if err := r.captureEvaluationWritePreimage(ctx, key, lease, actor, workingDir, call); err != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "evaluation Write preimage unavailable", ExitCode: 1}, true
+	}
 	pending := commitPayload{
 		CommitID: commitIDFor(key.runID, call.ID), RunID: key.runID,
 		ToolCallID: call.ID, ToolName: call.Name, ArgumentsJSON: call.ParametersJSON,
 	}
-	pendingEvent, err := r.appendLeasedFactEvent(ctx, key, lease.LeaseID, commitPendingEventType, pending)
+	pendingEvent, err := r.appendEvaluationToolPending(ctx, key, lease, evaluation, call, pending)
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool commit preparation failed", ExitCode: 1}, true
 	}
@@ -1988,7 +2044,12 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", "工具执行不可用，正在根据当前结果继续处理。", 0, 0)
 		return result, false
 	}
-	if call.Name == "RecallMemory" {
+	if err := r.evaluationBoundary(ctx, key, call, evaluation, "before_effect"); err != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "evaluation fault boundary unavailable", ExitCode: 1}, true
+	}
+	if ctx.Err() != nil {
+		result = orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "tool canceled before execution", ExitCode: 1, Stopped: true}
+	} else if call.Name == "RecallMemory" {
 		result = r.recallSessionMemory(ctx, events, call)
 	} else if call.Name == "ManageMemory" {
 		result = r.manageSessionMemory(ctx, key.sessionID, call)
@@ -2005,10 +2066,23 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	} else {
 		result = r.tools.Execute(ctx, actor, key.sessionID, call)
 	}
-	// A dispatched result is an observed fact even when the user canceled the
-	// transport. This context permits auditing only, never another effect.
+	boundaryErr := r.evaluationBoundary(ctx, key, call, evaluation, "after_effect")
+	// Persist observed results without permitting another effect after cancellation.
+	executionContext := ctx
 	ctx, stopAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer stopAudit()
+	if evaluation != nil && result.Error == "" && result.ExitCode == 0 {
+		read := call.Name == "RecallMemory"
+		if call.Name == "ManageMemory" {
+			var command MemoryCommand
+			read = json.Unmarshal([]byte(call.ParametersJSON), &command) == nil && (command.Action == "read" || command.Action == "list")
+		}
+		if read {
+			if err := r.recordEvaluationMemory(ctx, key, lease, evaluation, "explicit", call.Name, call.ID, result.Output, true, false); err != nil {
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "memory read evidence unavailable", ExitCode: 1}, true
+			}
+		}
+	}
 	result.ToolCallID = call.ID
 	result.ToolName = call.Name
 	for _, modification := range codeModificationPayloads(result, key.runID) {
@@ -2024,6 +2098,12 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 		result.Error = "tool result persistence failed"
 		result.ExitCode = 1
 		return result, true
+	}
+	if boundaryErr != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "evaluation fault boundary unavailable", ExitCode: 1}, true
+	}
+	if err := r.evaluationBoundary(executionContext, key, call, evaluation, "after_record"); err != nil {
+		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "evaluation fault boundary unavailable", ExitCode: 1}, true
 	}
 	if result.Error != "" || result.ExitCode != 0 {
 		r.recordProgress(ctx, key, lease, progressMilestone, "工具未完成", fmt.Sprintf("%s 未完成，正在根据当前结果继续处理。", progressToolName(call.Name)), 0, 0)
@@ -2294,6 +2374,13 @@ func (r *SessionRunner) appendLeasedFactEvent(ctx context.Context, key runKey, l
 		if err != nil {
 			return Event{}, err
 		}
+		if eventType == "evaluation/fault-ready" {
+			for _, event := range events {
+				if event.Type == eventType {
+					return Event{}, ErrSessionStateConflict
+				}
+			}
+		}
 		view, viewErr := reduceSessionView(events)
 		if viewErr != nil {
 			return Event{}, viewErr
@@ -2525,9 +2612,11 @@ func (r *SessionRunner) fail(parent context.Context, key runKey, lease runLeaseP
 		}
 	}
 	_ = r.appendLeasedFact(ctx, key, lease.LeaseID, "execution_result", map[string]any{
+		"run_id":     key.runID,
 		"status":     "run_failed",
 		"error_code": publicRunErrorCode(cause),
 		"error_type": errorTypeName(cause),
+		"diagnostic": orchestrator.FailureDetails(cause),
 	})
 	r.recordProgress(ctx, key, lease, progressMilestone, "运行未完成", "本次运行未完成，可以从当前任务继续或重试。", 0, 0)
 	cancel()
@@ -2542,6 +2631,9 @@ func errorTypeName(cause error) string {
 }
 
 func publicRunErrorCode(cause error) string {
+	if code := orchestrator.ConversationFailureCode(cause); code != "" {
+		return code
+	}
 	if cause == nil {
 		return "unknown"
 	}

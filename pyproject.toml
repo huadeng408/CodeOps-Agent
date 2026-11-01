@@ -54,6 +54,7 @@ eval = [
     # previously undeclared.  Capped below 2.0: verified only against 1.26.x, and
     # numpy 2.0 removed APIs these modules have not been re-checked against.
     "numpy>=1.26,<2",
+    "matplotlib>=3.8,<4",  # reproducible experiment figures
 ]
 test = [
     # Direct imports used by the repository test suite. Keep these explicit so

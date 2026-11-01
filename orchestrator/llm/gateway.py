@@ -13,17 +13,46 @@ from .client import ChatRequest, ChatResponse, LLMClient, RequestInterrupted, Us
 from .providers.anthropic import AnthropicClient
 from .providers.openai import OpenAIClient
 
+_GATEWAY_RPC_CODES = {f"model_gateway_rpc_{code.name.lower()}" for code in grpc.StatusCode}
+_GATEWAY_INVALID_DETAILS = {
+    "invalid thinking configuration": "thinking_budget_invalid",
+    "invalid thinking budget": "thinking_budget_invalid",
+    "thinking budget exceeds admitted output limit": "thinking_budget_exceeds_output_limit",
+    "model payload does not match the admitted profile": "model_payload_mismatch",
+    "unsupported model payload field": "unsupported_payload_field",
+    "invalid model tools": "model_tools_invalid",
+    "provider-hosted tools are not admitted": "model_hosted_tools_rejected",
+    "multiple model choices are not admitted": "model_multiple_choices_rejected",
+    "unsupported model purpose": "model_purpose_invalid",
+    "invalid model request": "model_request_invalid",
+    "invalid model payload": "model_payload_invalid",
+}
+
+
+def _gateway_rpc_code(error: grpc.RpcError) -> str:
+    try:
+        status = error.code()
+        if status == grpc.StatusCode.INVALID_ARGUMENT:
+            known = _GATEWAY_INVALID_DETAILS.get(error.details())
+            if known:
+                return known
+        if isinstance(status, grpc.StatusCode):
+            return f"model_gateway_rpc_{status.name.lower()}"
+    except Exception:
+        pass
+    return "model_gateway_rpc_unknown"
+
 
 class ModelGatewayError(RuntimeError):
     def __init__(self, code: str):
-        if code not in {
+        if code not in _GATEWAY_RPC_CODES and code not in _GATEWAY_INVALID_DETAILS.values() and code not in {
             "model_prerequisites_missing", "task_prerequisites_missing", "model_gateway_binding_invalid", "model_gateway_unavailable",
             "model_gateway_response_invalid", "provider_request_invalid", "provider_transport_unknown", "provider_timeout_unknown",
             "provider_response_unknown", "provider_http_unknown", "provider_rate_limited_unknown",
             "provider_transient_unknown", "provider_authentication_unknown", "provider_usage_unknown",
             "provider_http", "provider_rate_limited", "provider_transient", "provider_authentication",
-            "provider_retry_canceled",
-            "provider_bound_violated", "provider_settlement_unknown", "token_budget_exhausted",
+            "provider_retry_canceled", "provider_model_identity_unconfirmed",
+            "provider_bound_violated", "provider_settlement_unknown", "token_budget_exhausted", "wall_clock_budget_exhausted",
             "token_usage_unknown", "code_task_busy", "model_concurrency_exhausted",
             "model_call_already_reserved", "code_task_closed", "token_admission_unavailable",
         }:
@@ -116,8 +145,8 @@ class HarnessModelClient(LLMClient):
                     break
                 except grpc.FutureTimeoutError:
                     continue
-        except grpc.RpcError:
-            raise ModelGatewayError("model_gateway_unavailable") from None
+        except grpc.RpcError as error:
+            raise ModelGatewayError(_gateway_rpc_code(error)) from None
         if result.error_code:
             raise ModelGatewayError(result.error_code)
         try:

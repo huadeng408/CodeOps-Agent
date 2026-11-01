@@ -99,6 +99,13 @@ func ConfirmTaskRuntimeStops(ctx context.Context, ledger EventLog, actor identit
 		if err != nil {
 			return err
 		}
+		grade, err := ReadEvaluationGrade(snapshot.Events)
+		if err != nil {
+			return err
+		}
+		if grade != nil && (grade.ResultEventID == "" || !grade.Stopped) {
+			return ErrSessionStateConflict
+		}
 		runs, err := projectRuns(snapshot.Events)
 		if err != nil {
 			return err

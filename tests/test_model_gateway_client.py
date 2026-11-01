@@ -17,6 +17,38 @@ from orchestrator.workflows.models import WorkerSpec
 from orchestrator.workflows.providers import ProviderWorkerExecutor
 
 
+@pytest.mark.parametrize("rpc_status,details,expected", [
+    (grpc.StatusCode.INVALID_ARGUMENT, "private-unrecognized-upstream-text", "model_gateway_rpc_invalid_argument"),
+    (grpc.StatusCode.INVALID_ARGUMENT, "model payload does not match the admitted profile", "model_payload_mismatch"),
+    (grpc.StatusCode.INVALID_ARGUMENT, "unsupported model payload field", "unsupported_payload_field"),
+    (grpc.StatusCode.UNAUTHENTICATED, "private-unrecognized-upstream-text", "model_gateway_rpc_unauthenticated"),
+    (grpc.StatusCode.UNAVAILABLE, "private-unrecognized-upstream-text", "model_gateway_rpc_unavailable"),
+])
+def test_harness_gateway_retains_only_fixed_rpc_failure(rpc_status, details, expected):
+    from orchestrator.llm.gateway import ModelGatewayError
+
+    class Service(rpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            context.abort(rpc_status, details)
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_ModelGatewayServicer_to_server(Service(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    client = HarnessModelClient(pb.ModelGatewayBinding(
+        schema_version=1, address=f"127.0.0.1:{port}", capability=b"a" * 32,
+        protocol="openai", model="fixture-model",
+    ))
+    try:
+        with pytest.raises(ModelGatewayError) as failure:
+            asyncio.run(client.chat(ChatRequest(model="fixture-model", messages=[ChatMessage("user", "hello")])))
+        assert failure.value.code == expected
+        assert "private-unrecognized-upstream-text" not in str(failure.value)
+    finally:
+        client.close()
+        server.stop(0).wait()
+
+
 @pytest.mark.parametrize("rpc_timeout,minimum,maximum", [(0, 60, 66), (210, 205, 212), (570, 565, 572), (1830, 1825, 1840)])
 def test_harness_model_client_uses_go_issued_rpc_deadline(rpc_timeout, minimum, maximum):
     deadlines = []
@@ -163,7 +195,7 @@ def test_harness_model_client_uses_go_transport_and_normalized_usage(monkeypatch
     "", "token_usage_unknown", "task_prerequisites_missing", "missing_binding",
     "provider_rate_limited", "provider_transient", "provider_authentication",
     "provider_http", "provider_retry_canceled",
-    "provider_timeout_unknown",
+    "provider_timeout_unknown", "token_budget_exhausted", "wall_clock_budget_exhausted",
 ])
 @pytest.mark.parametrize("admission_mode", ["required", ""])
 def test_orchestrator_conversation_uses_harness_gateway(tmp_path, monkeypatch, gateway_error, admission_mode):

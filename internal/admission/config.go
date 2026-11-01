@@ -39,5 +39,5 @@ func ProviderFromEnv() ProviderConfig {
 			requestTimeout = -1
 		}
 	}
-	return ProviderConfig{Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output, TotalLimit: total, RequestTimeoutSeconds: requestTimeout}
+	return ProviderConfig{ResponseMode: strings.TrimSpace(os.Getenv("CODE_AGENT_MODEL_RESPONSE_MODE")), Protocol: protocol, BaseURL: os.Getenv(prefix + "_BASE_URL"), Model: os.Getenv(prefix + "_MODEL"), APIKey: key, InputLimit: input, OutputLimit: output, TotalLimit: total, RequestTimeoutSeconds: requestTimeout, ReasoningEffort: strings.TrimSpace(os.Getenv("CODE_AGENT_MODEL_REASONING_EFFORT")), ReportedModel: strings.TrimSpace(os.Getenv("CODE_AGENT_MODEL_REPORTED_MODEL")), ProviderSessionID: os.Getenv("CODE_AGENT_MODEL_PROVIDER_SESSION_ID")}
 }

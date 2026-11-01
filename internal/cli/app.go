@@ -52,44 +52,58 @@ type Options struct {
 }
 
 type App struct {
-	cfg            config.Config
-	input          *InputBuffer
-	renderer       *StreamRenderer
-	status         *StatusLine
-	metrics        *metrics.Collector
-	session        *session.Manager
-	memory         memory.CLIStore
-	ledgerMemory   *memory.LedgerMemory
-	agentRunner    *session.SessionRunner
-	agentTools     *cliAgentTools
-	todos          *todo.Manager
-	permissions    *permission.Controller
-	actor          identity.Actor
-	orchestrator   *orchestrator.Client
-	orchestratorPM *orchestrator.ProcessManager
-	modelGateway   *admission.Gateway
-	tokenBudget    *admission.Budget
-	hooks          *hooks.Engine
-	executor       *tools.Executor
-	ragClient      *rag.Client
-	ragIngester    rag.OpenFileIngester
-	safety         *safety.Analyzer
-	mcp            *mcp.Manager
-	worktree       *worktree.Manager
-	undo           *undo.Manager
-	recovery       *recovery.Engine
-	skills         *skills.Manager
-	prompts        *prompts.Builder
-	planMode       bool
-	instructions   []config.InstructionSource
-	interruptMu    sync.Mutex
-	telemetry      genai.Tracer
-	currentCancel  context.CancelFunc
-	interrupts     int
-	lastInterrupt  time.Time
+	cfg                  config.Config
+	input                *InputBuffer
+	renderer             *StreamRenderer
+	status               *StatusLine
+	metrics              *metrics.Collector
+	session              *session.Manager
+	memory               memory.CLIStore
+	ledgerMemory         *memory.LedgerMemory
+	agentRunner          *session.SessionRunner
+	agentTools           *cliAgentTools
+	todos                *todo.Manager
+	permissions          *permission.Controller
+	actor                identity.Actor
+	orchestrator         *orchestrator.Client
+	orchestratorErr      error
+	orchestratorPM       *orchestrator.ProcessManager
+	modelGateway         *admission.Gateway
+	tokenBudget          *admission.Budget
+	hooks                *hooks.Engine
+	executor             *tools.Executor
+	ragClient            *rag.Client
+	ragIngester          rag.OpenFileIngester
+	safety               *safety.Analyzer
+	mcp                  *mcp.Manager
+	worktree             *worktree.Manager
+	undo                 *undo.Manager
+	recovery             *recovery.Engine
+	skills               *skills.Manager
+	prompts              *prompts.Builder
+	planMode             bool
+	instructions         []config.InstructionSource
+	interruptMu          sync.Mutex
+	telemetry            genai.Tracer
+	currentCancel        context.CancelFunc
+	interrupts           int
+	lastInterrupt        time.Time
+	ledger               session.EventLog
+	initializeMemory     func() (*memory.LedgerMemory, error)
+	evaluationPolicy     *session.EvaluationPolicy
+	evaluationObserver   func(context.Context, session.EvaluationBoundary)
+	evaluationProduction *evaluationProduction
 }
 
 func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writer) *App {
+	return newApp(cfg, stdin, stdout, stderr, true)
+}
+
+func newApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writer, recoverAll bool) *App {
+	return newAppWithTaskInventory(cfg, stdin, stdout, stderr, recoverAll, false)
+}
+
+func newAppWithTaskInventory(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writer, recoverAll, preparedTask bool) *App {
 	instructions, _ := config.LoadInstructions(cfg.ProjectRoot, cfg.WorkingDir)
 	allowlist := make([]permission.AllowRule, 0, len(cfg.Permissions.Allow))
 	for _, rule := range cfg.Permissions.Allow {
@@ -133,11 +147,13 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		StartupTimeout:         time.Duration(cfg.OrchestratorStartupTimeout) * time.Second,
 		ConversationTimeout:    time.Duration(cfg.OrchestratorConversationTimeout) * time.Second,
 	})
-	orchestratorClient, _ := orchestratorManager.Client(context.Background())
+	orchestratorClient, orchestratorErr := orchestratorManager.Client(context.Background())
 	mcpManager := mcp.NewManager()
 	_ = mcpManager.LoadConfigFile(resolveConfigPath(cfg.ProjectRoot, cfg.MCPConfig))
 	_ = mcpManager.StartAll(context.Background())
-	_ = mcpManager.WriteToolsManifest(cfg.ProjectRoot)
+	if !preparedTask {
+		_ = mcpManager.WriteToolsManifest(cfg.ProjectRoot)
+	}
 	hookEngine := hooks.NewEngine()
 	for _, hookConfig := range cfg.Hooks {
 		hookEngine.RegisterCommandHook(hooks.CommandHook{
@@ -214,23 +230,16 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "skills discovery failed: %v\n", err)
 	}
-	if err := skillsManager.WriteManifest(filepath.Join(cfg.ProjectRoot, ".agent", "skills.json")); err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "skills manifest failed: %v\n", err)
+	if !preparedTask {
+		if err := skillsManager.WriteManifest(filepath.Join(cfg.ProjectRoot, ".agent", "skills.json")); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "skills manifest failed: %v\n", err)
+		}
 	}
 	executor.SetSkillsManager(skillsManager)
 
 	telemetry := genai.NewTelemetry(context.Background())
 	orchestratorClient.SetTracer(telemetry)
-	actor := identity.Actor{
-		SchemaVersion: identity.SchemaVersion,
-		ActorID:       cfg.ActorID,
-		Subject:       cfg.ActorSubject,
-		TenantID:      cfg.ActorTenantID,
-		Roles:         append([]string(nil), cfg.ActorRoles...),
-	}
-	if actor.ActorID == "" {
-		actor = identity.Default()
-	}
+	actor := configuredCLIActor(cfg)
 	if orchestratorClient != nil {
 		if err := orchestratorClient.SetActor(actor); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "actor configuration failed: %v\n", err)
@@ -241,37 +250,39 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	sessionManager := session.NewManager(sessionStore)
 
 	app := &App{
-		cfg:            cfg,
-		input:          NewInputBuffer(stdin, stdout),
-		renderer:       NewStreamRenderer(stdout),
-		status:         NewStatusLine(),
-		metrics:        metrics.NewCollector(),
-		session:        sessionManager,
-		todos:          todo.NewManager(),
-		permissions:    permission.NewControllerWithRules(levels, allowlist, denylist),
-		actor:          actor,
-		orchestrator:   orchestratorClient,
-		orchestratorPM: orchestratorManager,
-		hooks:          hookEngine,
-		executor:       executor,
-		ragClient:      ragClient,
-		ragIngester:    ragClient,
-		safety:         safety.NewAnalyzer(),
-		mcp:            mcpManager,
-		worktree:       worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
-		undo:           undo.NewManager(),
-		recovery:       recovery.NewEngine(),
-		skills:         skillsManager,
-		prompts:        prompts.NewBuilder(),
-		instructions:   instructions,
-		telemetry:      telemetry,
+		cfg:             cfg,
+		input:           NewInputBuffer(stdin, stdout),
+		renderer:        NewStreamRenderer(stdout),
+		status:          NewStatusLine(),
+		metrics:         metrics.NewCollector(),
+		session:         sessionManager,
+		todos:           todo.NewManager(),
+		permissions:     permission.NewControllerWithRules(levels, allowlist, denylist),
+		actor:           actor,
+		orchestrator:    orchestratorClient,
+		orchestratorErr: orchestratorErr,
+		orchestratorPM:  orchestratorManager,
+		hooks:           hookEngine,
+		executor:        executor,
+		ragClient:       ragClient,
+		ragIngester:     ragClient,
+		safety:          safety.NewAnalyzer(),
+		mcp:             mcpManager,
+		worktree:        worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
+		undo:            undo.NewManager(),
+		recovery:        recovery.NewEngine(),
+		skills:          skillsManager,
+		prompts:         prompts.NewBuilder(),
+		instructions:    instructions,
+		telemetry:       telemetry,
 	}
 	app.status.CostUnknown = true
-	app.memory = memory.NewLazyLedgerCLI(func() (*memory.LedgerMemory, error) {
+	app.initializeMemory = func() (*memory.LedgerMemory, error) {
 		ledger, err := sessionStore.Ledger()
 		if err != nil {
 			return nil, err
 		}
+		app.ledger = ledger
 		app.tokenBudget = admission.NewBudget(ledger)
 		app.modelGateway = admission.NewGateway(app.tokenBudget, admission.ProviderFromEnv())
 		if err := app.modelGateway.Start(); err != nil {
@@ -282,16 +293,45 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 			return app.orchestrator.ReflectMemory(ctx, request)
 		})
 		app.ledgerMemory.SetTracer(telemetry)
+		var sessionMemory session.SessionMemory = app.ledgerMemory
+		if app.evaluationPolicy != nil {
+			memoryActor, err := app.actor.BindSession("evaluation-view")
+			if err != nil {
+				return nil, err
+			}
+			memoryOwner, err := memory.OwnerForActor(memoryActor)
+			if err != nil {
+				return nil, err
+			}
+			frozen, err := memory.NewFrozenView(app.ledgerMemory, app.evaluationPolicy.FrozenMemory, cfg.WorkingDir, memoryOwner)
+			if err != nil {
+				return nil, err
+			}
+			sessionMemory = frozen
+		}
 		if app.orchestrator != nil {
-			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager)}
+			app.agentTools = &cliAgentTools{cfg: cfg, items: make(map[string]*tools.Executor), tracer: telemetry, mcp: mcpManager, mcps: make(map[string]*mcp.Manager), production: app.evaluationProduction}
+			var productionWorkspace func(context.Context, uint, string) (session.TaskModelWorkspace, error)
+			var readOnlyAgentWorkspace func(context.Context, identity.Actor, string, orchestrator.ToolCall) (session.TaskModelWorkspace, error)
+			if app.evaluationProduction != nil {
+				productionWorkspace = app.evaluationProduction.modelWorkspace
+				readOnlyAgentWorkspace = app.evaluationProduction.agentWorkspace
+				app.modelGateway.SetRuntimeStopVerifier(app.evaluationProduction.runner.ConfirmStopped)
+			}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
-				MemoryCommitTimeout: app.modelGateway.ReflectionTimeout(),
-				Permissions:         app.permissions, Memory: app.ledgerMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog, CancelModelCalls: app.modelGateway.StopRunCalls,
-				AgentLifecycle: app.handleAgentLifecycle,
+				Workspace:              productionWorkspace,
+				ReadOnlyAgentWorkspace: readOnlyAgentWorkspace,
+				MemoryCommitTimeout:    app.modelGateway.ReflectionTimeout(),
+				Permissions:            app.permissions, Memory: sessionMemory, Tracer: telemetry, MCPCatalog: mcpManager.Catalog, CancelModelCalls: app.modelGateway.StopRunCalls,
+				EvaluationObserver: app.evaluationObserver,
+				AgentLifecycle:     app.handleAgentLifecycle,
 				AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 					binding, ok := mcpManager.ResolveBinding(name)
 					return session.AgentToolBinding{Name: binding.Name, Server: binding.Server, InputSchemaSHA256: binding.InputSchemaSHA256, ServerConfigSHA256: binding.ServerConfigSHA256}, ok
 				}, AgentWorkspace: func(ctx context.Context, request session.AgentWorkspaceRequest) (string, error) {
+					if app.evaluationProduction != nil {
+						return "", errors.New("production child workspace mapping unavailable")
+					}
 					tree, err := app.worktree.SpawnAgent(ctx, worktree.AgentSpawnRequest{RequestID: request.TaskID, ParentSessionID: request.ParentSessionID, ChildSessionID: request.ChildSessionID, WorktreeName: request.TaskID, Retain: true})
 					if err != nil {
 						return "", err
@@ -307,12 +347,15 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 					return tree.Path, nil
 				},
 			})
-			if err := app.agentRunner.Recover(context.Background()); err != nil {
-				return nil, err
+			if recoverAll {
+				if err := app.agentRunner.Recover(context.Background()); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return app.ledgerMemory, nil
-	}, sessionManager.Current)
+	}
+	app.memory = memory.NewLazyLedgerCLI(app.initializeMemory, sessionManager.Current)
 	app.input.SetInterruptHandler(func() bool {
 		return app.handleInterrupt(time.Now(), func() {})
 	})
@@ -324,6 +367,14 @@ func NewApp(cfg config.Config, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 	app.input.SetWorkspaceDir(cfg.WorkingDir)
 	return app
+}
+
+func configuredCLIActor(cfg config.Config) identity.Actor {
+	actor := identity.Actor{SchemaVersion: identity.SchemaVersion, ActorID: cfg.ActorID, Subject: cfg.ActorSubject, TenantID: cfg.ActorTenantID, Roles: append([]string(nil), cfg.ActorRoles...)}
+	if actor.ActorID == "" {
+		return identity.Default()
+	}
+	return actor
 }
 
 func (a *App) Run(ctx context.Context) error {

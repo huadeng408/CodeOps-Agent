@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,34 @@ func OpenSQLiteEventLog(path string) (*SQLiteEventLog, error) {
 		return nil, err
 	}
 	return log, nil
+}
+
+// OpenReadOnlySQLiteEventLog reads an existing Ledger without schema migration
+// or a writable SQLite connection. It cannot create a missing database.
+func OpenReadOnlySQLiteEventLog(path string) (*SQLiteEventLog, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("session event log path is required")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLiteEventLog{Path: path, db: db}, nil
 }
 
 // Append atomically appends one event when expectedSeq equals the next sequence.

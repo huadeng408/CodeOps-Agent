@@ -86,6 +86,7 @@ func TestCLIRestartCompactionIsBoundBeforeForegroundInput(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Stop()
 	cfg := config.Default(t.TempDir())
+	cfg.Sandbox.Enabled = false
 	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.RAGEnabled = listener.Addr().String(), false, false
 	manager := session.NewManager(session.NewSQLiteEventStore(cfg.SessionDBPath))
 	previous := manager.NewSession(cfg.WorkingDir)
@@ -117,6 +118,7 @@ func TestCLIBudgetBeforeForegroundInputShowsRetainedReservation(t *testing.T) {
 	t.Setenv("CODE_AGENT_MODEL_ADMISSION", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", ":invalid")
 	cfg := config.Default(t.TempDir())
+	cfg.Sandbox.Enabled = false
 	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.RAGEnabled = "127.0.0.1:1", false, false
 	store := session.NewSQLiteEventStore(cfg.SessionDBPath)
 	ledger, err := store.Ledger()
@@ -155,6 +157,7 @@ func TestCLIRestartClearRetainsUnknownModelReservation(t *testing.T) {
 	t.Setenv("CODE_AGENT_MODEL_ADMISSION", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", ":invalid")
 	cfg := config.Default(t.TempDir())
+	cfg.Sandbox.Enabled = false
 	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.RAGEnabled = "127.0.0.1:1", false, false
 	store := session.NewSQLiteEventStore(cfg.SessionDBPath)
 	manager := session.NewManager(store)
@@ -235,6 +238,7 @@ func TestCLIDefaultAdmissionRetainsInputWhenCredentialsAreMissing(t *testing.T) 
 	defer server.Stop()
 	root := t.TempDir()
 	cfg := config.Default(root)
+	cfg.Sandbox.Enabled = false
 	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.RAGEnabled = listener.Addr().String(), false, false
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

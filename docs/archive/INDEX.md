@@ -4,6 +4,14 @@ This tree is historical context, not an execution entry. New conversations read 
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
 
+## Agent evaluation and current Goal correction — 2026-10-31
+
+The previous [Goal](agent-evaluation-2026-10-31/docs--GOAL.md) is retained byte-for-byte.
+Its [manifest](agent-evaluation-2026-10-31/manifest.json) records the source commit and checksum.
+The historical statement that the original long-dialogue workload was running is not a live status check.
+Current state and the explicitly approved admission handoff are recorded in
+[the experiment evidence](../evidence/agent-evaluation-experiments-2026-10-31.md).
+
 ## Policy and navigation cleanup — 2026-10-20
 
 Nine tracked originals are retained byte-for-byte in [policy-cleanup-2026-10-20/](policy-cleanup-2026-10-20/).

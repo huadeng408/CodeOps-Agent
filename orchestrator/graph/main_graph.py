@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -22,9 +24,10 @@ class MainGraph:
         default=("route", "execute", "verify", "respond"),
     )
     checkpoint_path: str | Path | None = None
+    ephemeral_checkpoints: bool = False
     interrupt_after: tuple[str, ...] = ()
     _connection: sqlite3.Connection | None = field(default=None, init=False, repr=False)
-    _checkpointer: SqliteSaver | None = field(default=None, init=False, repr=False)
+    _checkpointer: BaseCheckpointSaver | None = field(default=None, init=False, repr=False)
     _compiled: CompiledStateGraph = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -43,7 +46,10 @@ class MainGraph:
         workflow.add_edge("verify", "respond")
         workflow.add_edge("respond", END)
 
-        if self.checkpoint_path is not None:
+        if self.ephemeral_checkpoints:
+            # Go owns durable recovery; this cache retains same-process binding checks.
+            self._checkpointer = InMemorySaver()
+        elif self.checkpoint_path is not None:
             path = Path(self.checkpoint_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._connection = sqlite3.connect(path, check_same_thread=False)
@@ -114,6 +120,7 @@ def _coerce_state(value: GraphState | dict[str, Any]) -> GraphState:
 def build_graph(
     *,
     checkpoint_path: str | Path | None = None,
+    ephemeral_checkpoints: bool = False,
     interrupt_after: tuple[str, ...] = (),
 ) -> MainGraph:
-    return MainGraph(checkpoint_path=checkpoint_path, interrupt_after=interrupt_after)
+    return MainGraph(checkpoint_path=checkpoint_path, ephemeral_checkpoints=ephemeral_checkpoints, interrupt_after=interrupt_after)

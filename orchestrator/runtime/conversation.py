@@ -288,7 +288,7 @@ class ConversationRunner:
     llm: LLMClient | None
     tool_registry: ToolRegistry
     todo_manager: TodoManager
-    memory_manager: MemoryManager
+    memory_manager: MemoryManager | None
     skills: SkillManager
     project_root: str
     working_dir: str
@@ -2334,7 +2334,7 @@ class ConversationRunner:
     ) -> list[ChatMessage]:
         history = history or []
         memories = []
-        if not self.harness_managed:
+        if not self.harness_managed and self.memory_manager is not None:
             recalled = self.memory_manager.recall(
                 user_text,
                 RecallOptions(limit=5, max_tokens=1_200),

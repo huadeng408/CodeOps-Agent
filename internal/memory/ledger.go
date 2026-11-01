@@ -27,11 +27,13 @@ type trajectoryCommit struct {
 // LedgerMemory owns no writable side store. Commits are immutable ledger facts;
 // recall rebuilds the owner-scoped read projection using the current branch.
 type LedgerMemory struct {
-	ledger    session.EventLog
-	workbench *session.Workbench
-	reflector MemoryReflector
-	tracerMu  sync.RWMutex
-	tracer    genai.Tracer
+	ledger                   session.EventLog
+	workbench                *session.Workbench
+	reflector                MemoryReflector
+	tracerMu                 sync.RWMutex
+	tracer                   genai.Tracer
+	frozenRepository         string
+	frozenSourceRepositories map[string]string
 }
 
 var _ session.SessionMemory = (*LedgerMemory)(nil)
@@ -212,6 +214,14 @@ func (m *LedgerMemory) repositoryItems(ctx context.Context, owner uint, targetSe
 		return nil, err
 	}
 	filtered := make([]Memory, 0, len(items))
+	if m.frozenSourceRepositories != nil {
+		for _, item := range items {
+			if _, selected := m.frozenSourceRepositories[item.SessionID]; selected {
+				filtered = append(filtered, item)
+			}
+		}
+		return filtered, nil
+	}
 	repositories := map[string]string{targetSessionID: target}
 	for _, item := range items {
 		source, found := repositories[item.SessionID]
@@ -237,6 +247,19 @@ func (m *LedgerMemory) repositoryKey(ctx context.Context, owner uint, id string)
 	actual, err := trajectoryOwner(snapshot.Events)
 	if err != nil || actual != owner {
 		return "", session.ErrSessionNotFound
+	}
+	if m.frozenRepository != "" {
+		if key, selected := m.frozenSourceRepositories[id]; selected {
+			return key, nil
+		}
+		return m.frozenRepository, nil
+	}
+	root, err := session.EvaluationTaskRoot(ctx, m.ledger, id)
+	if err != nil {
+		return "", err
+	}
+	if root != "" {
+		return trajectoryDigest("evaluation:" + root), nil
 	}
 	var directory string
 	if snapshot.Events[0].Type == "session/created" {

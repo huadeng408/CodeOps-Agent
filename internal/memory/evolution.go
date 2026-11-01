@@ -599,6 +599,10 @@ func (m *LedgerMemory) experienceItems(ctx context.Context, owner uint, detail, 
 }
 
 func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, command session.MemoryCommand) (string, error) {
+	return m.manageWithWriteGuard(ctx, sourceSessionID, command, nil)
+}
+
+func (m *LedgerMemory) manageWithWriteGuard(ctx context.Context, sourceSessionID string, command session.MemoryCommand, validateWrite func(Experience) error) (string, error) {
 	snapshot, err := session.ReadVerifiedSnapshot(ctx, m.ledger, sourceSessionID)
 	if err != nil {
 		return "", err
@@ -631,9 +635,11 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 		if !ok || item.Deleted || item.ExpiresAt != nil && !item.ExpiresAt.After(time.Now()) {
 			return "", errors.New("memory not found")
 		}
-		expected, _, err := m.experienceIdentity(ctx, owner, sourceSessionID, item.Kind, item.Key, entries)
-		if err != nil || expected != item.ID {
-			return "", errors.New("memory repository scope is unavailable")
+		if m.frozenSourceRepositories == nil {
+			expected, _, err := m.experienceIdentity(ctx, owner, sourceSessionID, item.Kind, item.Key, entries)
+			if err != nil || expected != item.ID {
+				return "", errors.New("memory repository scope is unavailable")
+			}
 		}
 		valid, err := m.experienceItems(ctx, owner, "full", "")
 		if err != nil {
@@ -681,6 +687,11 @@ func (m *LedgerMemory) Manage(ctx context.Context, sourceSessionID string, comma
 			}
 		}
 		previous, exists := current[id]
+		if exists && validateWrite != nil {
+			if err := validateWrite(previous); err != nil {
+				return nil, err
+			}
+		}
 		if command.Action != "remember" && exists {
 			expected, _, err := m.experienceIdentity(ctx, owner, sourceSessionID, previous.Kind, previous.Key, current)
 			if err != nil || expected != id {

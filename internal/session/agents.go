@@ -30,6 +30,23 @@ type AgentWorkspaceRequest struct {
 	Kind             string
 }
 
+type agentSpawnArguments struct {
+	Kind         string          `json:"kind"`
+	Title        string          `json:"title"`
+	Objective    string          `json:"objective"`
+	Context      json.RawMessage `json:"context"`
+	ContextJSON  string          `json:"context_json"`
+	Parallel     bool            `json:"parallel"`
+	Message      json.RawMessage `json:"message"`
+	AllowedTools []string        `json:"allowed_tools"`
+}
+
+type agentControlArguments struct {
+	Action  string          `json:"action"`
+	TaskID  string          `json:"task_id"`
+	Message json.RawMessage `json:"message"`
+}
+
 type agentTaskCreated struct {
 	Task                 json.RawMessage    `json:"task"`
 	Signature            string             `json:"signature"`
@@ -96,6 +113,18 @@ func agentCard(kind string) (*pb.AgentCard, []string, error) {
 
 func agentTool(name string) bool {
 	return name == "SpawnAgent" || name == "AgentTask" || name == "PublishArtifact"
+}
+
+func (r *SessionRunner) agentCard(kind string) (*pb.AgentCard, []string, error) {
+	if r.options.ReadOnlyAgentWorkspace == nil {
+		return agentCard(kind)
+	}
+	if kind != "explore" {
+		return nil, nil, ErrInvalidSessionInput
+	}
+	card, _, err := agentCard(kind)
+	card.Description = "Synchronous read-only exploration of the parent's prepared task; explicit text/JSON materials and artifacts only"
+	return card, []string{"Read", "Glob", "Grep", "RecallMemory", "PublishArtifact"}, err
 }
 
 func staticAgentTool(name string) bool {
@@ -168,6 +197,14 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 		result.Error = "agent parent authorization rejected"
 		return result
 	}
+	if r.options.ReadOnlyAgentWorkspace != nil {
+		workspace, err := r.options.ReadOnlyAgentWorkspace(ctx, actor, parentSessionID, call)
+		if err != nil {
+			result.Error = "read-only agent workspace admission rejected"
+			return result
+		}
+		workingDir = workspace.WorkingDir
+	}
 	var output string
 	switch call.Name {
 	case "SpawnAgent":
@@ -188,16 +225,7 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 }
 
 func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identity.Actor, parentDir string, call orchestrator.ToolCall) (output string, returnErr error) {
-	var args struct {
-		Kind         string          `json:"kind"`
-		Title        string          `json:"title"`
-		Objective    string          `json:"objective"`
-		Context      json.RawMessage `json:"context"`
-		ContextJSON  string          `json:"context_json"`
-		Parallel     bool            `json:"parallel"`
-		Message      json.RawMessage `json:"message"`
-		AllowedTools []string        `json:"allowed_tools"`
-	}
+	var args agentSpawnArguments
 	decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&args) != nil || call.ID == "" || len(args.Title) > 240 || strings.TrimSpace(args.Title) == "" || len(args.Objective) > 16000 || strings.TrimSpace(args.Objective) == "" {
@@ -212,9 +240,14 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	}
 	signature := agentDigest([]byte(canonical))
 	taskID := "agent-" + agentDigest([]byte(actor.SessionID + "\x00" + call.ID))[:32]
-	card, allowed, err := agentCard(args.Kind)
+	card, allowed, err := r.agentCard(args.Kind)
 	if err != nil {
 		return "", err
+	}
+	if r.options.ReadOnlyAgentWorkspace != nil {
+		if _, err := readOnlySpawnArguments(call.ParametersJSON); err != nil {
+			return "", err
+		}
 	}
 	if existing, _, err := r.readAgentTask(ctx, owner, taskID, actor.SessionID); err == nil {
 		childEvents, _ := r.workbench.ledger.Events(ctx, taskID)
@@ -268,7 +301,11 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		}
 		// Lifecycle communication is mandatory even with a narrower tool set.
 		allowed = subset
-		for _, name := range []string{"PublishArtifact", "AskUser", "AgentTask"} {
+		mandatory := []string{"PublishArtifact", "AskUser", "AgentTask"}
+		if r.options.ReadOnlyAgentWorkspace != nil {
+			mandatory = []string{"PublishArtifact"}
+		}
+		for _, name := range mandatory {
 			if !seen[name] {
 				allowed = append(allowed, name)
 			}
@@ -533,16 +570,22 @@ func undispatchedRepeatRefusal(events []Event, call toolCallPayload) bool {
 
 // ModelTaskIdle refuses completion while a linked agent can still produce work.
 func ModelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor) error {
-	return modelTaskIdle(ctx, ledger, actor, false)
+	return modelTaskIdle(ctx, ledger, actor, false, false)
+}
+
+// ModelTaskYieldable permits a root's expired lease without treating its run as
+// complete. All existing tool, application, child and runtime checks still apply.
+func ModelTaskYieldable(ctx context.Context, ledger EventLog, actor identity.Actor) error {
+	return modelTaskIdle(ctx, ledger, actor, false, true)
 }
 
 // ModelTaskAdmissionAbandonable permits a durable cancel fence for admission
 // retirement only. It does not confirm foreign resource cleanup or a stopped run.
 func ModelTaskAdmissionAbandonable(ctx context.Context, ledger EventLog, actor identity.Actor) error {
-	return modelTaskIdle(ctx, ledger, actor, true)
+	return modelTaskIdle(ctx, ledger, actor, true, false)
 }
 
-func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, allowCancelFence bool) error {
+func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, allowCancelFence, allowExpiredRootLease bool) error {
 	root, err := ModelTaskRoot(ctx, ledger, actor)
 	if err != nil {
 		return err
@@ -567,6 +610,13 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 		confirmedStops, err := confirmedRuntimeStops(snapshot.Events, current)
 		if err != nil {
 			return err
+		}
+		grade, err := ReadEvaluationGrade(snapshot.Events)
+		if err != nil {
+			return err
+		}
+		if grade != nil && (grade.ResultEventID == "" || !grade.Stopped || grade.State != "completed" && !allowCancelFence) {
+			return ErrSessionStateConflict
 		}
 		proposal, proposalErr := taskProposal(snapshot.Events)
 		if proposalErr != nil {
@@ -593,7 +643,7 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 			if err != nil {
 				return ErrSessionStateConflict
 			}
-			if allowCancelFence && id == root {
+			if allowCancelFence && id == root && grade == nil {
 				view, err := reduceSessionView(snapshot.Events)
 				if err != nil || view.Run == nil || runs[view.Run.RunID].cancelRequest == nil {
 					return ErrSessionStateConflict
@@ -601,6 +651,9 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 			}
 			for _, run := range runs {
 				if !run.terminal || run.view.Status == RunCanceled && run.view.CancellationState == "unknown" {
+					if allowExpiredRootLease && id == root && !run.terminal && run.cancelRequest == nil && run.view.LeaseUntil != nil && !run.view.LeaseUntil.After(time.Now()) {
+						continue
+					}
 					if !allowCancelFence || run.cancelRequest == nil {
 						return ErrSessionStateConflict
 					}
@@ -627,6 +680,14 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 		pending := map[string]bool{}
 		for _, event := range snapshot.Events {
 			switch event.Type {
+			case "tool/call":
+				if allowExpiredRootLease {
+					var call toolCallPayload
+					if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" {
+						return ErrEventIntegrity
+					}
+					pending[invocationHistoryKey(call.RunID, call.ToolCallID)] = true
+				}
 			case commitPendingEventType, toolDispatchedType:
 				var call toolCallPayload
 				if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" {
@@ -641,11 +702,17 @@ func modelTaskIdle(ctx context.Context, ledger EventLog, actor identity.Actor, a
 				if json.Unmarshal(event.Payload, &result) != nil || result.RunID == "" || result.ToolCallID == "" {
 					return ErrEventIntegrity
 				}
+				if allowExpiredRootLease && result.OutcomeUnknown {
+					return ErrSessionStateConflict
+				}
 				if (result.OutcomeUnknown || result.RuntimeID != "") && !result.Stopped && !confirmedStops[event.EventID] {
 					return ErrSessionStateConflict
 				}
 				delete(pending, invocationHistoryKey(result.RunID, result.ToolCallID))
 			case toolUnknownEventType:
+				if allowExpiredRootLease {
+					return ErrSessionStateConflict
+				}
 				var call toolCallPayload
 				if json.Unmarshal(event.Payload, &call) != nil || call.RunID == "" || call.ToolCallID == "" || call.ToolName == "" {
 					return ErrEventIntegrity
@@ -832,6 +899,10 @@ func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {
 func (r *SessionRunner) taskResult(ctx context.Context, owner uint, taskID, parentID string, wait bool) (string, error) {
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
+	deadlineC := deadline.C
+	if r.options.ReadOnlyAgentWorkspace != nil {
+		deadlineC = nil
+	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -840,13 +911,32 @@ func (r *SessionRunner) taskResult(ctx context.Context, owner uint, taskID, pare
 			return "", err
 		}
 		if !wait || taskTerminal(task.Status) || task.Status == "input_required" || len(task.PendingApprovals) > 0 {
+			if wait && taskTerminal(task.Status) && r.options.ReadOnlyAgentWorkspace != nil {
+				var done <-chan struct{}
+				r.agentMu.Lock()
+				for key, execution := range r.activeAgentRuns {
+					if key.sessionID == taskID {
+						done = execution.done
+						break
+					}
+				}
+				r.agentMu.Unlock()
+				if done != nil {
+					select {
+					case <-done:
+						continue
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+			}
 			encoded, err := agentJSON.Marshal(task)
 			return string(encoded), err
 		}
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-deadline.C:
+		case <-deadlineC:
 			encoded, err := agentJSON.Marshal(task)
 			return string(encoded), err
 		case <-ticker.C:
@@ -855,11 +945,7 @@ func (r *SessionRunner) taskResult(ctx context.Context, owner uint, taskID, pare
 }
 
 func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (string, error) {
-	var args struct {
-		Action  string          `json:"action"`
-		TaskID  string          `json:"task_id"`
-		Message json.RawMessage `json:"message"`
-	}
+	var args agentControlArguments
 	decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&args) != nil {
@@ -867,8 +953,12 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	}
 	if args.Action == "cards" {
 		cards := []*pb.AgentCard{}
-		for _, kind := range []string{"deep", "explore", "plan", "general", "background", "review", "security"} {
-			card, _, _ := agentCard(kind)
+		kinds := []string{"deep", "explore", "plan", "general", "background", "review", "security"}
+		if r.options.ReadOnlyAgentWorkspace != nil {
+			kinds = []string{"explore"}
+		}
+		for _, kind := range kinds {
+			card, _, _ := r.agentCard(kind)
 			cards = append(cards, card)
 		}
 		items := make([]json.RawMessage, 0, len(cards))
