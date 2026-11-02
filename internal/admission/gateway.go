@@ -300,7 +300,7 @@ func (gateway *Gateway) StartupRecoveryAllowed(ctx context.Context, actor identi
 	if gateway == nil || gateway.budget == nil || gateway.budget.ledger == nil || actor.Validate() != nil {
 		return false, ErrInvalidAdmission
 	}
-	root, err := session.ModelTaskRoot(ctx, gateway.budget.ledger, actor)
+	root, err := session.StartupModelTaskRoot(ctx, gateway.budget.ledger, actor)
 	if err != nil {
 		return false, err
 	}

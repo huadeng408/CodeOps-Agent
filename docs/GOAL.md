@@ -16,9 +16,8 @@
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段公共入口、夹具构建复用和完整回归已交付，见[工程证据](evidence/engineering-execution-efficiency-2026-11-02.md)。真实实验暴露的冷启动已用 Go-only 控制路径修复；[已完成候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)已取得源码 CI 和真实补评分。新的[确定性摘要保留修复](evidence/compaction-summary-preservation-2026-11-03.md)完成定向回归与两轴审查；最终完整检查按交付提交对应的 Go／Python CI 读回验收 |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原 200 项范围保留；最新 run 的租约已过期且无终态。本轮经用户批准仅让出准入槽，原 Session／checkpoint／计量不变；后续需新版 runtime，不能直接续接旧源码的正式验收 |
-| [#36 Agent 对照实验](https://github.com/huadeng408/CodeOps-Agent/issues/36) | 原 Context 8次保留7通过、1提供方未知；新预算6格为5通过、1预算准入失败，故障恢复7格均完成并独立评分通过，五轮序列补评分7/8、业务不通过且已正常结束。[当前报告与完整来源](evidence/agent-evaluation-experiments-2026-11-03.md)及口述已形成，任务发布和本轮源码交付继续验收；不把负结果或历史 unknown 改为通过 |
+| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段、Go-only 控制路径、[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)已完成各自验证及源码 CI。[启动恢复修复](evidence/startup-recovery-cost-2026-11-03.md)已完成源码、隔离恢复回归和两轴复审，保留完整祖先授权与新鲜围栏；接续新提交 CI、新便携包实际启动验证，不把分配改善当作整批 5 秒通过 |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原 200 项范围和旧接受保护的 Session 保留。新 v10 实际首 POST 在接收前返回503，0 Run／0模型调用／0完成，失败及完整分母已收尾保存；修复 Go 启动恢复后，以新包、新冻结身份继续独立200轮，不拼接旧尝试 |
 | 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
@@ -28,6 +27,8 @@
 
 ## 证据链接
 
+- 三组 Agent 实测：[完整报告、来源和负结果](evidence/agent-evaluation-experiments-2026-11-03.md)；
+  #36 及五张子票已按小规模实验范围验收关闭，不替代独立长对话或发布门禁。
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。

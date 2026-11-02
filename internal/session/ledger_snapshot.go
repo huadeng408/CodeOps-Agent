@@ -28,6 +28,18 @@ func (s LedgerSnapshot) Prefix(endSeq int64) (LedgerSnapshot, error) {
 // ReadVerifiedSnapshot verifies and replays the very same immutable read.
 // Separate Verify/Surface/Events calls can observe different append boundaries.
 func ReadVerifiedSnapshot(ctx context.Context, ledger EventLog, sessionID string) (LedgerSnapshot, error) {
+	snapshot, err := readVerifiedMetadataSnapshot(ctx, ledger, sessionID)
+	if err != nil {
+		return LedgerSnapshot{}, err
+	}
+	snapshot.Surface, err = projectSurface(snapshot.Events)
+	if err != nil {
+		return LedgerSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func readVerifiedMetadataSnapshot(ctx context.Context, ledger EventLog, sessionID string) (LedgerSnapshot, error) {
 	if ledger == nil {
 		return LedgerSnapshot{}, errors.New("session ledger is required")
 	}
@@ -38,9 +50,5 @@ func ReadVerifiedSnapshot(ctx context.Context, ledger EventLog, sessionID string
 	if err := verifyLedgerEvents(events, sessionID); err != nil {
 		return LedgerSnapshot{}, err
 	}
-	surface, err := projectSurface(events)
-	if err != nil {
-		return LedgerSnapshot{}, err
-	}
-	return LedgerSnapshot{Events: events, Surface: surface}, nil
+	return LedgerSnapshot{Events: events}, nil
 }

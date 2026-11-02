@@ -149,6 +149,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 	if err != nil {
 		return state, err
 	}
+	activeCalls := 0
 	for _, event := range snapshot.Events {
 		var fact budgetFact
 		if err := json.Unmarshal(event.Payload, &fact); err != nil {
@@ -179,7 +180,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			state.scopes[fact.ScopeID] = fact
 		case "admission/scopes_recovered":
-			if fact.OwnerID == 0 || !validID(fact.TaskID) || len(fact.RecoveredScopes) == 0 || state.outstanding() != 0 || fact.ScopeID != "" || fact.CallID != "" || fact.Tokens != 0 || fact.Process != nil {
+			if fact.OwnerID == 0 || !validID(fact.TaskID) || len(fact.RecoveredScopes) == 0 || activeCalls != 0 || fact.ScopeID != "" || fact.CallID != "" || fact.Tokens != 0 || fact.Process != nil {
 				return state, session.ErrEventIntegrity
 			}
 			for _, recovered := range fact.RecoveredScopes {
@@ -205,7 +206,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
 			}
-			if _, exists := state.calls[fact.CallID]; exists || (state.TaskID != "" && (state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID)) || state.outstanding() >= RelayConcurrencyLimit {
+			if _, exists := state.calls[fact.CallID]; exists || (state.TaskID != "" && (state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID)) || activeCalls >= RelayConcurrencyLimit {
 				return state, session.ErrEventIntegrity
 			}
 			depth, err := state.retryDepth(fact)
@@ -232,6 +233,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			delete(state.yieldedTasks, taskKey(fact.OwnerID, fact.TaskID))
 			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens, purpose: fact.Purpose, attempt: depth, process: process}
 			state.ReservedTokens += fact.Tokens
+			activeCalls++
 		case "admission/call_settled":
 			request, exists := state.calls[fact.CallID]
 			if !exists || fact.OwnerID != request.owner || request.settled || request.boundViolated || fact.Tokens < 0 || fact.Tokens > request.reserved {
@@ -242,6 +244,9 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			state.ReservedTokens -= request.reserved
 			state.UsedTokens += fact.Tokens
+			if !request.unknown {
+				activeCalls--
+			}
 			request.settled, request.used = true, fact.Tokens
 			request.httpStatus = fact.HTTPStatus
 			state.calls[fact.CallID] = request
@@ -250,11 +255,14 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			if !exists || fact.OwnerID != request.owner || request.settled || fact.Tokens < 0 || (request.unknown && ((!fact.BoundViolated && fact.Tokens <= request.reserved) || request.boundViolated)) {
 				return state, session.ErrEventIntegrity
 			}
+			if !request.unknown {
+				activeCalls--
+			}
 			request.unknown = true
 			request.boundViolated = request.boundViolated || fact.BoundViolated || fact.Tokens > request.reserved
 			state.calls[fact.CallID] = request
 		case "admission/task_finished", "admission/task_yielded":
-			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || state.outstanding() != 0 || state.taskHasScopes(fact.OwnerID, fact.TaskID) {
+			if state.TaskID == "" || state.TaskID != fact.TaskID || state.TaskOwnerID != fact.OwnerID || activeCalls != 0 || state.taskHasScopes(fact.OwnerID, fact.TaskID) {
 				return state, session.ErrEventIntegrity
 			}
 			if event.Type == "admission/task_finished" {
@@ -269,7 +277,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 		state.seq++
 	}
 	state.UnknownUsage = state.unknownUsage()
-	state.ActiveCalls = state.outstanding()
+	state.ActiveCalls = activeCalls
 	return state, nil
 }
 

@@ -999,11 +999,15 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 		case sessionStateEventType, "legacy/import", "session/fork/import", "memory/catalog-created":
 			continue
 		}
+		if err := verifyLedgerEvents(events, sessionID); err != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s integrity: %w", sessionID, err))
+			continue
+		}
 		// A deleted session remains in the append-only ledger for auditability,
 		// but its unfinished runs must never be resurrected after a process
 		// restart. Re-project the lifecycle state before scheduling any work so
 		// deletion is a durable execution fence rather than only a UI tombstone.
-		view, viewErr := reduceSessionView(events)
+		view, viewErr := reduceSessionMetadata(events)
 		if viewErr != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s projection: %w", sessionID, viewErr))
 			continue
@@ -1021,14 +1025,30 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 				continue
 			}
 		}
+		current, readErr := ReadVerifiedSnapshot(ctx, r.workbench.ledger, sessionID)
+		if readErr != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s candidate: %w", sessionID, readErr))
+			continue
+		}
+		if len(current.Events) != len(events) || current.Events[len(current.Events)-1].Checksum != events[len(events)-1].Checksum {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s changed during admission: %w", sessionID, ErrSequenceConflict))
+			continue
+		}
+		task, _, taskErr := projectAgentTask(events)
+		if taskErr != nil {
+			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, taskErr))
+			continue
+		}
 		if err := r.recoverAgentTask(ctx, view.UserID, events); err != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, err))
 			continue
 		}
-		events, readErr = r.workbench.ledger.Events(ctx, sessionID)
-		if readErr != nil {
-			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s updated events: %w", sessionID, readErr))
-			continue
+		if task != nil {
+			events, readErr = r.workbench.ledger.Events(ctx, sessionID)
+			if readErr != nil {
+				recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s updated events: %w", sessionID, readErr))
+				continue
+			}
 		}
 		runs, projectErr := projectRuns(events)
 		if projectErr != nil {
@@ -1076,12 +1096,24 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 }
 
 func (r *SessionRunner) startupRecoveryAllowed(ctx context.Context, events []Event) (bool, error) {
+	admit := func(actor identity.Actor) (bool, error) {
+		allowed, err := r.options.StartupRecoveryAllowed(ctx, actor)
+		if err != nil || !allowed {
+			return allowed, err
+		}
+		// Metadata can reject ineligible work cheaply; every eligible task must
+		// validate its full ancestry before even cancellation recovery writes.
+		if _, err := ModelTaskRoot(ctx, r.workbench.ledger, actor); err != nil {
+			return false, err
+		}
+		return r.options.StartupRecoveryAllowed(ctx, actor)
+	}
 	task, created, err := projectAgentTask(events)
 	if err != nil {
 		return false, err
 	}
 	if task != nil {
-		return r.options.StartupRecoveryAllowed(ctx, created.Actor)
+		return admit(created.Actor)
 	}
 	runs, err := projectRuns(events)
 	if err != nil {
@@ -1097,7 +1129,7 @@ func (r *SessionRunner) startupRecoveryAllowed(ctx context.Context, events []Eve
 	if latest == nil {
 		return true, nil
 	}
-	return r.options.StartupRecoveryAllowed(ctx, latest.actor)
+	return admit(latest.actor)
 }
 
 func (r *SessionRunner) Close() error {

@@ -145,7 +145,7 @@ func agentParent(events []Event, actor identity.Actor) (uint, string, error) {
 		return 0, "", ErrSessionNotFound
 	}
 	if events[0].Type == sessionCreatedEventType {
-		view, err := reduceSessionView(events)
+		view, err := reduceSessionMetadata(events)
 		if err != nil || view.Status == "deleted" {
 			return 0, "", ErrSessionNotFound
 		}
@@ -461,11 +461,15 @@ func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, c
 }
 
 func readAgentTask(ctx context.Context, ledger EventLog, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
-	snapshot, err := ReadVerifiedSnapshot(ctx, ledger, taskID)
+	return readAgentTaskWithSnapshot(ctx, ledger, owner, taskID, callerSessionID, ReadVerifiedSnapshot)
+}
+
+func readAgentTaskWithSnapshot(ctx context.Context, ledger EventLog, owner uint, taskID, callerSessionID string, read func(context.Context, EventLog, string) (LedgerSnapshot, error)) (*pb.AgentTask, agentTaskCreated, error) {
+	snapshot, err := read(ctx, ledger, taskID)
 	if err != nil {
 		return nil, agentTaskCreated{}, err
 	}
-	view, err := reduceSessionView(snapshot.Events)
+	view, err := reduceSessionMetadata(snapshot.Events)
 	if err != nil || view.UserID != owner || view.Status == "deleted" {
 		return nil, agentTaskCreated{}, ErrSessionNotFound
 	}
@@ -483,7 +487,7 @@ func readAgentTask(ctx context.Context, ledger EventLog, owner uint, taskID, cal
 	if callerSessionID != task.ParentSessionId && callerSessionID != task.ChildSessionId {
 		return nil, created, ErrSessionNotFound
 	}
-	parent, err := ReadVerifiedSnapshot(ctx, ledger, task.ParentSessionId)
+	parent, err := read(ctx, ledger, task.ParentSessionId)
 	if err != nil {
 		return nil, created, err
 	}
@@ -511,6 +515,16 @@ func readAgentTask(ctx context.Context, ledger EventLog, owner uint, taskID, cal
 // ModelTaskRoot restores the authenticated task scope from existing Ledger
 // links, including auxiliary calls that carry no AgentTask protobuf.
 func ModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (string, error) {
+	return modelTaskRoot(ctx, ledger, actor, ReadVerifiedSnapshot)
+}
+
+// StartupModelTaskRoot authenticates scheduling eligibility without building a
+// model Surface. Eligible recovery still validates the Surface before any write.
+func StartupModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (string, error) {
+	return modelTaskRoot(ctx, ledger, actor, readVerifiedMetadataSnapshot)
+}
+
+func modelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor, read func(context.Context, EventLog, string) (LedgerSnapshot, error)) (string, error) {
 	if actor.Validate() != nil {
 		return "", ErrSessionNotFound
 	}
@@ -518,7 +532,7 @@ func ModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (
 	var rootOwner uint
 	for len(seen) < 128 && !seen[actor.SessionID] {
 		seen[actor.SessionID] = true
-		snapshot, err := ReadVerifiedSnapshot(ctx, ledger, actor.SessionID)
+		snapshot, err := read(ctx, ledger, actor.SessionID)
 		if err != nil {
 			return "", err
 		}
@@ -534,7 +548,7 @@ func ModelTaskRoot(ctx context.Context, ledger EventLog, actor identity.Actor) (
 		if task == nil {
 			return actor.SessionID, nil
 		}
-		task, created, err := readAgentTask(ctx, ledger, owner, task.Id, actor.SessionID)
+		task, created, err := readAgentTaskWithSnapshot(ctx, ledger, owner, task.Id, actor.SessionID, read)
 		if err != nil || created.Actor.ScopeKey() != actor.ScopeKey() {
 			return "", ErrSessionNotFound
 		}

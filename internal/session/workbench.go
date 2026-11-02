@@ -669,6 +669,26 @@ func (w *Workbench) signalDeletion(sessionID string) {
 }
 
 func reduceSessionView(events []Event) (SessionView, error) {
+	view, err := reduceSessionMetadata(events)
+	if err != nil {
+		return SessionView{}, err
+	}
+	if surface, surfaceErr := projectSurface(events); surfaceErr == nil {
+		for index := len(surface) - 1; index >= 0; index-- {
+			if surface[index].Type != userMessageEventType {
+				continue
+			}
+			var payload messagePayload
+			if json.Unmarshal(surface[index].Payload, &payload) == nil && strings.TrimSpace(payload.Content) != "" {
+				view.LastUserInput = payload.Content
+			}
+			break
+		}
+	}
+	return view, nil
+}
+
+func reduceSessionMetadata(events []Event) (SessionView, error) {
 	if len(events) == 0 || events[0].Seq != 0 || events[0].Type != sessionCreatedEventType {
 		return SessionView{}, ErrSessionNotFound
 	}
@@ -686,18 +706,6 @@ func reduceSessionView(events []Event) (SessionView, error) {
 	runs, runsErr := projectRuns(events)
 	if runsErr != nil {
 		return SessionView{}, runsErr
-	}
-	if surface, surfaceErr := projectSurface(events); surfaceErr == nil {
-		for index := len(surface) - 1; index >= 0; index-- {
-			if surface[index].Type != userMessageEventType {
-				continue
-			}
-			var payload messagePayload
-			if json.Unmarshal(surface[index].Payload, &payload) == nil && strings.TrimSpace(payload.Content) != "" {
-				view.LastUserInput = payload.Content
-			}
-			break
-		}
 	}
 	for _, event := range events[1:] {
 		switch event.Type {
