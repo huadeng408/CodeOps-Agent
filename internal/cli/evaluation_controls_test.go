@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +24,100 @@ import (
 	"code-agent/internal/session"
 	"google.golang.org/grpc"
 )
+
+func TestEvaluationControlDoesNotStartUnavailableOrchestrator(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("production task preparation uses Windows native pins")
+	}
+	for key, value := range map[string]string{
+		"CODE_AGENT_SESSION_LEDGER_PATH": "", "CODE_AGENT_EVAL_ALLOW_TOOLS": "Read,Write", "CODE_AGENT_EVAL_VISIBLE_VERIFICATION_COMMANDS_JSON": "[]",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": ":invalid", "LLM_PROVIDER": "openai", "OPENAI_MODEL": "approved-model", "OPENAI_API_KEY": "fixture-only",
+		"CODE_AGENT_MODEL_INPUT_LIMIT": "200", "CODE_AGENT_MODEL_OUTPUT_LIMIT": "20", "CODE_AGENT_MODEL_TOTAL_LIMIT": "", "CODE_AGENT_MODEL_REASONING_EFFORT": "", "CODE_AGENT_MODEL_REPORTED_MODEL": "",
+	} {
+		t.Setenv(key, value)
+	}
+	var modelCalls, runtimeCalls atomic.Int64
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		modelCalls.Add(1)
+		io.WriteString(w, `{"model":"approved-model","usage":{"prompt_tokens":100,"completion_tokens":5}}`)
+	}))
+	defer provider.Close()
+	t.Setenv("OPENAI_BASE_URL", provider.URL)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	pb.RegisterOrchestratorServer(server, evaluationTransport{})
+	go server.Serve(listener)
+	defer server.Stop()
+	cfg := config.Default(t.TempDir())
+	cfg.OrchestratorAddr, cfg.OrchestratorAutoStart, cfg.MCPConfig = listener.Addr().String(), false, "missing.json"
+	cfg.OrchestratorCommand, cfg.OrchestratorArgs = os.Args[0], []string{"-test.run=^TestEvaluationControlStartupTrap$"}
+	cfg.Sandbox = productionRuntimeFixture(t, t.TempDir(), &runtimeCalls)
+	request := map[string]any{"schema_version": 1, "runtime_contract": "production_opensandbox", "run_id": "control-without-strategy", "task_id": "write-result", "workspace": productionRepository(t),
+		"message": "Write result.txt", "model": "approved-model", "lifecycle": "hold", "turn_id": "turn-1", "budget": map[string]any{"max_tokens": 1000, "wall_clock_seconds": 90}}
+	call := func() (map[string]any, error) {
+		input, _ := json.Marshal(request)
+		var output strings.Builder
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := cli.RunEvaluation(ctx, cfg, bytes.NewReader(input), &output, io.Discard)
+		decoder := json.NewDecoder(strings.NewReader(output.String()))
+		var receipt map[string]any
+		for {
+			var event map[string]any
+			if decoder.Decode(&event) != nil {
+				break
+			}
+			if event["type"] == "receipt" {
+				receipt = event
+			}
+		}
+		return receipt, err
+	}
+	receipt, err := call()
+	if err != nil || receipt["task_state"] != "completed" || modelCalls.Load() != 1 {
+		t.Fatalf("completed candidate missing: %v state=%v code=%v", err, receipt["task_state"], receipt["error_code"])
+	}
+	request["session_id"] = receipt["session_id"]
+	server.Stop()
+	trap := filepath.Join(t.TempDir(), "unexpected-runtime-start")
+	t.Setenv("CODE_AGENT_EVAL_CONTROL_START_TRAP", trap)
+	cfg.OrchestratorAutoStart = true
+	for _, operation := range []string{"inspect", "finalize", "inspect"} {
+		request["operation"] = operation
+		before := receipt["ledger"].(map[string]any)["head_checksum"]
+		started := time.Now()
+		control, err := call()
+		if err != nil || control["error_code"] != "" || control["ledger"].(map[string]any)["verified"] != true {
+			t.Fatalf("%s depends on unavailable strategy runtime: %v state=%v code=%v", operation, err, control["task_state"], control["error_code"])
+		}
+		if operation == "inspect" && control["ledger"].(map[string]any)["head_checksum"] != before {
+			t.Fatal("inspection changed canonical facts")
+		}
+		if control["run_state"] != "completed" || control["session_id"] != receipt["session_id"] || control["usage"].(map[string]any)["confirmed_tokens"] != float64(105) {
+			t.Fatal("control lost the completed candidate or its usage")
+		}
+		if operation == "finalize" && control["admission_finalized"] != true {
+			t.Fatal("control did not finalize admission")
+		}
+		t.Logf("%s completed without strategy startup in %s", operation, time.Since(started))
+		receipt = control
+	}
+	if _, err := os.Stat(trap); !os.IsNotExist(err) || modelCalls.Load() != 1 || runtimeCalls.Load() != 0 {
+		t.Fatal("control started strategy work or executed a new model/tool call")
+	}
+}
+
+func TestEvaluationControlStartupTrap(t *testing.T) {
+	path := os.Getenv("CODE_AGENT_EVAL_CONTROL_START_TRAP")
+	if path == "" {
+		t.Skip("subprocess startup trap")
+	}
+	_ = os.WriteFile(path, []byte("started"), 0600)
+	os.Exit(17)
+}
 
 func TestEvaluationInspectAndAbandonReportControlSuccess(t *testing.T) {
 	if runtime.GOOS != "windows" {

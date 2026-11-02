@@ -270,24 +270,31 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 	if request.Operation == "grade" {
 		return runEvaluationGrade(ctx, cfg, request, productionRuntime, expectedBinding, output)
 	}
-	if cfg.OrchestratorAutoStart {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return refuse("orchestrator_address_unavailable")
-		}
-		cfg.OrchestratorAddr = listener.Addr().String()
-		_ = listener.Close()
+	app, controlErr := newEvaluationControlApp(ctx, cfg, request, productionRuntime)
+	if controlErr != nil {
+		return refuse(controlErr.Error())
 	}
-	priorPythonPath, present := os.LookupEnv("PYTHONPATH")
-	_ = os.Setenv("PYTHONPATH", moduleRoot+string(os.PathListSeparator)+priorPythonPath)
-	defer func() {
-		if present {
-			_ = os.Setenv("PYTHONPATH", priorPythonPath)
-		} else {
-			_ = os.Unsetenv("PYTHONPATH")
+	controlOnly := app != nil
+	if !controlOnly {
+		if cfg.OrchestratorAutoStart {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return refuse("orchestrator_address_unavailable")
+			}
+			cfg.OrchestratorAddr = listener.Addr().String()
+			_ = listener.Close()
 		}
-	}()
-	app := newAppWithTaskInventory(cfg, strings.NewReader(""), io.Discard, stderr, false, production)
+		priorPythonPath, present := os.LookupEnv("PYTHONPATH")
+		_ = os.Setenv("PYTHONPATH", moduleRoot+string(os.PathListSeparator)+priorPythonPath)
+		defer func() {
+			if present {
+				_ = os.Setenv("PYTHONPATH", priorPythonPath)
+			} else {
+				_ = os.Unsetenv("PYTHONPATH")
+			}
+		}()
+		app = newAppWithTaskInventory(cfg, strings.NewReader(""), io.Discard, stderr, false, production)
+	}
 	defer app.closeProductRuntime()
 	app.evaluationPolicy = &request.Policy
 	app.evaluationProduction = productionRuntime
@@ -307,16 +314,18 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 		_ = emit(map[string]any{"type": "fault_ready", "schema_version": 1, "run_id": request.RunID, "task_id": request.TaskID, "pid": os.Getpid(), "window": boundary.Window, "session_id": boundary.SessionID, "product_run_id": boundary.RunID, "tool_call_id": boundary.ToolCallID, "tool_name": boundary.ToolName, "fault_boundary": boundary})
 		<-ctx.Done()
 	}
-	if _, err := app.initializeMemory(); err != nil || app.agentRunner == nil {
-		if app.orchestratorErr != nil {
-			diagnostic := orchestrator.FailureDetails(app.orchestratorErr)
-			diagnostic["stage"] = "orchestrator_startup"
-			if productionRuntime != nil {
-				return productionRuntime.refuse(ctx, cfg, request, expectedBinding, output, "orchestrator_startup_unavailable", diagnostic)
+	if !controlOnly {
+		if _, err := app.initializeMemory(); err != nil || app.agentRunner == nil {
+			if app.orchestratorErr != nil {
+				diagnostic := orchestrator.FailureDetails(app.orchestratorErr)
+				diagnostic["stage"] = "orchestrator_startup"
+				if productionRuntime != nil {
+					return productionRuntime.refuse(ctx, cfg, request, expectedBinding, output, "orchestrator_startup_unavailable", diagnostic)
+				}
+				return evaluationStartupRefusal(output, request, diagnostic, runtimeConfig)
 			}
-			return evaluationStartupRefusal(output, request, diagnostic, runtimeConfig)
+			return refuse("product_prerequisites_missing")
 		}
-		return refuse("product_prerequisites_missing")
 	}
 	workbench := session.NewWorkbench(app.ledger, nil)
 	baseActor := app.actor
@@ -423,6 +432,9 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 		if current.Run != nil {
 			run = *current.Run
 		}
+		if controlOnly && request.Operation == "finalize" && !evaluationTerminalRun(run) {
+			return refuse("evaluation_session_changed")
+		}
 	} else if request.Operation == "continue" {
 		if current.Run == nil {
 			return refuse("continuation_unavailable")
@@ -494,7 +506,9 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 	}
 finished:
 	// Drain memory reflection and all admitted scopes before deriving the final usage.
-	_ = app.agentRunner.Close()
+	if app.agentRunner != nil {
+		_ = app.agentRunner.Close()
+	}
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer finishCancel()
 	var finalizationErr error
