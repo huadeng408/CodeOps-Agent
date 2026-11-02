@@ -78,10 +78,11 @@ type call struct {
 
 type projection struct {
 	Batch
-	seq         int64
-	calls       map[string]call
-	closedTasks map[string]bool
-	scopes      map[string]budgetFact
+	seq          int64
+	calls        map[string]call
+	closedTasks  map[string]bool
+	yieldedTasks map[string]bool
+	scopes       map[string]budgetFact
 }
 
 func (state projection) outstanding() int {
@@ -140,7 +141,7 @@ func (state projection) retryDepth(fact budgetFact) (int, error) {
 }
 
 func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) {
-	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
+	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, yieldedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
 	if owner == 0 || budget.ledger == nil {
 		return state, ErrInvalidAdmission
 	}
@@ -199,6 +200,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 				return state, session.ErrEventIntegrity
 			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
+			delete(state.yieldedTasks, taskKey(fact.OwnerID, fact.TaskID))
 		case "admission/call_reserved":
 			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
@@ -227,6 +229,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 				process = bound.Process
 			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
+			delete(state.yieldedTasks, taskKey(fact.OwnerID, fact.TaskID))
 			state.calls[fact.CallID] = call{owner: fact.OwnerID, taskID: fact.TaskID, reserved: fact.Tokens, purpose: fact.Purpose, attempt: depth, process: process}
 			state.ReservedTokens += fact.Tokens
 		case "admission/call_settled":
@@ -256,6 +259,8 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			if event.Type == "admission/task_finished" {
 				state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
+			} else {
+				state.yieldedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
 			}
 			state.TaskID, state.TaskOwnerID = "", 0
 		default:
@@ -291,6 +296,18 @@ func (budget *Budget) Open(ctx context.Context, owner uint) (Batch, error) {
 func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
 	state, err := budget.read(ctx, owner)
 	return state.Batch, err
+}
+
+// StartupRecoveryAllowed reads the scheduling fence without reacquiring a task.
+func (budget *Budget) StartupRecoveryAllowed(ctx context.Context, owner uint, taskID string) (bool, error) {
+	if budget == nil || !validID(taskID) {
+		return false, ErrInvalidAdmission
+	}
+	state, err := budget.read(ctx, owner)
+	if err != nil {
+		return false, err
+	}
+	return !state.yieldedTasks[taskKey(owner, taskID)], nil
 }
 
 // Scope facts coordinate idle checks across processes without creating a token batch.

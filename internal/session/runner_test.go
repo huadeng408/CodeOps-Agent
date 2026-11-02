@@ -1824,6 +1824,116 @@ func TestSessionRunnerRecoversPendingApprovalAfterLedgerReopen(t *testing.T) {
 	}
 }
 
+func TestSessionRunnerRecoversEvaluationPendingApprovalWithoutOperator(t *testing.T) {
+	ctx := context.Background()
+	ledgerPath := filepath.Join(t.TempDir(), "evaluation-pending-restart.sqlite")
+	seed, err := OpenSQLiteEventLog(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Close()
+	workbench := NewWorkbench(seed, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "evaluation pending approval", "recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BindEvaluation(ctx, seed, created.ID, EvaluationBinding{
+		SchemaVersion: 1, RunID: "pending-evaluation", TaskID: "pending-evaluation",
+		Policy: EvaluationPolicy{ContextStrategy: "metadata_on_demand", ExecutionStrategy: "single", MaxToolRounds: 4, ContextMaxBytes: 12000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := workbench.AppendUserMessage(ctx, 7, created.ID, 2, "resume the retained task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := workbench.CreateCheckpoint(ctx, 7, created.ID, 3, message.ID, "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workbench.UpdateStatus(ctx, 7, created.ID, 4, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	actor, err := testRunnerActor().BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := continuationRequestPayloadForTest(ctx, workbench, created.ID, checkpoint.Hash, "request-pending-evaluation", "run-pending-evaluation", actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.Append(ctx, created.ID, 5, continuationEventType, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.Append(ctx, created.ID, 6, runLeasedEventType, runLeasePayload{
+		RunID: payload.RunID, RequestID: payload.RequestID, LeaseID: "expired-evaluation-lease",
+		WorkerID: "stopped-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := toolCallPayload{RunID: payload.RunID, ToolCallID: "approval-call", ToolName: "Write", ArgumentsJSON: `{"content":"approved","path":"runtime/approved.txt"}`}
+	if _, err := seed.AppendSurface(ctx, created.ID, 7, "tool/call", call, SurfaceOperation{Op: "append"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.Append(ctx, created.ID, 8, approvalPendingEventType, toolApprovalPayload{
+		RunID: call.RunID, ToolCallID: call.ToolCallID, ToolName: call.ToolName, ArgumentsJSON: call.ArgumentsJSON, Decision: ApprovalPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := OpenSQLiteEventLog(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	workbench = NewWorkbench(ledger, nil)
+	conversation := &approvalToolConversationAdapter{result: make(chan orchestrator.ToolResult, 1)}
+	external := &countingToolAdapter{}
+	runner := NewSessionRunner(workbench, conversation, external, SessionRunnerOptions{
+		WorkerID: "evaluation-recovery", LeaseDuration: time.Second,
+		Permissions: permission.NewController(map[string]permission.Level{"Write": permission.AskSession}, nil),
+	})
+	defer runner.Close()
+	if err := runner.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	terminal := waitForRunStatus(t, runner, created.ID, payload.RunID, RunCompleted)
+	if terminal.Attempt != 2 {
+		t.Fatalf("retained evaluation was not recovered: %+v", terminal)
+	}
+	result := <-conversation.result
+	if result.Error != "tool approval denied" || result.ExitCode != 1 {
+		t.Fatalf("restored evaluation approval was not denied: %+v", result)
+	}
+	external.mu.Lock()
+	calls := external.calls
+	external.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("unapproved evaluation tool executed %d times", calls)
+	}
+	events, err := workbench.Events(ctx, 7, created.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denials := 0
+	for _, event := range events {
+		if event.Type == approvalDeniedEventType {
+			denials++
+			if event.Approval == nil || event.Approval.Decision != ApprovalDenied || event.Approval.RunID != payload.RunID || event.Approval.ToolCallID != call.ToolCallID {
+				t.Fatalf("durable denial lost the pending tool identity: %+v", event)
+			}
+		}
+		if event.Type == toolDispatchedType {
+			t.Fatal("denied evaluation tool was dispatched")
+		}
+	}
+	if denials != 1 {
+		t.Fatalf("durable evaluation denial count = %d, want 1", denials)
+	}
+}
+
 func TestSessionRunnerHeartbeatCancellationDoesNotFailSuccessfulRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	base := openWorkbenchTestLedger(t)

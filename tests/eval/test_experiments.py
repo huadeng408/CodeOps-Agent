@@ -22,7 +22,7 @@ def source_snapshot(tmp_path_factory) -> Path:
         cwd=repository, check=True, capture_output=True,
     ).stdout.decode("utf-8").split("\0")
     sources = {path for path in tracked if path.endswith(".py")}
-    sources.update(("eval/experiments.py", "eval/experiment_report.py"))
+    sources.update(("eval/experiments.py", "eval/experiment_report.py", "eval/harness/process_tree.py"))
     for relative in sorted(sources):
         destination = snapshot / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -79,8 +79,9 @@ def command(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.fixture
-def refusal_driver(tmp_path: Path) -> Path:
+@pytest.fixture(scope="module")
+def refusal_driver_template(tmp_path_factory, source_snapshot: Path) -> Path:
+    tmp_path = tmp_path_factory.mktemp("experiment-protocol-driver")
     source = tmp_path / "driver.go"
     source.write_text(r'''package main
 import ("encoding/json"; "os"; "os/exec"; "path/filepath"; "runtime"; "strings"; "time")
@@ -171,6 +172,46 @@ func main() {
         if mode == "wrong_contract" { receipt["runtime_contract"] = "legacy"; receipt["product_path"] = "cli-file-tools" }
         if request["lifecycle"] != nil { receipt["lifecycle"] = request["lifecycle"] }
         if request["turn_id"] != nil { receipt["turn_id"] = request["turn_id"] }
+        if strings.HasPrefix(mode, "missing_receipt_") {
+            receipt["task_state"], receipt["run_state"] = "running", "running"
+            receipt["usage"] = map[string]any{"state":"unknown", "input_tokens":10, "output_tokens":2, "confirmed_tokens":12, "reserved_tokens":4000, "unknown_calls":1, "call_count":2, "cost_status":"unknown"}
+            marker := filepath.Join(filepath.Dir(root), "fixture-missing-finalized")
+            if request["operation"] == "run" {
+                child := exec.Command(os.Args[0], "--child")
+                if child.Start() != nil { os.Exit(3) }
+                receipt["type"], receipt["child_pid"] = "started", child.Process.Pid
+                if mode == "missing_receipt_bad_pid" { receipt["pid"] = os.Getpid()+1 }
+                if mode == "missing_receipt_bad_runtime" { receipt["runtime_contract"] = "legacy" }
+                json.NewEncoder(os.Stdout).Encode(receipt)
+                if mode == "missing_receipt_malformed_stdout" { os.Stdout.WriteString("{invalid-fixture-json\n") }
+                if mode == "missing_receipt_invalid_final_identity" {
+                    receipt["type"], receipt["run_id"] = "receipt", "unbound-final-request"
+                    json.NewEncoder(os.Stdout).Encode(receipt)
+                }
+                if mode == "missing_receipt_timeout" { time.Sleep(120*time.Second) }
+                os.Exit(2)
+            }
+            if request["operation"] == "inspect" && mode == "missing_receipt_inspect_wrong_run" { receipt["product_run_id"] = "different-product-run" }
+            if request["operation"] == "finalize" {
+                if request["finalize_mode"] != "abandon" || request["session_id"] != sessionID || request["expected_session_head_checksum"] != strings.Repeat("a",64) { os.Exit(4) }
+                if mode == "missing_receipt_abandon_refused" {
+                    receipt["task_state"], receipt["error_code"], receipt["admission_finalized"] = "infra_error", "tool_outcome_unknown", false
+                    json.NewEncoder(os.Stdout).Encode(receipt)
+                    os.Exit(3)
+                }
+                os.WriteFile(marker, []byte("yes"), 0600)
+                receipt["task_state"], receipt["run_state"], receipt["admission_finalized"] = "finalized", "canceling", true
+            }
+            if _, err := os.Stat(marker); err == nil {
+                receipt["ledger"] = map[string]any{"verified":true, "session_id":sessionID, "head_checksum":strings.Repeat("6",64), "event_count":11}
+                if request["operation"] == "inspect" {
+                    receipt["task_state"], receipt["run_state"], receipt["admission_finalized"] = "finalized", "canceling", true
+                    if mode == "missing_receipt_stale_final_inspect" { receipt["ledger"].(map[string]any)["head_checksum"] = strings.Repeat("7",64) }
+                }
+            }
+            json.NewEncoder(os.Stdout).Encode(receipt)
+            return
+        }
         if strings.HasPrefix(mode, "post_prepare_") {
             state := os.Getenv("CODEOPS_FIXTURE_PREPARED_STATE")
             task["admission_ready"] = false
@@ -381,7 +422,14 @@ func main() {
 }
 ''', encoding="utf-8")
     binary = tmp_path / ("driver-fixture.exe" if os.name == "nt" else "driver-fixture")
-    subprocess.run(["go", "build", "-o", str(binary), str(source)], check=True, capture_output=True, timeout=60)
+    subprocess.run(["go", "build", "-o", str(binary), str(source)], cwd=source_snapshot, check=True, capture_output=True, timeout=60)
+    return binary
+
+
+@pytest.fixture
+def refusal_driver(tmp_path: Path, refusal_driver_template: Path) -> Path:
+    binary = tmp_path / refusal_driver_template.name
+    shutil.copy2(refusal_driver_template, binary)
     return binary
 
 
@@ -1207,6 +1255,98 @@ def test_public_production_keeps_post_prepare_refusal_identity_without_a_run(tmp
     requests = [json.loads(line) for line in protocol.read_text(encoding="utf-8").splitlines()]
     assert [request["operation"] for request in requests] == ["run"]
     assert not (directory / f"trials/{row['trial_id']}/final-score.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["exit", "timeout", "malformed_stdout", "invalid_final_identity"])
+def test_public_production_recovers_owned_started_identity_when_final_receipt_is_missing(tmp_path: Path, refusal_driver: Path, monkeypatch, mode: str) -> None:
+    config = experiment_config(tmp_path, repeats=2)
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    approved = tmp_path / "approved-runtime"
+    approved.mkdir()
+    payload.update(runtime_contract="production_opensandbox", approved_workspace_root=str(approved), evidence_kind="fixture")
+    if mode == "timeout":
+        payload["budget"]["wall_clock_seconds"] = 0.01
+    payload["tasks"][0]["task_id"] = "production"
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEOPS_FIXTURE_APPROVED_ROOT", str(approved))
+    monkeypatch.setenv("CODEOPS_FIXTURE_PRODUCTION", f"missing_receipt_{mode}")
+    protocol = tmp_path / "protocol.ndjson"
+    monkeypatch.setenv("CODEOPS_FIXTURE_PROTOCOL_LOG", str(protocol))
+    output = tmp_path / "output"
+    assert command("plan", "--config", str(config), "--output", str(output)).returncode == 0
+
+    result = command("run", "--config", str(config), "--output", str(output), "--agent-binary", str(refusal_driver))
+
+    assert result.returncode == 3, result.stderr
+    directory = output / "public-pilot"
+    rows = json.loads((directory / "summary.json").read_text(encoding="utf-8"))["trials"]
+    row = rows[0]
+    assert row["status"] == "infra_error" and row["success"] is None and row["provenance_verified"] is False
+    if mode in {"malformed_stdout", "invalid_final_identity"}:
+        assert row["error_code"] == ("JSONDecodeError" if mode == "malformed_stdout" else "ValueError")
+    assert row.get("session_id") == "fixture-production-session" and row.get("product_run_id") == "fixture-product-run"
+    assert row.get("admission_finalized") is True and not row.get("cleanup_blocked", False)
+    assert row["usage"]["state"] == "unknown" and row["usage"]["unknown_calls"] == 1 and row["tokens_in"] is None
+    assert rows[1]["status"] == "not_run" and rows[1]["success"] is None
+    process = json.loads((directory / f"processes/{row['trial_id']}-turn-000.json").read_text(encoding="utf-8"))
+    assert process["started"]["session_id"] == row["session_id"] and process["started"]["pid"] == process["pid"]
+    assert process["owned_tree_stopped"] is True and process["timed_out"] is (mode == "timeout")
+    child_pid = process["started"]["child_pid"]
+    if os.name == "nt":
+        processes = subprocess.run(["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
+        assert f'"{child_pid}"' not in processes
+    else:
+        status = Path(f"/proc/{child_pid}/stat")
+        assert not status.exists() or status.read_text().split(")", 1)[1].strip().startswith("Z")
+    assert not (directory / f"trials/{row['trial_id']}/product-receipt.json").exists()
+    assert not (directory / f"trials/{row['trial_id']}/final-score.json").exists()
+    requests = [json.loads(line) for line in protocol.read_text(encoding="utf-8").splitlines()]
+    assert [request["operation"] for request in requests] == ["run", "inspect", "finalize", "inspect"]
+    assert requests[2]["finalize_mode"] == "abandon"
+    validation = json.loads((directory / "receipt-validation.json").read_text(encoding="utf-8"))["trials"][0]
+    assert validation["checks"]["started_ledger_readback"] is True and validation["checks"]["finalized_ledger_readback"] is True
+    final_inspected = json.loads((directory / validation["final_inspect_receipt"]["path"]).read_text(encoding="utf-8"))
+    assert final_inspected["task_state"] == "finalized" and final_inspected["admission_finalized"] is True and final_inspected["run_state"] == "canceling"
+
+
+@pytest.mark.parametrize(("mode", "operations", "error_code"), [
+    ("bad_pid", ["run"], "product_started_identity_unavailable"),
+    ("bad_runtime", ["run"], "product_started_identity_unavailable"),
+    ("inspect_wrong_run", ["run", "inspect"], "started_ledger_readback_unconfirmed"),
+    ("abandon_refused", ["run", "inspect", "finalize"], "tool_outcome_unknown"),
+    ("stale_final_inspect", ["run", "inspect", "finalize", "inspect"], "finalized_ledger_readback_unconfirmed"),
+])
+def test_public_production_blocks_missing_receipt_cleanup_without_bound_canonical_proof(tmp_path: Path, refusal_driver: Path, monkeypatch, mode: str, operations: list[str], error_code: str) -> None:
+    config = experiment_config(tmp_path, repeats=2)
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    approved = tmp_path / "approved-runtime"
+    approved.mkdir()
+    payload.update(runtime_contract="production_opensandbox", approved_workspace_root=str(approved), evidence_kind="fixture")
+    payload["tasks"][0]["task_id"] = "production"
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEOPS_FIXTURE_APPROVED_ROOT", str(approved))
+    monkeypatch.setenv("CODEOPS_FIXTURE_PRODUCTION", f"missing_receipt_{mode}")
+    protocol = tmp_path / "protocol.ndjson"
+    monkeypatch.setenv("CODEOPS_FIXTURE_PROTOCOL_LOG", str(protocol))
+    output = tmp_path / "output"
+    assert command("plan", "--config", str(config), "--output", str(output)).returncode == 0
+
+    result = command("run", "--config", str(config), "--output", str(output), "--agent-binary", str(refusal_driver))
+
+    assert result.returncode == 3, result.stderr
+    directory = output / "public-pilot"
+    rows = json.loads((directory / "summary.json").read_text(encoding="utf-8"))["trials"]
+    row = rows[0]
+    assert row["status"] == "infra_error" and row["success"] is None and row["provenance_verified"] is False
+    assert row.get("cleanup_blocked") is True and row["cleanup_error"]["error_code"] == error_code
+    assert row.get("admission_finalized") is not True and rows[1]["status"] == "not_run"
+    assert not (directory / f"trials/{row['trial_id']}/product-receipt.json").exists()
+    assert not (directory / f"trials/{row['trial_id']}/final-score.json").exists()
+    requests = [json.loads(line) for line in protocol.read_text(encoding="utf-8").splitlines()]
+    assert [request["operation"] for request in requests] == operations
+    process = json.loads((directory / f"processes/{row['trial_id']}-turn-000.json").read_text(encoding="utf-8"))
+    assert process["owned_tree_stopped"] is True
+    assert (process["started"] is None) is (mode in {"bad_pid", "bad_runtime"})
 
 
 def test_public_production_finalizes_a_known_model_failure_without_grading_it(tmp_path: Path, refusal_driver: Path, monkeypatch) -> None:

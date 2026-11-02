@@ -295,6 +295,18 @@ func ActorOwner(actor identity.Actor) uint {
 	return owner
 }
 
+// StartupRecoveryAllowed preserves yielded roots and their authenticated children.
+func (gateway *Gateway) StartupRecoveryAllowed(ctx context.Context, actor identity.Actor) (bool, error) {
+	if gateway == nil || gateway.budget == nil || gateway.budget.ledger == nil || actor.Validate() != nil {
+		return false, ErrInvalidAdmission
+	}
+	root, err := session.ModelTaskRoot(ctx, gateway.budget.ledger, actor)
+	if err != nil {
+		return false, err
+	}
+	return gateway.budget.StartupRecoveryAllowed(ctx, ActorOwner(actor), root)
+}
+
 // BindExistingTask fences non-model execution inside an already admitted task.
 // The caller must first authorize the public Session owner and repository.
 func (gateway *Gateway) BindExistingTask(ctx context.Context, owner uint, taskID string) (func() error, error) {

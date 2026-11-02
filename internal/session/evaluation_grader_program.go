@@ -112,7 +112,7 @@ func grade() (out outcome) {
  encoded,_:=json.Marshal(parts);out.InputSHA256=hash(encoded);out.CheckerSHA256=hash(data["grader.go"]);out.ChecksSHA256=hash(data["checks.json"])
  var candidate candidateManifest
  decoder:=json.NewDecoder(bytes.NewReader(data["candidate.json"]));decoder.DisallowUnknownFields()
- if decoder.Decode(&candidate)!=nil||decoder.Decode(new(any))!=io.EOF||candidate.SchemaVersion!=1||candidate.CandidateArchiveSHA256!=out.CandidateArchiveSHA256||len(candidate.Files)==0||len(candidate.Files)>20000{out.ErrorCode="invalid_candidate";return}
+ if decoder.Decode(&candidate)!=nil||decoder.Decode(new(any))!=io.EOF||candidate.SchemaVersion!=1||candidate.CandidateArchiveSHA256!=out.CandidateArchiveSHA256||candidate.Files==nil||len(candidate.Files)>20000{out.ErrorCode="invalid_candidate";return}
  encoded,_=json.Marshal(candidate.Files);out.CandidateSHA256=hash(encoded);if out.CandidateSHA256!=candidate.CandidateSHA256{out.ErrorCode="invalid_candidate";return}
  expected:=map[string]inputFile{};previous:="";aliases:=map[string]bool{}
  for _,file:=range candidate.Files {

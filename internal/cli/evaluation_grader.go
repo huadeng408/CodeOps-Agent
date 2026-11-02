@@ -72,16 +72,6 @@ func runEvaluationGrade(ctx context.Context, cfg config.Config, request Evaluati
 			}
 			return gateway.BindExistingTask(scopeCtx, admission.ActorOwner(actor), id)
 		})
-		candidateID := sha256.Sum256([]byte("evaluation-grade-candidate/v1\x00" + prod.id + "\x00" + request.ExpectedSessionHeadChecksum))
-		proposal, err := prod.tasks.GenerateProposal(ctx, prod.owner, prod.id, int64(len(snapshot.Events)), hex.EncodeToString(candidateID[:]))
-		if err != nil || proposal.Proposal == nil || (proposal.Proposal.State != "ready" && proposal.Proposal.State != "failed") || !proposal.Proposal.Test.Stopped || proposal.Proposal.Test.InputSHA256 != proposal.Proposal.FinalStateSHA256 {
-			return evaluationRefusal(output, request, "candidate_freeze_unavailable")
-		}
-		snapshot, err = session.ReadVerifiedSnapshot(ctx, prod.ledger, prod.id)
-		if err != nil || len(snapshot.Events) == 0 {
-			return evaluationRefusal(output, request, "evidence_unavailable")
-		}
-		command.ExpectedSessionHeadChecksum = snapshot.Events[len(snapshot.Events)-1].Checksum
 	}
 	grade, gradeErr := prod.tasks.GradeEvaluation(ctx, command)
 	snapshot, snapshotErr := session.ReadVerifiedSnapshot(ctx, prod.ledger, prod.id)

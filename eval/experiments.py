@@ -9,7 +9,6 @@ import math
 import os
 import queue
 import re
-import signal
 import subprocess
 import sys
 import threading
@@ -21,6 +20,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from eval.harness.artifacts import RunArtifacts
+from eval.harness.process_tree import OwnedProcessTree as _OwnedProcessTree
 from eval.harness.redaction import redact_credential_value
 from eval.harness.source_pin import source_pin
 
@@ -474,6 +474,8 @@ def _product_call(binary: Path, request: dict[str, Any], timeout: float, artifac
     readers = []
     interruption: dict[str, Any] | None = None
     first_started: dict[str, Any] | None = None
+    failure: Exception | None = None
+    owned_tree_stopped = False
     termination_started = terminated_at = 0
 
     def read_stream(stream: Any, name: str) -> None:
@@ -516,6 +518,20 @@ def _product_call(binary: Path, request: dict[str, Any], timeout: float, artifac
             if not isinstance(message, dict):
                 continue
             if message.get("type") == "started":
+                if request.get("runtime_contract") == "production_opensandbox":
+                    if (
+                        first_started is not None
+                        or type(message.get("pid")) is not int or message["pid"] != process.pid
+                        or type(message.get("schema_version")) is not int or message["schema_version"] != 1
+                        or message.get("execution_path") != "go-session-runner-grpc"
+                        or any(message.get(field) != request.get(field) for field in ("run_id", "task_id", "model", "budget", "lifecycle", "turn_id"))
+                        or message.get("effective_policy", message.get("policy")) != request["policy"]
+                        or not isinstance(message.get("session_id"), str) or not message["session_id"]
+                        or not isinstance(message.get("product_run_id"), str) or not message["product_run_id"]
+                        or request.get("session_id") is not None and message["session_id"] != request["session_id"]
+                    ):
+                        raise ValueError("product started identity does not match the owned process and frozen request")
+                    _production_workspace(message, request, approved_workspace_root)
                 first_started = message
             if message.get("type") != "fault_ready":
                 continue
@@ -546,15 +562,19 @@ def _product_call(binary: Path, request: dict[str, Any], timeout: float, artifac
         process.wait(timeout=max(0.01, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        if tree is not None:
-            tree.stop()
-        raise subprocess.TimeoutExpired(process.args, timeout) from exc
+        failure = exc
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        failure = exc
     finally:
-        if tree is not None:
-            tree.close()
-        elif process.poll() is None:
-            process.kill()
-            process.wait(timeout=10)
+        try:
+            if tree is not None:
+                tree.close()
+                owned_tree_stopped = process.poll() is not None
+            elif process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        except (OSError, TimeoutError, subprocess.SubprocessError) as exc:
+            failure = failure or exc
         for reader in readers:
             reader.join(timeout=5)
         for stream in (process.stdin, process.stdout, process.stderr):
@@ -562,35 +582,51 @@ def _product_call(binary: Path, request: dict[str, Any], timeout: float, artifac
                 stream.close()
         artifacts.record_scorer_output(f"{stem}.ndjson", "".join(chunks["stdout"]))
         artifacts.record_scorer_output(f"{stem}-stderr.txt", "".join(chunks["stderr"]))
-        artifacts.write(f"processes/{stem}.json", {"pid": process.pid, "tree": "windows_job" if os.name == "nt" else "posix_process_group", "timed_out": timed_out, "exit_code": process.returncode, "fault_ready": interruption, "physical_termination_confirmed": interruption is not None, "termination_started_unix_nano": termination_started, "terminated_at_unix_nano": terminated_at, "confirmed": False})
+        artifacts.write(f"processes/{stem}.json", {"pid": process.pid, "tree": "windows_job" if os.name == "nt" else "posix_process_group", "timed_out": timed_out, "exit_code": process.returncode, "started": first_started, "owned_tree_stopped": owned_tree_stopped, "fault_ready": interruption, "physical_termination_confirmed": interruption is not None, "termination_started_unix_nano": termination_started, "terminated_at_unix_nano": terminated_at, "confirmed": False})
+    if failure is not None:
+        if request.get("runtime_contract") == "production_opensandbox" and request.get("operation") in {"run", "continue"}:
+            raise _ProductCallFailed(failure, request, first_started, f"processes/{stem}.json", owned_tree_stopped) from failure
+        raise failure
     if interruption is not None:
         raise _TrialInterrupted(interruption, f"processes/{stem}.json", termination_started, terminated_at)
     result = subprocess.CompletedProcess(process.args, process.returncode, "".join(chunks["stdout"]), "".join(chunks["stderr"]))
-    receipts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    if any(not isinstance(item, dict) for item in receipts):
-        raise ValueError("product driver emitted a non-object protocol message")
-    receipts = [item for item in receipts if item.get("type") == "receipt"]
-    if len(receipts) != 1:
-        raise ValueError("product driver must emit exactly one receipt")
-    receipt = receipts[0]
-    refusal = receipt.get("task_state") in {"blocked", "infra_error"} and not receipt.get("session_id") and bool(receipt.get("error_code"))
-    if (
-        type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
-        or receipt.get("execution_path") != "go-session-runner-grpc"
-        or receipt.get("run_id") != request["run_id"]
-        or receipt.get("task_id") != request["task_id"]
-        or receipt.get("model") != request["model"]
-        or receipt.get("budget") != request["budget"]
-        or receipt.get("effective_policy", receipt.get("policy")) != request["policy"]
-        or not refusal and any(receipt.get(field, "") != request.get(field, "") for field in ("lifecycle", "turn_id"))
-        or request.get("runtime_contract") != "production_opensandbox" and not (refusal and not receipt.get("workspace")) and Path(receipt.get("workspace", "")).resolve() != Path(request["workspace"])
-    ):
-        raise ValueError("product receipt identity mismatch; direct-model fallback is forbidden")
-    if request.get("runtime_contract") == "production_opensandbox" and not refusal and (receipt.get("task_state") in {"completed", "finalized", "graded"} or request.get("operation") in {"inspect", "grade", "finalize"} or receipt.get("task_state") in {"blocked", "infra_error"} and not receipt.get("product_run_id")):
-        _production_workspace(receipt, request, approved_workspace_root)
-    if receipt.get("task_state") in {"completed", "graded"} and result.returncode != 0:
-        raise ValueError("product driver failed after reporting completion")
-    return result, receipt
+    try:
+        receipts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        if any(not isinstance(item, dict) for item in receipts):
+            raise ValueError("product driver emitted a non-object protocol message")
+        receipts = [item for item in receipts if item.get("type") == "receipt"]
+        if len(receipts) != 1:
+            raise ValueError("product driver must emit exactly one receipt")
+        receipt = receipts[0]
+        refusal = receipt.get("task_state") in {"blocked", "infra_error"} and not receipt.get("session_id") and bool(receipt.get("error_code"))
+        if (
+            type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+            or receipt.get("execution_path") != "go-session-runner-grpc"
+            or receipt.get("run_id") != request["run_id"]
+            or receipt.get("task_id") != request["task_id"]
+            or receipt.get("model") != request["model"]
+            or receipt.get("budget") != request["budget"]
+            or receipt.get("effective_policy", receipt.get("policy")) != request["policy"]
+            or not refusal and any(receipt.get(field, "") != request.get(field, "") for field in ("lifecycle", "turn_id"))
+            or request.get("runtime_contract") != "production_opensandbox" and not (refusal and not receipt.get("workspace")) and Path(receipt.get("workspace", "")).resolve() != Path(request["workspace"])
+        ):
+            raise ValueError("product receipt identity mismatch; direct-model fallback is forbidden")
+        if request.get("runtime_contract") == "production_opensandbox" and not refusal and (receipt.get("task_state") in {"completed", "finalized", "graded"} or request.get("operation") in {"inspect", "grade", "finalize"} or receipt.get("task_state") in {"blocked", "infra_error"} and not receipt.get("product_run_id")):
+            _production_workspace(receipt, request, approved_workspace_root)
+        if receipt.get("task_state") in {"completed", "graded"} and result.returncode != 0:
+            raise ValueError("product driver failed after reporting completion")
+        return result, receipt
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if request.get("runtime_contract") == "production_opensandbox" and request.get("operation") in {"run", "continue"}:
+            raise _ProductCallFailed(exc, request, first_started, f"processes/{stem}.json", owned_tree_stopped) from exc
+        raise
+
+
+class _ProductCallFailed(ValueError):
+    def __init__(self, cause: Exception, request: dict[str, Any], started: dict[str, Any] | None, record_path: str, owned_tree_stopped: bool) -> None:
+        super().__init__(str(cause))
+        self.request, self.started, self.record_path, self.owned_tree_stopped = request, started, record_path, owned_tree_stopped
+        self.error_code = "production_runtime_invalid" if isinstance(cause, _ProductionContractError) else type(cause).__name__
 
 
 class _TrialInterrupted(Exception):
@@ -600,80 +636,6 @@ class _TrialInterrupted(Exception):
         self.termination_started, self.terminated_at = termination_started, terminated_at
 
 
-class _OwnedProcessTree:
-    def __init__(self, process: subprocess.Popen[str]) -> None:
-        self.process = process
-        self.job: Any = None
-        if os.name != "nt":
-            return
-        import ctypes
-        from ctypes import wintypes
-
-        class BasicLimits(ctypes.Structure):
-            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong), ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t), ("max_working_set", ctypes.c_size_t), ("active_limit", wintypes.DWORD), ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
-
-        class ExtendedLimits(ctypes.Structure):
-            _fields_ = [("basic", BasicLimits), ("io", ctypes.c_uint64 * 6), ("memory", ctypes.c_size_t * 4)]
-
-        class Accounting(ctypes.Structure):
-            _fields_ = [("times", ctypes.c_longlong * 4), ("counts", wintypes.DWORD * 4)]
-
-        self.ctypes, self.accounting_type = ctypes, Accounting
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        signatures = {
-            "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
-            "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
-            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
-            "QueryInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL),
-            "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
-            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
-        }
-        for name, (arguments, result) in signatures.items():
-            function = getattr(self.kernel, name)
-            function.argtypes, function.restype = arguments, result
-        self.job = self.kernel.CreateJobObjectW(None, None)
-        if not self.job:
-            raise ctypes.WinError(ctypes.get_last_error())
-        limits = ExtendedLimits()
-        limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE; no child may break away.
-        if not self.kernel.SetInformationJobObject(self.job, 9, ctypes.byref(limits), ctypes.sizeof(limits)) or not self.kernel.AssignProcessToJobObject(self.job, int(getattr(process, "_handle"))):
-            error = ctypes.WinError(ctypes.get_last_error())
-            self.kernel.CloseHandle(self.job)
-            self.job = None
-            raise error
-
-    def _active(self) -> int:
-        accounting = self.accounting_type()
-        if not self.kernel.QueryInformationJobObject(self.job, 1, self.ctypes.byref(accounting), self.ctypes.sizeof(accounting), None):
-            raise self.ctypes.WinError(self.ctypes.get_last_error())
-        return int(accounting.counts[2])
-
-    def stop(self) -> None:
-        if self.job is not None:
-            if not self.kernel.TerminateJobObject(self.job, 1):
-                raise self.ctypes.WinError(self.ctypes.get_last_error())
-            deadline = time.monotonic() + 10
-            while self._active():
-                if time.monotonic() > deadline:
-                    raise TimeoutError("owned process tree did not terminate")
-                time.sleep(0.01)
-        elif sys.platform != "win32":
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        self.process.wait(timeout=10)
-
-    def close(self) -> None:
-        if self.job is not None:
-            try:
-                if self._active():
-                    self.stop()
-            finally:
-                self.kernel.CloseHandle(self.job)
-                self.job = None
-        elif sys.platform != "win32":
-            self.stop()
 
 
 def _execution_status(receipt: dict[str, Any]) -> str:
@@ -1183,6 +1145,54 @@ def _run(config: dict[str, Any], plan: dict[str, Any], artifacts: RunArtifacts, 
                             validation["checks"]["finalized_ledger_readback"] = final_inspect_result.returncode == 0 and final_inspected.get("ledger", {}).get("verified") is True and final_inspected.get("ledger", {}).get("head_checksum") == final_receipt.get("ledger", {}).get("head_checksum")
                             if not validation["checks"]["finalized_ledger_readback"]:
                                 raise _CleanupError("final production admission head was not verified", "final_inspect", final_inspected.get("error_code") or "finalized_ledger_readback_unconfirmed", validation["final_inspect_receipt"])
+        except _ProductCallFailed as exc:
+            row.update(status="infra_error", success=None, provenance_verified=False, source_status="unknown", error_code=exc.error_code)
+            validation["status"], validation["error"] = "blocked", str(exc)
+            validation["started_record"] = {"path": exc.record_path, "sha256": _sha256(artifacts.root / exc.record_path)}
+            artifacts.record_failure(row["trial_id"], "infra_error", str(exc))
+            identity = exc.started
+            if identity is not None:
+                row.update(session_id=identity["session_id"], product_run_id=identity["product_run_id"], trace_id=identity.get("trace_id"))
+            artifacts.write_jsonl("predictions.jsonl", rows)
+            try:
+                if identity is None or not exc.owned_tree_stopped:
+                    raise _CleanupError("missing receipt cannot be reconciled without owned identity and process stop proof", "cleanup_preflight", "product_started_identity_unavailable" if identity is None else "owned_process_stop_unconfirmed", {})
+                inspect_request = {**exc.request, "operation": "inspect", "session_id": identity["session_id"]}
+                inspect_request.pop("expected_session_head_checksum", None)
+                inspect_result, inspected = call_product(inspect_request, 30, f"{row['trial_id']}-missing-receipt-inspect")
+                name = f"trials/{row['trial_id']}/missing-receipt-inspect-receipt.json"
+                artifacts.write(name, inspected)
+                validation["missing_receipt_inspect"] = {"path": name, "sha256": _sha256(artifacts.root / name)}
+                head = inspected.get("ledger", {}).get("head_checksum")
+                stable_task = ("approved_root", "working_dir", "workspace_id", "lease_id", "baseline_checksum", "prepared_event_id", "prepared_event_checksum")
+                validation["checks"]["started_ledger_readback"] = inspect_result.returncode in (0, 1) and inspected.get("task_state") in {"queued", "running", "canceling", "completed", "failed", "canceled", "budget_exceeded"} and all(inspected.get(key) == identity.get(key) for key in ("session_id", "product_run_id", "workspace", "opensandbox")) and all(inspected["task_workspace"].get(key) == identity["task_workspace"].get(key) for key in stable_task) and inspected.get("ledger", {}).get("verified") is True and inspected["ledger"].get("session_id") == identity["session_id"] and isinstance(head, str) and re.fullmatch(r"[0-9a-f]{64}", head) is not None
+                if not validation["checks"]["started_ledger_readback"]:
+                    raise _CleanupError("canonical inspection did not confirm the owned started Session", "cleanup_inspect", "started_ledger_readback_unconfirmed", validation["missing_receipt_inspect"])
+                _record_trial_usage(row, inspected.get("usage", {}), interrupted_usage)
+                artifacts.write_jsonl("predictions.jsonl", rows)
+                abandon_request = {**inspect_request, "operation": "finalize", "finalize_mode": "abandon", "expected_session_head_checksum": head}
+                artifacts.write(f"trials/{row['trial_id']}/abandon-request.json", abandon_request)
+                abandon_result, abandoned = call_product(abandon_request, 30, f"{row['trial_id']}-missing-receipt-abandon")
+                name = f"trials/{row['trial_id']}/abandon-receipt.json"
+                artifacts.write(name, abandoned)
+                validation["abandon_receipt"] = {"path": name, "sha256": _sha256(artifacts.root / name)}
+                validation["checks"]["admission_finalized"] = abandon_result.returncode == 0 and abandoned.get("task_state") == "finalized" and abandoned.get("admission_finalized") is True and abandoned.get("session_id") == identity["session_id"] and abandoned.get("product_run_id") == identity["product_run_id"] and isinstance(abandoned.get("run_state"), str) and bool(abandoned["run_state"]) and abandoned.get("ledger", {}).get("verified") is True and abandoned["ledger"].get("session_id") == identity["session_id"] and isinstance(abandoned["ledger"].get("head_checksum"), str) and re.fullmatch(r"[0-9a-f]{64}", abandoned["ledger"]["head_checksum"]) is not None
+                if not validation["checks"]["admission_finalized"]:
+                    raise _CleanupError("Go did not safely abandon the Session without a final receipt", "cleanup_abandon", abandoned.get("error_code") or "admission_finalization_unconfirmed", validation["abandon_receipt"])
+                final_result, final_inspected = call_product(inspect_request, 30, f"{row['trial_id']}-final-inspect")
+                name = f"trials/{row['trial_id']}/final-inspect-receipt.json"
+                artifacts.write(name, final_inspected)
+                validation["final_inspect_receipt"] = {"path": name, "sha256": _sha256(artifacts.root / name)}
+                validation["checks"]["finalized_ledger_readback"] = final_result.returncode == 0 and final_inspected.get("task_state") == "finalized" and final_inspected.get("admission_finalized") is True and final_inspected.get("session_id") == identity["session_id"] and final_inspected.get("product_run_id") == identity["product_run_id"] and final_inspected.get("run_state") == abandoned["run_state"] and final_inspected.get("ledger", {}).get("verified") is True and final_inspected["ledger"].get("session_id") == identity["session_id"] and final_inspected["ledger"].get("head_checksum") == abandoned["ledger"]["head_checksum"]
+                if not validation["checks"]["finalized_ledger_readback"]:
+                    raise _CleanupError("abandoned Session head was not verified", "final_inspect", "finalized_ledger_readback_unconfirmed", validation["final_inspect_receipt"])
+                row["admission_finalized"], row["ledger_valid"] = True, True
+                _record_trial_usage(row, final_inspected.get("usage", {}), interrupted_usage)
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as cleanup_exc:
+                row["cleanup_blocked"] = True
+                row["cleanup_error"] = cleanup_exc.details if isinstance(cleanup_exc, _CleanupError) else {"stage": "missing_receipt_cleanup", "error_code": type(cleanup_exc).__name__}
+                validation["cleanup_error"] = row["cleanup_error"]
+                artifacts.record_failure(row["trial_id"], "cleanup_blocked", str(cleanup_exc))
         except _CleanupError as exc:
             row["cleanup_blocked"] = True
             row["cleanup_error"] = exc.details

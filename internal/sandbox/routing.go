@@ -303,6 +303,9 @@ func detectAvailabilityWithRetry(ctx context.Context, config Config, platform st
 	}
 	config = normalizeConfig(config)
 	readinessTimeout := config.ProbeReadinessTimeout
+	if _, err := chooseBackend(config.Backend, platform, Availability{}); err != nil && !retryableSelectionError(err) {
+		return Availability{}
+	}
 	if readinessTimeout <= 0 {
 		readinessTimeout = defaultProbeReadinessTimeout
 	}

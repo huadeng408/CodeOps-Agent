@@ -408,7 +408,8 @@ func main() {
 		}
 		runner := session.NewSessionRunner(workbench, client, continuationTools, session.SessionRunnerOptions{
 			WorkerID: workerID, Permissions: continuationPermissions, MCPCatalog: continuationMCP.Catalog, CancelModelCalls: modelGateway.StopRunCalls,
-			AgentSpawn: client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
+			StartupRecoveryAllowed: modelGateway.StartupRecoveryAllowed,
+			AgentSpawn:             client.OnAgentSpawn, AgentLifecycle: client.OnAgentLifecycle,
 			Memory: sessionMemory, MemoryCommitTimeout: modelGateway.ReflectionTimeout(), Tracer: telemetry,
 			AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 				binding, ok := continuationMCP.ResolveBinding(name)

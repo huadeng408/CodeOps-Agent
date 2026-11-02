@@ -122,15 +122,57 @@ func TestEvaluationInspectAndAbandonReportControlSuccess(t *testing.T) {
 				t.Fatalf("verified control was reported as failure: %v state=%v code=%v finalized=%v", controlErr, receipt["task_state"], receipt["error_code"], receipt["admission_finalized"])
 			}
 			if operation == "inspect" {
-				if receipt["task_state"] != "running" {
+				if receipt["task_state"] != "running" || receipt["admission_finalized"] != false {
 					t.Fatal("inspection changed the interrupted run")
 				}
 				after, err := session.ReadVerifiedSnapshot(ctx, ledger, boundary["session_id"].(string))
 				if err != nil || len(after.Events) != len(before.Events) || after.Events[len(after.Events)-1].Checksum != before.Events[len(before.Events)-1].Checksum {
 					t.Fatal("inspection wrote Session facts")
 				}
-			} else if receipt["task_state"] != "finalized" || receipt["admission_finalized"] != true {
-				t.Fatal("successful abandonment was not acknowledged")
+				writer, err := session.OpenSQLiteEventLog(cfg.SessionDBPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invalid, appendErr := writer.Append(ctx, boundary["session_id"].(string), int64(len(after.Events)), "evaluation/finalized", map[string]string{"mode": "unknown"})
+				if closeErr := writer.Close(); appendErr != nil || closeErr != nil {
+					t.Fatalf("invalid finalization fixture: %v %v", appendErr, closeErr)
+				}
+				var rejectedOutput strings.Builder
+				rejectedErr := cli.RunEvaluation(ctx, cfg, strings.NewReader(string(input)), &rejectedOutput, io.Discard)
+				var rejected map[string]any
+				if err := json.Unmarshal([]byte(rejectedOutput.String()), &rejected); err != nil || rejectedErr == nil || rejected["error_code"] != "evidence_unavailable" || rejected["admission_finalized"] == true {
+					t.Fatalf("unknown finalization was accepted: %v %v %+v", err, rejectedErr, rejected)
+				}
+				unchanged, err := session.ReadVerifiedSnapshot(ctx, ledger, boundary["session_id"].(string))
+				if err != nil || len(unchanged.Events) != len(after.Events)+1 || unchanged.Events[len(unchanged.Events)-1].Checksum != invalid.Checksum {
+					t.Fatal("rejected finalization inspection rewrote Session facts")
+				}
+			} else {
+				if receipt["task_state"] != "finalized" || receipt["admission_finalized"] != true {
+					t.Fatal("successful abandonment was not acknowledged")
+				}
+				request["operation"] = "inspect"
+				delete(request, "finalize_mode")
+				delete(request, "expected_session_head_checksum")
+				input, _ = json.Marshal(request)
+				for repeat := 0; repeat < 2; repeat++ {
+					var readbackOutput strings.Builder
+					readbackErr := cli.RunEvaluation(ctx, cfg, strings.NewReader(string(input)), &readbackOutput, io.Discard)
+					readbackDecoder := json.NewDecoder(strings.NewReader(readbackOutput.String()))
+					var readback map[string]any
+					for {
+						var event map[string]any
+						if readbackDecoder.Decode(&event) != nil {
+							break
+						}
+						if event["type"] == "receipt" {
+							readback = event
+						}
+					}
+					if readbackErr != nil || readback["task_state"] != "finalized" || readback["admission_finalized"] != true || readback["run_state"] != receipt["run_state"] || readback["ledger"].(map[string]any)["head_checksum"] != receipt["ledger"].(map[string]any)["head_checksum"] {
+						t.Fatalf("abandoned trial readback lost canonical finalization: %v state=%v run=%v finalized=%v", readbackErr, readback["task_state"], readback["run_state"], readback["admission_finalized"])
+					}
+				}
 			}
 		})
 	}

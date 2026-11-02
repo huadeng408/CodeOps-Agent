@@ -508,6 +508,10 @@ finished:
 		}
 	}
 	snapshot, snapshotErr := session.ReadVerifiedSnapshot(finishCtx, app.ledger, current.ID)
+	if snapshotErr == nil {
+		finalization, snapshotErr = session.ReadEvaluationFinalization(snapshot.Events)
+	}
+	finalized := snapshotErr == nil && finalization != nil
 	usage, usageErr := evaluationUsage(finishCtx, app.ledger, current.ID)
 	state := string(run.Status)
 	if state == "" {
@@ -519,9 +523,6 @@ finished:
 	}
 	if finalizationErr != nil && (request.Operation == "finalize" || run.Status == session.RunCompleted) {
 		code, state = "admission_finalization_unavailable", "infra_error"
-	}
-	if request.Operation == "finalize" && finalizationErr == nil {
-		state = "finalized"
 	}
 	var diagnostic map[string]string
 	var runDiagnostic map[string]string
@@ -564,7 +565,10 @@ finished:
 	if code == "wall_clock_budget_exhausted" {
 		state = "budget_exceeded"
 	}
-	if err != nil {
+	if finalized && finalizationErr == nil && (request.Operation == "inspect" || request.Operation == "finalize") {
+		state = "finalized"
+	}
+	if err != nil && state != "finalized" {
 		code = "run_read_unavailable"
 	}
 	if snapshotErr != nil || usageErr != nil {
@@ -581,7 +585,7 @@ finished:
 	base["run_state"] = string(run.Status)
 	base["run_error_code"], base["run_diagnostic"] = runErrorCode, runDiagnostic
 	base["reconciliations"] = reconciliations
-	base["admission_finalized"] = finalizationErr == nil && (request.Operation == "finalize" || request.Operation != "inspect" && request.Lifecycle != "hold")
+	base["admission_finalized"] = finalized
 	base["checkpoint_hash"] = run.CheckpointHash
 	base["usage"] = usage
 	toolCount := 0

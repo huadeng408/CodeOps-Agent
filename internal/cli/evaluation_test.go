@@ -374,6 +374,8 @@ type evaluationTransport struct {
 	rejectBeforeDispatch bool
 	terminalCode         string
 	bashAfterWrite       bool
+	skipWrite            bool
+	unapprovedTool       string
 	onHealth             func()
 }
 
@@ -430,6 +432,21 @@ func (fixture evaluationTransport) Converse(stream grpc.BidiStreamingServer[pb.H
 	}
 	if response.ErrorCode != "" {
 		return stream.Send(&pb.OrchestratorMessage{Payload: &pb.OrchestratorMessage_Done{Done: &pb.Done{ErrorCode: response.ErrorCode}}})
+	}
+	if fixture.unapprovedTool != "" {
+		if err := stream.Send(&pb.OrchestratorMessage{Payload: &pb.OrchestratorMessage_ToolRequest{ToolRequest: &pb.ToolRequest{ToolCallId: "unapproved-tool", ToolName: fixture.unapprovedTool, ParametersJson: `{"name":"inspect","args":"inspect the public task"}`}}}); err != nil {
+			return err
+		}
+		denied, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if denied.GetToolResult() == nil || denied.GetToolResult().Error == "" {
+			return errors.New("unapproved tool was not denied")
+		}
+	}
+	if fixture.skipWrite {
+		return stream.Send(&pb.OrchestratorMessage{Payload: &pb.OrchestratorMessage_Done{Done: &pb.Done{Success: true, Message: "task finished without changes"}}})
 	}
 	if err := stream.Send(&pb.OrchestratorMessage{Payload: &pb.OrchestratorMessage_ToolRequest{ToolRequest: &pb.ToolRequest{ToolCallId: "write-result", ToolName: "Write", ParametersJson: `{"path":"result.txt","content":"product tool completed\n"}`}}}); err != nil {
 		return err

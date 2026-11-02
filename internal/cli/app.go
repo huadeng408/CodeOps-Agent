@@ -319,6 +319,7 @@ func newAppWithTaskInventory(cfg config.Config, stdin io.Reader, stdout io.Write
 				app.modelGateway.SetRuntimeStopVerifier(app.evaluationProduction.runner.ConfirmStopped)
 			}
 			app.agentRunner = session.NewSessionRunner(session.NewWorkbench(ledger, nil), app.orchestrator, app.agentTools, session.SessionRunnerOptions{
+				StartupRecoveryAllowed: app.modelGateway.StartupRecoveryAllowed,
 				Workspace:              productionWorkspace,
 				ReadOnlyAgentWorkspace: readOnlyAgentWorkspace,
 				MemoryCommitTimeout:    app.modelGateway.ReflectionTimeout(),

@@ -91,3 +91,8 @@ _Avoid_: Subagent, process
 An immutable evidence manifest that identifies what ran, under which pins and
 budget, with its complete denominator, result, trace references, and checksums.
 _Avoid_: log excerpt, synthetic report
+
+**Verification Receipt**:
+A Receipt for a declared engineering verification scope and its observed result.
+It does not establish completion of a product task or acceptance of a release.
+_Avoid_: Session state, Checkpoint, product acceptance

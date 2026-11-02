@@ -221,6 +221,9 @@ type SessionRunnerOptions struct {
 	ReadOnlyAgentWorkspace func(context.Context, identity.Actor, string, orchestrator.ToolCall) (TaskModelWorkspace, error)
 	// Workspace resolves Go-admitted task paths before Context or model work.
 	Workspace func(context.Context, uint, string) (TaskModelWorkspace, error)
+	// StartupRecoveryAllowed fences background recovery before any Session write.
+	// Explicit Session commands retain their independent admission path.
+	StartupRecoveryAllowed func(context.Context, identity.Actor) (bool, error)
 	// AgentToolBinding resolves dynamic tools before delegation and again before
 	// every child call. Static Agent Card tools remain local policy.
 	AgentToolBinding   func(string) (AgentToolBinding, bool)
@@ -948,7 +951,7 @@ func (r *SessionRunner) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return r.recoverSessions(ctx, ids)
+	return r.recoverSessions(ctx, ids, true)
 }
 
 // RecoverSession reopens only the authorized Session, without scheduling other
@@ -960,10 +963,10 @@ func (r *SessionRunner) RecoverSession(ctx context.Context, owner uint, sessionI
 	if _, err := r.workbench.Get(ctx, owner, sessionID); err != nil {
 		return err
 	}
-	return r.recoverSessions(ctx, []string{sessionID})
+	return r.recoverSessions(ctx, []string{sessionID}, false)
 }
 
-func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string) error {
+func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, startup bool) error {
 	r.lifecycleMu.RLock()
 	if r.closed {
 		r.lifecycleMu.RUnlock()
@@ -1007,6 +1010,16 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string) error
 		}
 		if view.Status == "deleted" {
 			continue
+		}
+		if startup && r.options.StartupRecoveryAllowed != nil {
+			allowed, err := r.startupRecoveryAllowed(ctx, events)
+			if err != nil {
+				recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s admission: %w", sessionID, err))
+				continue
+			}
+			if !allowed {
+				continue
+			}
 		}
 		if err := r.recoverAgentTask(ctx, view.UserID, events); err != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, err))
@@ -1060,6 +1073,31 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string) error
 		return &PartialRecoveryError{Err: err}
 	}
 	return nil
+}
+
+func (r *SessionRunner) startupRecoveryAllowed(ctx context.Context, events []Event) (bool, error) {
+	task, created, err := projectAgentTask(events)
+	if err != nil {
+		return false, err
+	}
+	if task != nil {
+		return r.options.StartupRecoveryAllowed(ctx, created.Actor)
+	}
+	runs, err := projectRuns(events)
+	if err != nil {
+		return false, err
+	}
+	var latest *runProjection
+	for _, run := range runs {
+		if latest == nil || run.createdOrder > latest.createdOrder {
+			copy := run
+			latest = &copy
+		}
+	}
+	if latest == nil {
+		return true, nil
+	}
+	return r.options.StartupRecoveryAllowed(ctx, latest.actor)
 }
 
 func (r *SessionRunner) Close() error {
@@ -2149,11 +2187,18 @@ func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease
 			if taskErr != nil {
 				return "", taskErr
 			}
-			if task != nil && r.options.AgentApproval != nil {
+			binding, err := r.evaluationBinding(ctx, events)
+			if err != nil {
+				return "", err
+			}
+			if binding != nil || task != nil && r.options.AgentApproval != nil {
 				pending := agentApprovalView(key.sessionID, *approval.pendingEvent, *approval.pending)
-				decision, err := r.options.AgentApproval(ctx, pending)
-				if err != nil {
-					return "", errors.New("agent approval unavailable")
+				decision := ApprovalDenied
+				if binding == nil {
+					decision, err = r.options.AgentApproval(ctx, pending)
+					if err != nil {
+						return "", errors.New("agent approval unavailable")
+					}
 				}
 				_, err = r.workbench.DecideToolApproval(ctx, projectionOwner(events), key.sessionID, ToolApprovalDecisionCommand{
 					RunID: pending.RunId, ToolCallID: pending.ToolCallId, PendingEventID: pending.PendingEventId,
@@ -2186,6 +2231,13 @@ func (r *SessionRunner) awaitToolApproval(ctx context.Context, key runKey, lease
 		case permission.Deny:
 			return ApprovalDenied, nil
 		case permission.AskUser:
+			binding, err := r.evaluationBinding(ctx, events)
+			if err != nil {
+				return "", err
+			}
+			if binding != nil {
+				return ApprovalDenied, nil
+			}
 			pending := toolApprovalPayload{
 				RunID: key.runID, ToolCallID: call.ID, ToolName: call.Name,
 				ArgumentsJSON: call.ParametersJSON, Decision: ApprovalPending,

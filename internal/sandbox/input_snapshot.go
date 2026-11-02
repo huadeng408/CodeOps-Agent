@@ -157,7 +157,7 @@ func FreezeInput(ctx context.Context, sourceRoot, storageRoot, operationID strin
 }
 
 func inputManifest(input []InputFile) ([]InputFile, []*tar.Header, string, error) {
-	if len(input) == 0 || len(input) > maxInputFiles {
+	if input == nil || len(input) > maxInputFiles {
 		return nil, nil, "", errors.New("frozen input file count exceeds its contract")
 	}
 	files := slices.Clone(input)

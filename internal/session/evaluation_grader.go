@@ -68,6 +68,8 @@ type evaluationGradePayload struct {
 	SourceHeadChecksum    string              `json:"source_head_checksum"`
 	ProposalEventID       string              `json:"proposal_event_id"`
 	ProposalEventChecksum string              `json:"proposal_event_checksum"`
+	PreparedEventID       string              `json:"prepared_event_id,omitempty"`
+	PreparedEventChecksum string              `json:"prepared_event_checksum,omitempty"`
 	AssertionCount        int                 `json:"assertion_count"`
 	View                  EvaluationGradeView `json:"view"`
 }
@@ -109,16 +111,31 @@ func readEvaluationGrade(events []Event) (*evaluationGradePayload, error) {
 			continue
 		}
 		var payload evaluationGradePayload
-		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion != 1 || payload.OwnerID == 0 || payload.Actor.Validate() != nil || payload.Actor.SessionID != event.SessionID || payload.RequestID == "" || !evaluationGradeHash(payload.BindingChecksum) || !evaluationGradeHash(payload.SourceHeadChecksum) || !evaluationGradeHash(payload.View.CandidateSHA256) || !evaluationGradeHash(payload.View.ChecksSHA256) || !evaluationGradeHash(payload.View.CheckerSHA256) || !evaluationGradeHash(payload.View.OperationID) || payload.AssertionCount < 1 || payload.AssertionCount > 256 {
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion != 1 && payload.SchemaVersion != 2 || payload.OwnerID == 0 || payload.Actor.Validate() != nil || payload.Actor.SessionID != event.SessionID || payload.RequestID == "" || !evaluationGradeHash(payload.BindingChecksum) || !evaluationGradeHash(payload.SourceHeadChecksum) || !evaluationGradeHash(payload.View.CandidateSHA256) || !evaluationGradeHash(payload.View.ChecksSHA256) || !evaluationGradeHash(payload.View.CheckerSHA256) || !evaluationGradeHash(payload.View.OperationID) || payload.AssertionCount < 1 || payload.AssertionCount > 256 {
 			return nil, ErrEventIntegrity
 		}
 		if event.Type == evaluationGradeIntentEvent {
 			binding, bindingErr := ReadEvaluation(events[:index])
 			bindingBytes, _ := json.Marshal(binding)
-			proposalEvent, exists := prior[payload.ProposalEventID]
-			var proposal taskProposalPayload
-			if bindingErr != nil || binding == nil || hashCodeState(string(bindingBytes)) != payload.BindingChecksum || payload.SourceHeadChecksum != event.PrevChecksum || !exists || proposalEvent.Type != taskProposalOutcomeEvent || proposalEvent.Checksum != payload.ProposalEventChecksum || json.Unmarshal(proposalEvent.Payload, &proposal) != nil || proposal.OwnerID != payload.OwnerID || proposal.View.FinalStateSHA256 != payload.View.CandidateSHA256 || proposal.View.Test.InputSHA256 != payload.View.CandidateSHA256 || !proposal.View.Test.Stopped {
-				return nil, ErrEventIntegrity
+			if payload.SchemaVersion == 1 {
+				proposalEvent, exists := prior[payload.ProposalEventID]
+				var proposal taskProposalPayload
+				if bindingErr != nil || binding == nil || hashCodeState(string(bindingBytes)) != payload.BindingChecksum || payload.SourceHeadChecksum != event.PrevChecksum || !exists || proposalEvent.Type != taskProposalOutcomeEvent || proposalEvent.Checksum != payload.ProposalEventChecksum || json.Unmarshal(proposalEvent.Payload, &proposal) != nil || proposal.OwnerID != payload.OwnerID || proposal.View.FinalStateSHA256 != payload.View.CandidateSHA256 || proposal.View.Test.InputSHA256 != payload.View.CandidateSHA256 || !proposal.View.Test.Stopped {
+					return nil, ErrEventIntegrity
+				}
+			} else {
+				preparedEvent, exists := prior[payload.PreparedEventID]
+				prepared, state, prepareErr := taskPreparation(events[:index])
+				var source taskPreparePayload
+				sessionView, sessionErr := reduceSessionView(events[:index])
+				if bindingErr != nil || binding == nil || hashCodeState(string(bindingBytes)) != payload.BindingChecksum || payload.SourceHeadChecksum != event.PrevChecksum || !exists || preparedEvent.Type != taskPreparedEvent || preparedEvent.Checksum != payload.PreparedEventChecksum || prepareErr != nil || prepared == nil || state != "prepared" || json.Unmarshal(preparedEvent.Payload, &source) != nil || source.Task.LeaseID != prepared.Task.LeaseID || source.Task.Baseline.Checksum != prepared.Task.Baseline.Checksum || sessionErr != nil || sessionView.UserID != payload.OwnerID || payload.ProposalEventID != "" || payload.ProposalEventChecksum != "" || taskToolOutcomesKnown(events[:index], "") != nil {
+					return nil, ErrEventIntegrity
+				}
+				_, inputs, inputErr := proposalFiles(prepared.Task.Baseline, events[:index])
+				inventory, _ := json.Marshal(inputs)
+				if inputErr != nil || hashCodeState(string(inventory)) != payload.View.CandidateSHA256 {
+					return nil, ErrEventIntegrity
+				}
 			}
 			if found != nil || payload.View.State != "unknown" || payload.View.Passed != nil || payload.View.ChecksTotal != nil || payload.View.ChecksPassed != nil || payload.View.RuntimeID != "" || payload.View.Stopped || payload.View.ExitCode != nil || payload.View.IntentEventID != "" || payload.View.ResultEventID != "" || payload.View.AlreadyRecorded {
 				return nil, ErrEventIntegrity
@@ -127,7 +144,7 @@ func readEvaluationGrade(events []Event) (*evaluationGradePayload, error) {
 			found = &payload
 			continue
 		}
-		if found == nil || found.View.ResultEventID != "" || payload.RequestID != found.RequestID || payload.OwnerID != found.OwnerID || payload.Actor.ScopeKey() != found.Actor.ScopeKey() || payload.BindingChecksum != found.BindingChecksum || payload.SourceHeadChecksum != found.SourceHeadChecksum || payload.ProposalEventID != found.ProposalEventID || payload.ProposalEventChecksum != found.ProposalEventChecksum || payload.AssertionCount != found.AssertionCount || payload.View.OperationID != found.View.OperationID || payload.View.CandidateSHA256 != found.View.CandidateSHA256 || payload.View.ChecksSHA256 != found.View.ChecksSHA256 || payload.View.CheckerSHA256 != found.View.CheckerSHA256 || payload.View.IntentEventID != found.View.IntentEventID || payload.View.IntentEventChecksum != found.View.IntentEventChecksum || payload.View.ResultEventID != "" || payload.View.ResultEventChecksum != "" {
+		if found == nil || payload.SchemaVersion != found.SchemaVersion || found.View.ResultEventID != "" || payload.RequestID != found.RequestID || payload.OwnerID != found.OwnerID || payload.Actor.ScopeKey() != found.Actor.ScopeKey() || payload.BindingChecksum != found.BindingChecksum || payload.SourceHeadChecksum != found.SourceHeadChecksum || payload.ProposalEventID != found.ProposalEventID || payload.ProposalEventChecksum != found.ProposalEventChecksum || payload.PreparedEventID != found.PreparedEventID || payload.PreparedEventChecksum != found.PreparedEventChecksum || payload.AssertionCount != found.AssertionCount || payload.View.OperationID != found.View.OperationID || payload.View.CandidateSHA256 != found.View.CandidateSHA256 || payload.View.ChecksSHA256 != found.View.ChecksSHA256 || payload.View.CheckerSHA256 != found.View.CheckerSHA256 || payload.View.IntentEventID != found.View.IntentEventID || payload.View.IntentEventChecksum != found.View.IntentEventChecksum || payload.View.ResultEventID != "" || payload.View.ResultEventChecksum != "" {
 			return nil, ErrEventIntegrity
 		}
 		if payload.View.RuntimeID != "" && !evaluationGradeRuntime(payload.View.OperationID, payload.View.RuntimeID) {
@@ -380,14 +397,20 @@ func (t *TaskWorkspaces) GradeEvaluation(ctx context.Context, command Evaluation
 	if err != nil || workspaceErr != nil || workspacePath != "." || !proof.AdmissionReady || t.baselineRuntime == nil || t.baselineRuntime.Runner == nil || t.baselineRuntime.BeginProposal == nil || t.baselineRuntime.Toolchain != "go" {
 		return preflight("grade_workspace_unavailable", ErrSessionStateConflict)
 	}
-	proposal, err := taskProposal(snapshot.Events)
-	if err != nil || proposal == nil || (proposal.View.State != "ready" && proposal.View.State != "failed") || !proposal.View.Test.Stopped || proposal.View.Test.InputSHA256 != proposal.View.FinalStateSHA256 || !evaluationGradeHash(proposal.View.Test.ArchiveSHA256) {
+	current, err := t.project(ctx, snapshot.Events, sessionView)
+	if err != nil || !current.ProposalAvailable || current.Test != nil && !current.Test.Stopped {
 		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
 	}
-	current, err := t.Inspect(ctx, command.OwnerID, command.SessionID)
-	if err != nil || current.Proposal == nil || current.Proposal.State == "stale" || current.Proposal.ID != proposal.View.ID {
-		return preflight("grade_candidate_stale", ErrSessionStateConflict)
+	prepared, state, err := taskPreparation(snapshot.Events)
+	if err != nil || prepared == nil || state != "prepared" {
+		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
 	}
+	_, inputs, err := proposalFiles(prepared.Task.Baseline, snapshot.Events)
+	if err != nil {
+		return preflight("grade_candidate_unavailable", err)
+	}
+	inventory, _ := json.Marshal(inputs)
+	candidateHash := hashCodeState(string(inventory))
 	checks, count, err := readEvaluationChecks(ctx, command.ChecksPath, command.ChecksSHA256, t.repository, t.storage)
 	if err != nil {
 		return preflight("grade_checks_unavailable", err)
@@ -397,17 +420,9 @@ func (t *TaskWorkspaces) GradeEvaluation(ctx context.Context, command Evaluation
 		return preflight("grade_checker_unavailable", ErrSessionStateConflict)
 	}
 	checkerHash := hashCodeState(string(program))
-	operation := hashCodeState("evaluation-grade/v1\x00" + command.SessionID + "\x00" + command.RequestID + "\x00" + proposal.View.FinalStateSHA256 + "\x00" + command.ChecksSHA256 + "\x00" + checkerHash)
-	payload := evaluationGradePayload{SchemaVersion: 1, OwnerID: command.OwnerID, Actor: command.Actor, RequestID: command.RequestID, BindingChecksum: bindingHash, SourceHeadChecksum: command.ExpectedSessionHeadChecksum, AssertionCount: count,
-		View: EvaluationGradeView{State: "unknown", CandidateSHA256: proposal.View.FinalStateSHA256, CheckerSHA256: checkerHash, ChecksSHA256: command.ChecksSHA256, OperationID: operation}}
-	for _, event := range snapshot.Events {
-		if event.Type == taskProposalOutcomeEvent {
-			payload.ProposalEventID, payload.ProposalEventChecksum = event.EventID, event.Checksum
-		}
-	}
-	if payload.ProposalEventID == "" {
-		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
-	}
+	operation := hashCodeState("evaluation-grade/v2\x00" + command.SessionID + "\x00" + command.RequestID + "\x00" + candidateHash + "\x00" + command.ChecksSHA256 + "\x00" + checkerHash)
+	payload := evaluationGradePayload{SchemaVersion: 2, OwnerID: command.OwnerID, Actor: command.Actor, RequestID: command.RequestID, BindingChecksum: bindingHash, SourceHeadChecksum: command.ExpectedSessionHeadChecksum, PreparedEventID: proof.PreparedEventID, PreparedEventChecksum: proof.PreparedEventChecksum, AssertionCount: count,
+		View: EvaluationGradeView{State: "unknown", CandidateSHA256: candidateHash, CheckerSHA256: checkerHash, ChecksSHA256: command.ChecksSHA256, OperationID: operation}}
 	intent, err := t.workbench.ledger.Append(ctx, command.SessionID, int64(len(snapshot.Events)), evaluationGradeIntentEvent, payload)
 	if err != nil {
 		return preflight("grade_intent_not_recorded", err)
@@ -420,58 +435,53 @@ func (t *TaskWorkspaces) GradeEvaluation(ctx context.Context, command Evaluation
 	knownStopped := true
 	payload.View.State, payload.View.Reason = "blocked", "grader_admission_unavailable"
 	if beginErr == nil {
-		prepared, _, readErr := taskPreparation(snapshot.Events)
-		if readErr == nil && prepared != nil {
-			frozen, freezeErr := sandbox.FreezeInput(gradeCtx, proof.WorkingDir, t.storage, operation, proposal.InputFiles)
-			if freezeErr == nil && frozen.SourceSHA256 == payload.View.CandidateSHA256 {
-				payload.View.CandidateArchiveSHA256 = frozen.ArchiveSHA256
-				directory, inputHash, release, stageErr := t.stageEvaluationGrade(gradeCtx, operation, frozen, checks, program)
-				if stageErr == nil {
-					payload.View.InputSHA256 = inputHash
-					latest, headErr := ReadVerifiedSnapshot(gradeCtx, t.workbench.ledger, command.SessionID)
-					if headErr == nil && latest.Events[len(latest.Events)-1].Checksum == intent.Checksum {
-						result, runErr := t.baselineRuntime.Runner.Run(gradeCtx, sandbox.Request{Workspace: directory, WorkingDir: directory, OperationID: operation, Program: "go", Args: []string{"run", "grader.go"}})
-						payload.View.RuntimeID, payload.View.Stopped = result.RuntimeID, result.Stopped
-						payload.View.OutputSHA256 = hashCodeState(result.Output)
-						if runErr == nil {
-							code := result.ExitCode
-							payload.View.ExitCode = &code
-						}
-						knownStopped = result.Stopped || (errors.Is(runErr, sandbox.ErrSandboxUnavailable) && !errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown) && result.RuntimeID == "")
-						payload.View.State, payload.View.Reason = "unknown", "grader_runtime_outcome_unknown"
-						if knownStopped {
-							payload.View.State, payload.View.Reason = "scorer_error", "grader_output_invalid"
-							switch {
-							case errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown):
-								payload.View.State, payload.View.Reason = "unknown", "grader_runtime_outcome_unknown"
-							case errors.Is(runErr, sandbox.ErrSandboxUnavailable):
-								payload.View.Reason = "grader_runtime_unavailable"
-							case runErr != nil:
-								payload.View.Reason = "grader_runtime_failed"
-							case result.ExitCode != 0:
-								payload.View.Reason = "grader_execution_failed"
-							default:
-								var output evaluationGradeOutput
-								decoder := json.NewDecoder(strings.NewReader(result.Output))
-								decoder.DisallowUnknownFields()
-								if runErr == nil && result.Stopped && result.ExitCode == 0 && !result.Truncated && len(result.Output) <= 16384 && evaluationGradeRuntime(operation, result.RuntimeID) && decoder.Decode(&output) == nil && decoder.Decode(new(any)) == io.EOF && output.SchemaVersion == 1 && output.Valid && output.ErrorCode == "" && output.CandidateSHA256 == payload.View.CandidateSHA256 && output.CandidateArchiveSHA256 == payload.View.CandidateArchiveSHA256 && output.InputSHA256 == inputHash && output.CheckerSHA256 == checkerHash && output.ChecksSHA256 == command.ChecksSHA256 && output.Passed != nil && output.ChecksTotal != nil && *output.ChecksTotal == count && output.ChecksPassed != nil && *output.ChecksPassed >= 0 && *output.ChecksPassed <= count && *output.Passed == (*output.ChecksPassed == count) {
-									payload.View.State, payload.View.Reason = "completed", ""
-									payload.View.Passed, payload.View.ChecksTotal, payload.View.ChecksPassed = output.Passed, output.ChecksTotal, output.ChecksPassed
-								}
+		frozen, freezeErr := sandbox.FreezeInput(gradeCtx, proof.WorkingDir, t.storage, operation, inputs)
+		if freezeErr == nil && frozen.SourceSHA256 == payload.View.CandidateSHA256 {
+			payload.View.CandidateArchiveSHA256 = frozen.ArchiveSHA256
+			directory, inputHash, release, stageErr := t.stageEvaluationGrade(gradeCtx, operation, frozen, checks, program)
+			if stageErr == nil {
+				payload.View.InputSHA256 = inputHash
+				latest, headErr := ReadVerifiedSnapshot(gradeCtx, t.workbench.ledger, command.SessionID)
+				if headErr == nil && latest.Events[len(latest.Events)-1].Checksum == intent.Checksum {
+					result, runErr := t.baselineRuntime.Runner.Run(gradeCtx, sandbox.Request{Workspace: directory, WorkingDir: directory, OperationID: operation, Program: "go", Args: []string{"run", "grader.go"}})
+					payload.View.RuntimeID, payload.View.Stopped = result.RuntimeID, result.Stopped
+					payload.View.OutputSHA256 = hashCodeState(result.Output)
+					if runErr == nil {
+						code := result.ExitCode
+						payload.View.ExitCode = &code
+					}
+					knownStopped = result.Stopped || (errors.Is(runErr, sandbox.ErrSandboxUnavailable) && !errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown) && result.RuntimeID == "")
+					payload.View.State, payload.View.Reason = "unknown", "grader_runtime_outcome_unknown"
+					if knownStopped {
+						payload.View.State, payload.View.Reason = "scorer_error", "grader_output_invalid"
+						switch {
+						case errors.Is(runErr, sandbox.ErrSandboxOutcomeUnknown):
+							payload.View.State, payload.View.Reason = "unknown", "grader_runtime_outcome_unknown"
+						case errors.Is(runErr, sandbox.ErrSandboxUnavailable):
+							payload.View.Reason = "grader_runtime_unavailable"
+						case runErr != nil:
+							payload.View.Reason = "grader_runtime_failed"
+						case result.ExitCode != 0:
+							payload.View.Reason = "grader_execution_failed"
+						default:
+							var output evaluationGradeOutput
+							decoder := json.NewDecoder(strings.NewReader(result.Output))
+							decoder.DisallowUnknownFields()
+							if runErr == nil && result.Stopped && result.ExitCode == 0 && !result.Truncated && len(result.Output) <= 16384 && evaluationGradeRuntime(operation, result.RuntimeID) && decoder.Decode(&output) == nil && decoder.Decode(new(any)) == io.EOF && output.SchemaVersion == 1 && output.Valid && output.ErrorCode == "" && output.CandidateSHA256 == payload.View.CandidateSHA256 && output.CandidateArchiveSHA256 == payload.View.CandidateArchiveSHA256 && output.InputSHA256 == inputHash && output.CheckerSHA256 == checkerHash && output.ChecksSHA256 == command.ChecksSHA256 && output.Passed != nil && output.ChecksTotal != nil && *output.ChecksTotal == count && output.ChecksPassed != nil && *output.ChecksPassed >= 0 && *output.ChecksPassed <= count && *output.Passed == (*output.ChecksPassed == count) {
+								payload.View.State, payload.View.Reason = "completed", ""
+								payload.View.Passed, payload.View.ChecksTotal, payload.View.ChecksPassed = output.Passed, output.ChecksTotal, output.ChecksPassed
 							}
 						}
-					} else {
-						payload.View.Reason = "session_changed_before_grade"
 					}
-					release()
 				} else {
-					payload.View.Reason = "grader_input_unavailable"
+					payload.View.Reason = "session_changed_before_grade"
 				}
+				release()
 			} else {
-				payload.View.Reason = "candidate_freeze_unavailable"
+				payload.View.Reason = "grader_input_unavailable"
 			}
 		} else {
-			payload.View.Reason = "candidate_preparation_unavailable"
+			payload.View.Reason = "candidate_freeze_unavailable"
 		}
 	}
 	if knownStopped {

@@ -1,10 +1,12 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -314,20 +317,90 @@ func productionRuntimeFixture(t *testing.T, storage string, calls *atomic.Int64,
 	return config.SandboxConfig{Enabled: true, Backend: sandbox.BackendOpenSandbox, TrustRoot: storage, Image: taskImage, Toolchain: "go", MemoryLimit: "1g", CPULimit: "2", PidsLimit: 128, TmpfsSize: "64m", OpenSandboxManifest: manifestPath, OpenSandboxManifestSHA256: hex.EncodeToString(hash[:])}
 }
 
-func productionDockerFixture(t *testing.T, objects string) {
-	t.Helper()
-	dir := t.TempDir()
+var productionDockerBinary = sync.OnceValues(func() (binaryBytes []byte, err error) {
+	dir, err := os.MkdirTemp("", "codeops-production-docker-fixture-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(dir); cleanupErr != nil {
+			binaryBytes = nil
+			err = errors.Join(err, fmt.Errorf("docker fixture cleanup: %w", cleanupErr))
+		}
+	}()
 	source := `package main
 import("os";"encoding/json";"fmt")
 func main(){a:=os.Args[1:];if len(a)>0&&a[0]=="version"{fmt.Print("28.0.0");return};if len(a)<2{os.Exit(77)};b,e:=os.ReadFile(os.Getenv("CODEOPS_PRODUCTION_DOCKER_OBJECTS"));if e!=nil{os.Exit(78)};var objects map[string]json.RawMessage;if json.Unmarshal(b,&objects)!=nil{os.Exit(79)};v,ok:=objects[a[len(a)-1]];if !ok{fmt.Fprintln(os.Stderr,"error: no such object");os.Exit(1)};fmt.Print(string(v))}`
 	path := filepath.Join(dir, "docker.go")
 	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	binary := filepath.Join(dir, "docker.exe")
 	if body, err := exec.Command("go", "build", "-o", binary, path).CombinedOutput(); err != nil {
-		t.Fatalf("docker fixture build: %v %s", err, body)
+		return nil, fmt.Errorf("docker fixture build: %w %s", err, body)
+	}
+	return os.ReadFile(binary)
+})
+
+func productionDockerFixture(t *testing.T, objects string) {
+	t.Helper()
+	dir := t.TempDir()
+	body, err := productionDockerBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "docker.exe")
+	if err := os.WriteFile(binary, body, 0700); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CODEOPS_PRODUCTION_DOCKER_OBJECTS", objects)
+}
+
+func TestProductionDockerFixtureCopiesStayIndependent(t *testing.T) {
+	install := func(label string) string {
+		t.Helper()
+		objects := filepath.Join(t.TempDir(), "objects.json")
+		if err := os.WriteFile(objects, []byte(`{"probe":{"label":"`+label+`"}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		productionDockerFixture(t, objects)
+		binary, err := exec.LookPath("docker.exe")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command(binary, "image", "inspect", "probe").CombinedOutput(); err != nil || string(output) != `{"label":"`+label+`"}` {
+			t.Fatalf("independent fixture data: %s %v", output, err)
+		}
+		return binary
+	}
+	first, second := install("first"), install("second")
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(second)
+	if err != nil || os.SameFile(firstInfo, secondInfo) {
+		t.Fatalf("fixture copies do not have independent file identities: %v", err)
+	}
+	original, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first, []byte("owned fixture copy mutation"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := os.ReadFile(second); err != nil || !bytes.Equal(original, current) {
+		t.Fatalf("overwriting one fixture copy changed its sibling: %v", err)
+	}
+	if err := os.Remove(first); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := os.ReadFile(second); err != nil || !bytes.Equal(original, current) {
+		t.Fatalf("deleting one fixture copy changed its sibling: %v", err)
+	}
+	third := install("third")
+	if current, err := os.ReadFile(third); err != nil || !bytes.Equal(original, current) {
+		t.Fatalf("copy mutation or deletion changed the cached template: %v", err)
+	}
 }
