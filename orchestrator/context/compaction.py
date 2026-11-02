@@ -203,14 +203,14 @@ def _message_for_compaction(message: ChatMessage) -> dict[str, object]:
         "role": message.role,
         "content": message_content_text(message.content),
         "tool_calls": list(message.tool_calls),
+        "source_events": message.source_events,
     }
 
 
 def _build_summary(compactor, summarizer, request: CompactionRequest, tool_schemas) -> tuple[str, str]:
     messages = [_message_for_compaction(message) for message in request.messages]
-    deterministic = compactor.compact_history(messages)
     if summarizer is None:
-        return deterministic, "deterministic"
+        return compactor.compact_history(messages), "deterministic"
     try:
         if tool_schemas is not None:
             try:
@@ -221,14 +221,14 @@ def _build_summary(compactor, summarizer, request: CompactionRequest, tool_schem
     except RequestInterrupted:
         raise
     except Exception:
-        return deterministic, "deterministic-fallback"
+        return compactor.compact_history(messages), "deterministic-fallback"
     if not isinstance(candidate, str) or not candidate.strip():
-        return deterministic, "deterministic-fallback"
+        return compactor.compact_history(messages), "deterministic-fallback"
     framed = "[Compacted conversation history]\n" + candidate.strip()
     replaced_tokens = compactor.estimate_tokens(messages)
     summary_tokens = compactor.estimate_tokens([{"role": "system", "content": framed}])
     if summary_tokens >= replaced_tokens:
-        return deterministic, "deterministic-fallback"
+        return compactor.compact_history(messages), "deterministic-fallback"
     return framed, "llm"
 
 

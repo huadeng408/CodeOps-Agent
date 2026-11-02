@@ -16,9 +16,9 @@
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段公共入口、夹具构建复用、永久拒绝快速返回和最终完整回归已交付，见[工程证据](evidence/engineering-execution-efficiency-2026-11-02.md)。真实实验暴露控制命令冷启动超时，已实现 Go-only inspect／终态 finalize 并通过 CLI 相关回归，见[修复范围与续行证据](evidence/evaluation-control-runtime-2026-11-03.md)；新 runtime 的真实实验与发布分别验收 |
+| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段公共入口、夹具构建复用和完整回归已交付，见[工程证据](evidence/engineering-execution-efficiency-2026-11-02.md)。真实实验暴露的冷启动已用 Go-only 控制路径修复；[已完成候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)已取得源码 CI 和真实补评分。新的[确定性摘要保留修复](evidence/compaction-summary-preservation-2026-11-03.md)完成定向回归与两轴审查；最终完整检查按交付提交对应的 Go／Python CI 读回验收 |
 | [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原 200 项范围保留；最新 run 的租约已过期且无终态。本轮经用户批准仅让出准入槽，原 Session／checkpoint／计量不变；后续需新版 runtime，不能直接续接旧源码的正式验收 |
-| [#36 Agent 对照实验](https://github.com/huadeng408/CodeOps-Agent/issues/36) | 原Context 8次为7次通过、1次提供方未知，原分母保留。新的真实尝试已暴露并修复无改动候选评分、启动恢复围栏、非交互审批和终态读回问题；预算、真实故障和多轮序列仍需以新runtime继续验收，不沿用历史通道错误作为当前事实；[原始实验记录](evidence/agent-evaluation-experiments-2026-10-31.md) |
+| [#36 Agent 对照实验](https://github.com/huadeng408/CodeOps-Agent/issues/36) | 原 Context 8次保留7通过、1提供方未知；新预算6格为5通过、1预算准入失败，故障恢复7格均完成并独立评分通过，五轮序列补评分7/8、业务不通过且已正常结束。[当前报告与完整来源](evidence/agent-evaluation-experiments-2026-11-03.md)及口述已形成，任务发布和本轮源码交付继续验收；不把负结果或历史 unknown 改为通过 |
 | 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |

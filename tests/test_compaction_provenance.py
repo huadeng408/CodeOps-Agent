@@ -10,6 +10,7 @@ from orchestrator.todo.manager import TodoManager
 from orchestrator.llm.providers.anthropic import AnthropicClient
 from orchestrator.llm.providers.openai import OpenAIClient
 import json
+from copy import deepcopy
 import pytest
 
 
@@ -124,6 +125,146 @@ def test_canonical_source_identity_is_not_sent_to_provider():
         serialized = json.dumps(payload)
         assert "internal-event-marker" not in serialized
         assert "f" * 64 not in serialized
+
+
+@pytest.fixture
+def canonical_summary_history():
+    amendment = 'UPDATED_CONSTRAINT_GENERIC_7: keep "literal" \\values\nincluding this second line.'
+    previous = "[Compacted conversation history]\n" + "Archived observation. " * 40 + "\n" + amendment
+    messages = [
+        ChatMessage(role="system", content="runtime rules"),
+        ChatMessage(role="system", content=previous, source_events=(("prior-summary", "a" * 64),)),
+        ChatMessage(role="user", content="Earlier observation. " * 100, source_events=(("earlier-user", "b" * 64),)),
+        ChatMessage(role="assistant", content="", tool_calls=[{
+            "id": "old-read", "name": "Read", "arguments": {"path": "old.txt"},
+        }], source_events=(("old-call", "c" * 64),)),
+        ChatMessage(role="tool", content="Older result. " * 150, tool_call_id="old-read",
+                    source_events=(("old-result", "d" * 64),)),
+        ChatMessage(role="assistant", content="", tool_calls=[{
+            "id": "recent-read", "name": "Read", "arguments": {"path": "recent.txt"},
+        }], source_events=(("recent-call", "e" * 64),)),
+        ChatMessage(role="tool", content="Recent result. " * 65, tool_call_id="recent-read",
+                    source_events=(("recent-result", "f" * 64),)),
+        ChatMessage(role="user", content="Apply the revised agreement and verify.",
+                    source_events=(("active-input", "1" * 64),)),
+    ]
+    return previous, amendment, messages
+
+
+@pytest.mark.parametrize("max_messages", [2, 100], ids=["summary-in-older", "summary-in-recent"])
+@pytest.mark.parametrize("returned", [None, "", "expanded " * 10_000, RuntimeError("summary unavailable")],
+                         ids=["invalid", "empty", "too-long", "exception"])
+def test_fallback_preserves_complete_canonical_summary(canonical_summary_history, max_messages, returned):
+    previous, amendment, messages = canonical_summary_history
+
+    class SummaryAdapter:
+        def summarize(self, request):
+            if isinstance(returned, Exception):
+                raise returned
+            return returned
+
+    result = compact_surface(
+        messages, compactor=Compactor(max_chars=16_000, max_messages=max_messages),
+        force=True, retain_ratio=0.1, harness_managed=True, summarizer=SummaryAdapter(),
+    )
+
+    assert len(result.updates) == 1
+    assert previous in result.messages[1].content
+    assert amendment in result.messages[1].content
+    assert result.messages[0] is messages[0]
+    assert result.messages[-3:] == messages[-3:]
+    assert [ref for message in result.messages for ref in message.source_events] == [
+        ref for message in messages for ref in message.source_events
+    ]
+    assert [(ref["event_id"], ref["checksum"]) for ref in result.updates[0]["source_events"]] == [
+        ref for message in messages[1:5] for ref in message.source_events
+    ]
+    assert "prior-summary" not in result.messages[1].content
+    assert "a" * 64 not in result.messages[1].content
+
+
+@pytest.mark.parametrize("extra_budget", [-1, 1], ids=["prior-summary-too-large", "combined-summary-too-large"])
+def test_fallback_budget_refusal_does_not_publish_compaction(canonical_summary_history, extra_budget):
+    previous, _, messages = canonical_summary_history
+    before = deepcopy(messages)
+    events = []
+    calls = []
+
+    class EmptySummary:
+        def summarize(self, request):
+            calls.append(request)
+            return ""
+
+    with pytest.raises(ValueError, match="exceed compaction budget"):
+        compact_surface(
+            messages, compactor=Compactor(max_chars=len(previous) + extra_budget,
+                                         tool_result_threshold=100_000),
+            force=True, retain_ratio=0.1, harness_managed=True, summarizer=EmptySummary(),
+            record_event=lambda kind, payload: events.append((kind, payload)) or True,
+        )
+
+    assert len(calls) == 1
+    assert messages == before
+    assert [kind for kind, _ in events] == ["compaction/start", "compaction/end"]
+    assert events[-1][1] == {"status": "failed"}
+
+
+def test_valid_llm_summary_does_not_need_fallback_budget(canonical_summary_history):
+    _, amendment, messages = canonical_summary_history
+
+    class ValidSummary:
+        def summarize(self, request):
+            return amendment
+
+    result = compact_surface(
+        messages, compactor=Compactor(max_chars=128), force=True, retain_ratio=0.1,
+        harness_managed=True, summarizer=ValidSummary(),
+    )
+
+    assert len(result.updates) == 1
+    assert result.messages[1].content == "[Compacted conversation history]\n" + amendment
+    assert result.messages[-3:] == messages[-3:]
+    assert [ref for message in result.messages for ref in message.source_events] == [
+        ref for message in messages for ref in message.source_events
+    ]
+
+
+def test_canonical_summary_alone_fits_exact_budget_without_repeated_wrapping(canonical_summary_history):
+    previous, _, original = canonical_summary_history
+    messages = [original[0], original[1], original[-1]]
+    compactor = Compactor(max_chars=len(previous))
+
+    for _ in range(3):
+        result = compact_surface(messages, compactor=compactor, force=True, harness_managed=True)
+        assert len(result.updates) == 1
+        assert result.messages[1].content == previous
+        assert result.messages[-1] is original[-1]
+        assert result.messages[1].source_events == original[1].source_events
+        messages = result.messages
+
+
+def test_fallback_recompaction_preserves_prior_text_without_json_nesting(canonical_summary_history):
+    previous, amendment, messages = canonical_summary_history
+    compactor = Compactor(max_chars=16_000)
+
+    for turn in range(3):
+        sources = [ref for message in messages for ref in message.source_events]
+        active = messages[-1]
+        result = compact_surface(
+            messages, compactor=compactor, force=True, retain_ratio=0.1, harness_managed=True,
+        )
+        assert len(result.updates) == 1
+        content = result.messages[1].content
+        assert previous in content
+        assert content.count(amendment) == 1
+        assert len(content) <= compactor.max_chars
+        assert result.messages[-1] is active
+        assert [ref for message in result.messages for ref in message.source_events] == sources
+        previous = content
+        messages = [*result.messages, ChatMessage(
+            role="user", content=f"New request {turn}; keep all prior amendments.",
+            source_events=((f"next-input-{turn}", str(turn + 2) * 64),),
+        )]
 
 
 def test_python_grpc_compaction_returns_canonical_sources(tmp_path):

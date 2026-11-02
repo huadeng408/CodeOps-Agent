@@ -103,6 +103,19 @@ class Compactor:
         return [summary] + keep
 
     def compact_history(self, messages: list[dict[str, Any]], keep_recent: int | None = None) -> str:
+        preserved = [
+            str(message.get("content", "")) for message in messages
+            if message.get("role") == "system" and message.get("source_events")
+        ]
+        if preserved:
+            # A canonical summary may be the only remaining copy of earlier user revisions.
+            previous = "\n\n".join(preserved)
+            if len(previous) > self.max_chars:
+                raise ValueError("canonical summaries exceed compaction budget")
+            messages = [message for message in messages
+                        if not (message.get("role") == "system" and message.get("source_events"))]
+            if not messages:
+                return previous
         if keep_recent is None:
             keep_recent = max(1, min(self.max_messages, len(messages)))
         older = messages[:-keep_recent] if keep_recent < len(messages) else []
@@ -117,7 +130,12 @@ class Compactor:
             "recent_messages": [self._message_line(message) for message in recent],
         }
         text = "[Compacted conversation history]\n" + json.dumps(summary, ensure_ascii=False, indent=2)
-        return self.compact_text(text)
+        text = self.compact_text(text)
+        if preserved:
+            text = previous + "\n\n" + text
+            if len(text) > self.max_chars:
+                raise ValueError("canonical summaries and new history exceed compaction budget")
+        return text
 
     def should_compact(
         self,
