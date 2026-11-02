@@ -19,9 +19,12 @@ import (
 	"time"
 
 	pb "code-agent/gen/codeagentpb"
+	"code-agent/internal/admission"
 	"code-agent/internal/cli"
 	"code-agent/internal/config"
+	"code-agent/internal/identity"
 	"code-agent/internal/safety"
+	"code-agent/internal/session"
 	"google.golang.org/grpc"
 )
 
@@ -53,9 +56,14 @@ func TestEvaluationProductionGradeRejectsUnapprovedToolWithoutWaiting(t *testing
 	testEvaluationProductionGrade(t, evaluationGradeScenario{noChanges: true, unapprovedTool: "Skill"})
 }
 
+func TestEvaluationProductionGradeRejectsActiveBudgetBeforeIntent(t *testing.T) {
+	testEvaluationProductionGrade(t, evaluationGradeScenario{activeCall: true})
+}
+
 type evaluationGradeScenario struct {
 	unapprovedTool                                        string
 	slashRoot, noChanges, wrongAssertion, emptyRepository bool
+	activeCall                                            bool
 	checkerDelay                                          time.Duration
 }
 
@@ -166,6 +174,34 @@ func testEvaluationProductionGrade(t *testing.T, scenario evaluationGradeScenari
 	request["operation"], request["session_id"] = "grade", run["session_id"]
 	request["expected_session_head_checksum"] = modelHead
 	request["grade_checks_path"], request["grade_checks_sha256"] = checksPath, hex.EncodeToString(checksHash[:])
+	if scenario.activeCall {
+		canonical, err := session.OpenSQLiteEventLog(cfg.SessionDBPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer canonical.Close()
+		id := run["session_id"].(string)
+		actor, _ := identity.Default().BindSession(id)
+		batch, err := admission.NewBudget(canonical).Reserve(context.Background(), admission.ActorOwner(actor), id, "fixture-active-call", 10)
+		if err != nil || batch.ActiveCalls != 1 {
+			t.Fatal("active-call fixture did not reserve its declared call")
+		}
+		before, _ := session.ReadVerifiedSnapshot(context.Background(), canonical, id)
+		admissionBefore, _ := session.ReadVerifiedSnapshot(context.Background(), canonical, session.VerificationAdmissionLedgerID)
+		input, _ := json.Marshal(request)
+		var output strings.Builder
+		controlErr := cli.RunEvaluation(context.Background(), cfg, strings.NewReader(string(input)), &output, io.Discard)
+		var refused map[string]any
+		if json.Unmarshal([]byte(output.String()), &refused) != nil || controlErr == nil || refused["error_code"] != "grader_admission_unavailable" {
+			t.Fatal("active model admission did not stop grading preflight")
+		}
+		after, _ := session.ReadVerifiedSnapshot(context.Background(), canonical, id)
+		admissionAfter, _ := session.ReadVerifiedSnapshot(context.Background(), canonical, session.VerificationAdmissionLedgerID)
+		if len(after.Events) != len(before.Events) || after.Events[len(after.Events)-1].Checksum != modelHead || len(admissionAfter.Events) != len(admissionBefore.Events) || admissionAfter.Events[len(admissionAfter.Events)-1].Checksum != admissionBefore.Events[len(admissionBefore.Events)-1].Checksum || checkerCalls.Load() != 0 || runtimeCalls.Load() != 0 || modelCalls.Load() != 1 {
+			t.Fatal("blocked grade renewed a lease, opened a scope, or dispatched work")
+		}
+		return
+	}
 	graded := call()
 	grade := graded["grade"].(map[string]any)
 	if graded["task_state"] != "graded" || graded["error_code"] != "" || grade["state"] != "completed" || grade["passed"] != !scenario.wrongAssertion || grade["stopped"] != true || grade["exit_code"] != float64(0) || grade["checks_total"] != float64(1) || checkerCalls.Load() != 1 || modelCalls.Load() != 1 {

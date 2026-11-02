@@ -57,6 +57,19 @@ type EvaluationGradeView struct {
 	ResultEventChecksum    string `json:"result_event_checksum"`
 	AlreadyRecorded        bool   `json:"already_recorded"`
 	Reason                 string `json:"reason,omitempty"`
+
+	LeaseRevalidation *EvaluationLeaseRevalidation `json:"lease_revalidation,omitempty"`
+}
+
+type EvaluationLeaseRevalidation struct {
+	Verified           bool      `json:"verified"`
+	BeforeHeadChecksum string    `json:"before_head_checksum"`
+	AfterHeadChecksum  string    `json:"after_head_checksum"`
+	EventID            string    `json:"event_id"`
+	EventChecksum      string    `json:"event_checksum"`
+	LeaseID            string    `json:"lease_id"`
+	PreviousExpiresAt  time.Time `json:"previous_expires_at"`
+	ExpiresAt          time.Time `json:"expires_at"`
 }
 
 type evaluationGradePayload struct {
@@ -112,6 +125,10 @@ func readEvaluationGrade(events []Event) (*evaluationGradePayload, error) {
 		}
 		var payload evaluationGradePayload
 		if json.Unmarshal(event.Payload, &payload) != nil || payload.SchemaVersion != 1 && payload.SchemaVersion != 2 || payload.OwnerID == 0 || payload.Actor.Validate() != nil || payload.Actor.SessionID != event.SessionID || payload.RequestID == "" || !evaluationGradeHash(payload.BindingChecksum) || !evaluationGradeHash(payload.SourceHeadChecksum) || !evaluationGradeHash(payload.View.CandidateSHA256) || !evaluationGradeHash(payload.View.ChecksSHA256) || !evaluationGradeHash(payload.View.CheckerSHA256) || !evaluationGradeHash(payload.View.OperationID) || payload.AssertionCount < 1 || payload.AssertionCount > 256 {
+			return nil, ErrEventIntegrity
+		}
+		// Revalidation belongs to a refused preflight, never to a stored grade.
+		if payload.View.LeaseRevalidation != nil {
 			return nil, ErrEventIntegrity
 		}
 		if event.Type == evaluationGradeIntentEvent {
@@ -392,17 +409,60 @@ func (t *TaskWorkspaces) GradeEvaluation(ctx context.Context, command Evaluation
 	if sessionView.Run != nil && (sessionView.Run.Status == RunQueued || sessionView.Run.Status == RunRunning || sessionView.Run.Status == RunCanceling) {
 		return preflight("grade_model_run_not_completed", ErrSessionStateConflict)
 	}
-	proof, err := t.Evidence(ctx, command.OwnerID, command.SessionID)
-	workspacePath, workspaceErr := filepath.Rel(binding.Workspace, proof.WorkingDir)
-	if err != nil || workspaceErr != nil || workspacePath != "." || !proof.AdmissionReady || t.baselineRuntime == nil || t.baselineRuntime.Runner == nil || t.baselineRuntime.BeginProposal == nil || t.baselineRuntime.Toolchain != "go" {
-		return preflight("grade_workspace_unavailable", ErrSessionStateConflict)
-	}
-	current, err := t.project(ctx, snapshot.Events, sessionView)
-	if err != nil || !current.ProposalAvailable || current.Test != nil && !current.Test.Stopped {
-		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
+	checks, count, err := readEvaluationChecks(ctx, command.ChecksPath, command.ChecksSHA256, t.repository, t.storage)
+	if err != nil {
+		return preflight("grade_checks_unavailable", err)
 	}
 	prepared, state, err := taskPreparation(snapshot.Events)
 	if err != nil || prepared == nil || state != "prepared" {
+		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
+	}
+	proof, err := t.Evidence(ctx, command.OwnerID, command.SessionID)
+	workspacePath, workspaceErr := filepath.Rel(binding.Workspace, proof.WorkingDir)
+	if err != nil || !proof.Verified || workspaceErr != nil || workspacePath != "." || t.baselineRuntime == nil || t.baselineRuntime.Runner == nil || t.baselineRuntime.BeginProposal == nil || t.baselineRuntime.Toolchain != "go" {
+		return preflight("grade_workspace_unavailable", ErrSessionStateConflict)
+	}
+	current, err := t.project(ctx, snapshot.Events, sessionView)
+	if err != nil || !current.Available || !current.TestAvailable || current.Test != nil && !current.Test.Stopped || current.Proposal != nil && !current.Proposal.Test.Stopped || current.Application != nil {
+		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
+	}
+	if time.Now().After(prepared.Task.LeaseExpiresAt) {
+		if sessionView.Run == nil || sessionView.Run.Status != RunCompleted {
+			return preflight("grade_model_run_not_completed", ErrSessionStateConflict)
+		}
+		if err := ModelTaskIdle(ctx, t.workbench.ledger, command.Actor); err != nil {
+			return preflight("grade_candidate_unavailable", err)
+		}
+		_, renewed, renewalErr := t.modelWorkspace(ctx, command.OwnerID, command.SessionID, "", command.ExpectedSessionHeadChecksum)
+		if renewed != nil {
+			after, readErr := ReadVerifiedSnapshot(ctx, t.workbench.ledger, command.SessionID)
+			if readErr != nil || len(after.Events) != len(snapshot.Events)+1 || after.Events[len(after.Events)-1].EventID != renewed.EventID || after.Events[len(after.Events)-1].Checksum != renewed.Checksum {
+				return preflight("grade_session_changed", ErrSequenceConflict)
+			}
+			var renewal taskLeaseRenewalPayload
+			if renewed.Type != taskLeaseRenewedEvent || renewed.SessionID != command.SessionID || renewed.PrevChecksum != command.ExpectedSessionHeadChecksum || json.Unmarshal(renewed.Payload, &renewal) != nil || renewal.LeaseID != prepared.Task.LeaseID || !renewal.PreviousExpiresAt.Equal(prepared.Task.LeaseExpiresAt) {
+				return preflight("grade_evidence_invalid", ErrEventIntegrity)
+			}
+			if _, _, err := taskPreparation(after.Events); err != nil {
+				return preflight("grade_evidence_invalid", err)
+			}
+			return EvaluationGradeView{State: "blocked", Reason: "grade_session_changed", LeaseRevalidation: &EvaluationLeaseRevalidation{
+				Verified: true, BeforeHeadChecksum: command.ExpectedSessionHeadChecksum, AfterHeadChecksum: renewed.Checksum,
+				EventID: renewed.EventID, EventChecksum: renewed.Checksum, LeaseID: renewal.LeaseID,
+				PreviousExpiresAt: renewal.PreviousExpiresAt, ExpiresAt: renewal.ExpiresAt,
+			}}, ErrSequenceConflict
+		}
+		if errors.Is(renewalErr, ErrSequenceConflict) {
+			return preflight("grade_session_changed", ErrSequenceConflict)
+		}
+		if renewalErr != nil {
+			return preflight("grade_workspace_unavailable", renewalErr)
+		}
+	}
+	if !proof.AdmissionReady {
+		return preflight("grade_workspace_unavailable", ErrSessionStateConflict)
+	}
+	if !current.ProposalAvailable {
 		return preflight("grade_candidate_unavailable", ErrSessionStateConflict)
 	}
 	_, inputs, err := proposalFiles(prepared.Task.Baseline, snapshot.Events)
@@ -411,10 +471,6 @@ func (t *TaskWorkspaces) GradeEvaluation(ctx context.Context, command Evaluation
 	}
 	inventory, _ := json.Marshal(inputs)
 	candidateHash := hashCodeState(string(inventory))
-	checks, count, err := readEvaluationChecks(ctx, command.ChecksPath, command.ChecksSHA256, t.repository, t.storage)
-	if err != nil {
-		return preflight("grade_checks_unavailable", err)
-	}
 	program, err := format.Source([]byte(evaluationGraderProgram))
 	if err != nil {
 		return preflight("grade_checker_unavailable", ErrSessionStateConflict)

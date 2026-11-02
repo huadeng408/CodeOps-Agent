@@ -87,13 +87,6 @@ def refusal_driver_template(tmp_path_factory, source_snapshot: Path) -> Path:
 import ("encoding/json"; "os"; "os/exec"; "path/filepath"; "runtime"; "strings"; "time")
 func main() {
     if len(os.Args) > 1 && os.Args[1] == "--child" { time.Sleep(120*time.Second); return }
-    if real := os.Getenv("CODEOPS_REAL_GIT"); real != "" && len(os.Args) > 1 && os.Args[1] != "--eval-trial" {
-        if os.Args[1] == "clone" { os.Stderr.WriteString("fixture clone refused\n"); os.Exit(73) }
-        command := exec.Command(real, os.Args[1:]...)
-        command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-        if err := command.Run(); err != nil { if exit, ok := err.(*exec.ExitError); ok { os.Exit(exit.ExitCode()) }; os.Exit(2) }
-        return
-    }
     var request map[string]any
     if json.NewDecoder(os.Stdin).Decode(&request) != nil { os.Exit(2) }
     if path := os.Getenv("CODEOPS_FIXTURE_PROTOCOL_LOG"); path != "" {
@@ -160,6 +153,24 @@ func main() {
         if mode == "unknown_stop" { tool["stopped"] = false; tool["outcome_unknown"] = true }
         if mode == "missing_runtime" { tool["runtime_id"] = "" }
         receipt := map[string]any{"type":"receipt", "schema_version":1, "run_id":request["run_id"], "task_id":request["task_id"], "session_id":sessionID, "product_run_id":"fixture-product-run", "trace_id":"0123456789abcdef0123456789abcdef", "pid":os.Getpid(), "workspace":actual, "source_workspace":request["workspace"], "runtime_contract":"production_opensandbox", "product_path":"opensandbox-production", "execution_path":"go-session-runner-grpc", "model":request["model"], "policy":request["policy"], "budget":request["budget"], "task_state":"completed", "task_workspace":task, "opensandbox":map[string]any{"manifest_sha256":strings.Repeat("1",64), "source_sha":strings.Repeat("2",40), "policy_sha256":strings.Repeat("3",64), "server_container_id":strings.Repeat("4",64), "server_image":"sha256:"+strings.Repeat("5",64), "execd_image":"sha256:"+strings.Repeat("6",64), "egress_image":"sha256:"+strings.Repeat("7",64), "task_image":"sha256:"+strings.Repeat("8",64)}, "usage":map[string]any{"state":"known", "input_tokens":10, "output_tokens":2, "confirmed_tokens":12, "reserved_tokens":0, "unknown_calls":0, "call_count":1}, "ledger":map[string]any{"verified":true, "session_id":sessionID, "head_checksum":strings.Repeat("a",64), "event_count":8}, "execution_evidence":map[string]any{"verified":true, "tools":[]any{tool}}}
+        if strings.HasPrefix(mode, "graded_pre_dispatch_") {
+            denied := map[string]any{"session_id":sessionID, "run_id":"fixture-product-run", "tool_call_id":"fixture-denied", "tool_name":os.Getenv("CODEOPS_FIXTURE_DENIED_TOOL"), "is_error":true, "dispatch_count":0, "result_count":1, "unknown_count":0, "commit_done_count":0, "runtime_id":"", "stopped":false, "outcome_unknown":false, "result_event_id":strings.Repeat("7",32), "result_event_checksum":strings.Repeat("7",64)}
+            switch strings.TrimPrefix(mode, "graded_pre_dispatch_") {
+            case "missing_error": delete(denied, "is_error")
+            case "not_error": denied["is_error"] = false
+            case "string_error": denied["is_error"] = "true"
+            case "dispatched": denied["dispatch_count"] = 1
+            case "boolean_dispatch": denied["dispatch_count"] = false
+            case "multiple_results": denied["result_count"] = 2
+            case "unknown": denied["outcome_unknown"] = true
+            case "unknown_event": denied["unknown_count"] = 1
+            case "committed": denied["commit_done_count"] = 1
+            case "bad_ref": denied["result_event_checksum"] = "unbound"
+            case "numeric_ref": denied["result_event_id"] = json.Number(strings.Repeat("1",32))
+            case "numeric_checksum": denied["result_event_checksum"] = json.Number(strings.Repeat("1",64))
+            }
+            receipt["execution_evidence"].(map[string]any)["tools"] = []any{tool, denied}
+        }
         if strings.HasPrefix(mode, "graded_identity_") {
             profile := map[string]any{"protocol":"openai", "model":request["model"], "expected_reported_model":request["model"], "reasoning_effort":"xhigh"}
             reported := []any{request["model"]}
@@ -1034,20 +1045,21 @@ def test_public_run_stops_on_pin_changes_even_after_a_failed_attempt(tmp_path: P
     assert dispatch_log.read_text(encoding="utf-8").splitlines() == ["mutate-next"]
 
 
-def test_public_clone_failure_keeps_the_full_matrix_and_finalizes_checksums(tmp_path: Path, refusal_driver: Path, monkeypatch) -> None:
+def test_public_checkout_failure_keeps_the_full_matrix_and_finalizes_checksums(tmp_path: Path, refusal_driver: Path, monkeypatch) -> None:
     config = experiment_config(tmp_path, repeats=1)
     payload = json.loads(config.read_text(encoding="utf-8"))
     payload.update(experiment="context_memory", evidence_kind="fixture")
     config.write_text(json.dumps(payload), encoding="utf-8")
     output = tmp_path / "output"
     assert command("plan", "--config", str(config), "--output", str(output)).returncode == 0
-    real_git = shutil.which("git")
-    assert real_git is not None
-    shim = tmp_path / "git-bin"
-    shim.mkdir()
-    shutil.copy2(refusal_driver, shim / ("git.exe" if os.name == "nt" else "git"))
-    monkeypatch.setenv("CODEOPS_REAL_GIT", real_git)
-    monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "post-checkout"
+    hook.write_text("#!/bin/sh\necho 'fixture checkout refused' >&2\nexit 73\n", encoding="utf-8")
+    hook.chmod(0o755)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hooks))
 
     result = command("run", "--config", str(config), "--output", str(output), "--agent-binary", str(refusal_driver))
 
@@ -1170,6 +1182,39 @@ def test_public_production_finalizes_a_completed_candidate_when_required_executi
     requests = [json.loads(line) for line in protocol.read_text(encoding="utf-8").splitlines()]
     assert [request["operation"] for request in requests] == ["run", "inspect", "finalize", "inspect"]
     assert not (directory / f"trials/{row['trial_id']}/final-score.json").exists()
+
+
+@pytest.mark.parametrize(("tool", "mutation"), [(name, "accepted") for name in ("Bash", "Git", "Hook")] + [("Git", mode) for mode in ("missing_error", "not_error", "string_error", "dispatched", "boolean_dispatch", "multiple_results", "unknown", "unknown_event", "committed", "bad_ref", "numeric_ref", "numeric_checksum")])
+def test_public_production_distinguishes_pre_dispatch_errors_from_missing_runtime(tmp_path: Path, refusal_driver: Path, monkeypatch, tool: str, mutation: str) -> None:
+    config = experiment_config(tmp_path, repeats=1)
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    approved = tmp_path / "approved-runtime"
+    approved.mkdir()
+    payload.update(runtime_contract="production_opensandbox", approved_workspace_root=str(approved), evidence_kind="fixture")
+    payload["tasks"][0]["task_id"] = "production"
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEOPS_FIXTURE_APPROVED_ROOT", str(approved))
+    monkeypatch.setenv("CODEOPS_FIXTURE_DENIED_TOOL", tool)
+    monkeypatch.setenv("CODEOPS_FIXTURE_PRODUCTION", "graded_pre_dispatch_" + mutation)
+    output = tmp_path / "output"
+    assert command("plan", "--config", str(config), "--output", str(output)).returncode == 0
+
+    result = command("run", "--config", str(config), "--output", str(output), "--agent-binary", str(refusal_driver))
+
+    accepted = mutation == "accepted"
+    assert result.returncode == (0 if accepted else 3), result.stderr
+    directory = output / "public-pilot"
+    row = json.loads((directory / "summary.json").read_text(encoding="utf-8"))["trials"][0]
+    assert row["status"] == ("completed" if accepted else "infra_error")
+    assert row["success"] is (True if accepted else None)
+    if accepted:
+        assert row["admission_finalized"] is True
+        validation = json.loads((directory / "receipt-validation.json").read_text(encoding="utf-8"))["trials"][0]
+        assert validation["checks"]["independent_production_grade_verified"] is True
+        assert validation["checks"]["finalized_ledger_readback"] is True
+    else:
+        assert row["error_code"] == "production_runtime_invalid"
+        assert not (directory / f"trials/{row['trial_id']}/final-score.json").exists()
 
 
 @pytest.mark.parametrize("mode", ["good", "wrong_contract", "workspace_escape", "fake_workspace_id", "unknown_stop", "missing_runtime", "source_mutation", "bad_event_ref"])

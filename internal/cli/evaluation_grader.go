@@ -60,7 +60,12 @@ func runEvaluationGrade(ctx context.Context, cfg config.Config, request Evaluati
 		if readErr != nil || finalized != nil || snapshot.Events[len(snapshot.Events)-1].Checksum != request.ExpectedSessionHeadChecksum {
 			return evaluationRefusal(output, request, "evaluation_session_changed")
 		}
-		gateway := admission.NewGateway(admission.NewBudget(prod.ledger), admission.ProviderFromEnv())
+		budget := admission.NewBudget(prod.ledger)
+		batch, budgetErr := budget.Inspect(ctx, admission.ActorOwner(actor))
+		if budgetErr != nil || batch.ActiveCalls != 0 || batch.TaskID != prod.id || batch.TaskOwnerID != admission.ActorOwner(actor) {
+			return evaluationRefusal(output, request, "grader_admission_unavailable")
+		}
+		gateway := admission.NewGateway(budget, admission.ProviderFromEnv())
 		if err := gateway.Start(); err != nil {
 			return evaluationRefusal(output, request, "grader_admission_unavailable")
 		}

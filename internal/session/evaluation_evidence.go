@@ -14,6 +14,7 @@ type EvaluationToolEvidence struct {
 	RuntimeID           string `json:"runtime_id"`
 	Stopped             bool   `json:"stopped"`
 	OutcomeUnknown      bool   `json:"outcome_unknown"`
+	IsError             bool   `json:"is_error"`
 	ResultEventID       string `json:"result_event_id"`
 	ResultEventChecksum string `json:"result_event_checksum"`
 	SessionID           string `json:"session_id"`
@@ -192,6 +193,7 @@ func ReadEvaluationExecutionEvidence(ctx context.Context, ledger EventLog, actor
 					}
 					results[key] = result
 					item.RuntimeID, item.Stopped, item.OutcomeUnknown = result.RuntimeID, result.Stopped, result.OutcomeUnknown
+					item.IsError = result.Error != ""
 					item.ResultEventID, item.ResultEventChecksum = event.EventID, event.Checksum
 				}
 			}

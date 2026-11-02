@@ -412,7 +412,23 @@ def _production_workspace(receipt: dict[str, Any], request: dict[str, Any], appr
             runtime_id = tool.get("runtime_id")
             if not runtime_id and tool.get("tool_name") not in {"Bash", "Git", "Hook"}:
                 continue
-            if not isinstance(runtime_id, str) or re.fullmatch(r"[0-9a-f]{64}/[0-9a-f-]{36}/[0-9a-f]{64}", runtime_id) is None or tool.get("stopped") is not True or tool.get("outcome_unknown") is not False or re.fullmatch(r"[0-9a-f]{32}", str(tool.get("result_event_id", ""))) is None or re.fullmatch(r"[0-9a-f]{64}", str(tool.get("result_event_checksum", ""))) is None:
+            result_bound = (
+                isinstance(tool.get("result_event_id"), str)
+                and re.fullmatch(r"[0-9a-f]{32}", tool["result_event_id"]) is not None
+                and isinstance(tool.get("result_event_checksum"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", tool["result_event_checksum"]) is not None
+            )
+            # Go can reject a call before dispatch; its canonical error has no runtime to stop.
+            if (
+                runtime_id == "" and tool.get("is_error") is True
+                and tool.get("outcome_unknown") is False and result_bound
+                and all(
+                    type(tool.get(field)) is int and tool[field] == count
+                    for field, count in (("dispatch_count", 0), ("result_count", 1), ("unknown_count", 0), ("commit_done_count", 0))
+                )
+            ):
+                continue
+            if not isinstance(runtime_id, str) or re.fullmatch(r"[0-9a-f]{64}/[0-9a-f-]{36}/[0-9a-f]{64}", runtime_id) is None or tool.get("stopped") is not True or tool.get("outcome_unknown") is not False or not result_bound:
                 raise _ProductionContractError("production tool runtime or known termination is unconfirmed")
             runtimes.append(runtime_id)
     return path

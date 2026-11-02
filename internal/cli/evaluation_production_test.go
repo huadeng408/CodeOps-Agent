@@ -76,7 +76,7 @@ func TestEvaluationProductionPreparesCanonicalWorkspaceAndExecutesOpenSandbox(t 
 	workspace, storage := productionRepository(t), t.TempDir()
 	var polluteBootstrap atomic.Bool
 	polluteBootstrap.Store(true)
-	pb.RegisterOrchestratorServer(server, evaluationTransport{bashAfterWrite: true, onHealth: func() {
+	pb.RegisterOrchestratorServer(server, evaluationTransport{bashAfterWrite: true, unapprovedTool: "Git", onHealth: func() {
 		if !polluteBootstrap.Load() {
 			return
 		}
@@ -181,15 +181,26 @@ func TestEvaluationProductionPreparesCanonicalWorkspaceAndExecutesOpenSandbox(t 
 		t.Fatal("bootstrap wrote manifests to the source repository")
 	}
 	proof := receipt["execution_evidence"].(map[string]any)
-	found := false
+	found, deniedGit := false, false
+	var bashIsError any
 	for _, raw := range proof["tools"].([]any) {
 		item := raw.(map[string]any)
 		if item["tool_name"] == "Bash" {
 			found = true
+			bashIsError = item["is_error"]
 			if item["runtime_id"] == "" || item["stopped"] != true || item["outcome_unknown"] != false || item["result_event_id"] == "" || item["result_event_checksum"] == "" {
 				t.Fatal("OSB execution and stop proof was omitted")
 			}
 		}
+		if item["tool_name"] == "Git" {
+			deniedGit = true
+			if item["is_error"] != true || item["runtime_id"] != "" || item["dispatch_count"] != float64(0) || item["result_count"] != float64(1) || item["commit_done_count"] != float64(0) || item["unknown_count"] != float64(0) || item["outcome_unknown"] != false || item["result_event_id"] == "" || item["result_event_checksum"] == "" {
+				t.Fatal("denied Git was not retained as a known pre-dispatch error")
+			}
+		}
+	}
+	if !deniedGit || bashIsError != false {
+		t.Fatal("tool error evidence omitted a rejection or misclassified executed Bash")
 	}
 	if !found || runtimeCalls.Load() != 1 || modelCalls.Load() != 1 {
 		t.Fatal("configured pins were substituted for an actual runtime operation")

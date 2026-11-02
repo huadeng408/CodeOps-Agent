@@ -97,7 +97,8 @@ func (t *TaskWorkspaces) Inspect(ctx context.Context, ownerID uint, sessionID st
 }
 
 func (t *TaskWorkspaces) ModelWorkspace(ctx context.Context, owner uint, id string) (TaskModelWorkspace, error) {
-	return t.modelWorkspace(ctx, owner, id, "")
+	workspace, _, err := t.modelWorkspace(ctx, owner, id, "", "")
+	return workspace, err
 }
 
 // ToolWorkspace admits only the current Go-dispatched call while its result is pending.
@@ -105,74 +106,85 @@ func (t *TaskWorkspaces) ToolWorkspace(ctx context.Context, owner uint, id, call
 	if callID == "" {
 		return TaskModelWorkspace{}, ErrInvalidSessionInput
 	}
-	return t.modelWorkspace(ctx, owner, id, callID)
+	workspace, _, err := t.modelWorkspace(ctx, owner, id, callID, "")
+	return workspace, err
 }
 
-func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, currentToolID string) (TaskModelWorkspace, error) {
+func (t *TaskWorkspaces) modelWorkspace(ctx context.Context, owner uint, id, currentToolID, expectedHead string) (TaskModelWorkspace, *Event, error) {
 	for conflicts := 0; conflicts < 8; {
 		snapshot, sessionView, err := t.read(ctx, owner, id)
 		if err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
+		}
+		if expectedHead != "" && (len(snapshot.Events) == 0 || snapshot.Events[len(snapshot.Events)-1].Checksum != expectedHead) {
+			return TaskModelWorkspace{}, nil, ErrSequenceConflict
 		}
 		grade, err := ReadEvaluationGrade(snapshot.Events)
 		if err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		if grade != nil {
-			return TaskModelWorkspace{}, ErrSessionStateConflict
+			return TaskModelWorkspace{}, nil, ErrSessionStateConflict
 		}
 		view, err := t.project(ctx, snapshot.Events, sessionView)
 		if err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		applications, err := taskApplications(snapshot.Events)
 		if err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		for _, application := range applications {
 			if application.View.State == "unknown" || application.View.State == "partial" {
-				return TaskModelWorkspace{}, ErrSessionStateConflict
+				return TaskModelWorkspace{}, nil, ErrSessionStateConflict
 			}
 		}
 		prepared, state, err := taskPreparation(snapshot.Events)
 		if err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		expired := prepared != nil && state == "prepared" && time.Now().After(prepared.Task.LeaseExpiresAt)
 		if !view.Available || view.State != "prepared" && !expired || !view.TestAvailable || t.baselineRuntime.Ready == nil ||
 			view.Test != nil && view.Test.State == "unknown" && !view.Test.Stopped ||
 			view.Proposal != nil && !view.Proposal.Test.Stopped {
-			return TaskModelWorkspace{}, ErrSessionStateConflict
+			return TaskModelWorkspace{}, nil, ErrSessionStateConflict
 		}
 		if err := taskToolOutcomesKnown(snapshot.Events, currentToolID); err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		if err := t.borrowedAgentsAdmissible(ctx, owner, id, snapshot.Events, currentToolID); err != nil {
-			return TaskModelWorkspace{}, err
+			return TaskModelWorkspace{}, nil, err
 		}
 		if expired {
 			if err := t.verifyTask(ctx, prepared.Task, snapshot.Events); err != nil {
-				return TaskModelWorkspace{}, ErrSessionStateConflict
+				return TaskModelWorkspace{}, nil, ErrSessionStateConflict
 			}
 			renewal := taskLeaseRenewalPayload{LeaseID: prepared.Task.LeaseID, PreviousExpiresAt: prepared.Task.LeaseExpiresAt,
 				ExpiresAt: time.Now().UTC().Add(worktree.TaskLeaseTTL)}
-			if _, err := t.workbench.ledger.Append(ctx, id, int64(len(snapshot.Events)), taskLeaseRenewedEvent, renewal); err != nil {
+			renewed, err := t.workbench.ledger.Append(ctx, id, int64(len(snapshot.Events)), taskLeaseRenewedEvent, renewal)
+			if err != nil {
 				if errors.Is(err, ErrSequenceConflict) {
+					if expectedHead != "" {
+						return TaskModelWorkspace{}, nil, ErrSequenceConflict
+					}
 					conflicts++
 					continue
 				}
-				return TaskModelWorkspace{}, err
+				return TaskModelWorkspace{}, nil, err
 			}
 			t.workbench.signal(id)
+			if expectedHead != "" {
+				return TaskModelWorkspace{}, &renewed, ErrSequenceConflict
+			}
 			continue
 		}
 		workspace := TaskModelWorkspace{WorkingDir: filepath.Join(t.storage, view.WorkspaceID)}
 		if view.Dependency != nil {
 			workspace.DependencyOperationID = view.Dependency.OperationID
 		}
-		return workspace, nil
+		return workspace, nil, nil
 	}
-	return TaskModelWorkspace{}, ErrSequenceConflict
+	return TaskModelWorkspace{}, nil, ErrSequenceConflict
 }
 
 func taskToolOutcomesKnown(events []Event, currentToolID string) error {
