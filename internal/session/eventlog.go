@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -109,10 +110,78 @@ type sessionOwnerReader interface {
 // remains independent from the legacy sessions snapshot table so migration can
 // be performed without dual-writing mutable state.
 type SQLiteEventLog struct {
-	Path     string
-	db       *sql.DB
-	mu       sync.Mutex
-	appendMu sync.Mutex
+	Path               string
+	db                 *sql.DB
+	mu                 sync.Mutex
+	appendMu           sync.Mutex
+	revisionMu         sync.Mutex
+	revisionConnection any
+	revisionGeneration uint64
+}
+
+// LedgerReadRevision identifies SQL-observable changes on one native connection.
+// It is an ephemeral read proof, not a Ledger fact or a physical file checksum.
+type LedgerReadRevision struct {
+	source            *SQLiteEventLog
+	connection        uint64
+	dataVersion       int64
+	changes           int64
+	schemaVersion     int64
+	tempSchemaVersion int64
+}
+
+func (revision LedgerReadRevision) Matches(other LedgerReadRevision) bool {
+	return revision.source != nil && revision.connection != 0 && revision == other
+}
+
+// ReadRevision samples the same pinned connection throughout. Other-connection
+// commits change data_version; this connection's DML and DDL change the other
+// counters. Replacing the underlying connection invalidates prior proofs.
+func (l *SQLiteEventLog) ReadRevision(ctx context.Context) (LedgerReadRevision, error) {
+	if l == nil {
+		return LedgerReadRevision{}, errors.New("native Ledger revision unavailable")
+	}
+	l.mu.Lock()
+	db := l.db
+	l.mu.Unlock()
+	if db == nil {
+		return LedgerReadRevision{}, errors.New("native Ledger revision unavailable")
+	}
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		return LedgerReadRevision{}, err
+	}
+	defer connection.Close()
+	var generation uint64
+	err = connection.Raw(func(driverConnection any) error {
+		if driverConnection == nil || !reflect.TypeOf(driverConnection).Comparable() {
+			return errors.New("native Ledger connection identity unavailable")
+		}
+		l.revisionMu.Lock()
+		defer l.revisionMu.Unlock()
+		if l.revisionConnection != driverConnection {
+			l.revisionGeneration++
+			// The strong reference prevents an old address being reused. Driver
+			// identities are compared only inside Raw; no driver calls escape it.
+			l.revisionConnection = driverConnection
+		}
+		generation = l.revisionGeneration
+		return nil
+	})
+	if err != nil {
+		return LedgerReadRevision{}, err
+	}
+	revision := LedgerReadRevision{source: l, connection: generation}
+	if err := connection.QueryRowContext(ctx, `SELECT data_version, total_changes(), schema_version FROM pragma_data_version, pragma_schema_version`).Scan(&revision.dataVersion, &revision.changes, &revision.schemaVersion); err != nil {
+		return LedgerReadRevision{}, err
+	}
+	if err := connection.QueryRowContext(ctx, `PRAGMA temp.schema_version`).Scan(&revision.tempSchemaVersion); err != nil {
+		return LedgerReadRevision{}, err
+	}
+	if revision.dataVersion <= 0 || revision.changes < 0 || revision.schemaVersion < 0 || revision.tempSchemaVersion < 0 {
+		return LedgerReadRevision{}, errors.New("native Ledger revision invalid")
+	}
+	return revision, nil
 }
 
 // OpenSQLiteEventLog opens or creates a durable event ledger at path.
@@ -604,7 +673,18 @@ func (l *SQLiteEventLog) Surface(ctx context.Context, sessionID string) ([]Event
 
 func projectSurface(events []Event) ([]Event, error) {
 	active := make([]Event, 0, len(events))
-	projections := make([][]Event, len(events))
+	// Only retained branch targets need historical copies. This pass collects
+	// possible targets; the normal replay below still validates every marker.
+	projections := make(map[int64][]Event)
+	for _, event := range events {
+		if event.SurfaceOp != nil || event.Type != "session/rewind" && event.Type != continuationEventType {
+			continue
+		}
+		var target rewindPayload
+		if json.Unmarshal(event.Payload, &target) == nil && target.TargetSeq >= 0 && target.TargetSeq < int64(len(events)) {
+			projections[target.TargetSeq] = nil
+		}
+	}
 	continuationCount := 0
 	for index, event := range events {
 		if event.SurfaceOp == nil {
@@ -624,7 +704,9 @@ func projectSurface(events []Event) ([]Event, error) {
 				_ = json.Unmarshal(event.Payload, &receipt)
 				active = cloneEvents(projections[receipt.TargetSeq])
 			}
-			projections[index] = cloneEvents(active)
+			if _, retained := projections[int64(index)]; retained {
+				projections[int64(index)] = cloneEvents(active)
+			}
 			continue
 		}
 		switch event.SurfaceOp.Op {
@@ -645,7 +727,9 @@ func projectSurface(events []Event) ([]Event, error) {
 			}
 			active = append(kept, event)
 		}
-		projections[index] = cloneEvents(active)
+		if _, retained := projections[int64(index)]; retained {
+			projections[int64(index)] = cloneEvents(active)
+		}
 	}
 	return active, nil
 }

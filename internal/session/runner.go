@@ -966,7 +966,24 @@ func (r *SessionRunner) RecoverSession(ctx context.Context, owner uint, sessionI
 	return r.recoverSessions(ctx, []string{sessionID}, false)
 }
 
-func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, startup bool) error {
+type startupRecoveryContextKey struct{}
+type startupRecoveryPlanningContextKey struct{}
+
+type startupRecoveryWork struct {
+	key    runKey
+	wakeAt time.Time
+	actor  identity.Actor
+}
+
+func isStartupRecovery(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	startup, _ := ctx.Value(startupRecoveryContextKey{}).(bool)
+	return startup
+}
+
+func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, startup bool) (resultErr error) {
 	r.lifecycleMu.RLock()
 	if r.closed {
 		r.lifecycleMu.RUnlock()
@@ -974,6 +991,56 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 	}
 	r.lifecycleMu.RUnlock()
 	var recoverErrs []error
+	var planned []startupRecoveryWork
+	if startup {
+		defer func() {
+			if err := ctx.Err(); err != nil {
+				resultErr = err
+				return
+			}
+			if r.ctx.Err() != nil {
+				resultErr = ErrSessionRunnerClosed
+				return
+			}
+			var flushErrs []error
+			approved := make([]startupRecoveryWork, 0, len(planned))
+			for _, work := range planned {
+				if err := ctx.Err(); err != nil {
+					resultErr = err
+					return
+				}
+				if r.options.StartupRecoveryAllowed != nil {
+					allowed, err := r.options.StartupRecoveryAllowed(ctx, work.actor)
+					if err != nil {
+						flushErrs = append(flushErrs, fmt.Errorf("recover session %s final admission: %w", work.key.sessionID, err))
+						continue
+					}
+					if !allowed {
+						continue
+					}
+				}
+				approved = append(approved, work)
+			}
+			r.lifecycleMu.RLock()
+			defer r.lifecycleMu.RUnlock()
+			if err := ctx.Err(); err != nil {
+				resultErr = err
+				return
+			}
+			if r.closed {
+				resultErr = ErrSessionRunnerClosed
+				return
+			}
+			if len(flushErrs) != 0 {
+				resultErr = &PartialRecoveryError{Err: errors.Join(append([]error{resultErr}, flushErrs...)...)}
+			}
+			// Commit only a fully checked startup plan. Failed/cancelled scans
+			// never publish timers that could swallow a later successful replay.
+			for _, work := range approved {
+				r.enqueue(context.WithValue(ctx, startupRecoveryContextKey{}, true), work.key, work.wakeAt)
+			}
+		}()
+	}
 	for _, sessionID := range ids {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1034,12 +1101,16 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s changed during admission: %w", sessionID, ErrSequenceConflict))
 			continue
 		}
-		task, _, taskErr := projectAgentTask(events)
+		task, createdTask, taskErr := projectAgentTask(events)
 		if taskErr != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, taskErr))
 			continue
 		}
-		if err := r.recoverAgentTask(ctx, view.UserID, events); err != nil {
+		taskCtx := ctx
+		if startup {
+			taskCtx = context.WithValue(ctx, startupRecoveryPlanningContextKey{}, true)
+		}
+		if err := r.recoverAgentTask(taskCtx, view.UserID, events); err != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, err))
 			continue
 		}
@@ -1085,7 +1156,16 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 				r.lifecycleMu.RUnlock()
 				return ErrSessionRunnerClosed
 			}
-			r.enqueue(ctx, runKey{sessionID: sessionID, runID: runID, memoryRecovery: memoryRecovery}, wakeAt)
+			key := runKey{sessionID: sessionID, runID: runID, memoryRecovery: memoryRecovery}
+			if startup {
+				actor := run.actor
+				if task != nil {
+					actor = createdTask.Actor
+				}
+				planned = append(planned, startupRecoveryWork{key, wakeAt, actor})
+			} else {
+				r.enqueue(ctx, key, wakeAt)
+			}
 			r.lifecycleMu.RUnlock()
 		}
 	}
@@ -1168,6 +1248,11 @@ func (r *SessionRunner) Close() error {
 func (r *SessionRunner) now() time.Time { return r.options.Now().UTC() }
 
 func (r *SessionRunner) enqueue(ctx context.Context, key runKey, wakeAt time.Time) {
+	if ctx != nil && ctx.Value(startupRecoveryPlanningContextKey{}) == true {
+		// Agent admission may durably create a Run during recovery. The caller
+		// replays those new facts into its final startup plan before dispatch.
+		return
+	}
 	if r.admissionClosed.Load() {
 		return
 	}
@@ -1177,6 +1262,9 @@ func (r *SessionRunner) enqueue(ctx context.Context, key runKey, wakeAt time.Tim
 		return
 	}
 	traceCtx := genai.DetachedTraceContext(ctx, key.sessionID)
+	if isStartupRecovery(ctx) {
+		traceCtx = context.WithValue(traceCtx, startupRecoveryContextKey{}, true)
+	}
 	r.queuedMu.Lock()
 	if r.queued == nil {
 		r.queued = make(map[runKey]struct{})
@@ -1186,7 +1274,9 @@ func (r *SessionRunner) enqueue(ctx context.Context, key runKey, wakeAt time.Tim
 	}
 	if _, exists := r.queued[key]; exists {
 		queuedCtx := r.queuedContexts[key]
-		if (queuedCtx == nil || !trace.SpanContextFromContext(queuedCtx).IsValid()) && trace.SpanContextFromContext(traceCtx).IsValid() {
+		existingStartup, incomingStartup := isStartupRecovery(queuedCtx), isStartupRecovery(traceCtx)
+		if existingStartup && !incomingStartup || existingStartup == incomingStartup &&
+			(queuedCtx == nil || !trace.SpanContextFromContext(queuedCtx).IsValid()) && trace.SpanContextFromContext(traceCtx).IsValid() {
 			r.queuedContexts[key] = traceCtx
 		}
 		r.queuedMu.Unlock()
@@ -1256,6 +1346,20 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 	stopRunnerCancel := context.AfterFunc(r.ctx, cancelExecution)
 	defer stopRunnerCancel()
 	defer cancelExecution()
+	if isStartupRecovery(traceCtx) && r.options.StartupRecoveryAllowed != nil {
+		events, err := r.workbench.ledger.Events(executionCtx, key.sessionID)
+		if err != nil || verifyLedgerEvents(events, key.sessionID) != nil {
+			return
+		}
+		allowed, err := r.startupRecoveryAllowed(executionCtx, events)
+		if err != nil || !allowed {
+			return
+		}
+		current, err := ReadVerifiedSnapshot(executionCtx, r.workbench.ledger, key.sessionID)
+		if err != nil || len(current.Events) != len(events) || len(events) == 0 || current.Events[len(events)-1].Checksum != events[len(events)-1].Checksum {
+			return
+		}
+	}
 	r.agentMu.Lock()
 	if r.activeAgentRuns[key] != nil {
 		r.agentMu.Unlock()

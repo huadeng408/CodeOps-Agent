@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"code-agent/internal/session"
 )
@@ -37,7 +38,12 @@ type Batch struct {
 	ActiveCalls    int
 }
 
-type Budget struct{ ledger session.EventLog }
+type Budget struct {
+	ledger          session.EventLog
+	startupMu       sync.Mutex
+	startupRevision session.LedgerReadRevision
+	startupYielded  map[string]bool
+}
 
 func NewBudget(ledger session.EventLog) *Budget { return &Budget{ledger: ledger} }
 
@@ -308,14 +314,48 @@ func (budget *Budget) Inspect(ctx context.Context, owner uint) (Batch, error) {
 
 // StartupRecoveryAllowed reads the scheduling fence without reacquiring a task.
 func (budget *Budget) StartupRecoveryAllowed(ctx context.Context, owner uint, taskID string) (bool, error) {
-	if budget == nil || !validID(taskID) {
+	if budget == nil || budget.ledger == nil || owner == 0 || !validID(taskID) {
 		return false, ErrInvalidAdmission
 	}
-	state, err := budget.read(ctx, owner)
-	if err != nil {
-		return false, err
+	native, ok := budget.ledger.(*session.SQLiteEventLog)
+	if ok && native == nil {
+		return false, ErrInvalidAdmission
 	}
-	return !state.yieldedTasks[taskKey(owner, taskID)], nil
+	if !ok {
+		state, err := budget.read(ctx, owner)
+		return !state.yieldedTasks[taskKey(owner, taskID)] && err == nil, err
+	}
+	budget.startupMu.Lock()
+	defer budget.startupMu.Unlock()
+	for attempt := 0; attempt < 2; attempt++ {
+		before, beforeErr := native.ReadRevision(ctx)
+		if beforeErr == nil && before.Matches(budget.startupRevision) {
+			return !budget.startupYielded[taskKey(owner, taskID)], nil
+		}
+		budget.startupRevision = session.LedgerReadRevision{}
+		budget.startupYielded = nil
+		state, err := budget.read(ctx, owner)
+		if err != nil {
+			return false, err
+		}
+		after, afterErr := native.ReadRevision(ctx)
+		if beforeErr != nil || afterErr != nil {
+			// Unknown proofs preserve the original full-read behavior.
+			return !state.yieldedTasks[taskKey(owner, taskID)], nil
+		}
+		if !before.Matches(after) {
+			continue
+		}
+		// The private immutable view is reusable only while the same native
+		// connection proves no SQL change, including an old payload UPDATE.
+		budget.startupYielded = make(map[string]bool, len(state.yieldedTasks))
+		for key, yielded := range state.yieldedTasks {
+			budget.startupYielded[key] = yielded
+		}
+		budget.startupRevision = after
+		return !budget.startupYielded[taskKey(owner, taskID)], nil
+	}
+	return false, session.ErrSequenceConflict
 }
 
 // Scope facts coordinate idle checks across processes without creating a token batch.

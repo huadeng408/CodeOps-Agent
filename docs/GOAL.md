@@ -16,8 +16,8 @@
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段、Go-only 控制路径、[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)已完成各自验证及源码 CI。[启动恢复修复](evidence/startup-recovery-cost-2026-11-03.md)已完成源码、隔离恢复回归和两轴复审，保留完整祖先授权与新鲜围栏；接续新提交 CI、新便携包实际启动验证，不把分配改善当作整批 5 秒通过 |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原 200 项范围和旧接受保护的 Session 保留。新 v10 实际首 POST 在接收前返回503，0 Run／0模型调用／0完成，失败及完整分母已收尾保存；修复 Go 启动恢复后，以新包、新冻结身份继续独立200轮，不拼接旧尝试 |
+| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段、Go-only 控制路径、[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)已完成各自验证及源码 CI。[启动回放、派发与 Artifact 修复](evidence/startup-recovery-replay-2026-11-03.md)通过相关 Go 回归730 pass／11 skip、vet和两轴审查；同一真实库只读235/235在原5秒内4.8944秒返回nil。接续本次提交完整CI、新便携包实际启动验证；只读诊断不代替产品或长期SLA |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原200项范围和旧接受保护的Session保留。v10首POST在接收前503；v11在派发前恢复门禁超时，0 POST／0 Run／200全部未运行。失败、unknown和完整分母均封存；以修复后的新包、新冻结身份继续独立200轮，不拼接旧尝试 |
 | 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
@@ -29,6 +29,9 @@
 
 - 三组 Agent 实测：[完整报告、来源和负结果](evidence/agent-evaluation-experiments-2026-11-03.md)；
   #36 及五张子票已按小规模实验范围验收关闭，不替代独立长对话或发布门禁。
+- 模块深化：[原工程交付](evidence/module-deepening-2026-10-22.md)、
+  [#31 父规格逐项审计收口](https://github.com/huadeng408/CodeOps-Agent/issues/31#issuecomment-6591882364)；
+  按原source／unit／integration／deterministic fixture范围验收，不把历史收据当当前源码新运行。
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。

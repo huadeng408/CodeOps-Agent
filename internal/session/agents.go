@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1202,14 +1203,48 @@ func agentApprovalView(childID string, event Event, pending toolApprovalPayload)
 		ToolName: pending.ToolName, ArgumentsJson: tools.RedactSensitive(pending.ArgumentsJSON), PendingEventId: event.EventID, PendingSeq: event.Seq}
 }
 
+func marshalAgentArtifact(artifact *pb.AgentArtifact) ([]byte, error) {
+	body, err := agentJSON.Marshal(artifact)
+	if err != nil {
+		return nil, err
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, body); err != nil {
+		return nil, err
+	}
+	return compact.Bytes(), nil
+}
+
 func verifyArtifactChecksum(artifact *pb.AgentArtifact) error {
 	if artifact == nil || artifact.Id == "" || len(artifact.Parts) == 0 || len(artifact.Parts) > 16 {
 		return ErrEventIntegrity
 	}
 	copy := proto.Clone(artifact).(*pb.AgentArtifact)
 	copy.Checksum = ""
-	body, err := agentJSON.Marshal(copy)
-	if err != nil || agentDigest(body) != artifact.Checksum {
+	body, err := marshalAgentArtifact(copy)
+	if err != nil {
+		return ErrEventIntegrity
+	}
+	if agentDigest(body) == artifact.Checksum {
+		return nil
+	}
+	// Older protobuf builds inserted one space after each structural comma.
+	legacy := make([]byte, 0, len(body))
+	quoted, escaped := false, false
+	for _, value := range body {
+		legacy = append(legacy, value)
+		switch {
+		case escaped:
+			escaped = false
+		case quoted && value == '\\':
+			escaped = true
+		case value == '"':
+			quoted = !quoted
+		case !quoted && value == ',':
+			legacy = append(legacy, ' ')
+		}
+	}
+	if agentDigest(legacy) != artifact.Checksum {
 		return ErrEventIntegrity
 	}
 	return nil
@@ -1302,25 +1337,28 @@ func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor i
 	}
 	artifact.Id = call.ID
 	artifact.Checksum = ""
-	body, err := agentJSON.Marshal(artifact)
+	body, err := marshalAgentArtifact(artifact)
 	if err != nil {
 		return "", err
 	}
 	artifact.Checksum = agentDigest(body)
-	encoded, err := agentJSON.Marshal(artifact)
-	if err != nil {
-		return "", err
-	}
 	for _, existing := range task.Artifacts {
 		if existing.Id == call.ID {
-			if !proto.Equal(existing, artifact) {
+			previous := proto.Clone(existing).(*pb.AgentArtifact)
+			previous.Checksum = artifact.Checksum
+			if !proto.Equal(previous, artifact) {
 				return "", ErrSessionStateConflict
 			}
-			return string(encoded), nil
+			encoded, err := marshalAgentArtifact(existing)
+			return string(encoded), err
 		}
 	}
 	if len(task.Artifacts) >= 16 {
 		return "", ErrInvalidSessionInput
+	}
+	encoded, err := marshalAgentArtifact(artifact)
+	if err != nil {
+		return "", err
 	}
 	if err := r.appendAgentFact(ctx, task.ChildSessionId, "agent/task-artifact", agentTaskMutation{RequestID: call.ID, Artifact: encoded}, agentMutationExists("agent/task-artifact", call.ID)); err != nil {
 		return "", err
@@ -1600,9 +1638,15 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 					continue
 				}
 				artifact := &pb.AgentArtifact{Id: requestID, Name: "Task report", Parts: []*pb.AgentPart{{Payload: &pb.AgentPart_Text{Text: tools.RedactSensitive(message.Content)}}}}
-				body, _ := agentJSON.Marshal(artifact)
+				body, err := marshalAgentArtifact(artifact)
+				if err != nil {
+					return
+				}
 				artifact.Checksum = agentDigest(body)
-				body, _ = agentJSON.Marshal(artifact)
+				body, err = marshalAgentArtifact(artifact)
+				if err != nil {
+					return
+				}
 				_ = r.appendAgentFact(ctx, key.sessionID, "agent/task-artifact", agentTaskMutation{RequestID: requestID, Artifact: body}, agentMutationExists("agent/task-artifact", requestID))
 				break
 			}
