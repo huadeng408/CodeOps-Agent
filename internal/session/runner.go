@@ -224,6 +224,8 @@ type SessionRunnerOptions struct {
 	// StartupRecoveryAllowed fences background recovery before any Session write.
 	// Explicit Session commands retain their independent admission path.
 	StartupRecoveryAllowed func(context.Context, identity.Actor) (bool, error)
+	// ResumeTaskForMessage authorizes only an accepted new root user message.
+	ResumeTaskForMessage func(context.Context, identity.Actor) error
 	// AgentToolBinding resolves dynamic tools before delegation and again before
 	// every child call. Static Agent Card tools remain local policy.
 	AgentToolBinding   func(string) (AgentToolBinding, bool)
@@ -766,6 +768,18 @@ func (r *SessionRunner) SubmitMessage(ctx context.Context, command SubmitMessage
 			}
 			r.workbench.signal(command.SessionID)
 			continue
+		}
+
+		if r.options.ResumeTaskForMessage != nil {
+			task, _, err := projectAgentTask(events)
+			if err != nil {
+				return RunView{}, err
+			}
+			if task == nil {
+				if err := r.options.ResumeTaskForMessage(ctx, actor); err != nil {
+					return RunView{}, err
+				}
+			}
 		}
 
 		checkpoint, boundCheckpoint, checkpointExists, err := automaticCheckpointForRequest(events, command.RequestID)

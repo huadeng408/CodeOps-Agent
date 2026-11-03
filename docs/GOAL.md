@@ -10,15 +10,15 @@
 - 已交付能力的修改按自身范围回归；首批 milestone 的已验收范围见下方证据。
 - 模型调用在服务商已设置的 100,000,000-token 硬上限内推进；保留未知计量和原预留，
   已结束调用的计量缺口不阻塞新的独立调用。
-- 新的真实运行冻结源码、输入、模型／镜像 pin 和完整场景分母；失败、重试和未运行项均保留。
+- 新的真实运行或恢复段冻结源码、输入、模型／镜像 pin、前驱原生边界和完整场景分母；失败、重试和未运行项均保留。
 
 ## 当前缺口
 
 | 范围 | 下一步与验收边界 |
 | --- | --- |
-| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段、Go-only 控制路径、[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)已完成各自验证及源码 CI。[启动回放、派发与 Artifact 修复](evidence/startup-recovery-replay-2026-11-03.md)通过相关 Go 回归730 pass／11 skip、vet和两轴审查；同一真实库只读235/235在原5秒内4.8944秒返回nil。接续本次提交完整CI、新便携包实际启动验证；只读诊断不代替产品或长期SLA |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 原200项范围和旧接受保护的Session保留。v10首POST在接收前503；v11在派发前恢复门禁超时，0 POST／0 Run／200全部未运行。失败、unknown和完整分母均封存；以修复后的新包、新冻结身份继续独立200轮，不拼接旧尝试 |
-| 故障恢复与 Memory | 在新的独立 200 轮中验证目标召回、续行和恢复，保留历史 unknown；旧测试任务不再占用任务槽 |
+| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段证据见[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)和[启动回放、派发与 Artifact 修复](evidence/startup-recovery-replay-2026-11-03.md)。本轮只读锁等待、能力刷新和续办兼容修复按[各自验证范围](evidence/product-long-dialogue-resume-2026-11-03.md)交付；源码检查不代替产品或长期 SLA |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | v12 已正常收尾，完成123/200；第124项两次失败，76项未运行，127个实际Run含4次失败。按用户已修改的正式票，保留同一Session、原200输入、全部尝试与原预算，在新冻结执行段从124项累计attempt3继续；不重跑已完成前缀、不改旧收据。闭票仍要求完整200项及全部边界，见[封存及续跑准备](evidence/product-long-dialogue-resume-2026-11-03.md) |
+| 故障恢复与 Memory | 在同一逻辑任务的后续执行段验证目标召回、续行和恢复；保留已验证前缀、历史失败与 unknown，未知副作用先对账。旧测试任务的启动围栏保持 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
 
@@ -35,7 +35,8 @@
 - 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
-- 最新独立长对话：[v9 的首轮刷新及阶段核验](evidence/product-long-dialogue-v9-2026-10-22.md)、
+- 长对话及分段续跑：[v12 封存、规则修订与准备](evidence/product-long-dialogue-resume-2026-11-03.md)、
+  [v9 的首轮刷新及阶段核验](evidence/product-long-dialogue-v9-2026-10-22.md)、
   [v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、
   [v7 阶段证据、完整失败分母与正常收尾](evidence/product-long-dialogue-v7-2026-10-21.md)、
   [构建与冻结输入](evidence/product-long-dialogue-preparation-2026-10-21.md)。

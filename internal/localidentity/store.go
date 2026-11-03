@@ -126,6 +126,27 @@ func (s *Store) OwnerID(ctx context.Context) (uint, error) {
 	return id, nil
 }
 
+// RotateOwnerPassword is an offline local-operator recovery operation.
+// It preserves the principal and existing token revocations.
+func (s *Store) RotateOwnerPassword(ctx context.Context, expectedOwner uint, newPassword string) (string, error) {
+	if expectedOwner == 0 || len(newPassword) < 12 {
+		return "", errors.New("local identity recovery requires an existing owner and a password of at least 12 bytes")
+	}
+	password, err := hash.HashPassword(newPassword)
+	if err != nil {
+		return "", err
+	}
+	var username string
+	err = s.db.QueryRowContext(ctx, `UPDATE local_identity SET password=?, updated_at=? WHERE slot=1 AND id=? RETURNING username`, password, time.Now().UTC().Format(time.RFC3339Nano), expectedOwner).Scan(&username)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("local identity owner does not match")
+	}
+	if err != nil {
+		return "", err
+	}
+	return username, nil
+}
+
 func (s *Store) Create(user *model.User) error {
 	if s.setupUser == "" || len(s.setupPassword) < 12 || user.Username != s.setupUser || !hash.CheckPasswordHash(s.setupPassword, user.Password) {
 		return errors.New("local identity setup requires approved process credentials")

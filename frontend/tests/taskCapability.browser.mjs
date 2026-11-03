@@ -13,9 +13,9 @@ const session = {
   goal: 'Finish admitted task', workingDir: '.', status: 'done', eventCount: 1,
   createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z',
 };
-let held = false, blocked = false, capabilityReads = 0, failed = true;
+let held = false, blocked = false, capabilityReads = 0, capabilityDelay = 0, failed = true;
 const submissions = [], errors = [], events = [], finishes = [], sockets = new Set();
-const checks = { initial_unowned_hidden: false, admission_refresh: false, background_blocked: false, background_finished: false, unchanged_budget: false, no_automatic_finish: false, no_page_errors: false };
+const checks = { initial_unowned_hidden: false, delayed_streamed_refresh: false, admission_refresh: false, background_blocked: false, background_finished: false, unchanged_budget: false, no_automatic_finish: false, explicit_stream_finish: false, no_page_errors: false };
 function backgroundEvent(type) {
   const event = { id: 'event-' + session.eventCount, seq: session.eventCount++, sessionId: session.id, type, author: 'system', content: '', createdAt: session.updatedAt };
   events.push(event);
@@ -41,12 +41,15 @@ try {
       capabilityReads++;
       data = { budget: { state: blocked ? 'blocked' : 'ready', reason: blocked ? 'a model attempt is still active; wait or recover its execution' : 'provider enforces budget; local usage is audited',
         tokens: { batch_id: 'original-fixture-batch', task_id: held ? session.id : undefined, limit: 100_000_000, used: 11, reserved: 0, cost_status: 'unknown' } }, execution: { state: 'ready' } };
+      await new Promise(resolve => setTimeout(resolve, capabilityDelay));
     } else if (path.endsWith('/messages') && request.method() === 'POST') {
       const body = request.postDataJSON(); submissions.push(body); held = true; session.eventCount = 2;
       session.run = { sessionId: session.id, runId: 'new-fixture-run', requestId: body.requestId, status: 'completed', attempt: 1, checkpointHash: '' };
       return route.fulfill({ status: 202, json: { data: session.run } });
     } else if (path.endsWith('/task/finish')) {
       finishes.push(path);
+      held = false;
+      data = { sessionId: session.id };
     }
     await route.fulfill({ json: { data } });
   });
@@ -58,9 +61,22 @@ try {
   const finish = page.getByRole('button', { name: '结束代码任务', exact: true });
   assert.equal(await finish.count(), 0);
   checks.initial_unowned_hidden = true;
+  capabilityDelay = 2000;
   await page.locator('textarea.input-box').fill('Read the current source file.');
   await page.getByRole('button', { name: '发送', exact: true }).click();
-  await finish.waitFor({ state: 'visible', timeout: 3000 });
+  const stream = setInterval(() => backgroundEvent('memory/capability-refresh-streamed'), 200);
+  try {
+    await finish.waitFor({ state: 'visible', timeout: 4000 });
+    backgroundEvent('memory/capability-refresh-retained');
+    await page.getByRole('combobox', { name: '执行记录筛选', exact: true }).selectOption('all');
+    await page.getByText('memory/capability-refresh-retained', { exact: true }).waitFor();
+    assert.equal(await finish.isVisible(), true, 'streamed Memory facts hid the known task completion control');
+    checks.delayed_streamed_refresh = true;
+  } finally {
+    clearInterval(stream);
+    capabilityDelay = 0;
+  }
+  await page.waitForFunction(() => document.querySelector('button[aria-label="结束代码任务"]')?.disabled === false, undefined, { timeout: 5000 });
   assert.equal(await finish.isEnabled(), true);
   assert.equal(submissions.length, 1);
   checks.admission_refresh = true;
@@ -79,9 +95,28 @@ try {
   checks.unchanged_budget = true;
   assert.deepEqual(finishes, []);
   checks.no_automatic_finish = true;
+  capabilityDelay = 2000;
+  backgroundEvent('memory/capability-finish-refresh');
+  await page.getByText('正在检查当前运行条件…', { exact: true }).waitFor();
+  const finishStream = setInterval(() => backgroundEvent('memory/capability-finish-streamed'), 200);
+  try {
+    await page.getByText('memory/capability-finish-streamed', { exact: true }).first().waitFor();
+    await page.waitForFunction(() => document.querySelector('button[aria-label="结束代码任务"]')?.disabled === false, undefined, { timeout: 4000 });
+    await finish.click();
+    await page.getByText('代码任务已结束。历史和用量记录保留；后续调用仍受服务商预算上限约束。', { exact: true }).waitFor();
+    assert.deepEqual(finishes, ['/api/v1/sessions/capability-fixture/task/finish']);
+    assert.equal(held, false);
+    assert.equal(await finish.count(), 0, 'a pre-finish capability read retained the finished task control');
+    checks.explicit_stream_finish = true;
+  } finally {
+    clearInterval(finishStream);
+    capabilityDelay = 0;
+  }
+  await page.getByText('每项能力独立报告状态', { exact: true }).waitFor();
+  assert.equal(await finish.count(), 0);
   assert.deepEqual(errors, []);
   checks.no_page_errors = true;
-  await finish.scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: '重新检查能力', exact: true }).scrollIntoViewIfNeeded();
   failed = false;
 } finally {
   await page.screenshot({ path: resolve(output, 'result.png'), fullPage: true });

@@ -210,7 +210,7 @@ func OpenReadOnlySQLiteEventLog(path string) (*SQLiteEventLog, error) {
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
 	}
-	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro"}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err

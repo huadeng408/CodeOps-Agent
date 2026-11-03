@@ -43,31 +43,47 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
   const [finishedTask, setFinishedTask] = useState('');
   const [finishError, setFinishError] = useState<{ taskId: string; message: string } | null>(null);
   const request = useRef<AbortController | null>(null);
-  const refresh = useCallback(async () => {
-    request.current?.abort();
+  const refreshPending = useRef(false);
+  const refresh = useCallback(async (): Promise<void> => {
+    if (request.current) {
+      refreshPending.current = true;
+      return;
+    }
     const controller = new AbortController();
     request.current = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    const timeout = window.setTimeout(() => controller.abort(), 20_000);
     setChecking(true);
     setError('');
-    onChange(null);
     try {
       const data = await api.capabilities(controller.signal);
-      if (!controller.signal.aborted) onChange(data || null);
+      if (!controller.signal.aborted && request.current === controller) onChange(data || null);
     } catch {
-      if (request.current === controller) setError('无法确认能力状态，请检查服务连接后重试。');
+      if (request.current === controller) {
+        onChange(null);
+        setError('无法确认能力状态，请检查服务连接后重试。');
+      }
     } finally {
       window.clearTimeout(timeout);
-      if (request.current === controller) setChecking(false);
+      if (request.current === controller) {
+        request.current = null;
+        if (refreshPending.current) {
+          refreshPending.current = false;
+          void refresh();
+        } else setChecking(false);
+      }
     }
   }, [onChange]);
   useEffect(() => {
-    void refresh();
+    onChange(null);
     return () => {
       request.current?.abort();
       request.current = null;
+      refreshPending.current = false;
     };
-  }, [refresh, session?.id, session?.eventCount]);
+  }, [onChange, session?.id]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh, session?.id, session?.eventCount, session?.status, session?.run?.runId, session?.run?.status]);
 
   const taskId = capabilities?.budget?.tokens?.task_id;
   const finishTask = async () => {
@@ -77,6 +93,10 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
     setFinishError(null);
     try {
       await api.finishTask(taskId);
+      request.current?.abort();
+      request.current = null;
+      refreshPending.current = false;
+      onChange(null);
       setFinishedTask(taskId);
       await refresh();
     } catch (cause) {
@@ -106,7 +126,7 @@ export function CapabilityPanel({ capabilities, onChange, session }: {
       </div>;
     })}
     {taskId && taskId === session?.id && <button className="primary-btn capability-refresh" type="button" aria-label="结束代码任务"
-      disabled={checking || finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || session.run?.status === 'queued' || session.run?.status === 'running' || session.run?.status === 'canceling'}
+      disabled={finishing || (capabilities?.budget?.state !== 'ready' && capabilities?.budget?.reason !== 'token batch is exhausted') || session.run?.status === 'queued' || session.run?.status === 'running' || session.run?.status === 'canceling'}
       onClick={() => void finishTask()}>{finishing ? '结束中…' : '结束代码任务'}</button>}
     {finishedTask && finishedTask === session?.id && <p role="status">代码任务已结束。历史和用量记录保留；后续调用仍受服务商预算上限约束。</p>}
     {finishError && finishError.taskId === session?.id && <p className="capability-error" role="status">{finishError.message}</p>}

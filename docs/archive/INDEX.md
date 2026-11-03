@@ -4,6 +4,15 @@ This tree is historical context, not an execution entry. New conversations read 
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
 
+## Same-Session resumable amendment — 2026-11-03
+
+The previous [Goal](resumable-2026-11-03/docs--GOAL.md) is retained byte-for-byte;
+its [manifest](resumable-2026-11-03/manifest.json) records source and checksum.
+Its requirement to begin a fresh independent 200-item workload is historical.
+The operator amended issue #27 to retain the same Session and cumulative failures,
+then continue planned round 124 in a new pinned execution segment.
+Current scope is in [the Goal](../GOAL.md) and [the preparation record](../evidence/product-long-dialogue-resume-2026-11-03.md).
+
 ## Agent evaluation and current Goal correction — 2026-10-31
 
 The previous [Goal](agent-evaluation-2026-10-31/docs--GOAL.md) is retained byte-for-byte.

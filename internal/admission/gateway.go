@@ -344,6 +344,44 @@ func (gateway *Gateway) BindExistingTask(ctx context.Context, owner uint, taskID
 	}, nil
 }
 
+// ResumeTask readmits an ordinarily finished root only for new user intent.
+func (gateway *Gateway) ResumeTask(ctx context.Context, actor identity.Actor) error {
+	if gateway == nil || gateway.budget == nil || actor.Validate() != nil {
+		return ErrInvalidAdmission
+	}
+	root, err := session.ModelTaskRoot(ctx, gateway.budget.ledger, actor)
+	if err != nil {
+		return err
+	}
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	owner := ActorOwner(actor)
+	state, err := gateway.budget.read(ctx, owner)
+	if err != nil {
+		return err
+	}
+	if !state.closedTasks[taskKey(owner, root)] {
+		return nil
+	}
+	if root != actor.SessionID {
+		return ErrInvalidAdmission
+	}
+	if err := session.ModelTaskIdle(ctx, gateway.budget.ledger, actor); err != nil {
+		return err
+	}
+	// Finishing permits stopped unknown effects; continuation must reject them.
+	if err := session.ModelTaskYieldable(ctx, gateway.budget.ledger, actor); err != nil {
+		return err
+	}
+	for _, scope := range gateway.scopes {
+		if scope.taskID == root {
+			return ErrTaskBusy
+		}
+	}
+	_, err = gateway.budget.resumeTask(ctx, owner, root)
+	return err
+}
+
 // FinishTask is an explicit operator action, never a per-turn or restart reset.
 func (gateway *Gateway) FinishTask(ctx context.Context, actor identity.Actor) error {
 	return gateway.finishTask(ctx, actor, false)

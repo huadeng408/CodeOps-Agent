@@ -179,6 +179,7 @@ func runLocalCore(cfg serverconfig.Config) error {
 		memories.SetTracer(telemetry)
 		runner := session.NewSessionRunner(workbench, client, executors, session.SessionRunnerOptions{WorkerID: "local:" + cfg.Server.Port, Permissions: continuationPermissionController(), Memory: memories, Tracer: telemetry, Workspace: modelWorkspace,
 			StartupRecoveryAllowed: gateway.StartupRecoveryAllowed,
+			ResumeTaskForMessage:   gateway.ResumeTask,
 			MemoryCommitTimeout:    gateway.ReflectionTimeout(),
 			MCPCatalog:             repositoryMCP.Catalog, CancelModelCalls: gateway.StopRunCalls, AgentToolBinding: func(name string) (session.AgentToolBinding, bool) {
 				binding, ok := repositoryMCP.ResolveBinding(name)

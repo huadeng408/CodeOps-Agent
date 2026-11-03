@@ -84,11 +84,12 @@ type call struct {
 
 type projection struct {
 	Batch
-	seq          int64
-	calls        map[string]call
-	closedTasks  map[string]bool
-	yieldedTasks map[string]bool
-	scopes       map[string]budgetFact
+	seq                int64
+	calls              map[string]call
+	closedTasks        map[string]bool
+	closedTaskPurposes map[string]string
+	yieldedTasks       map[string]bool
+	scopes             map[string]budgetFact
 }
 
 func (state projection) outstanding() int {
@@ -147,7 +148,7 @@ func (state projection) retryDepth(fact budgetFact) (int, error) {
 }
 
 func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) {
-	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, yieldedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
+	state := projection{Batch: Batch{LimitTokens: VerificationTokenLimit, CostStatus: "unknown"}, calls: map[string]call{}, closedTasks: map[string]bool{}, closedTaskPurposes: map[string]string{}, yieldedTasks: map[string]bool{}, scopes: map[string]budgetFact{}}
 	if owner == 0 || budget.ledger == nil {
 		return state, ErrInvalidAdmission
 	}
@@ -208,6 +209,16 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
 			delete(state.yieldedTasks, taskKey(fact.OwnerID, fact.TaskID))
+		case "admission/task_resumed":
+			key := taskKey(fact.OwnerID, fact.TaskID)
+			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.TaskID) || state.TaskID != "" || !state.closedTasks[key] || state.closedTaskPurposes[key] != "" || activeCalls != 0 || state.taskHasScopes(fact.OwnerID, fact.TaskID) ||
+				fact.CallID != "" || fact.Tokens != 0 || fact.Limit != 0 || fact.ScopeID != "" || fact.SessionID != "" || fact.Process != nil || len(fact.RecoveredScopes) != 0 || fact.Purpose != "" ||
+				fact.InputTokens != 0 || fact.OutputTokens != 0 || fact.CachedTokens != 0 || fact.CostStatus != "" || fact.BoundViolated {
+				return state, session.ErrEventIntegrity
+			}
+			delete(state.closedTasks, key)
+			delete(state.closedTaskPurposes, key)
+			state.TaskID, state.TaskOwnerID = fact.TaskID, fact.OwnerID
 		case "admission/call_reserved":
 			if state.ID == "" || fact.OwnerID == 0 || !validID(fact.CallID) || !validID(fact.TaskID) || state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] || fact.Tokens <= 0 || fact.Tokens > VerificationTokenLimit {
 				return state, session.ErrEventIntegrity
@@ -273,6 +284,7 @@ func (budget *Budget) read(ctx context.Context, owner uint) (projection, error) 
 			}
 			if event.Type == "admission/task_finished" {
 				state.closedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
+				state.closedTaskPurposes[taskKey(fact.OwnerID, fact.TaskID)] = fact.Purpose
 			} else {
 				state.yieldedTasks[taskKey(fact.OwnerID, fact.TaskID)] = true
 			}
@@ -480,6 +492,47 @@ func (budget *Budget) AcquireTask(ctx context.Context, owner uint, taskID string
 			return state.Batch, ErrTaskBusy
 		}
 		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_started", budgetFact{OwnerID: owner, TaskID: taskID})
+		if errors.Is(err, session.ErrSequenceConflict) {
+			continue
+		}
+		if err != nil {
+			return state.Batch, err
+		}
+		updated, err := budget.read(ctx, owner)
+		return updated.Batch, err
+	}
+	return Batch{}, session.ErrSequenceConflict
+}
+
+func (budget *Budget) resumeTask(ctx context.Context, owner uint, taskID string) (Batch, error) {
+	if !validID(taskID) {
+		return Batch{}, ErrInvalidAdmission
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		state, err := budget.read(ctx, owner)
+		if err != nil {
+			return Batch{}, err
+		}
+		key := taskKey(owner, taskID)
+		if !state.closedTasks[key] {
+			if state.TaskID == taskID && state.TaskOwnerID == owner {
+				return state.Batch, nil
+			}
+			return state.Batch, ErrInvalidAdmission
+		}
+		if state.closedTaskPurposes[key] != "" {
+			return state.Batch, ErrTaskClosed
+		}
+		if state.TaskID != "" {
+			return state.Batch, ErrTaskBusy
+		}
+		if state.outstanding() != 0 {
+			return state.Batch, ErrUsageUnknown
+		}
+		if state.taskHasScopes(owner, taskID) {
+			return state.Batch, ErrTaskBusy
+		}
+		_, err = budget.ledger.Append(ctx, verificationLedgerID, state.seq, "admission/task_resumed", budgetFact{OwnerID: owner, TaskID: taskID})
 		if errors.Is(err, session.ErrSequenceConflict) {
 			continue
 		}
