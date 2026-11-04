@@ -558,6 +558,9 @@ func (e *Executor) executeReadSpill(ctx context.Context, args map[string]any) (T
 	if !ok || strings.TrimSpace(locator) == "" {
 		return ToolResult{Name: "ReadSpill", Error: "spill locator is required", ExitCode: 1}, fmt.Errorf("spill locator is required")
 	}
+	if _, err := parseSpillLocator(locator); err != nil {
+		return ToolResult{Name: "ReadSpill", Error: "invalid spill locator; use the full spill:// locator from the original tool result", ExitCode: 1}, nil
+	}
 	e.mu.Lock()
 	store := e.spill
 	e.mu.Unlock()

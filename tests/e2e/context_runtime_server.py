@@ -183,13 +183,34 @@ def start_gateway_provider(llm: DeterministicContextLLM) -> ThreadingHTTPServer 
             response = asyncio.run(llm.chat(ChatRequest(
                 model=payload["model"],
                 messages=[
-                    ChatMessage(role=item["role"], content=item.get("content", ""))
+                    ChatMessage(
+                        role=item["role"], content=item.get("content", ""),
+                        name=item.get("name"), tool_call_id=item.get("tool_call_id"),
+                        tool_calls=[
+                            ToolCall(
+                                id=call["id"], name=call["function"]["name"],
+                                arguments=json.loads(call["function"].get("arguments", "{}")),
+                                arguments_json=call["function"].get("arguments", "{}"),
+                            )
+                            for call in item.get("tool_calls", [])
+                        ],
+                    )
                     for item in payload["messages"]
                 ],
             )))
+            message = {"role": "assistant", "content": response.text}
+            if response.tool_calls:
+                message["tool_calls"] = [
+                    {"id": call.id, "type": "function", "function": {
+                        "name": call.name,
+                        "arguments": call.arguments_json or json.dumps(call.arguments),
+                    }}
+                    for call in response.tool_calls
+                ]
             body = json.dumps({
                 "model": llm.model,
-                "choices": [{"message": {"role": "assistant", "content": response.text}}],
+                "choices": [{"message": message,
+                             "finish_reason": "tool_calls" if response.tool_calls else "stop"}],
                 "usage": {
                     "prompt_tokens": response.usage.input_tokens,
                     "completion_tokens": response.usage.output_tokens,

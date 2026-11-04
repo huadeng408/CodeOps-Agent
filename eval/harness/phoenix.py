@@ -76,7 +76,26 @@ def _allowed_attributes(attributes: object) -> dict[str, Any]:
     return {str(key): value for key, value in attributes.items() if str(key) in _ATTRIBUTE_ALLOWLIST}
 
 
-def _parse_page(payload: Mapping[str, Any]) -> tuple[list[CapturedSpan], str]:
+def _intent_observation(item: Mapping[str, Any]) -> dict[str, Any]:
+    attributes, links = item.get("attributes"), item.get("links")
+    pending = [("", attributes)] if isinstance(attributes, Mapping) else []
+    transport = False
+    while pending:
+        prefix, values = pending.pop()
+        if isinstance(values, list):
+            pending.extend((prefix, value) for value in values if isinstance(value, (Mapping, list)))
+            continue
+        for key, value in values.items():
+            name = (prefix + "." + str(key) if prefix else str(key)).lower()
+            transport = transport or any(marker in name for marker in (
+                "usage", "http", "retry", "cost", "token", "link", "settle", "billing", "gen_ai.response", "model.outcome"))
+            if isinstance(value, (Mapping, list)):
+                pending.append((name, value))
+    return {"schema_version": 1, "complete": isinstance(attributes, Mapping) and isinstance(links, list),
+            "transport_attribute_present": transport, "raw_links_present": bool(links)}
+
+
+def _parse_page(payload: Mapping[str, Any], *, retain_intent_evidence: bool = False) -> tuple[list[CapturedSpan], str]:
     data = payload.get("data")
     if not isinstance(data, list):
         raise PhoenixReadbackError("Phoenix span response has no data list")
@@ -101,6 +120,7 @@ def _parse_page(payload: Mapping[str, Any]) -> tuple[list[CapturedSpan], str]:
                 status=str(item.get("status_code") or "UNSET"),
                 attributes=_allowed_attributes(item.get("attributes")),
                 ended=bool(item.get("end_time")),
+                **({"intent_observation": _intent_observation(item)} if retain_intent_evidence else {}),
             )
         )
     cursor = payload.get("next_cursor")
@@ -151,13 +171,14 @@ def _project_pages(phoenix_url: str, project: str, start_time: str, filters=()):
         cursor = next_cursor
 
 
-def read_product_spans(phoenix_url: str, project: str, start_time: str, session_id: str, run_id: str) -> list[CapturedSpan]:
+def read_product_spans(phoenix_url: str, project: str, start_time: str, session_id: str, run_id: str,
+                       *, retain_intent_evidence: bool = False) -> list[CapturedSpan]:
     """Read every actual attempt trace of one durable Go run, without judging it."""
     roots = []
     filters = (("name", "agent.main"), ("attribute", "session.id:" + json.dumps(session_id)),
                ("attribute", "session.run_id:" + json.dumps(run_id)))
     for page in _project_pages(phoenix_url, project, start_time, filters):
-        spans, _ = _parse_product_page(page)
+        spans, _ = _parse_product_page(page, retain_intent_evidence=retain_intent_evidence)
         roots.extend(span for span in spans if span.name == "agent.main" and
                      span.attributes.get("session.id") == session_id and span.attributes.get("session.run_id") == run_id)
     if not roots:
@@ -167,17 +188,17 @@ def read_product_spans(phoenix_url: str, project: str, start_time: str, session_
     result = []
     for trace_id in sorted({span.trace_id for span in roots}):
         for page in _project_pages(phoenix_url, project, start_time, (("trace_id", trace_id),)):
-            spans, _ = _parse_product_page(page)
+            spans, _ = _parse_product_page(page, retain_intent_evidence=retain_intent_evidence)
             if any(span.trace_id != trace_id for span in spans):
                 raise PhoenixReadbackError("backend returned an unexpected trace")
             result.extend(spans)
     return result
 
 
-def _parse_product_page(page):
+def _parse_product_page(page, *, retain_intent_evidence: bool = False):
     from eval.harness.trace_contract import find_trace_privacy_problem
 
-    spans, cursor = _parse_page(page)
+    spans, cursor = _parse_page(page, retain_intent_evidence=retain_intent_evidence)
     if any(find_trace_privacy_problem(raw) for raw in page["data"]):
         raise PhoenixReadbackError("product backend trace contains sensitive fields")
     return spans, cursor

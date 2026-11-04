@@ -6,6 +6,7 @@
 
 | 范围 | 入口 |
 | --- | --- |
+| 分段续跑与修复 | [186/200封存、Trace负结果及源码修复](product-long-dialogue-repairs-2026-11-04.md) |
 | Agent 对照实验 | [三组实验、优先修复与准入让出](agent-evaluation-experiments-2026-10-31.md) |
 | Context、准入与 Session 架构 | [Module 深化与范围验证](module-deepening-2026-10-22.md) |
 | 首批 Windows 产品 | [父规格逐项审计](milestone-parent-acceptance-2026-10-21.md)、[五类恢复与 Memory](milestone-v5-matrix-2026-10-19.md)、[兼容／物料及 AC01–AC09](milestone-v5-compatibility-2026-10-19.md) |

@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// Retained-session recovery has a separate allowance from transport probes.
+const continuationRecoveryTimeout = 30 * time.Second
+
 type continuationHealth interface {
 	Health(context.Context) error
 }
@@ -140,9 +143,10 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 	module, err := s.connect(connectCtx)
 	cancelConnect()
 	if err != nil || module == nil {
-		if err != nil {
-			s.recordHealth(err, 0)
+		if err == nil {
+			err = errors.New("continuation connector returned no module")
 		}
+		s.recordHealth(err, 0)
 		s.scheduleConnectRetry()
 		return
 	}
@@ -157,7 +161,7 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 			return
 		}
 	}
-	recoverCtx, cancelRecover := context.WithTimeout(ctx, s.interval)
+	recoverCtx, cancelRecover := context.WithTimeout(ctx, continuationRecoveryTimeout)
 	err = module.Recover(recoverCtx)
 	cancelRecover()
 	if err != nil {
@@ -170,7 +174,6 @@ func (s *ContinuationSupervisor) reconcile(ctx context.Context) {
 				s.recordPartialRecovery(err, s.Status().Generation)
 				return
 			}
-			_ = module.Close()
 			return
 		}
 		s.recordHealth(err, 0)

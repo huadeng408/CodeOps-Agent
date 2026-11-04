@@ -956,6 +956,30 @@ func TestExecutorReadSpillDefaultsToBoundedPage(t *testing.T) {
 	}
 }
 
+func TestExecutorReadSpillDistinguishesInvalidLocatorFromUnavailableOutput(t *testing.T) {
+	executor := tools.NewExecutor(t.TempDir())
+	executor.SetSpillStore(failingSpillStore{})
+	for name, locator := range map[string]string{
+		"bare hash":  strings.Repeat("a", 64),
+		"local path": `C:\private\captured-output.txt`,
+		"short URI":  "spill://short",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "ReadSpill", Arguments: map[string]any{"locator": locator}})
+			if err != nil || result.ExitCode != 1 || result.Output != "" || result.Spill != nil {
+				t.Fatalf("invalid locator must return a known tool failure: result=%+v err=%v", result, err)
+			}
+			if result.Error != "invalid spill locator; use the full spill:// locator from the original tool result" || strings.Contains(result.Error, locator) {
+				t.Fatalf("invalid locator needs a fixed retrieval hint without echoing input: %q", result.Error)
+			}
+		})
+	}
+	result, err := executor.Execute(context.Background(), tools.ToolRequest{Name: "ReadSpill", Arguments: map[string]any{"locator": "spill://" + strings.Repeat("a", 64)}})
+	if err == nil || result.Error != "spill output is unavailable" || result.ExitCode != 1 {
+		t.Fatalf("valid locator storage failure changed: result=%+v err=%v", result, err)
+	}
+}
+
 type failingSpillStore struct{}
 
 func (failingSpillStore) Save(context.Context, tools.SpillRequest) (tools.SpillRef, error) {

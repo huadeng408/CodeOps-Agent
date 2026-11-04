@@ -44,7 +44,10 @@ from any source (in-process capture today, a Phoenix query under O3).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -251,9 +254,10 @@ class CapturedSpan:
     attributes: dict[str, Any] = field(default_factory=dict)
     links: tuple[str, ...] = ()
     ended: bool = True
+    intent_observation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "name": self.name,
             "trace_id": self.trace_id,
             "span_id": self.span_id,
@@ -263,6 +267,26 @@ class CapturedSpan:
             "links": list(self.links),
             "ended": self.ended,
         }
+        if self.intent_observation is not None:
+            value["intent_observation"] = dict(self.intent_observation)
+        return value
+
+
+@dataclass(frozen=True)
+class ProductIntentAuthority:
+    """Native/runtime evidence minted by the verified CLI, never a caller flag."""
+
+    session_id: str
+    run_ids: tuple[str, ...]
+    model: str
+    admitted_calls: tuple[tuple[str, str, str], ...]
+    global_reserved_call_ids: frozenset[str]
+    contained_runs: frozenset[str]
+    terminal_roots: tuple[tuple[str, str, str], ...]
+    source_bindings: tuple[tuple[str, str, str], ...]
+    evidence_sha256: tuple[tuple[str, str], ...]
+    captured_spans: frozenset[tuple[str, str, str]]
+    raw_attribute_absent_spans: frozenset[tuple[str, str, str]] = frozenset()
 
 
 # -- secret detection -------------------------------------------------------
@@ -442,11 +466,95 @@ def _product_attempt_roots(items, roots, expected, problems):
     return owners
 
 
+def _product_intents(items, roots, owners, expected, logical_calls, problems, *, admission=False):
+    observed = [span for span in items if _matches_kind(span.name, "provider.call")]
+    extra = [span for span in observed if span.attributes.get("model.call_id") not in logical_calls]
+    qualified = []
+    if extra:
+        proof = expected.get("intent_authority")
+        run_ids = expected.get("run_ids", [expected["run_id"]])
+        admitted = tuple(sorted((call_id, purpose, expected.get("retry_of", {}).get(call_id, ""))
+                                for call_id, purpose in expected["model_calls"].items()))
+        valid = (isinstance(proof, ProductIntentAuthority) and proof.session_id == expected["session_id"]
+                 and proof.run_ids == tuple(run_ids) and proof.model == expected["model"]
+                 and proof.admitted_calls == admitted
+                 and isinstance(proof.global_reserved_call_ids, frozenset)
+                 and isinstance(proof.captured_spans, frozenset)
+                 and isinstance(proof.raw_attribute_absent_spans, frozenset)
+                 and set(expected["model_calls"]) <= proof.global_reserved_call_ids
+                 and proof.contained_runs <= set(run_ids)
+                 and {row[0] for row in proof.source_bindings} == proof.contained_runs
+                 and len(proof.source_bindings) == len(proof.contained_runs)
+                 and all(segment and re.fullmatch(r"[0-9a-f]{40}", source) for _, segment, source in proof.source_bindings)
+                 and len(proof.terminal_roots) == len(run_ids)
+                 and {row[0] for row in proof.terminal_roots} == set(run_ids)
+                 and all(any(root.attributes.get("session.run_id") == run and root.trace_id == trace_id
+                             and root.span_id == span_id for root in roots) for run, trace_id, span_id in proof.terminal_roots)
+                 and len(proof.evidence_sha256) >= 3
+                 and len({name for name, _ in proof.evidence_sha256}) == len(proof.evidence_sha256)
+                 and all(name and re.fullmatch(r"[0-9a-f]{64}", digest) for name, digest in proof.evidence_sha256))
+        if not valid:
+            problems.append("complete native and contained managed-runtime intent authority required")
+        else:
+            ids = Counter(span.attributes.get("model.call_id") for span in observed
+                          if isinstance(span.attributes.get("model.call_id"), str))
+            children = {(span.trace_id, span.parent_span_id) for span in items if span.parent_span_id}
+            purposes = {"foreground", "compaction", "memory_reflection", "workflow_worker"}
+            for span in extra:
+                call_id, purpose = span.attributes.get("model.call_id"), span.attributes.get("model.purpose")
+                root = owners.get((span.trace_id, span.span_id))
+                run = root.attributes.get("session.run_id") if root else None
+                body = span.to_dict()
+                if admission:
+                    body.pop("intent_observation", None)
+                identity = (span.trace_id, span.span_id, hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+                observation = span.intent_observation
+                if (not admission or observation is not None) and (not isinstance(observation, dict)
+                        or set(observation) != {"schema_version", "complete", "transport_attribute_present", "raw_links_present"}
+                        or type(observation["schema_version"]) is not int or observation["schema_version"] != 1
+                        or (not admission and observation["complete"] is not True) or type(observation["complete"]) is not bool
+                        or type(observation["transport_attribute_present"]) is not bool
+                        or type(observation["raw_links_present"]) is not bool):
+                    problems.append("complete pre-normalization intent observation required")
+                    continue
+                transport = any(str(key).lower().startswith(("gen_ai.usage.", "gen_ai.response.", "http."))
+                                or str(key).lower() in {"model.usage_known", "model.outcome", "model.retry_of", "model.cost_status", "cost_status"}
+                                for key in span.attributes)
+                if (span.name != "provider.call" or not isinstance(call_id, str) or not call_id or len(call_id) > 256
+                        or any(character.isspace() for character in call_id) or ids[call_id] != 1
+                        or call_id in proof.global_reserved_call_ids or span.ended is not True
+                        or not isinstance(span.status, str) or span.status.upper() != "ERROR"
+                        or span.links or (span.trace_id, span.span_id) in children or transport
+                        or (observation is not None and (observation["transport_attribute_present"] or observation["raw_links_present"]))
+                        or admission and identity not in proof.raw_attribute_absent_spans
+                        or purpose not in purposes or span.attributes.get("gen_ai.request.model") != proof.model
+                        or root is None or run not in proof.contained_runs
+                        or identity not in proof.captured_spans
+                        or any(key in span.attributes and span.attributes[key] != value
+                               for key, value in (("session.id", proof.session_id), ("session.run_id", run)))):
+                    problems.append("unqualified unadmitted logical intent")
+                    continue
+                qualified.append({"trace_id": span.trace_id, "span_id": span.span_id, "call_id": call_id,
+                                  "run_id": run, "purpose": purpose, "model": proof.model, "status": span.status,
+                                  "source_scope": "contained-new-run/one-frozen-owned-runtime",
+                                  "exact_failure_stage": "unknown", "billing": "unknown"})
+                if admission:
+                    qualified[-1].update(admission="absent", links="unknown", metadata_complete=False,
+                                         verified_go_paid_transport="no_request_for_exact_call_id",
+                                         segment=next(segment for source_run, segment, _ in proof.source_bindings if source_run == run),
+                                         source_commit=next(source for source_run, _, source in proof.source_bindings if source_run == run))
+    return qualified, {"observed": len(observed), "admitted_logical": len(logical_calls),
+                       "physical_attempts": sum(_matches_kind(span.name, "provider.attempt") for span in items),
+                       "unadmitted_failed": len(qualified), "unclassified": len(extra) - len(qualified),
+                       "unadmitted": qualified}
+
+
 def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str, Any], *, contract_version: str = "product-v1") -> dict[str, Any]:
     """Check the product's selected run trees against its durable denominator."""
-    if contract_version not in {"product-v1", "product-integrity-v2"}:
+    admission = contract_version == "product-integrity-v3-admission-v1"
+    if contract_version not in {"product-v1", "product-integrity-v2", "product-integrity-v3"} and not admission:
         raise ValueError("unknown product Trace contract")
-    integrity = contract_version == "product-integrity-v2"
+    integrity = contract_version in {"product-integrity-v2", "product-integrity-v3"} or admission
     items = list(spans)
     problems, missing = [], []
     session_id, run_id = expected["session_id"], expected["run_id"]
@@ -485,6 +593,10 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
     if len(contexts if integrity else by_id) != len(items):
         problems.append("duplicate span IDs")
     owners = _product_attempt_roots(items, roots, expected, problems) if integrity else {}
+    logical_span_calls = logical_calls
+    if contract_version == "product-integrity-v3" or admission:
+        unadmitted, intent_report = _product_intents(items, roots, owners, expected, logical_calls, problems, admission=admission)
+        logical_span_calls = logical_calls | {row["call_id"]: row["purpose"] for row in unadmitted}
     for span in items:
         if (not re.fullmatch(r"[0-9a-f]{32}", span.trace_id) or span.trace_id == "0" * 32
                 or not re.fullmatch(r"[0-9a-f]{16}", span.span_id) or span.span_id == "0" * 16):
@@ -523,7 +635,7 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
             problems.append("a Go run has no foreground Python provider call")
     for name, calls, id_key, value_key in (
         ("execute_tool", tools, "gen_ai.tool.call.id", "gen_ai.tool.name"),
-        ("provider.call", logical_calls, "model.call_id", "model.purpose"),
+        ("provider.call", logical_span_calls, "model.call_id", "model.purpose"),
         ("provider.attempt", models, "model.call_id", "model.purpose"),
     ):
         observed = {}
@@ -582,6 +694,10 @@ def evaluate_product_trace(spans: Iterable[CapturedSpan], expected: Mapping[str,
                       execution={"runs": outcomes, "cancellation_states": cancellations, "tools": tool_outcomes},
                       error_spans=[{"trace_id": span.trace_id, "span_id": span.span_id, "name": span.name, "status": span.status}
                                    for span in items if str(span.status).upper() not in {"OK", "UNSET"}])
+    if contract_version == "product-integrity-v3" or admission:
+        report["model_intents"] = intent_report
+    if admission:
+        report.update(scope="go-only-admission-classification", metadata_complete=False, links="unknown")
     return report
 
 

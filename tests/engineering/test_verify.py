@@ -103,16 +103,18 @@ def test_public_verification_does_not_claim_a_complete_denominator_after_pytest_
 
 
 @pytest.mark.parametrize("early_stop_source", ["argv", "environment"])
-def test_public_verification_does_not_claim_a_complete_go_denominator_after_failfast(tmp_path, repository, monkeypatch, early_stop_source):
+@pytest.mark.parametrize("failfast_flag", ["-failfast", "--failfast", "--test.failfast", "--failfast=true"])
+def test_public_verification_does_not_claim_a_complete_go_denominator_after_failfast(tmp_path, repository, monkeypatch, early_stop_source, failfast_flag):
     monkeypatch.setenv("GOPROXY", "off")
     monkeypatch.setenv("GOSUMDB", "off")
     monkeypatch.setenv("GOTOOLCHAIN", "local")
-    monkeypatch.setenv("GOFLAGS", "-failfast" if early_stop_source == "environment" else "")
+    monkeypatch.setenv("GOENV", "off")
+    monkeypatch.setenv("GOFLAGS", failfast_flag if early_stop_source == "environment" else "")
     (repository / "go.mod").write_bytes(b"module fixture\n\ngo 1.24\n")
     (repository / "fixture_test.go").write_bytes(b'package fixture\nimport "testing"\nfunc TestFirst(t *testing.T) { t.Fatal("retained failure") }\nfunc TestSecond(t *testing.T) { t.Fatal("must remain unstarted") }\n')
     arguments = ["go", "test", "-vet=off", "-p", "1", "-json", "./...", "-count=1"]
     if early_stop_source == "argv":
-        arguments.append("-failfast")
+        arguments.append(failfast_flag)
     plan = write_plan(tmp_path / "plan.json", [{"id": "go-test", "argv": arguments, "timeout_seconds": 30}])
     result = verification_command(repository, plan, tmp_path / "receipts")
     assert result.returncode == 3
@@ -120,6 +122,27 @@ def test_public_verification_does_not_claim_a_complete_go_denominator_after_fail
     assert record["source_state"] == "failed" and record["error_code"] == "test_denominator_unconfirmed"
     assert record["test_denominator"]["complete"] is False and record["test_denominator"]["total"] is None
     assert record["test_denominator"]["test_events"] == {"pass": 0, "fail": 1, "skip": 0}
+
+
+@pytest.mark.parametrize("termination", ["panic", "goexit"])
+def test_public_verification_keeps_aborted_go_test_binary_denominator_unknown(tmp_path, repository, monkeypatch, termination):
+    for name, value in {"GOPROXY": "off", "GOSUMDB": "off", "GOTOOLCHAIN": "local", "GOENV": "off", "GOFLAGS": ""}.items():
+        monkeypatch.setenv(name, value)
+    (repository / "go.mod").write_bytes(b"module fixture\n\ngo 1.24\n")
+    imports, first = ('import "testing"', 'panic("retained abnormal stop")') if termination == "panic" else ('import ("testing"; "runtime")', 'runtime.Goexit()')
+    (repository / "fixture_test.go").write_text("package fixture\n" + imports + "\nfunc TestFirst(t *testing.T) { " + first + " }\nfunc TestAfter(t *testing.T) { t.Fatal(\"must remain unstarted\") }\n", encoding="utf-8")
+    plan = write_plan(tmp_path / "plan.json", [{"id": "go-test", "argv": ["go", "test", "-vet=off", "-p", "1", "-json", "./...", "-count=1"], "timeout_seconds": 30}])
+    result = verification_command(repository, plan, tmp_path / "receipts")
+    artifact = tmp_path / "receipts/target"
+    record = json.loads((artifact / "summary.json").read_text(encoding="utf-8"))["checks"][0]
+    events = [json.loads(line) for line in (artifact / record["stdout_log"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [event["Test"] for event in events if event.get("Action") == "run"] == ["TestFirst"]
+    assert record["exit_code"] == 1 and record["process_tree_stop_confirmed"] is True
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert record["source_state"] == "failed" and record["error_code"] == "test_denominator_unconfirmed"
+    assert record["test_denominator"]["complete"] is False and record["test_denominator"]["total"] is None
+    assert record["test_denominator"]["test_events"] == {"pass": 0, "fail": 1, "skip": 0}
+    assert record["test_denominator"]["package_events"] == {"pass": 0, "fail": 1, "skip": 0}
 
 
 def test_public_verification_preserves_actual_go_json_test_denominator(tmp_path, repository, monkeypatch):

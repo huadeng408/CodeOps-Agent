@@ -29,20 +29,26 @@ func TestProductionToolSpillSurvivesPythonRoundTrip(t *testing.T) {
 	python := contextE2EPython(t)
 	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "tool_spill_server.py")
 	t.Setenv("PYTHONPATH", repositoryRoot)
+	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
+	current := sessionManager.Current()
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address: address, AutoStart: true, Command: python, Args: []string{fixture},
 		ProjectRoot: projectRoot, WorkingDir: projectRoot, MemoryDir: filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout: 15 * time.Second, ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory: modelScope,
 	})
 	t.Cleanup(manager.Stop)
 	client, err := manager.Client(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.SetActor(current.Actor); err != nil {
+		t.Fatal(err)
+	}
 	executor := tools.NewExecutor(projectRoot)
 	executor.MaxOutputLines = 0
 	executor.MaxOutputBytes = 64
-	response, err := client.Converse(context.Background(), "spill", func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	response, err := client.ConverseWithHistory(context.Background(), "spill", current.ID, nil, func(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.ParametersJSON), &args); err != nil {
 			return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: err.Error(), ExitCode: 1}
@@ -60,7 +66,7 @@ func TestProductionToolSpillSurvivesPythonRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(response, "SPILL_ROUNDTRIP_OK:") {
+	if !strings.Contains(response, "SPILL_ROUNDTRIP_OK:") {
 		t.Fatalf("spill round trip failed: %q", response)
 	}
 	receipt := map[string]any{
@@ -68,12 +74,13 @@ func TestProductionToolSpillSurvivesPythonRoundTrip(t *testing.T) {
 		"git_sha": productionGitSHA(t, repositoryRoot),
 		"command": "CODE_AGENT_RUN_TOOL_SPILL_E2E=1 go test ./tests/e2e -run TestProductionToolSpillSurvivesPythonRoundTrip -count=1",
 		"result":  "SPILL_ROUNDTRIP_OK",
+		"invalid_locator_rejected_before_successful_read": true,
 	}
 	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "tool-spill-process-recovery.json")
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "tool-spill-process-invalid-locator-recovery.json")
 	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
 		t.Fatal(err)
 	}

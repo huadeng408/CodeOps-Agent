@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-from orchestrator.llm.client import ChatRequest, ChatResponse, LLMClient, ToolCall, Usage, message_content_text
+from orchestrator.llm.client import ChatRequest, ChatResponse, ToolCall, Usage, message_content_text
 from orchestrator.server import OrchestratorServer, ServerConfig, build_parser
+from context_runtime_server import DeterministicContextLLM, start_gateway_provider
 
 
-class SpillLLM(LLMClient):
-    model = "deterministic-tool-spill-e2e"
-
+class SpillLLM(DeterministicContextLLM):
     async def chat(self, request: ChatRequest) -> ChatResponse:
         latest = next((message_content_text(m.content) for m in reversed(request.messages) if m.role == "user"), "")
         tool = next((m for m in reversed(request.messages) if m.role == "tool"), None)
@@ -17,9 +16,16 @@ class SpillLLM(LLMClient):
             return ChatResponse(tool_calls=[ToolCall(name="Read", arguments=args, id="spill-read-1", arguments_json=json.dumps(args))], usage=Usage(input_tokens=1, output_tokens=1))
         if "Complete redacted output: spill://" in tool_text:
             locator = tool_text.split("Complete redacted output: ", 1)[1].split(".", 1)[0]
-            args = {"locator": locator, "start": 2, "limit": 2}
+            args = {"locator": locator.removeprefix("spill://"), "start": 2, "limit": 2}
             return ChatResponse(tool_calls=[ToolCall(name="ReadSpill", arguments=args, id="spill-read-2", arguments_json=json.dumps(args))], usage=Usage(input_tokens=1, output_tokens=1))
-        if tool is not None and "line" in tool_text:
+        invalid_locator_hint = "invalid spill locator; use the full spill:// locator from the original tool result"
+        if invalid_locator_hint in tool_text:
+            original = next(message_content_text(m.content) for m in request.messages if m.role == "tool" and "Complete redacted output: spill://" in message_content_text(m.content))
+            locator = original.split("Complete redacted output: ", 1)[1].split(".", 1)[0]
+            args = {"locator": locator, "start": 2, "limit": 2}
+            return ChatResponse(tool_calls=[ToolCall(name="ReadSpill", arguments=args, id="spill-read-3", arguments_json=json.dumps(args))], usage=Usage(input_tokens=1, output_tokens=1))
+        recovered = any(invalid_locator_hint in message_content_text(m.content) for m in request.messages if m.role == "tool")
+        if tool is not None and "line" in tool_text and recovered:
             return ChatResponse(text="SPILL_ROUNDTRIP_OK:" + tool_text.splitlines()[0], usage=Usage(input_tokens=1, output_tokens=1))
         return ChatResponse(text="SPILL_ROUNDTRIP_FAILED", usage=Usage(input_tokens=1, output_tokens=1))
 
@@ -31,7 +37,13 @@ def main() -> None:
     app.llm = llm
     app.fast_llm = llm
     app.provider_clients = {"default": llm}
-    app.serve()
+    provider = start_gateway_provider(llm)
+    try:
+        app.serve()
+    finally:
+        if provider is not None:
+            provider.shutdown()
+            provider.server_close()
 
 
 if __name__ == "__main__":

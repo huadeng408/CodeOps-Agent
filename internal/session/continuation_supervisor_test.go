@@ -302,6 +302,7 @@ func (m *recoverFailModule) Recover(context.Context) error { return m.err }
 
 type blockingRecoverModule struct {
 	*supervisorModule
+	started chan context.Context
 }
 
 type gatedRecoverModule struct {
@@ -310,10 +311,148 @@ type gatedRecoverModule struct {
 	release chan struct{}
 }
 
-func (m *gatedRecoverModule) Recover(context.Context) error {
+func (m *gatedRecoverModule) Recover(ctx context.Context) error {
+	_ = m.supervisorModule.Recover(ctx)
 	close(m.started)
+	select {
+	case <-m.release:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestContinuationSupervisorRecoversBeyondHealthPollingInterval(t *testing.T) {
+	const interval = 10 * time.Millisecond
+	slot := NewContinuationSlot()
+	module := &gatedRecoverModule{
+		supervisorModule: &supervisorModule{healthy: true},
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	var mu sync.Mutex
+	connects := 0
+	supervisor := NewContinuationSupervisor(slot, interval, func(context.Context) (ContinuationModule, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		connects++
+		if connects != 1 {
+			return nil, errors.New("first recovery did not attach")
+		}
+		return module, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	supervisor.Start(ctx)
+	defer supervisor.Close()
+	select {
+	case <-module.started:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not start")
+	}
+	// Hold real recovery past one health poll, then release the same module.
+	heldAt := time.Now()
+	<-time.After(3 * interval)
+	close(module.release)
+	t.Logf("controlled fixture recovery hold=%s poll=%s", time.Since(heldAt), interval)
+	deadline := time.Now().Add(time.Second)
+	for !slot.Available() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	status := supervisor.Status()
+	if !slot.Available() || !status.Attached || status.Generation != 1 || status.LastRecoveryAt == nil {
+		t.Fatalf("recovery did not attach beyond the polling interval: %+v", status)
+	}
+	view, err := slot.RequestContinuation(ctx, ContinueCommand{})
+	if err != nil || view.RunID != "supervisor-run" {
+		t.Fatalf("recovered continuation unavailable: run=%q err=%v", view.RunID, err)
+	}
+	mu.Lock()
+	attempts := connects
+	mu.Unlock()
+	_, recovers, closed := module.snapshot()
+	if attempts != 1 || recovers != 1 || closed != 0 {
+		t.Fatalf("recovery lifecycle: connects=%d recovers=%d closed=%d", attempts, recovers, closed)
+	}
+}
+
+func TestContinuationSupervisorRecordsMissingModule(t *testing.T) {
+	slot := NewContinuationSlot()
+	supervisor := NewContinuationSupervisor(slot, time.Hour, func(context.Context) (ContinuationModule, error) {
+		return nil, nil
+	})
+	supervisor.Start(context.Background())
+	defer supervisor.Close()
+	deadline := time.Now().Add(time.Second)
+	for supervisor.Status().ConsecutiveFailures == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	status := supervisor.Status()
+	if status.Attached || status.ConsecutiveFailures != 1 || status.NextRetryAt == nil {
+		t.Fatalf("missing-module backoff status: %+v", status)
+	}
+	if status.LastHealthError != "continuation connector returned no module" {
+		t.Fatalf("missing-module diagnostic = %q", status.LastHealthError)
+	}
+}
+
+type gatedPartialRecoverModule struct {
+	*supervisorModule
+	started chan struct{}
+	release chan struct{}
+}
+
+func (m *gatedPartialRecoverModule) Recover(ctx context.Context) error {
+	_ = m.supervisorModule.Recover(ctx)
+	close(m.started)
+	// Return the already isolated partial result only after shutdown starts.
 	<-m.release
-	return nil
+	return &PartialRecoveryError{Err: errors.New("fixture isolated session")}
+}
+
+func TestContinuationSupervisorPartialRecoveryClosesOnceDuringShutdown(t *testing.T) {
+	slot := NewContinuationSlot()
+	module := &gatedPartialRecoverModule{
+		supervisorModule: &supervisorModule{healthy: true},
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	supervisor := NewContinuationSupervisor(slot, time.Second, func(context.Context) (ContinuationModule, error) {
+		return module, nil
+	})
+	defer supervisor.Close()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(module.release) }) }
+	defer release()
+	supervisor.Start(context.Background())
+	select {
+	case <-module.started:
+	case <-time.After(time.Second):
+		t.Fatal("partial recovery did not start")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- supervisor.Close() }()
+	deadline := time.Now().Add(time.Second)
+	for supervisor.Status().LastHealthError != "continuation supervisor is closed" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if supervisor.Status().LastHealthError != "continuation supervisor is closed" {
+		t.Fatal("shutdown did not publish its closed projection")
+	}
+	release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not finish after partial recovery returned")
+	}
+	_, recovers, closes := module.snapshot()
+	status := supervisor.Status()
+	if recovers != 1 || closes != 1 || slot.Available() || status.Attached || status.Generation != 0 {
+		t.Fatalf("partial shutdown lifecycle: recovers=%d closes=%d attached=%v generation=%d", recovers, closes, status.Attached, status.Generation)
+	}
 }
 
 func TestContinuationSupervisorDoesNotAttachAfterClose(t *testing.T) {
@@ -545,28 +684,51 @@ func TestContinuationSupervisorOldLoopCannotClearNewCancel(t *testing.T) {
 }
 
 func (m *blockingRecoverModule) Recover(ctx context.Context) error {
+	if m.started != nil {
+		m.started <- ctx
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }
 
 func TestContinuationSupervisorBoundsRecovery(t *testing.T) {
 	slot := NewContinuationSlot()
-	module := &blockingRecoverModule{supervisorModule: &supervisorModule{healthy: true}}
+	module := &blockingRecoverModule{
+		supervisorModule: &supervisorModule{healthy: true}, started: make(chan context.Context, 1),
+	}
 	supervisor := NewContinuationSupervisor(slot, 10*time.Millisecond, func(context.Context) (ContinuationModule, error) {
 		return module, nil
 	})
 
-	started := time.Now()
-	supervisor.reconcile(context.Background())
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("recovery exceeded bound: %s", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	supervisor.Start(ctx)
+	defer supervisor.Close()
+	var recoveryCtx context.Context
+	select {
+	case recoveryCtx = <-module.started:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not start")
+	}
+	limit, bounded := recoveryCtx.Deadline()
+	if remaining := time.Until(limit); !bounded || remaining <= 10*time.Millisecond || remaining > 30*time.Second {
+		t.Fatalf("dedicated recovery budget is not finite/independent: bounded=%v remaining=%s", bounded, remaining)
+	}
+	cancel()
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_, _, closed := module.snapshot()
+		if closed != 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if slot.Available() {
 		t.Fatal("module attached after recovery timeout")
 	}
 	status := supervisor.Status()
-	if !strings.Contains(status.LastHealthError, context.DeadlineExceeded.Error()) {
-		t.Fatalf("last health error = %q, want deadline exceeded", status.LastHealthError)
+	if !strings.Contains(status.LastHealthError, context.Canceled.Error()) {
+		t.Fatalf("last health error = %q, want parent cancellation", status.LastHealthError)
 	}
 	_, _, closed := module.snapshot()
 	if closed != 1 {

@@ -1882,6 +1882,11 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 	if err := r.applyEvaluationContext(ctx, key, lease, &request, evaluation); err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
+	if inputEventID != "" && len(surface) > 0 && surface[len(surface)-1].EventID != inputEventID {
+		// The active input already precedes its committed tail in History.
+		request.Input = ""
+		request.NewTurn = false
+	}
 	return request, nil
 }
 
@@ -1964,7 +1969,7 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 	}
 	history := make([]orchestrator.ConversationMessage, 0, len(surface))
 	input := ""
-	for _, event := range surface {
+	for index, event := range surface {
 		switch event.Type {
 		case compactionEventType:
 			var payload compactionPayload
@@ -1977,14 +1982,19 @@ func conversationHistory(surface, events []Event, runID, inputEventID string) ([
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return nil, "", fmt.Errorf("%w: invalid message payload at seq %d", ErrEventIntegrity, event.Seq)
 			}
-			if event.EventID == inputEventID {
-				input = payload.Content
-				continue
-			}
-			history = append(history, orchestrator.ConversationMessage{
+			message := orchestrator.ConversationMessage{
 				Role: payload.Author, Content: payload.Content, CreatedAt: event.CreatedAt.Format(time.RFC3339Nano), SchemaVersion: 1,
 				EventID: event.EventID, EventChecksum: event.Checksum,
-			})
+			}
+			if event.EventID == inputEventID {
+				input = payload.Content
+				if index+1 == len(surface) {
+					continue
+				}
+				// Reuse the live-message barrier so compaction cannot replace this input.
+				message.EventID, message.EventChecksum = "", ""
+			}
+			history = append(history, message)
 		case "tool/call":
 			var payload toolCallPayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {

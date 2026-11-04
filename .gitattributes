@@ -48,3 +48,4 @@ deployments/opensandbox/**/*.patch -text whitespace=-blank-at-eol,-blank-at-eof,
 docs/archive/policy-cleanup-2026-10-14/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 docs/archive/policy-cleanup-2026-10-20/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 docs/archive/resumable-2026-11-03/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+docs/archive/resumable-2026-11-04/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

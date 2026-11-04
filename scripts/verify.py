@@ -213,7 +213,7 @@ def _prepare_full_go(root: Path, environment: dict[str, str]) -> dict[str, Any]:
     return {"required_version": "go" + required, "actual_version": actual, "executable": str(executable), "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(), "automatic_downloads": False}
 
 
-def _test_denominator(check: dict[str, Any], result: dict[str, Any], artifact: RunArtifacts) -> dict[str, Any]:
+def _test_denominator(check: dict[str, Any], result: dict[str, Any], artifact: RunArtifacts, environment: dict[str, str]) -> dict[str, Any]:
     argv = check["argv"]
     is_go_test = Path(argv[0]).stem == "go" and len(argv) > 1 and argv[1] == "test"
     text = "\n".join((artifact.root / result[channel + "_log"]).read_text(encoding="utf-8") for channel in ("stdout", "stderr"))
@@ -222,15 +222,24 @@ def _test_denominator(check: dict[str, Any], result: dict[str, Any], artifact: R
         packages = counts.copy()
         started: Counter[tuple[str, str]] = Counter()
         ended: Counter[tuple[str, str]] = Counter()
-        for line in text.splitlines():
+        failed_tests, failed_packages = set(), set()
+        normal_failures = set()
+        abnormal_output = False
+        valid_events = True
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
             try:
                 event = json.loads(line)
             except ValueError:
+                valid_events = False
                 continue
             if not isinstance(event, dict):
+                valid_events = False
                 continue
             action, package, test = event.get("Action"), event.get("Package"), event.get("Test", "")
-            if not isinstance(package, str) or not isinstance(test, str):
+            if not isinstance(action, str) or not isinstance(package, str) or not package or not isinstance(test, str):
+                valid_events = False
                 continue
             key = (package, test)
             if action == "start" and not test or action == "run" and test:
@@ -238,8 +247,31 @@ def _test_denominator(check: dict[str, Any], result: dict[str, Any], artifact: R
             elif action in counts:
                 (counts if test else packages)[action] += 1
                 ended[key] += 1
-        # Failed Go runs can omit unstarted tests through flags or persisted Go config.
-        complete = "-json" in argv and result["exit_code"] == 0 and not result["timed_out"] and result["process_tree_stop_confirmed"] is True and bool(packages) and sum(packages.values()) > 0 and started == ended
+                if action == "fail":
+                    (failed_tests if test else failed_packages).add(package)
+            elif action == "build-fail":
+                valid_events = False
+            elif action == "output":
+                output = event.get("Output", "")
+                if not isinstance(output, str):
+                    valid_events = False
+                    continue
+                if not test and output == "FAIL\n":
+                    normal_failures.add(package)
+                if re.search(r"(?:^|\n)(?:panic:|fatal error:)|test executed panic\(nil\) or runtime\.Goexit|test timed out after", output):
+                    abnormal_output = True
+        # Nonzero tests need known configuration: failfast can hide unstarted cases.
+        flags = " ".join(argv[2:]) + " " + environment.get("GOFLAGS", "")
+        early_stop = re.search(r'''(?:^|[\s"'])-{1,2}(?:test\.)?failfast(?:=|[\s"']|$)''', flags)
+        # A crashed binary can flush balanced fail events before later tests start.
+        known_failure = (result["exit_code"] == 1 and bool(failed_tests)
+                         and failed_tests == failed_packages and failed_packages <= normal_failures
+                         and not abnormal_output and environment.get("GOENV") == "off" and not early_stop)
+        known_success = result["exit_code"] == 0 and not failed_tests and not failed_packages
+        complete = ("-json" in argv and (known_success or known_failure) and valid_events
+                    and not result["timed_out"] and not result.get("error_code")
+                    and result["process_tree_stop_confirmed"] is True and sum(packages.values()) > 0
+                    and started == ended and (known_success or all(count == 1 for count in started.values())))
         return {"kind": "go-test-json", "unit": "terminal test events including subtests", "complete": complete,
                 "test_events": counts, "package_events": packages, "total": sum(counts.values()) if complete else None,
                 "reason": None if complete else "complete Go JSON denominator not confirmed"}
@@ -355,7 +387,15 @@ def _run_check(root: Path, check: dict[str, Any], environment: dict[str, str], a
             if overflow.is_set():
                 text = text.rsplit("\n", 1)[0] + "\n[output bound exceeded; check not accepted]\n"
             try:
-                path = artifact.record_scorer_output(f"{check['id']}-{channel}.log", text)
+                records = None
+                if channel == "stdout" and Path(check["argv"][0]).stem == "go" and check["argv"][1:2] == ["test"] and "-json" in check["argv"]:
+                    try:
+                        records = [json.loads(line) for line in text.split("\n") if line.strip()]
+                    except ValueError:
+                        result.setdefault("error_code", "invalid_go_json_output")
+                name = f"{check['id']}-{channel}.log"
+                path = (artifact.write_jsonl("scorer/" + name, records) if records is not None
+                        else artifact.record_scorer_output(name, text))
                 result[channel + "_log"] = path.relative_to(artifact.root).as_posix()
                 result[channel + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             except (OSError, ValueError) as error:
@@ -467,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
                             records[index].update(state="infra_error", error_code="closed_inputs_changed_during_check")
                     if check.get("reuse_policy") and closure["stdout_must_be_empty"] and (artifact.root / records[index]["stdout_log"]).read_bytes() and records[index]["state"] == "passed":
                         records[index].update(state="failed", error_code="formatter_output_not_empty")
-                    denominator = {"kind": "static_files", "complete": True, "total": None, "check_count": 1, "input_file_count": closure["input_file_count"]} if closure["complete"] else _test_denominator(check, records[index], artifact)
+                    denominator = {"kind": "static_files", "complete": True, "total": None, "check_count": 1, "input_file_count": closure["input_file_count"]} if closure["complete"] else _test_denominator(check, records[index], artifact, execution_environment)
                     if plan["scope_kind"] == "full" and denominator.get("deselected", 0):
                         denominator.update(complete=False, total=None, reason="full verification deselected tests")
                     records[index]["test_denominator"] = denominator

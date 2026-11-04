@@ -5,13 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"code-agent/internal/admission"
 	"code-agent/internal/identity"
 	harnessorch "code-agent/internal/orchestrator"
 	"code-agent/internal/session"
@@ -65,6 +68,8 @@ func TestContinuationSurvivesGoAndPythonRestartWithoutRepeatingCommittedTool(t *
 	toolCallsPath := filepath.Join(projectRoot, "tool-executions.log")
 	address := contextE2EAddress(t)
 	python := contextE2EPython(t)
+	t.Setenv("CODE_AGENT_E2E_PROVIDER", "deterministic")
+	t.Setenv("CODE_AGENT_CONTEXT_E2E_PROVIDER_ADDRESS", contextE2EAddress(t))
 
 	firstPython, firstPythonOutput := startContinuationPython(
 		t, python, repositoryRoot, projectRoot, memoryDir, address,
@@ -103,15 +108,6 @@ func TestContinuationSurvivesGoAndPythonRestartWithoutRepeatingCommittedTool(t *
 		t, "recover", repositoryRoot, address, databasePath, controlPath, readyPath, toolCallsPath,
 	)
 	stopSessionControlServer(secondPython)
-	checkpointResumedCount := countContextStatus(
-		t,
-		filepath.Join(projectRoot, ".agent", "context.sqlite"),
-		control.SessionID,
-		"checkpoint_resumed",
-	)
-	if checkpointResumedCount != 1 {
-		t.Fatalf("Python checkpoint_resumed events = %d, want exactly 1", checkpointResumedCount)
-	}
 
 	toolCalls, err := os.ReadFile(toolCallsPath)
 	if err != nil {
@@ -133,6 +129,12 @@ func TestContinuationSurvivesGoAndPythonRestartWithoutRepeatingCommittedTool(t *
 	if err := log.Verify(context.Background(), control.SessionID); err != nil {
 		_ = log.Close()
 		t.Fatalf("verify recovered continuation ledger: %v", err)
+	}
+	for index, event := range firstAttemptEvents {
+		if index >= len(events) || events[index].EventID != event.EventID || events[index].Checksum != event.Checksum {
+			_ = log.Close()
+			t.Fatal("recovery changed the committed first-process prefix")
+		}
 	}
 	surface, err := log.Surface(context.Background(), control.SessionID)
 	if err != nil {
@@ -170,6 +172,13 @@ func TestContinuationSurvivesGoAndPythonRestartWithoutRepeatingCommittedTool(t *
 		_ = log.Close()
 		t.Fatalf("recovered Surface = %+v", surface)
 	}
+	var reply struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(surface[3].Payload, &reply); err != nil || reply.Content != "WRITE_COMPLETE:"+strconv.Itoa(secondPython.Process.Pid) {
+		_ = log.Close()
+		t.Fatalf("final reply did not come from the restarted Python process: reply=%q err=%v", reply.Content, err)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatalf("close recovered continuation ledger: %v", err)
 	}
@@ -200,13 +209,15 @@ func TestContinuationSurvivesGoAndPythonRestartWithoutRepeatingCommittedTool(t *
 		"sequence_contiguous":              sessionEventSequenceContiguous(events),
 		"final_event_checksum":             events[len(events)-1].Checksum,
 		"database_sha256":                  productionFileSHA256(t, databasePath),
-		"python_checkpoint_resumed_events": checkpointResumedCount,
+		"python_checkpoint_resume_claimed": false,
+		"canonical_prefix_preserved":       true,
+		"reply_from_restarted_python":      true,
 	}
 	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		t.Fatalf("encode continuation recovery receipt: %v", err)
 	}
-	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "continuation-process-recovery.json")
+	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "continuation-process-recovery-active-input.json")
 	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
 		t.Fatalf("create continuation receipt directory: %v", err)
 	}
@@ -232,6 +243,21 @@ func TestContinuationRunnerProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open helper continuation ledger: %v", err)
 	}
+	defer sqliteLog.Close()
+	providerAddress := os.Getenv("CODE_AGENT_CONTEXT_E2E_PROVIDER_ADDRESS")
+	host, _, err := net.SplitHostPort(providerAddress)
+	if err != nil || host != "127.0.0.1" {
+		t.Fatal("continuation helper requires the parent's loopback deterministic provider")
+	}
+	gateway := admission.NewGateway(admission.NewBudget(sqliteLog), admission.ProviderConfig{
+		Protocol: "openai", BaseURL: "http://" + providerAddress + "/v1",
+		Model: "deterministic-context-e2e", APIKey: "fixture-only",
+		InputLimit: 100_000, OutputLimit: 4096,
+	})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
 	var eventLog session.EventLog = sqliteLog
 	if stage == "first" {
 		eventLog = &blockingToolResultLog{EventLog: sqliteLog, readyPath: readyPath}
@@ -241,6 +267,8 @@ func TestContinuationRunnerProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create helper orchestrator client: %v", err)
 	}
+	defer client.Close()
+	client.SetModelScopeFactory(gateway.BindActor)
 	client.SetConversationTimeout(20 * time.Second)
 	toolExecutor := session.ToolExecutionFunc(func(
 		_ context.Context,
@@ -262,32 +290,17 @@ func TestContinuationRunnerProcessHelper(t *testing.T) {
 	runner := session.NewSessionRunner(workbench, client, toolExecutor, session.SessionRunnerOptions{
 		WorkerID: "continuation-" + stage, LeaseDuration: 350 * time.Millisecond, HeartbeatInterval: 75 * time.Millisecond,
 	})
-	defer func() {
-		_ = runner.Close()
-		_ = client.Close()
-		_ = sqliteLog.Close()
-	}()
+	defer runner.Close()
 
 	switch stage {
 	case "first":
-		created, createErr := workbench.Create(context.Background(), 7, "continuation-e2e", "restart recovery", "continue exactly once")
+		created, createErr := workbench.CreateWithWorkingDir(context.Background(), 7, "continuation-e2e", "restart recovery", "continue exactly once", filepath.Dir(databasePath))
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		message, appendErr := workbench.AppendUserMessage(context.Background(), 7, created.ID, 1, "CREATE_CONTEXT_RECOVERY_MARKER")
-		if appendErr != nil {
-			t.Fatal(appendErr)
-		}
-		checkpoint, checkpointErr := workbench.CreateCheckpoint(context.Background(), 7, created.ID, 2, message.ID, "before tool")
-		if checkpointErr != nil {
-			t.Fatal(checkpointErr)
-		}
-		if statusErr := workbench.UpdateStatus(context.Background(), 7, created.ID, 3, "paused"); statusErr != nil {
-			t.Fatal(statusErr)
-		}
-		accepted, requestErr := runner.RequestContinuation(context.Background(), session.ContinueCommand{
-			RequestID: "process-restart-request", SessionID: created.ID, CheckpointHash: checkpoint.Hash,
-			OwnerID: 7, ExpectedSeq: 4, Actor: continuationProcessActor(),
+		accepted, requestErr := runner.SubmitMessage(context.Background(), session.SubmitMessageCommand{
+			RequestID: "process-restart-request", SessionID: created.ID, Content: "CREATE_CONTEXT_RECOVERY_MARKER",
+			OwnerID: 7, ExpectedSeq: 1, Actor: continuationProcessActor(),
 		})
 		if requestErr != nil {
 			t.Fatal(requestErr)

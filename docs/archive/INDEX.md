@@ -6,6 +6,12 @@ Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps 
 
 ## Same-Session resumable amendment — 2026-11-03
 
+The following [Goal snapshot](resumable-2026-11-04/docs--GOAL.md) is also retained
+byte-for-byte with its [manifest](resumable-2026-11-04/manifest.json). Its planned
+continuation from124 is historical. The same logical workload has since reached
+186/200; current stopped-run failures and repair boundaries are recorded in the
+[2026-11-04 evidence](../evidence/product-long-dialogue-repairs-2026-11-04.md).
+
 The previous [Goal](resumable-2026-11-03/docs--GOAL.md) is retained byte-for-byte;
 its [manifest](resumable-2026-11-03/manifest.json) records source and checksum.
 Its requirement to begin a fresh independent 200-item workload is historical.

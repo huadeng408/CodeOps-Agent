@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source_commit": "751ac92aad76b0613ed8508f297a5317bd039297",
+  "files": [
+    {
+      "source": "docs/GOAL.md",
+      "archive": "docs--GOAL.md",
+      "bytes": 6363,
+      "sha256": "4814cc0dac078a26d25043160648db7868d9bf106a2984e718d5c33df739feee"
+    }
+  ],
+  "scope": "Previous current-goal wording retained before the stopped186/200 update; no runtime facts or old receipts changed."
+}
