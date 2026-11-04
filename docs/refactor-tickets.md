@@ -5,7 +5,7 @@
 
 | 范围 | 正式任务与证据 |
 | --- | --- |
-| 长对话与恢复 | [#27：200轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27)、[最新断点](evidence/product-long-dialogue-checkpoint-2026-11-04.md) |
+| 长对话与恢复 | [#27：200轮压缩与恢复](https://github.com/huadeng408/CodeOps-Agent/issues/27)、[200项累计结果与剩余缺口](evidence/product-long-dialogue-final-2026-11-05.md) |
 | 工程执行提效 | [#42](https://github.com/huadeng408/CodeOps-Agent/issues/42)、[首阶段证据](evidence/engineering-execution-efficiency-2026-11-02.md) |
 | Agent 实验 | [#36规格及#37–#41子票](https://github.com/huadeng408/CodeOps-Agent/issues/36)、[完整实测报告](evidence/agent-evaluation-experiments-2026-11-03.md) |
 | 模块深化 | [#31规格及#32–#35子票](https://github.com/huadeng408/CodeOps-Agent/issues/31)、[范围证据](evidence/module-deepening-2026-10-22.md) |
