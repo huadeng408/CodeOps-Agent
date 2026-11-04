@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"reflect"
 	"strings"
 
 	"code-agent/internal/identity"
@@ -156,7 +157,7 @@ func (w *Workbench) RecoverCanceledRun(ctx context.Context, command CanceledRunR
 			}
 		}
 	}
-	terminal := canceledRunRecoveryPayload{runTerminalPayload: runTerminalPayload{RunID: command.RunID, RequestID: run.view.RequestID, LeaseID: run.leaseID, Attempt: run.view.Attempt, CancellationState: "stopped"}, CancellationRequestID: command.RequestID, ProofDigest: command.ProofDigest, RecoveryActor: actor}
+	terminal := canceledRunRecoveryPayload{runTerminalPayload: runTerminalPayload{RunID: command.RunID, RequestID: run.view.RequestID, LeaseID: run.leaseID, Attempt: run.view.Attempt, CancellationState: "stopped", TraceContext: run.traceContext}, CancellationRequestID: command.RequestID, ProofDigest: command.ProofDigest, RecoveryActor: actor}
 	for {
 		progress := len(snapshot.Events) - int(command.ExpectedSeq)
 		if progress > len(closures)+1 {
@@ -170,7 +171,7 @@ func (w *Workbench) RecoverCanceledRun(ctx context.Context, command CanceledRunR
 				}
 			} else {
 				var previous canceledRunRecoveryPayload
-				if event.Type != runCanceledEventType || json.Unmarshal(event.Payload, &previous) != nil || previous.runTerminalPayload != terminal.runTerminalPayload || previous.CancellationRequestID != command.RequestID || previous.ProofDigest != command.ProofDigest || previous.RecoveryActor.ScopeKey() != actor.ScopeKey() {
+				if event.Type != runCanceledEventType || json.Unmarshal(event.Payload, &previous) != nil || !reflect.DeepEqual(previous.runTerminalPayload, terminal.runTerminalPayload) || previous.CancellationRequestID != command.RequestID || previous.ProofDigest != command.ProofDigest || previous.RecoveryActor.ScopeKey() != actor.ScopeKey() {
 					return RunView{}, ErrSequenceConflict
 				}
 			}

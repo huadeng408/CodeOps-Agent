@@ -250,7 +250,7 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 		if err != nil || run.terminal || run.cancelRequest == nil {
 			return
 		}
-		payload := runTerminalPayload{RunID: key.runID, RequestID: run.view.RequestID, LeaseID: run.leaseID, Attempt: run.view.Attempt, CancellationState: state}
+		payload := runTerminalPayload{RunID: key.runID, RequestID: run.view.RequestID, LeaseID: run.leaseID, Attempt: run.view.Attempt, CancellationState: state, TraceContext: run.traceContext}
 		if _, err := r.workbench.ledger.Append(ctx, key.sessionID, int64(len(events)), runCanceledEventType, payload); errors.Is(err, ErrSequenceConflict) {
 			continue
 		} else if err != nil {

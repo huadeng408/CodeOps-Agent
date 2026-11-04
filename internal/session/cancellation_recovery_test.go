@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestCanceledRunRecoveryRequiresOwnerStopProofAndExactHead(t *testing.T) {
-	for _, scenario := range []string{"nil-verifier", "wrong-owner", "wrong-actor", "wrong-cancel", "stale-head", "missing-tool-result", "unknown-tool-result", "pending-commit", "unresolved-approval", "independent-agent", "verifier-refused", "late-append", "stopped"} {
+	for _, scenario := range []string{"nil-verifier", "wrong-owner", "wrong-actor", "wrong-cancel", "stale-head", "missing-tool-result", "unknown-tool-result", "pending-commit", "unresolved-approval", "independent-agent", "verifier-refused", "late-append", "trace-changed", "trace-wrong-session", "stopped", "stopped-with-trace"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			ledger := openWorkbenchTestLedger(t)
@@ -25,7 +26,12 @@ func TestCanceledRunRecoveryRequiresOwnerStopProofAndExactHead(t *testing.T) {
 			if _, err := ledger.Append(ctx, created.ID, 4, continuationEventType, payload); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, runLeasePayload{RunID: "original-run", RequestID: "original-request", LeaseID: "old-lease", WorkerID: "old-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC()}); err != nil {
+			lease := runLeasePayload{RunID: "original-run", RequestID: "original-request", LeaseID: "old-lease", WorkerID: "old-worker", Attempt: 1, LeaseUntil: time.Now().Add(-time.Minute).UTC()}
+			savedTrace := runTraceContext{SchemaVersion: 1, SessionID: created.ID, TraceParent: "00-11111111111111111111111111111111-2222222222222222-01"}
+			if scenario == "stopped-with-trace" || strings.HasPrefix(scenario, "trace-") {
+				lease.TraceContext = &savedTrace
+			}
+			if _, err := ledger.Append(ctx, created.ID, 5, runLeasedEventType, lease); err != nil {
 				t.Fatal(err)
 			}
 			cancel := runCancelPayload{RunID: "original-run", RequestID: "original-cancel", Actor: actor, CleanupOwner: "original-owner"}
@@ -42,6 +48,15 @@ func TestCanceledRunRecoveryRequiresOwnerStopProofAndExactHead(t *testing.T) {
 				}
 			}
 			switch scenario {
+			case "trace-changed", "trace-wrong-session":
+				changed := savedTrace
+				if scenario == "trace-changed" {
+					changed.TraceParent = "00-11111111111111111111111111111111-3333333333333333-01"
+				} else {
+					changed.SessionID = "other-session"
+				}
+				lease.TraceContext = &changed
+				appendFixture(runHeartbeatEventType, lease)
 			case "missing-tool-result", "unknown-tool-result":
 				call := toolCallPayload{RunID: "original-run", ToolCallID: "real-write", ToolName: "Write", ArgumentsJSON: `{}`}
 				appendFixture("tool/call", call)
@@ -86,7 +101,7 @@ func TestCanceledRunRecoveryRequiresOwnerStopProofAndExactHead(t *testing.T) {
 			if readErr != nil || !reflect.DeepEqual(prefix, after[:len(prefix)]) {
 				t.Fatalf("original prefix changed: %v", readErr)
 			}
-			if scenario != "stopped" {
+			if scenario != "stopped" && scenario != "stopped-with-trace" {
 				if err == nil {
 					t.Fatal("recovery accepted an unverified transition")
 				}
@@ -99,6 +114,13 @@ func TestCanceledRunRecoveryRequiresOwnerStopProofAndExactHead(t *testing.T) {
 			}
 			if err != nil || view.Status != RunCanceled || view.CancellationState != "stopped" || view.Attempt != 1 || len(after) != len(prefix)+1 {
 				t.Fatalf("recovery = %+v %v", view, err)
+			}
+			var terminal runTerminalPayload
+			if err := json.Unmarshal(after[len(after)-1].Payload, &terminal); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "stopped-with-trace" && !reflect.DeepEqual(terminal.TraceContext, &savedTrace) || scenario == "stopped" && terminal.TraceContext != nil {
+				t.Fatalf("recovery invented or lost the original trace: %+v", terminal.TraceContext)
 			}
 			if _, err := workbench.RecoverCanceledRun(ctx, command, verify); err != nil {
 				t.Fatalf("idempotent recovery: %v", err)

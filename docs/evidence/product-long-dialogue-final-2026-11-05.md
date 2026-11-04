@@ -39,6 +39,7 @@ Run窗口包含模型、工具、审批及取消194迟到恢复终态前的等�
 3. Python直接OpenAI适配器不再忽略HTTP200流内错误，也不在错误后发出成功usage/done；复用已有Anthropic的固定脱敏异常策略。默认／快速模型路由及压缩调用方沿用原失败或回退处理。此缺陷未被认定为旧Go托管运行失败的原因。
 4. 内置摘要模型只接收选定的历史来源及专用摘要指令；移除来源之外的Agent系统指令、`Current request`和完整工具schema，保留历史工具调用、失败标记、名称和原生图片。当前请求仍留在原Surface，Go准入、计量及模型配置沿用原路径。C75旧输出接受回放仍能复现约束丢失；输入隔离不等于已证明摘要语义无损。
 5. 三个过期的跨进程压缩测试仍使用不带来源引用的旧Manager历史，其中一个查询已废弃的Python表；实际均失败。合并为自动／手动两个场景，改用Workbench、SessionRunner和公开CompactConversation，验证Go原生持久化、Python重启及原事件前缀，删除重复转换和固定收据写入代码。旧失败日志及旧收据保留。
+6. 根Trace此前只在完成／失败终态中写入，普通取消与停止后取消恢复都可能丢失它。现在Go创建真实root后，先经原lease围栏持久化到既有heartbeat，再执行模型／工具；各终态复制原生root，同lease不能换根，新lease不继承。写入失败时保留永久Memory阻断，重开Session也不触发反思；阻断记录也写不成则保留非终态lease等待恢复。旧无root记录及极早取消窗口仍可能UNKNOWN，不补造旧194证据。
 
 Python相关回归为183通过、1跳过，exit0；Go sandbox/tools/hooks三个包均exit0。
 流内错误修复扩展既有公共适配器测试，修复前OpenAI两例失败、Anthropic两例通过；修复后provider／compactor／context／router相关92例通过，exit0，JUnit保留在`.scratch/p9-final-code-delivery-v1/`。
@@ -53,6 +54,11 @@ C75来源的独立真实回归在原BeeAPI通道返回HTTP502，记为`provider_
 
 兼容性相关Python回归158通过、Go准入完整包通过，均exit0。覆盖全局thinking开关、Anthropic输出上限4096／8192／131072下的实际托管请求序列化，以及Go对DeepSeek最高思考档和输出上限的覆盖；Go预算拒绝不放宽。Anthropic开启thinking时，两种出站路径均省略不兼容的temperature，依据[官方采样限制](https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters)。入口为`.scratch/compaction-quality-20261105/fallback-validation-v2.json`，此前预算／采样失败回归均保留。
 摘要来源修复提交`4593abcf`的首次CI因一个CLI fixture仍匹配旧prompt而失败；修复fixture后，原CLI跨进程测试通过，`04abc1a8`的[完整源码CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41892194420)五项全部成功。保留原失败，后续兼容性改动另验，不把这次CI绑定到未运行的源码。
+
+兼容性提交`64a16cb9`的[完整源码CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41895017251)五项全部成功。其冻结真实回归已读取cc-switch的DeepSeek配置，通过Go发送`deepseek-v4-pro`、thinking开启、`reasoning_effort=max`的一次逻辑请求；上游返回HTTP402／`provider_http_unknown`，没有摘要。两次回归均已停止、ActiveCalls=0、任务槽空，原Session／Admission前缀不变，未知用量和预留保留；不是模型质量通过。技术结果及hash入口为`.scratch/compaction-quality-20261105/provider-fallback-outcome.json`，不检查账单，也不重复探测失败通道。
+
+后续只读Trace核验复用了完整211次原生收据、3525个span和938次准入／物理attempt，确认939个logical intent中的唯一额外项仍是旧187；原194仍缺原生root，绑定为210／211，不能按现有v3契约升级PASS。新诊断在`.scratch/compaction-quality-20261105/trace-gap-review-v1/`，不修改旧结果。
+取消修复的相关Go回归43个顶层用例通过（含子例85项），另补双写入失败边界通过，均exit0；覆盖真实SDK span与原生根一致、取消／恢复幂等、同lease冲突拒绝及重开后的零模型调用。早期完整Session测试因审查发现Memory恢复绕过而主动停止，exit-1，未记为通过；修复后的完整源码CI单独验收。入口为`.scratch/compaction-quality-20261105/cancellation-validation.json`。
 
 ## 可追溯产物
 

@@ -283,12 +283,13 @@ type runExecution struct {
 }
 
 type runLeasePayload struct {
-	RunID      string    `json:"run_id"`
-	RequestID  string    `json:"request_id"`
-	LeaseID    string    `json:"lease_id"`
-	WorkerID   string    `json:"worker_id"`
-	Attempt    int       `json:"attempt"`
-	LeaseUntil time.Time `json:"lease_until"`
+	RunID        string           `json:"run_id"`
+	RequestID    string           `json:"request_id"`
+	LeaseID      string           `json:"lease_id"`
+	WorkerID     string           `json:"worker_id"`
+	Attempt      int              `json:"attempt"`
+	LeaseUntil   time.Time        `json:"lease_until"`
+	TraceContext *runTraceContext `json:"trace_context,omitempty"`
 }
 
 type runTerminalPayload struct {
@@ -1413,7 +1414,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		if run.cancelRequest != nil {
 			return
 		}
-		r.completeRun(traceCtx, key)
+		r.completeRun(traceCtx, key, true)
 		return
 	}
 	if run.cancelRequest != nil {
@@ -1425,9 +1426,10 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		return
 	}
 	completionCtx := traceCtx
+	allowMemory := true
 	var agentSpan genai.Span
 	defer func() {
-		r.completeRun(completionCtx, key)
+		r.completeRun(completionCtx, key, allowMemory)
 		if agentSpan != nil {
 			agentSpan.End()
 		}
@@ -1461,6 +1463,24 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 		}
 		completionCtx = traceCtx
 		agentSpan.SetAttributes(genai.AgentNameKV(agentName), attribute.String("session.id", key.sessionID), attribute.String("session.run_id", key.runID))
+	}
+	lease.TraceContext = agentRootTraceContext(traceCtx, key.sessionID)
+	if lease.TraceContext != nil {
+		if err := r.appendLeasedFact(traceCtx, key, lease.LeaseID, runHeartbeatEventType, lease); err != nil {
+			allowMemory = false
+			genai.MarkSpanError(agentSpan)
+			blockCtx, stop := context.WithTimeout(context.WithoutCancel(traceCtx), 5*time.Second)
+			blockErr := r.appendLeasedFact(blockCtx, key, lease.LeaseID, "memory/commit-blocked", map[string]any{
+				"schema_version": 1, "run_id": key.runID, "error_code": "trace_root_unavailable",
+				"retryable": false, "status": "permanently_blocked", "attempt": 0,
+			})
+			stop()
+			if blockErr != nil {
+				return
+			}
+			r.fail(traceCtx, key, lease, err)
+			return
+		}
 	}
 	r.recordProgress(traceCtx, key, lease, progressPhase, "开始执行", "已开始分析本次请求并准备执行。", 0, 0)
 	if committed, committedErr := r.hasCommittedAssistant(traceCtx, key); committedErr != nil {
@@ -2703,7 +2723,7 @@ func latestRunSourceSeq(events []Event, runID string) int64 {
 	return -1
 }
 
-func (r *SessionRunner) completeRun(parent context.Context, key runKey) {
+func (r *SessionRunner) completeRun(parent context.Context, key runKey, allowMemory bool) {
 	readCtx, stopRead := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	events, readErr := r.workbench.ledger.Events(readCtx, key.sessionID)
 	stopRead()
@@ -2722,7 +2742,7 @@ func (r *SessionRunner) completeRun(parent context.Context, key runKey) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	r.completeAgentTurn(ctx, key)
 	cancel()
-	if readErr != nil || !run.terminal || run.cancelRequest != nil {
+	if !allowMemory || readErr != nil || !run.terminal || run.cancelRequest != nil {
 		return
 	}
 	view, err := reduceSessionView(events)
@@ -2732,19 +2752,24 @@ func (r *SessionRunner) completeRun(parent context.Context, key runKey) {
 	}
 }
 
-func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
-	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
+func agentRootTraceContext(ctx context.Context, sessionID string) *runTraceContext {
 	if spanContext, ok := ctx.Value(runAgentTraceKey{}).(trace.SpanContext); ok && spanContext.IsValid() {
-		payload.TraceContext = &runTraceContext{
-			SchemaVersion: 1, SessionID: key.sessionID,
+		saved := &runTraceContext{
+			SchemaVersion: 1, SessionID: sessionID,
 			TraceParent: fmt.Sprintf("00-%s-%s-%s", spanContext.TraceID(), spanContext.SpanID(), spanContext.TraceFlags()),
 		}
 		for _, attr := range genai.EvalJoinAttributes(ctx) {
 			if string(attr.Key) == genai.AttrEvalRunID {
-				payload.TraceContext.EvalRunID = attr.Value.AsString()
+				saved.EvalRunID = attr.Value.AsString()
 			}
 		}
+		return saved
 	}
+	return nil
+}
+
+func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease runLeasePayload, eventType, publicError string) error {
+	payload := runTerminalPayload{RunID: key.runID, RequestID: lease.RequestID, LeaseID: lease.LeaseID, Attempt: lease.Attempt, Error: publicError}
 	// Each closure attempt owns its deadline; earlier annotations cannot consume it.
 	previousPending, stalled := -1, 0
 	var lastErr error
@@ -2759,6 +2784,12 @@ func (r *SessionRunner) appendTerminal(ctx context.Context, key runKey, lease ru
 			}
 			return err
 		}
+		run, err := projectRun(events, key.runID)
+		if err != nil {
+			stop()
+			return err
+		}
+		payload.TraceContext = run.traceContext
 		pending := len(pendingCommits(events, key.runID))
 		if previousPending >= 0 && pending >= previousPending {
 			stalled++
@@ -3064,8 +3095,16 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 				}
 				started := event.CreatedAt
 				run.view.StartedAt = &started
+				run.traceContext = nil
 			} else if payload.Attempt != run.view.Attempt || payload.LeaseID != run.leaseID {
 				return nil, fmt.Errorf("%w: invalid run heartbeat at seq %d", ErrEventIntegrity, event.Seq)
+			}
+			if saved := payload.TraceContext; saved != nil {
+				traceCtx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": saved.TraceParent})
+				if saved.SchemaVersion != 1 || saved.SessionID != event.SessionID || !trace.SpanContextFromContext(traceCtx).IsValid() || run.traceContext != nil && *run.traceContext != *saved {
+					return nil, fmt.Errorf("%w: invalid run trace at seq %d", ErrEventIntegrity, event.Seq)
+				}
+				run.traceContext = saved
 			}
 			leaseUntil := payload.LeaseUntil
 			run.view.Status, run.view.Attempt, run.view.WorkerID, run.view.LeaseUntil = RunRunning, payload.Attempt, payload.WorkerID, &leaseUntil

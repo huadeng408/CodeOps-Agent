@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +27,157 @@ type sessionTelemetryTracer struct {
 }
 
 type sessionTelemetrySpan struct{ span trace.Span }
+
+type rejectedTraceLeaseLog struct {
+	EventLog
+	rejectBlock bool
+	blocked     chan struct{}
+}
+
+func (l rejectedTraceLeaseLog) Append(ctx context.Context, id string, seq int64, kind string, payload any) (Event, error) {
+	if kind == runHeartbeatEventType {
+		return Event{}, errors.New("fixture root persistence failure")
+	}
+	if kind == "memory/commit-blocked" && l.rejectBlock {
+		close(l.blocked)
+		return Event{}, errors.New("fixture blocking receipt failure")
+	}
+	return l.EventLog.Append(ctx, id, seq, kind, payload)
+}
+
+func TestRootPersistenceFailureDoesNotCallModelsOrMemory(t *testing.T) {
+	for _, rejectBlock := range []bool{false, true} {
+		t.Run(fmt.Sprintf("block-write-fails=%t", rejectBlock), func(t *testing.T) {
+			ctx := context.Background()
+			tracer := newSessionTelemetryTracer(tracetest.NewSpanRecorder())
+			defer tracer.Shutdown(ctx)
+			ledger := openWorkbenchTestLedger(t)
+			blocked := make(chan struct{})
+			workbench := NewWorkbench(rejectedTraceLeaseLog{EventLog: ledger, rejectBlock: rejectBlock, blocked: blocked}, nil)
+			created, err := workbench.Create(ctx, 7, "repo", "failed root", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			conversation := &recordingConversationAdapter{reply: "must not run"}
+			memory := &tracedCommitMemory{tracer: tracer, committed: make(chan context.Context, 1)}
+			runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{Tracer: tracer, Memory: memory})
+			defer runner.Close()
+			run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "failed-root", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "work", Actor: identity.Default()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rejectBlock {
+				select {
+				case <-blocked:
+				case <-time.After(5 * time.Second):
+					t.Fatal("root failure did not attempt its durable block")
+				}
+			} else {
+				waitForRunStatus(t, runner, created.ID, run.RunID, RunFailed)
+			}
+			if err := runner.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if len(conversation.requests) != 0 || len(memory.committed) != 0 {
+				t.Fatalf("failed pre-dispatch proof called conversation=%d memory=%d", len(conversation.requests), len(memory.committed))
+			}
+			if rejectBlock {
+				events, err := ledger.Events(ctx, created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				projection, err := projectRun(events, run.RunID)
+				if err != nil || projection.terminal || projection.traceContext != nil {
+					t.Fatalf("failed block invented a terminal/root: %+v %v", projection, err)
+				}
+				return
+			}
+			recovered := NewSessionRunner(NewWorkbench(ledger, nil), conversation, nil, SessionRunnerOptions{Tracer: tracer, Memory: memory})
+			defer recovered.Close()
+			if err := recovered.RecoverSession(ctx, 7, created.ID); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-memory.committed:
+				t.Fatal("reopening bypassed the durable pre-dispatch failure")
+			case <-time.After(100 * time.Millisecond):
+			}
+			events, err := ledger.Events(ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state, _, found := latestMemoryCommitState(events, run.RunID); !found || state != "permanently_blocked" {
+				t.Fatalf("no durable Memory stop after failed root: %q", state)
+			}
+		})
+	}
+}
+
+func TestCancellationKeepsDurableAgentRoot(t *testing.T) {
+	ctx := context.Background()
+	recorder := tracetest.NewSpanRecorder()
+	tracer := newSessionTelemetryTracer(recorder)
+	defer tracer.Shutdown(ctx)
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "cancel trace", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := repeatedBlockingConversation{started: make(chan string, 1)}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{Tracer: tracer})
+	defer runner.Close()
+	actor := identity.Default()
+	run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "traced-turn", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "work", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not start")
+	}
+	before, err := ReadVerifiedSnapshot(ctx, ledger, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := projectRun(before.Events, run.RunID)
+	if err != nil || projection.traceContext == nil {
+		t.Errorf("active run has no durable root: %v", err)
+	}
+	if _, err := runner.CancelRun(ctx, CancelRunCommand{RequestID: "traced-cancel", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, runner, created.ID, run.RunID, RunCanceled)
+	after, err := ReadVerifiedSnapshot(ctx, ledger, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range before.Events {
+		if event.Checksum != after.Events[i].Checksum {
+			t.Fatal("cancellation changed original native prefix")
+		}
+	}
+	var terminal runTerminalPayload
+	for _, event := range after.Events {
+		if event.Type == runCanceledEventType {
+			if err := json.Unmarshal(event.Payload, &terminal); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, span := range recorder.Ended() {
+		if span.Name() == "agent.main" {
+			sc := span.SpanContext()
+			want := fmt.Sprintf("00-%s-%s-%s", sc.TraceID(), sc.SpanID(), sc.TraceFlags())
+			if terminal.TraceContext == nil || terminal.TraceContext.TraceParent != want || terminal.TraceContext.SessionID != created.ID || projection.traceContext == nil || projection.traceContext.TraceParent != want {
+				t.Fatalf("canceled terminal and durable lease must retain actual agent root: %+v", terminal.TraceContext)
+			}
+			return
+		}
+	}
+	t.Fatal("actual agent root was not exported")
+}
 
 func newSessionTelemetryTracer(recorder *tracetest.SpanRecorder) *sessionTelemetryTracer {
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
