@@ -10,7 +10,7 @@ import grpc
 from codeagent import orchestrator_pb2 as pb
 from codeagent import orchestrator_pb2_grpc as rpc
 from .client import ChatRequest, ChatResponse, LLMClient, RequestInterrupted, Usage
-from .providers.anthropic import AnthropicClient
+from .providers.anthropic import AnthropicClient, _read_int
 from .providers.openai import OpenAIClient
 
 _GATEWAY_RPC_CODES = {f"model_gateway_rpc_{code.name.lower()}" for code in grpc.StatusCode}
@@ -88,6 +88,10 @@ class HarnessModelClient(LLMClient):
         self._stub = rpc.ModelGatewayStub(self._channel)
         factory = AnthropicClient if binding.protocol == "anthropic" else OpenAIClient
         self._adapter = factory(api_key="", model=self.model, max_retries=0)
+        self.thinking_budget_tokens = (
+            _read_int("ANTHROPIC_THINKING_BUDGET_TOKENS", 10000)
+            if self.protocol == "anthropic" else 10000
+        )
         if self.max_tokens > 0:
             self._adapter.max_tokens = self.max_tokens
 

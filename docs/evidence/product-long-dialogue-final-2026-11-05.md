@@ -60,6 +60,8 @@ C75来源的独立真实回归在原BeeAPI通道返回HTTP502，记为`provider_
 后续只读Trace核验复用了完整211次原生收据、3525个span和938次准入／物理attempt，确认939个logical intent中的唯一额外项仍是旧187；原194仍缺原生root，绑定为210／211，不能按现有v3契约升级PASS。新诊断在`.scratch/compaction-quality-20261105/trace-gap-review-v1/`，不修改旧结果。
 取消修复的相关Go回归43个顶层用例通过（含子例85项），另补双写入失败边界通过，均exit0；覆盖真实SDK span与原生根一致、取消／恢复幂等、同lease冲突拒绝及重开后的零模型调用。早期完整Session测试因审查发现Memory恢复绕过而主动停止，exit-1，未记为通过；修复后的完整源码CI单独验收。入口为`.scratch/compaction-quality-20261105/cancellation-validation.json`。
 
+后续发现Go托管客户端没有读取`ANTHROPIC_THINKING_BUDGET_TOKENS`，摘要把配置的130048回退成10000；现在复用原解析器读取该配置，仍由摘要输出上限截断和Go准入校验约束。原公共gRPC测试复现1失败／5通过，修复后相关Python回归181通过，exit0；首次回归命令因误写不存在的测试路径退出4，未算通过。记录在`.scratch/compaction-quality-20261105/aliyun-fallback-v1/budget-validation.json`。百炼替代通道的真实结果独立记录，不把本地回归当模型质量通过。
+
 ## 可追溯产物
 
 本机原件均保留于忽略目录；下列为相对仓库的入口，不含凭据或模型答案。

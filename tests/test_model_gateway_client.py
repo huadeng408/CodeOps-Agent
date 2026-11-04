@@ -81,9 +81,18 @@ def test_harness_model_client_uses_go_issued_rpc_deadline(rpc_timeout, minimum, 
         server.stop(0).wait()
 
 
-@pytest.mark.parametrize("output_limit", [4096, 8192, 131072])
-def test_managed_anthropic_compaction_thinks_within_admitted_output(output_limit, monkeypatch):
+@pytest.mark.parametrize("output_limit,configured_budget,expected_budget", [
+    (4096, None, 3072), (8192, None, 7168), (131072, None, 10000),
+    (131072, "130048", 130048), (8192, "130048", 7168),
+    (131072, "invalid", 10000),
+])
+def test_managed_anthropic_compaction_thinks_within_admitted_output(
+        output_limit, configured_budget, expected_budget, monkeypatch):
     monkeypatch.setenv("THINKING_ENABLED", "true")
+    if configured_budget is None:
+        monkeypatch.delenv("ANTHROPIC_THINKING_BUDGET_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_THINKING_BUDGET_TOKENS", configured_budget)
     observed = []
 
     class Service(rpc.ModelGatewayServicer):
@@ -109,7 +118,7 @@ def test_managed_anthropic_compaction_thinks_within_admitted_output(output_limit
         payload = observed[0]
         assert payload["thinking"]["type"] == "enabled"
         assert "temperature" not in payload
-        assert 1024 <= payload["thinking"]["budget_tokens"] <= output_limit - 1024
+        assert payload["thinking"]["budget_tokens"] == expected_budget
         assert payload["max_tokens"] == output_limit
     finally:
         client.close()
