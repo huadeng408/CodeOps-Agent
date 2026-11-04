@@ -17,7 +17,7 @@
 | 范围 | 下一步与验收边界 |
 | --- | --- |
 | [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段证据见[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)和[启动回放、派发与 Artifact 修复](evidence/startup-recovery-replay-2026-11-03.md)。本轮只读锁等待、能力刷新和续办兼容修复按[各自验证范围](evidence/product-long-dialogue-resume-2026-11-03.md)交付；源码检查不代替产品或长期 SLA |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 同一Session跨冻结段已完成186/200；193个实际Run含7次失败，11个已结束计量unknown保留。最新段已正常结束并停止；原生193/193审计通过，Trace v2因多一个未准入逻辑意图而FAIL，不能闭票。先完成已复现问题的源码修复与验证，再从187项累计attempt2继续；保留全部前缀、失败、原预算与已知写入，见[186项封存及修复边界](evidence/product-long-dialogue-repairs-2026-11-04.md) |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 同一Session已完成193/200；201个实际Run为193完成、7失败、1取消，12个已结束计量unknown及原预留保留。最新故障段已停止，原失败封存不改写；经过副本验证、独立审查和Go原库恢复，活动调用归零、任务槽释放，557项工具提交全部闭合。下一段从194项累计attempt2继续；绑定新源码CI／包与恢复证据后冻结新段，完整累计审计及最终200项仍须完成，见[194项故障与恢复边界](evidence/product-long-dialogue-fault194-2026-11-04.md) |
 | 故障恢复与 Memory | 在同一逻辑任务的后续执行段验证目标召回、续行和恢复；保留已验证前缀、历史失败与 unknown，未知副作用先对账。旧测试任务的启动围栏保持 |
 | 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
 | 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
@@ -36,6 +36,7 @@
   [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
   [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
 - 长对话及分段续跑：[v12 封存、规则修订与准备](evidence/product-long-dialogue-resume-2026-11-03.md)、
+  [193项及194项原Run恢复](evidence/product-long-dialogue-fault194-2026-11-04.md)、
   [186项封存与源码修复](evidence/product-long-dialogue-repairs-2026-11-04.md)、
   [v9 的首轮刷新及阶段核验](evidence/product-long-dialogue-v9-2026-10-22.md)、
   [v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、

@@ -169,13 +169,26 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 	}
 	r.agentMu.Lock()
 	execution := r.activeAgentRuns[key]
-	// Earlier leases can retain MCP or job resources in another Go process.
+	// A leased run's cleanup belongs to its own leases. A queued run can still
+	// inherit Session resources, so retain its earlier-lease ownership fence.
 	priorLease, allOwned := false, true
 	for _, event := range snapshot.Events {
 		if event.Type == runLeasedEventType {
 			var lease runLeasePayload
+			if json.Unmarshal(event.Payload, &lease) != nil {
+				allOwned = false
+				continue
+			}
+			if run.view.Attempt > 0 && lease.RunID != key.runID {
+				// Another Run cannot own this worker's finalizer, but may
+				// retain Session resources that this process cannot stop.
+				if !r.ownedLeases[lease.LeaseID] {
+					state = "unknown"
+				}
+				continue
+			}
 			priorLease = true
-			if json.Unmarshal(event.Payload, &lease) != nil || !r.ownedLeases[lease.LeaseID] {
+			if !r.ownedLeases[lease.LeaseID] {
 				allOwned = false
 			}
 		}

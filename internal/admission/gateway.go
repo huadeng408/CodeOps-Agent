@@ -550,15 +550,6 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	defer cancel()
 	stopScopeWatch := context.AfterFunc(scope.ctx, cancel)
 	defer stopScopeWatch()
-	finalizationDeadline, _ := ctx.Deadline()
-	finalizationDeadline = finalizationDeadline.Add(5 * time.Second)
-	newAuditContext := func() (context.Context, context.CancelFunc) {
-		deadline := time.Now().Add(5 * time.Second)
-		if finalizationDeadline.Before(deadline) {
-			deadline = finalizationDeadline
-		}
-		return context.WithDeadline(context.Background(), deadline)
-	}
 	if !validID(request.CallId) || len(request.PayloadJson) > 8<<20 {
 		return nil, status.Error(codes.InvalidArgument, "invalid model request")
 	}
@@ -645,7 +636,16 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			result.ErrorCode = admissionErrorCode(err)
 			return result, nil
 		}
+		var finalizationDeadline time.Time
+		newAuditContext := func() (context.Context, context.CancelFunc) {
+			// One audit window per attempt, starting when finalization is needed.
+			if finalizationDeadline.IsZero() {
+				finalizationDeadline = time.Now().Add(5 * time.Second)
+			}
+			return context.WithDeadline(context.Background(), finalizationDeadline)
+		}
 		confirmed := false
+		observedTokens, boundViolated := int64(0), false
 		attemptCtx, span := otel.Tracer("code-agent-model-gateway").Start(ctx, "provider.attempt", trace.WithSpanKind(trace.SpanKindClient))
 		span.SetAttributes(attribute.String("model.call_id", callID), attribute.String("model.retry_of", retryOf),
 			attribute.String("model.purpose", purpose), attribute.String("gen_ai.request.model", config.Model),
@@ -665,7 +665,10 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			if !confirmed {
 				auditCtx, cancel := newAuditContext()
 				defer cancel()
-				_, _ = gateway.budget.MarkUnknown(auditCtx, scope.owner, callID)
+				if _, err := gateway.budget.markUnknown(auditCtx, scope.owner, callID, observedTokens, boundViolated); err != nil {
+					span.SetAttributes(attribute.Bool("model.finalization_failed", true))
+					log.Print("model finalization failed: stage=unknown_accounting")
+				}
 			}
 		}()
 		upstream, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -754,9 +757,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		}
 		if usage.input > config.InputLimit || (config.TotalLimit == 0 && usage.output > config.OutputLimit) || usage.visibleOutput != nil && *usage.visibleOutput > config.OutputLimit || usage.input+usage.output > config.tokenLimit() {
 			result.ErrorCode = "provider_bound_violated"
-			auditCtx, cancel := newAuditContext()
-			defer cancel()
-			_, _ = gateway.budget.markUnknown(auditCtx, scope.owner, callID, usage.input+usage.output, true)
+			observedTokens, boundViolated = usage.input+usage.output, true
 			return result, nil
 		}
 		auditCtx, cancel := newAuditContext()

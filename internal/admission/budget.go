@@ -598,8 +598,11 @@ func (budget *Budget) reserve(ctx context.Context, owner uint, taskID, callID st
 		if err != nil {
 			return state.Batch, err
 		}
-		updated, err := budget.read(ctx, owner)
-		return updated.Batch, err
+		// The append committed; caller cancellation must not hide this admission.
+		state.TaskID, state.TaskOwnerID = taskID, owner
+		state.ReservedTokens += tokens
+		state.ActiveCalls++
+		return state.Batch, nil
 	}
 	return Batch{}, session.ErrSequenceConflict
 }

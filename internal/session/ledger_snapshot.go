@@ -11,6 +11,12 @@ type LedgerSnapshot struct {
 	Surface []Event
 }
 
+// Run projects a durable Run from this same immutable read boundary.
+func (s LedgerSnapshot) Run(runID string) (RunView, error) {
+	run, err := projectRun(s.Events, runID)
+	return run.view, err
+}
+
 // Prefix replays an earlier boundary of this verified read without racing a
 // second database query. endSeq is exclusive.
 func (s LedgerSnapshot) Prefix(endSeq int64) (LedgerSnapshot, error) {

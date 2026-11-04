@@ -476,7 +476,12 @@ class ToolRegistry:
             ),
             ToolSpec(
                 name="Bash",
-                description="Run a shell command after harness permission checks.",
+                description=(
+                    "Run a shell command after Harness permission checks. Approval does not change sandbox mount permissions. "
+                    "If the workspace reports read-only, avoid retrying in-place writes, cp or redirection there. "
+                    "For formatting, print output to stdout (gofmt without -w), retrieve the complete output, "
+                    "then apply it through available Write/Edit tools under normal Harness approval."
+                ),
                 permission=orchestrator_pb2.ALWAYS_ASK,
                 parameters={
                     "type": "object",

@@ -461,7 +461,8 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 	if err != nil {
 		return refuse("run_not_admitted")
 	}
-	base := map[string]any{"schema_version": 1, "run_id": request.RunID, "task_id": request.TaskID, "session_id": current.ID, "product_run_id": run.RunID, "trace_id": traceID, "pid": os.Getpid(), "workspace": executionWorkspace, "source_workspace": workspace, "runtime_contract": request.RuntimeContract, "product_path": "cli-file-tools", "execution_path": "go-session-runner-grpc", "policy": request.Policy, "effective_policy": request.Policy, "budget": request.Budget, "model": request.Model}
+	productRunID := run.RunID
+	base := map[string]any{"schema_version": 1, "run_id": request.RunID, "task_id": request.TaskID, "session_id": current.ID, "product_run_id": productRunID, "trace_id": traceID, "pid": os.Getpid(), "workspace": executionWorkspace, "source_workspace": workspace, "runtime_contract": request.RuntimeContract, "product_path": "cli-file-tools", "execution_path": "go-session-runner-grpc", "policy": request.Policy, "effective_policy": request.Policy, "budget": request.Budget, "model": request.Model}
 	base["memory_namespace"] = expectedBinding.MemoryNamespace
 	if productionRuntime != nil {
 		base["product_path"] = "opensandbox-production"
@@ -485,7 +486,7 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 		if err != nil {
 			recoveryBlocked, err = true, nil
 		} else {
-			run, err = app.agentRunner.CancelRun(trialContext, session.CancelRunCommand{RequestID: request.RunID + ":abandon", SessionID: current.ID, RunID: run.RunID, OwnerID: owner, Actor: actor})
+			run, err = app.agentRunner.CancelRun(trialContext, session.CancelRunCommand{RequestID: request.RunID + ":abandon", SessionID: current.ID, RunID: productRunID, OwnerID: owner, Actor: actor})
 		}
 	}
 	if !recoveryBlocked && request.Operation != "inspect" && (request.Operation != "finalize" || request.FinalizeMode == "abandon") {
@@ -493,11 +494,11 @@ func RunEvaluation(ctx context.Context, cfg config.Config, input io.Reader, outp
 			select {
 			case <-trialContext.Done():
 				cancelCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				run, _ = app.agentRunner.CancelRun(cancelCtx, session.CancelRunCommand{RequestID: request.RunID + ":deadline", SessionID: current.ID, RunID: run.RunID, OwnerID: owner, Actor: actor})
+				run, _ = app.agentRunner.CancelRun(cancelCtx, session.CancelRunCommand{RequestID: request.RunID + ":deadline", SessionID: current.ID, RunID: productRunID, OwnerID: owner, Actor: actor})
 				stop()
 				goto finished
 			case <-time.After(20 * time.Millisecond):
-				run, err = app.agentRunner.Run(trialContext, current.ID, run.RunID)
+				run, err = app.agentRunner.Run(trialContext, current.ID, productRunID)
 				if err != nil {
 					goto finished
 				}
@@ -522,6 +523,9 @@ finished:
 		}
 	}
 	snapshot, snapshotErr := session.ReadVerifiedSnapshot(finishCtx, app.ledger, current.ID)
+	if snapshotErr == nil && productRunID != "" {
+		run, snapshotErr = snapshot.Run(productRunID)
+	}
 	if snapshotErr == nil {
 		finalization, snapshotErr = session.ReadEvaluationFinalization(snapshot.Events)
 	}

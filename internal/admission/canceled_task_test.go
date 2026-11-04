@@ -193,7 +193,7 @@ func testCanceledAdmission(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 		waitView(func(run session.RunView) bool {
-			return run.Status == session.RunCanceling && run.CancellationState == "unknown"
+			return run.Status == session.RunCanceled && run.CancellationState == "unknown"
 		})
 		if err := second.Close(); err != nil {
 			t.Fatal(err)

@@ -1551,3 +1551,228 @@ func TestSessionCancellationRefusesLateToolDispatch(t *testing.T) {
 		t.Fatalf("cancellation allowed an external write: %v", err)
 	}
 }
+
+func TestCancellationIgnoresAnotherCompletedRunsForeignLease(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "cancel after process change", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "tester", TenantID: "org:test", Roles: []string{"USER"}}
+	retained := &atomic.Bool{}
+	previous := NewSessionRunner(workbench, carriedResourceConversation{started: make(chan struct{})}, carriedResourceTool{session: created.ID, owned: true, active: retained}, SessionRunnerOptions{WorkerID: "previous-process"})
+	defer previous.Close()
+	first, err := previous.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "historical", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "initial", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, previous, created.ID, first.RunID, RunCompleted)
+	if err := previous.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !retained.Load() {
+		t.Fatal("fixture did not retain the previous worker's Session resource")
+	}
+	prefix, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := &blockingConversationAdapter{started: make(chan struct{}), finished: make(chan struct{})}
+	current := NewSessionRunner(workbench, conversation, carriedResourceTool{session: created.ID, active: retained}, SessionRunnerOptions{WorkerID: "current-process"})
+	defer current.Close()
+	run, err := current.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "current", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(len(prefix)), Content: "cancel this turn", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("current process did not claim its run")
+	}
+	command := CancelRunCommand{RequestID: "cancel-current", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}
+	if _, err := current.CancelRun(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	view := waitForRunStatus(t, current, created.ID, run.RunID, RunCanceled)
+	if view.CancellationState != "unknown" || !retained.Load() {
+		t.Fatalf("foreign Session resources were promoted to stopped: %+v retained=%v", view, retained.Load())
+	}
+	currentView, err := workbench.Get(ctx, 7, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := current.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "new-before-cleanup", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(currentView.EventCount), Content: "must stay fenced", Actor: actor}); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("foreign Session resources admitted a new Run: %v", err)
+	}
+	bound, err := actor.BindSession(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ModelTaskIdle(ctx, ledger, bound); !errors.Is(err, ErrSessionStateConflict) {
+		t.Fatalf("foreign Session resources were allowed to finish: %v", err)
+	}
+	if err := current.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Events(ctx, created.ID)
+	if err != nil || len(after) < len(prefix) || !reflect.DeepEqual(prefix, after[:len(prefix)]) {
+		t.Fatalf("cancellation changed the completed prefix: %v", err)
+	}
+	old, err := current.Run(ctx, created.ID, first.RunID)
+	if err != nil || old.Status != RunCompleted {
+		t.Fatalf("old completed Run was changed: %+v %v", old, err)
+	}
+	var canceled, unconfirmed int
+	for _, event := range after {
+		if event.Type == runCanceledEventType {
+			canceled++
+		}
+		if event.Type == runCancelUnconfirmedEventType {
+			unconfirmed++
+		}
+	}
+	if canceled != 1 || unconfirmed != 0 {
+		t.Fatalf("target cancellation lost its single unknown terminal: canceled=%d unconfirmed=%d", canceled, unconfirmed)
+	}
+}
+
+func TestCancellationRetainsTheTargetsEarlierForeignLease(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "same Run across processes", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "tester", TenantID: "org:test", Roles: []string{"USER"}}
+	conversation := repeatedBlockingConversation{started: make(chan string, 2)}
+	options := SessionRunnerOptions{WorkerID: "previous-process", LeaseDuration: 200 * time.Millisecond, HeartbeatInterval: 50 * time.Millisecond}
+	previous := NewSessionRunner(workbench, conversation, nil, options)
+	defer previous.Close()
+	run, err := previous.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "same-run", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "work", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("previous process did not start")
+	}
+	// Public graceful close retains the nonterminal lease; it is not a stop
+	// acknowledgement that another process may promote to owned cleanup.
+	if err := previous.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old, err := previous.Run(ctx, created.ID, run.RunID)
+	if err != nil || old.Status != RunRunning || old.LeaseUntil == nil {
+		t.Fatalf("graceful close did not retain the original lease: %+v %v", old, err)
+	}
+	if remaining := time.Until(*old.LeaseUntil) + 20*time.Millisecond; remaining > 0 {
+		time.Sleep(remaining)
+	}
+	options.WorkerID = "current-process"
+	current := NewSessionRunner(workbench, conversation, nil, options)
+	defer current.Close()
+	if err := current.RecoverSession(ctx, 7, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("current process did not recover the same Run")
+	}
+	if _, err := current.CancelRun(ctx, CancelRunCommand{RequestID: "cancel-recovered", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		view, err := current.Run(ctx, created.ID, run.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Status == RunCanceled {
+			t.Fatalf("earlier foreign lease of the same Run was discarded: %+v", view)
+		}
+		if view.Status == RunCanceling && view.CancellationState == "unknown" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("foreign target lease was not retained as unknown: %+v", view)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leases, unconfirmed int
+	for _, event := range events {
+		if event.Type == runLeasedEventType {
+			var lease runLeasePayload
+			if json.Unmarshal(event.Payload, &lease) != nil || lease.RunID != run.RunID {
+				t.Fatal("recovery changed the target Run identity")
+			}
+			leases++
+		}
+		if event.Type == runCancelUnconfirmedEventType {
+			unconfirmed++
+		}
+		if event.Type == runCanceledEventType {
+			t.Fatal("same-Run foreign resources were falsely acknowledged")
+		}
+	}
+	if leases != 2 || unconfirmed != 1 {
+		t.Fatalf("same-Run lease/cancel denominator changed: leases=%d unknown=%d", leases, unconfirmed)
+	}
+}
+
+func TestCancellationMalformedHistoricalLeaseFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	ledger := openWorkbenchTestLedger(t)
+	workbench := NewWorkbench(ledger, nil)
+	created, err := workbench.Create(ctx, 7, "repo", "malformed historical lease", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := &blockingConversationAdapter{started: make(chan struct{}), finished: make(chan struct{})}
+	runner := NewSessionRunner(workbench, conversation, nil, SessionRunnerOptions{HeartbeatInterval: time.Second})
+	defer runner.Close()
+	actor := identity.Actor{SchemaVersion: 1, ActorID: "user:7", Subject: "tester", TenantID: "org:test", Roles: []string{"USER"}}
+	run, err := runner.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "target", SessionID: created.ID, OwnerID: 7, ExpectedSeq: int64(created.EventCount), Content: "wait", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversation.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("target did not start")
+	}
+	for attempt := 0; ; attempt++ {
+		events, err := ledger.Events(ctx, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ledger.Append(ctx, created.ID, int64(len(events)), runLeasedEventType, map[string]any{"run_id": "unrelated-run", "lease_id": 42})
+		if errors.Is(err, ErrSequenceConflict) && attempt < 15 {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	if _, err := runner.CancelRun(ctx, CancelRunCommand{RequestID: "cancel-corrupt", SessionID: created.ID, RunID: run.RunID, OwnerID: 7, Actor: actor}); !errors.Is(err, ErrEventIntegrity) {
+		t.Fatalf("invalid non-target lease payload bypassed validation: %v", err)
+	}
+	events, err := ledger.Events(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == runCancelRequestedEventType || event.Type == runCanceledEventType {
+			t.Fatal("invalid history was promoted to cancellation proof")
+		}
+	}
+}
