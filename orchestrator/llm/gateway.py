@@ -77,6 +77,7 @@ class HarnessModelClient(LLMClient):
                 or binding.rpc_timeout_seconds > 1830):
             raise ModelGatewayError("model_gateway_binding_invalid")
         self.model = binding.model
+        self.max_tokens = binding.output_limit
         self.protocol = binding.protocol
         self._capability = bytes(binding.capability)
         self._rpc_timeout_seconds = binding.rpc_timeout_seconds or 65
@@ -87,8 +88,8 @@ class HarnessModelClient(LLMClient):
         self._stub = rpc.ModelGatewayStub(self._channel)
         factory = AnthropicClient if binding.protocol == "anthropic" else OpenAIClient
         self._adapter = factory(api_key="", model=self.model, max_retries=0)
-        if binding.output_limit > 0:
-            self._adapter.max_tokens = binding.output_limit
+        if self.max_tokens > 0:
+            self._adapter.max_tokens = self.max_tokens
 
     def close(self):
         self._channel.close()

@@ -77,6 +77,37 @@ def test_provider_stream_error_does_not_become_success(monkeypatch, provider, pa
     assert [delta.kind for delta in deltas] == (["text"] if partial else [])
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("global_thinking", [False, True])
+def test_anthropic_thinking_omits_incompatible_sampling(monkeypatch, streaming, thinking, global_thinking):
+    monkeypatch.setenv("THINKING_ENABLED", str(global_thinking).lower())
+    captured = []
+
+    def respond(request, **kwargs):
+        captured.append(json.loads(request.data))
+        body = b'data: {"type":"message_stop"}\n\n' if streaming else b'{"content":[],"usage":{}}'
+        return io.BytesIO(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    client = AnthropicClient(api_key="fixture", max_tokens=4096)
+    request = ChatRequest(model="claude-test", messages=[ChatMessage("user", "fixture")],
+                          temperature=0, thinking_enabled=thinking, thinking_budget=2048)
+
+    async def invoke():
+        if streaming:
+            return [delta async for delta in client.stream(request)]
+        return await client.chat(request)
+
+    asyncio.run(invoke())
+    assert len(captured) == 1
+    if thinking and global_thinking:
+        assert captured[0]["thinking"]["type"] == "enabled"
+        assert "temperature" not in captured[0]
+    else:
+        assert "thinking" not in captured[0] and captured[0]["temperature"] == 0
+
+
 def _provider_messages() -> list[ChatMessage]:
     return [
         ChatMessage(role="system", content="system prompt"),

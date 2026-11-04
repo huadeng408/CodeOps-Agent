@@ -591,7 +591,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	} else {
 		delete(payload, "stream_options")
 	}
-	if config.Protocol == "openai" {
+	if config.Protocol == "openai" && !strings.HasPrefix(strings.ToLower(config.Model), "deepseek-") {
 		// Provider cap semantics vary; reconcile all returned usage before settlement.
 		payload["max_completion_tokens"] = config.OutputLimit
 		delete(payload, "max_tokens")

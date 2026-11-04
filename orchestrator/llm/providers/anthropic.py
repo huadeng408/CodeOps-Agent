@@ -68,6 +68,7 @@ class AnthropicClient(LLMClient):
             "temperature": request.temperature,
         }
         if request.thinking_enabled and is_thinking_enabled():
+            del payload["temperature"]
             budget = request.thinking_budget or self.thinking_budget_tokens
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             if self.max_tokens <= budget:
@@ -294,6 +295,7 @@ class AnthropicClient(LLMClient):
             "stream": True,
         }
         if request.thinking_enabled and is_thinking_enabled():
+            del payload["temperature"]
             budget = request.thinking_budget or self.thinking_budget_tokens
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             if self.max_tokens <= budget:

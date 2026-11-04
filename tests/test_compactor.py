@@ -468,7 +468,9 @@ def test_manual_compaction_returns_update_without_model_turn(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("is_error", [False, True])
-def test_llm_compaction_summarizer_uses_only_selected_history_without_enabling_tools(is_error) -> None:
+@pytest.mark.parametrize("thinking", [False, True])
+def test_llm_compaction_summarizer_uses_only_selected_history_without_enabling_tools(is_error, thinking, monkeypatch) -> None:
+    monkeypatch.setenv("THINKING_ENABLED", str(thinking).lower())
     class RecordingClient:
         async def stream(self, request):
             self.request = request
@@ -503,6 +505,7 @@ def test_llm_compaction_summarizer_uses_only_selected_history_without_enabling_t
     assert request.model == "reasoner"
     assert request.purpose == "compaction"
     assert request.allow_tools is False
+    assert request.thinking_enabled is thinking
     assert request.tools == []
     text = "\n".join(str(message.content) for message in request.messages)
     assert "unselected current request" not in text

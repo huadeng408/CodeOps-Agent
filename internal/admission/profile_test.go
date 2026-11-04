@@ -81,6 +81,46 @@ func TestGatewayTrustedEffortOverridesEveryPurposeAndChildScope(t *testing.T) {
 	}
 }
 
+func TestGatewayDeepSeekMaxUsesDocumentedOutputCap(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		if payload["reasoning_effort"] != "max" || payload["max_tokens"] != float64(393216) || payload["max_completion_tokens"] != nil {
+			t.Errorf("DeepSeek maximum profile was not applied: %v", payload)
+		}
+		fmt.Fprint(w, `{"model":"deepseek-v4-pro","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":3}}`)
+	}))
+	defer upstream.Close()
+	ledger, err := session.OpenSQLiteEventLog(filepath.Join(t.TempDir(), "ledger.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{
+		Protocol: "openai", BaseURL: upstream.URL, Model: "deepseek-v4-pro", APIKey: "fixture-only",
+		InputLimit: 655360, OutputLimit: 393216, ReasoningEffort: "max",
+	})
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	binding, release, err := gateway.Bind(7, "deepseek-task", "deepseek-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	response, err := gateway.Invoke(context.Background(), &pb.ModelCallRequest{
+		Capability: binding.Capability, CallId: "deepseek-max", Purpose: "compaction",
+		PayloadJson: []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"fixture"}],"reasoning_effort":"medium","max_tokens":999,"max_completion_tokens":999}`),
+	})
+	if err != nil || response.GetErrorCode() != "" {
+		t.Fatalf("max effort invocation failed: %v %s", err, response.GetErrorCode())
+	}
+}
+
 func TestGatewayRejectsInconsistentThinkingBeforeReservation(t *testing.T) {
 	for _, thinking := range []string{`{"type":"enabled"}`, `{"type":"enabled","budget_tokens":10000}`, `{"type":"enabled","budget_tokens":1}`, `{"type":"enabled","budget_tokens":1024.5}`} {
 		t.Run(thinking, func(t *testing.T) {

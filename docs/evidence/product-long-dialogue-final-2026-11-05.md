@@ -48,6 +48,12 @@ Python相关回归为183通过、1跳过，exit0；Go sandbox/tools/hooks三个�
 
 摘要输入隔离相关Python回归159通过，exit0；上述两个Go/Python跨进程场景通过，exit0，每例保留25条原事件、最终43条事件。上游使用确定性fixture，仅证明集成行为；真实provider摘要质量仍待独立验证。来源、命令、失败与成功日志及checksum入口为`.scratch/compaction-quality-20261105/validation.json`。
 
+C75来源的独立真实回归在原BeeAPI通道返回HTTP502，记为`provider_transient_unknown`；原Session及Admission前缀核验通过，调用已结束、任务槽已释放，未知用量和预留保留。该回归不加入原200／211分母；失败原件在`.scratch/compaction-quality-20261105/provider-primary-v1/`。
+按已授权规则改用cc-switch的DeepSeek配置前，修复Go不接受`max`及输出token字段不兼容的问题，并使摘要遵守全局thinking开关；Anthropic的thinking预算受既有输出上限约束，保留输出空间，Go拒绝越界的规则不变。DeepSeek的最高档是`max`，`xhigh`会映射为`high`，Chat API使用`max_tokens`，依据[官方思考参数](https://api-docs.deepseek.com/guides/thinking_mode/)和[Chat API](https://api-docs.deepseek.com/api/create-chat-completion/)。替代通道的实际结果另行记录，不把配置可用当连通或语义通过。
+
+兼容性相关Python回归158通过、Go准入完整包通过，均exit0。覆盖全局thinking开关、Anthropic输出上限4096／8192／131072下的实际托管请求序列化，以及Go对DeepSeek最高思考档和输出上限的覆盖；Go预算拒绝不放宽。Anthropic开启thinking时，两种出站路径均省略不兼容的temperature，依据[官方采样限制](https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters)。入口为`.scratch/compaction-quality-20261105/fallback-validation-v2.json`，此前预算／采样失败回归均保留。
+摘要来源修复提交`4593abcf`的首次CI因一个CLI fixture仍匹配旧prompt而失败；修复fixture后，原CLI跨进程测试通过，`04abc1a8`的[完整源码CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41892194420)五项全部成功。保留原失败，后续兼容性改动另验，不把这次CI绑定到未运行的源码。
+
 ## 可追溯产物
 
 本机原件均保留于忽略目录；下列为相对仓库的入口，不含凭据或模型答案。

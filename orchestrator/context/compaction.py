@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
+from orchestrator.config import is_thinking_enabled
 from orchestrator.llm.client import (
     ChatMessage,
     ChatRequest,
@@ -327,11 +328,17 @@ class LLMCompactionSummarizer:
             ),
             ChatMessage(role="user", content=history),
         ]
+        thinking_budget = getattr(self.client, "thinking_budget_tokens", 10000)
+        output_limit = getattr(self.client, "max_tokens", 0)
+        if output_limit > 0:
+            thinking_budget = min(thinking_budget, max(1024, output_limit - 1024))
         chat_request = ChatRequest(
             model=model,
             messages=prompt_messages,
             tools=[],
             temperature=self.temperature,
+            thinking_enabled=is_thinking_enabled(),
+            thinking_budget=thinking_budget,
             allow_tools=False,
             purpose="compaction",
             cancel_event=request.cancel_event,

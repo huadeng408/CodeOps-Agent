@@ -12,6 +12,7 @@ from codeagent import orchestrator_pb2 as pb
 from codeagent import orchestrator_pb2_grpc as rpc
 from orchestrator.llm.client import ChatMessage, ChatRequest, RequestInterrupted
 from orchestrator.llm.gateway import HarnessModelClient
+from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
 from orchestrator.server import OrchestratorServer, OrchestratorService, ServerConfig
 from orchestrator.workflows.models import WorkerSpec
 from orchestrator.workflows.providers import ProviderWorkerExecutor
@@ -75,6 +76,41 @@ def test_harness_model_client_uses_go_issued_rpc_deadline(rpc_timeout, minimum, 
         assert response.text == "ok"
         # gRPC rounds longer wire deadlines up to seconds or tens of seconds.
         assert len(deadlines) == 1 and minimum <= deadlines[0] <= maximum
+    finally:
+        client.close()
+        server.stop(0).wait()
+
+
+@pytest.mark.parametrize("output_limit", [4096, 8192, 131072])
+def test_managed_anthropic_compaction_thinks_within_admitted_output(output_limit, monkeypatch):
+    monkeypatch.setenv("THINKING_ENABLED", "true")
+    observed = []
+
+    class Service(rpc.ModelGatewayServicer):
+        def Invoke(self, request, context):
+            observed.append(json.loads(request.payload_json))
+            return pb.ModelCallResponse(payload_json=json.dumps({
+                "model": "fixture-model", "content": [{"type": "text", "text": "summary"}],
+            }).encode(), cost_status="unknown")
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    rpc.add_ModelGatewayServicer_to_server(Service(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    client = HarnessModelClient(pb.ModelGatewayBinding(
+        schema_version=1, address=f"127.0.0.1:{port}", capability=b"a" * 32,
+        protocol="anthropic", model="fixture-model", output_limit=output_limit,
+    ))
+    try:
+        summary = LLMCompactionSummarizer(client).summarize(CompactionRequest(
+            prefix_messages=(), messages=(ChatMessage("user", "historical constraint"),),
+        ))
+        assert summary == "summary" and len(observed) == 1
+        payload = observed[0]
+        assert payload["thinking"]["type"] == "enabled"
+        assert "temperature" not in payload
+        assert 1024 <= payload["thinking"]["budget_tokens"] <= output_limit - 1024
+        assert payload["max_tokens"] == output_limit
     finally:
         client.close()
         server.stop(0).wait()
