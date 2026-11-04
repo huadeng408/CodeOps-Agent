@@ -71,11 +71,12 @@ func TestEvaluationForcedCompactionPreservesUpdatedRequirementsAcrossProcesses(t
 		index := calls.Add(1)
 		last := request.Messages[len(request.Messages)-1]
 		text, _ := last["content"].(string)
+		system, _ := request.Messages[0]["content"].(string)
 		serialized, _ := json.Marshal(request.Messages)
 		v2 := bytes.Contains(serialized, []byte("REQUIREMENTS_V2"))
 		message := map[string]any{"role": "assistant", "content": "The requested step is complete."}
 		tool, arguments := "", map[string]string{}
-		if strings.Contains(text, "Summarize the preceding conversation") {
+		if strings.HasPrefix(system, "Summarize the supplied historical records for a future agent turn.") {
 			summaries.Add(1)
 			message["content"] = "REQUIREMENTS_V1: blue; schema 1."
 			if v2 {
