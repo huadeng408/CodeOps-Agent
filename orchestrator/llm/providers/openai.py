@@ -186,6 +186,9 @@ class OpenAIClient(LLMClient):
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                if chunk.get("type") == "error" or chunk.get("error") is not None:
+                    # Upstream bodies may contain secrets. Expose a fixed failure only.
+                    raise RuntimeError("OpenAI upstream stream error")
                 for key in ("model", "id", "system_fingerprint", "created"):
                     value = chunk.get(key)
                     if value in (None, ""):

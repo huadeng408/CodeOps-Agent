@@ -52,16 +52,29 @@ def _json_server(response_payload: dict[str, object]):
     return server, captured
 
 
-def test_anthropic_stream_error_does_not_become_success(monkeypatch) -> None:
-    response = io.BytesIO(b'data: {"type":"error","error":{"message":"private-provider-value"}}\n\n')
+@pytest.mark.parametrize("provider", [AnthropicClient, OpenAIClient])
+@pytest.mark.parametrize("partial", [False, True])
+def test_provider_stream_error_does_not_become_success(monkeypatch, provider, partial) -> None:
+    prefix = b""
+    if partial:
+        prefix = (b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n'
+                  if provider is AnthropicClient else b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')
+    error = {"error": {"message": "private-provider-value"}}
+    if provider is AnthropicClient:
+        error["type"] = "error"
+    response = io.BytesIO(prefix + b"data: " + json.dumps(error).encode() + b"\n\n")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: response)
-    client = AnthropicClient(api_key="test")
+    client = provider(api_key="test")
+    deltas = []
 
     async def collect():
-        return [delta async for delta in client.stream(ChatRequest(model="test", messages=[ChatMessage(role="user", content="hello")]))]
+        async for delta in client.stream(ChatRequest(model="test", messages=[ChatMessage(role="user", content="hello")])):
+            deltas.append(delta)
 
-    with pytest.raises(RuntimeError, match="^Anthropic upstream stream error$"):
+    name = "Anthropic" if provider is AnthropicClient else "OpenAI"
+    with pytest.raises(RuntimeError, match=f"^{name} upstream stream error$"):
         asyncio.run(collect())
+    assert [delta.kind for delta in deltas] == (["text"] if partial else [])
 
 
 def _provider_messages() -> list[ChatMessage]:
