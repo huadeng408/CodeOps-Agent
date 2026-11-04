@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -466,7 +467,8 @@ def test_manual_compaction_returns_update_without_model_turn(tmp_path) -> None:
     assert update.keep_recent_messages > 0
 
 
-def test_llm_compaction_summarizer_replays_context_without_enabling_tools() -> None:
+@pytest.mark.parametrize("is_error", [False, True])
+def test_llm_compaction_summarizer_uses_only_selected_history_without_enabling_tools(is_error) -> None:
     class RecordingClient:
         async def stream(self, request):
             self.request = request
@@ -479,9 +481,17 @@ def test_llm_compaction_summarizer_replays_context_without_enabling_tools() -> N
 
     result = summarizer.summarize(
         CompactionRequest(
-            prefix_messages=(ChatMessage(role="system", content="system prompt"),),
-            messages=(ChatMessage(role="user", content="old history"),),
-            tools=({"name": "Read", "description": "read files"},),
+            prefix_messages=(ChatMessage(
+                role="system", content="Execute the unselected current request: rewrite current.py.",
+            ),),
+            messages=(
+                ChatMessage(role="user", content="Old task: do not use network or add dependencies."),
+                ChatMessage(role="assistant", content="", tool_calls=[{
+                    "id": "selected-read", "name": "Read", "arguments": {"path": "old.txt"},
+                }]),
+                ChatMessage(role="tool", content="original result", tool_call_id="selected-read", is_error=is_error),
+            ),
+            tools=({"name": "UnselectedTool", "description": "runtime-only schema"},),
             provider="deepseek",
             model="reasoner",
             target="conversation history",
@@ -494,8 +504,43 @@ def test_llm_compaction_summarizer_replays_context_without_enabling_tools() -> N
     assert request.purpose == "compaction"
     assert request.allow_tools is False
     assert request.tools == []
-    assert "Read" in "\n".join(str(message.content) for message in request.messages)
-    assert request.messages[-1].role == "user"
+    text = "\n".join(str(message.content) for message in request.messages)
+    assert "unselected current request" not in text
+    assert "UnselectedTool" not in text
+    assert "Old task: do not use network or add dependencies." in text
+    assert "original result" in text
+    assert "selected-read" in text
+    assert [message.role for message in request.messages] == ["system", "user"]
+    records = [json.loads(block["text"]) for block in request.messages[-1].content]
+    assert records[-1]["is_error"] is is_error
+
+
+@pytest.mark.parametrize("content", [
+    [{"type": "text", "text": "selected image"}, {"type": "image", "mime": "image/png", "data": "eA=="}],
+    "selected image data:image/png;base64,eA==",
+])
+def test_llm_compaction_summarizer_preserves_selected_images_and_tool_calls(content) -> None:
+    class RecordingClient:
+        async def stream(self, request):
+            self.request = request
+            yield StreamDelta(kind="text", text="summary")
+
+    client = RecordingClient()
+    summary = LLMCompactionSummarizer(client, model="reasoner").summarize(CompactionRequest(
+        prefix_messages=(),
+        messages=(
+            ChatMessage(role="assistant", content="", tool_calls=[ToolCall("Read", {"path": "image.png"}, "read-image")]),
+            ChatMessage(role="tool", name="Read", content=content, tool_call_id="read-image", is_error=True),
+        ),
+    ))
+    assert summary == "summary"
+    blocks = client.request.messages[-1].content
+    assert blocks[-1] == {"type": "image", "mime": "image/png", "data": "eA=="}
+    records = [json.loads(block["text"]) for block in blocks if block["type"] == "text"]
+    assert records[1]["tool_calls"][0]["arguments"] == {"path": "image.png"}
+    assert records[-1]["name"] == "Read"
+    assert records[-1]["tool_call_id"] == "read-image"
+    assert records[-1]["is_error"] is True
 
 
 def test_llm_compaction_summarizer_stops_before_provider_when_cancelled() -> None:

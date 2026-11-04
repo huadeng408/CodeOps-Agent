@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	codeagentpb "code-agent/gen/codeagentpb"
 	"code-agent/internal/admission"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
@@ -245,316 +244,162 @@ func TestContextRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 	contextE2EAssertSQLite(t, filepath.Join(projectRoot, ".agent", "context.sqlite"))
 }
 
-func TestContextCompactionRuntimeAcrossProcesses(t *testing.T) {
+// The upstream is deterministic; canonical history, model admission and persistence are real.
+func TestCanonicalCompactionRuntimeAcrossRestart(t *testing.T) {
 	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
 		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
 	}
-
-	repositoryRoot := contextE2ERepositoryRoot(t)
-	python := contextE2EPython(t)
-	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
-	projectRoot := t.TempDir()
-	address := contextE2EAddress(t)
-	pythonPath := repositoryRoot
-	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
-		pythonPath += string(os.PathListSeparator) + inherited
-	}
-	t.Setenv("PYTHONPATH", pythonPath)
-	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
-	sessionID := sessionManager.Current().ID
-
-	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:             address,
-		AutoStart:           true,
-		Command:             python,
-		Args:                []string{fixture, "--context-window", "512"},
-		ProjectRoot:         projectRoot,
-		WorkingDir:          projectRoot,
-		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
-		StartupTimeout:      15 * time.Second,
-		ConversationTimeout: 30 * time.Second,
-		ModelScopeFactory:   modelScope,
-	})
-	t.Cleanup(manager.Stop)
-
-	client, err := manager.Client(context.Background())
-	if err != nil {
-		t.Fatalf("start real Python orchestrator: %v", err)
-	}
-	client.OnCompaction = contextE2EPersistCompaction(sessionManager)
-	history := make([]orchestrator.ConversationMessage, 0, 24)
-	for index := 0; index < 24; index++ {
-		content := fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160))
-		sessionManager.Append(session.RoleUser, content)
-		history = append(history, orchestrator.ConversationMessage{
-			Role:    "user",
-			Content: content,
+	for _, manual := range []bool{false, true} {
+		t.Run(fmt.Sprintf("manual=%t", manual), func(t *testing.T) {
+			ctx := context.Background()
+			repo, project := contextE2ERepositoryRoot(t), t.TempDir()
+			t.Setenv("PYTHONPATH", repo)
+			t.Setenv("CODE_AGENT_E2E_PROVIDER", "deterministic")
+			providerAddress := contextE2EAddress(t)
+			t.Setenv("CODE_AGENT_CONTEXT_E2E_PROVIDER_ADDRESS", providerAddress)
+			ledger, err := session.OpenSQLiteEventLog(filepath.Join(project, "sessions.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ledger.Close() })
+			gateway := admission.NewGateway(admission.NewBudget(ledger), admission.ProviderConfig{
+				Protocol: "openai", BaseURL: "http://" + providerAddress + "/v1",
+				Model: "deterministic-context-e2e", APIKey: "fixture-only",
+				InputLimit: 100_000, OutputLimit: 4096,
+			})
+			if err := gateway.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(gateway.Close)
+			manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
+				Address: contextE2EAddress(t), AutoStart: true,
+				Command:     contextE2EPython(t),
+				Args:        []string{filepath.Join(repo, "tests", "e2e", "context_runtime_server.py"), "--context-window", "512"},
+				ProjectRoot: project, WorkingDir: project, MemoryDir: filepath.Join(project, ".agent", "memory"),
+				StartupTimeout: 15 * time.Second, ConversationTimeout: 30 * time.Second,
+				ModelScopeFactory: gateway.BindActor,
+			})
+			t.Cleanup(manager.Stop)
+			workbench := session.NewWorkbench(ledger, nil)
+			created, err := workbench.CreateWithWorkingDir(ctx, 7, "fixture", "canonical compaction", "", project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor, err := identity.Default().BindSession(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index := 0; index < 24; index++ {
+				if _, err := workbench.AppendUserMessage(ctx, 7, created.ID, int64(index+1),
+					fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original, err := session.ReadVerifiedSnapshot(ctx, ledger, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := manager.Client(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var adapter session.ConversationAdapter = client
+			if manual {
+				adapter = manualCompactionConversation{client}
+			}
+			runner := session.NewSessionRunner(workbench, adapter, nil, session.SessionRunnerOptions{WorkerID: "compact-first"})
+			t.Cleanup(func() { _ = runner.Close() })
+			contextE2ERun(t, ledger, runner, actor, "compact-first", "COMPACTION_CHECK")
+			surface, err := ledger.Surface(ctx, created.ID)
+			if err != nil || len(surface) == 0 || surface[0].Type != "context/compaction" {
+				t.Fatalf("canonical compaction missing: surface=%d err=%v", len(surface), err)
+			}
+			var summary struct {
+				Summary string `json:"summary"`
+			}
+			if err := json.Unmarshal(surface[0].Payload, &summary); err != nil ||
+				!strings.Contains(summary.Summary, "Historical context retained for the next agent turn.") {
+				t.Fatal("expected model summary, not a silent deterministic fallback")
+			}
+			if err := runner.Close(); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODE_AGENT_CONTEXT_E2E_WINDOW", "8192")
+			restarted, err := manager.Restart(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovery := session.NewSessionRunner(workbench, restarted, nil, session.SessionRunnerOptions{WorkerID: "compact-recovered"})
+			t.Cleanup(func() { _ = recovery.Close() })
+			contextE2ERun(t, ledger, recovery, actor, "compact-recovered", "COMPACTION_RECOVER")
+			if err := recovery.Close(); err != nil {
+				t.Fatal(err)
+			}
+			final, err := session.ReadVerifiedSnapshot(ctx, ledger, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, event := range original.Events {
+				if final.Events[index].EventID != event.EventID || final.Events[index].Checksum != event.Checksum {
+					t.Fatalf("original event changed: %d", index)
+				}
+			}
+			recovered := false
+			for _, event := range final.Events {
+				if event.Type == "assistant/message" && strings.Contains(string(event.Payload), "COMPACTION_RECOVERED:") {
+					recovered = true
+				}
+			}
+			if !recovered {
+				t.Fatal("restarted Python did not receive the persisted canonical summary")
+			}
+			t.Logf("canonical Session %s: %d original events preserved, %d final events", created.ID, len(original.Events), len(final.Events))
 		})
 	}
-	sessionManager.Append(session.RoleUser, "COMPACTION_CHECK")
-	response, err := client.ConverseWithHistory(
-		context.Background(),
-		"COMPACTION_CHECK",
-		sessionID,
-		history,
-	)
-	if err != nil {
-		t.Fatalf("compaction conversation: %v", err)
-	}
-	if !strings.HasPrefix(response, "COMPACTION_OK:") {
-		t.Fatalf("response = %q, want compaction confirmation", response)
-	}
-
-	databasePath := filepath.Join(projectRoot, ".agent", "context.sqlite")
-	database, err := sql.Open("sqlite", databasePath)
-	if err != nil {
-		t.Fatalf("open compaction context SQLite: %v", err)
-	}
-	defer database.Close()
-	for _, kind := range []string{"compaction/start", "compaction/summary", "compaction/end"} {
-		var count int
-		if err := database.QueryRow(
-			"SELECT COUNT(*) FROM context_events WHERE session_id = ? AND kind = ?",
-			sessionID,
-			kind,
-		).Scan(&count); err != nil {
-			t.Fatalf("count %s events: %v", kind, err)
-		}
-		if count == 0 {
-			t.Fatalf("no persisted %s event", kind)
-		}
-	}
-	gitSHA := contextE2EGitSHA(t, repositoryRoot)
-	receipt := map[string]any{
-		"status":         "VERIFIED",
-		"git_sha":        gitSHA,
-		"session_id":     sessionID,
-		"response_pid":   contextE2EProcessID(t, response, "COMPACTION_OK:"),
-		"context_window": 512,
-		"event_kinds":    []string{"compaction/start", "compaction/summary", "compaction/end"},
-	}
-	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		t.Fatalf("encode compaction E2E receipt: %v", err)
-	}
-	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-compaction-process-recovery.json")
-	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
-		t.Fatalf("create compaction receipt directory: %v", err)
-	}
-	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
-		t.Fatalf("write compaction E2E receipt: %v", err)
-	}
 }
 
-func TestContextCompactionPersistsIntoGoSessionAcrossRestart(t *testing.T) {
-	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
-		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
-	}
+type manualCompactionConversation struct{ client *orchestrator.Client }
 
-	repositoryRoot := contextE2ERepositoryRoot(t)
-	python := contextE2EPython(t)
-	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
-	projectRoot := t.TempDir()
-	address := contextE2EAddress(t)
-	pythonPath := repositoryRoot
-	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
-		pythonPath += string(os.PathListSeparator) + inherited
-	}
-	t.Setenv("PYTHONPATH", pythonPath)
-	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
-
-	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:             address,
-		AutoStart:           true,
-		Command:             python,
-		Args:                []string{fixture, "--context-window", "512"},
-		ProjectRoot:         projectRoot,
-		WorkingDir:          projectRoot,
-		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
-		StartupTimeout:      15 * time.Second,
-		ConversationTimeout: 30 * time.Second,
-		ModelScopeFactory:   modelScope,
-	})
-	t.Cleanup(manager.Stop)
-
-	for index := 0; index < 24; index++ {
-		sessionManager.Append(
-			session.RoleUser,
-			fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160)),
-		)
-	}
-	sessionManager.Append(session.RoleUser, "COMPACTION_CHECK")
-
-	client, err := manager.Client(context.Background())
+func (a manualCompactionConversation) RunConversation(ctx context.Context, request orchestrator.ConversationRequest, handlers orchestrator.ConversationHandlers) (orchestrator.ConversationResult, error) {
+	update, err := a.client.CompactConversation(ctx, request, handlers)
 	if err != nil {
-		t.Fatalf("start real Python orchestrator: %v", err)
-	}
-	persist := contextE2EPersistCompaction(sessionManager)
-	client.OnCompaction = persist
-
-	current := sessionManager.Current()
-	first, err := client.ConverseWithHistory(
-		context.Background(),
-		"COMPACTION_CHECK",
-		current.ID,
-		sessionConversationHistory(current.Messages[:len(current.Messages)-1]),
-	)
-	if err != nil {
-		t.Fatalf("initial compaction conversation: %v", err)
-	}
-	if !strings.HasPrefix(first, "COMPACTION_OK:") {
-		t.Fatalf("initial response = %q, want compaction confirmation", first)
-	}
-	compacted := sessionManager.Current()
-	if !hasSessionSummary(compacted) {
-		t.Fatalf("Go session did not persist the Python compaction summary: %#v", compacted.Messages)
-	}
-
-	t.Setenv("CODE_AGENT_CONTEXT_E2E_WINDOW", "4096")
-	restartedClient, err := manager.Restart(context.Background())
-	if err != nil {
-		t.Fatalf("restart real Python orchestrator: %v", err)
-	}
-	restartedClient.OnCompaction = persist
-	sessionManager.Append(session.RoleUser, "COMPACTION_RECOVER")
-	recoveredSession := sessionManager.Current()
-	recoveryHistory := sessionConversationHistory(recoveredSession.Messages[:len(recoveredSession.Messages)-1])
-	second, err := restartedClient.ConverseWithHistory(
-		context.Background(),
-		"COMPACTION_RECOVER",
-		recoveredSession.ID,
-		recoveryHistory,
-	)
-	if err != nil {
-		t.Fatalf("recovery compaction conversation: %v", err)
-	}
-	if !strings.HasPrefix(second, "COMPACTION_RECOVERED:") {
-		t.Fatalf("recovery response = %q, want persisted summary confirmation", second)
-	}
-	receipt := map[string]any{
-		"status":                 "VERIFIED",
-		"git_sha":                contextE2EGitSHA(t, repositoryRoot),
-		"session_id":             recoveredSession.ID,
-		"initial_response_pid":   contextE2EProcessID(t, first, "COMPACTION_OK:"),
-		"recovery_response_pid":  contextE2EProcessID(t, second, "COMPACTION_RECOVERED:"),
-		"go_session_summary":     true,
-		"recovery_after_restart": true,
-	}
-	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		t.Fatalf("encode Go session compaction receipt: %v", err)
-	}
-	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-compaction-go-session-recovery.json")
-	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
-		t.Fatalf("create Go session compaction receipt directory: %v", err)
-	}
-	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
-		t.Fatalf("write Go session compaction receipt: %v", err)
-	}
-}
-
-func TestManualCompactionRuntimeAcrossProcesses(t *testing.T) {
-	if os.Getenv("CODE_AGENT_RUN_CONTEXT_E2E") != "1" {
-		t.Skip("set CODE_AGENT_RUN_CONTEXT_E2E=1 to run the cross-language runtime E2E")
-	}
-
-	repositoryRoot := contextE2ERepositoryRoot(t)
-	python := contextE2EPython(t)
-	fixture := filepath.Join(repositoryRoot, "tests", "e2e", "context_runtime_server.py")
-	projectRoot := t.TempDir()
-	address := contextE2EAddress(t)
-	pythonPath := repositoryRoot
-	if inherited := os.Getenv("PYTHONPATH"); inherited != "" {
-		pythonPath += string(os.PathListSeparator) + inherited
-	}
-	t.Setenv("PYTHONPATH", pythonPath)
-	sessionManager, modelScope := contextE2EAdmittedSession(t, projectRoot)
-
-	processManager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
-		Address:             address,
-		AutoStart:           true,
-		Command:             python,
-		Args:                []string{fixture, "--context-window", "512"},
-		ProjectRoot:         projectRoot,
-		WorkingDir:          projectRoot,
-		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
-		StartupTimeout:      15 * time.Second,
-		ConversationTimeout: 30 * time.Second,
-		ModelScopeFactory:   modelScope,
-	})
-	t.Cleanup(processManager.Stop)
-
-	for index := 0; index < 24; index++ {
-		sessionManager.Append(
-			session.RoleUser,
-			fmt.Sprintf("manual history %02d %s", index, strings.Repeat("m", 160)),
-		)
-	}
-
-	client, err := processManager.Client(context.Background())
-	if err != nil {
-		t.Fatalf("start real Python orchestrator: %v", err)
-	}
-	persist := contextE2EPersistCompaction(sessionManager)
-	client.OnCompaction = persist
-
-	current := sessionManager.Current()
-	update, err := client.Compact(
-		context.Background(),
-		current.ID,
-		sessionConversationHistory(current.Messages),
-	)
-	if err != nil {
-		t.Fatalf("manual compact conversation: %v", err)
+		return orchestrator.ConversationResult{}, err
 	}
 	if update == nil || update.GetTrigger() != "manual" || update.GetRemovedMessages() == 0 {
-		t.Fatalf("unexpected manual compaction update: %+v", update)
+		return orchestrator.ConversationResult{}, errors.New("manual compaction returned no update")
 	}
-	compacted := sessionManager.Current()
-	if !hasSessionSummary(compacted) {
-		t.Fatalf("Go session did not persist manual compaction summary: %#v", compacted.Messages)
-	}
+	return orchestrator.ConversationResult{Success: true, Message: "Manual compaction committed"}, nil
+}
 
-	t.Setenv("CODE_AGENT_CONTEXT_E2E_WINDOW", "4096")
-	restartedClient, err := processManager.Restart(context.Background())
+func contextE2ERun(t *testing.T, ledger session.EventLog, runner *session.SessionRunner, actor identity.Actor, requestID, content string) {
+	t.Helper()
+	ctx := context.Background()
+	events, err := ledger.Events(ctx, actor.SessionID)
 	if err != nil {
-		t.Fatalf("restart real Python orchestrator: %v", err)
+		t.Fatal(err)
 	}
-	restartedClient.OnCompaction = persist
-	sessionManager.Append(session.RoleUser, "COMPACTION_RECOVER")
-	recoveredSession := sessionManager.Current()
-	recovered, err := restartedClient.ConverseWithHistory(
-		context.Background(),
-		"COMPACTION_RECOVER",
-		recoveredSession.ID,
-		sessionConversationHistory(recoveredSession.Messages[:len(recoveredSession.Messages)-1]),
-	)
+	run, err := runner.SubmitMessage(ctx, session.SubmitMessageCommand{
+		RequestID: requestID, SessionID: actor.SessionID, OwnerID: 7, Actor: actor,
+		ExpectedSeq: int64(len(events)), Content: content,
+	})
 	if err != nil {
-		t.Fatalf("manual compaction recovery conversation: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.HasPrefix(recovered, "COMPACTION_RECOVERED:") {
-		t.Fatalf("manual compaction recovery response = %q", recovered)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := runner.Run(ctx, actor.SessionID, run.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.Status == session.RunCompleted {
+			return
+		}
+		if current.Status == session.RunFailed || current.Status == session.RunCanceled {
+			t.Fatalf("canonical run ended unsuccessfully: %+v", current)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-
-	receipt := map[string]any{
-		"status":                 "VERIFIED",
-		"git_sha":                contextE2EGitSHA(t, repositoryRoot),
-		"session_id":             recoveredSession.ID,
-		"manual_compaction":      true,
-		"go_session_summary":     true,
-		"recovery_after_restart": true,
-	}
-	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		t.Fatalf("encode manual compaction receipt: %v", err)
-	}
-	receiptPath := filepath.Join(repositoryRoot, ".runtime", "e2e", "context-manual-compaction-process-recovery.json")
-	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
-		t.Fatalf("create manual compaction receipt directory: %v", err)
-	}
-	if err := os.WriteFile(receiptPath, append(receiptJSON, '\n'), 0o600); err != nil {
-		t.Fatalf("write manual compaction receipt: %v", err)
-	}
+	t.Fatal("canonical run did not finish within 30 seconds")
 }
 
 // Only the upstream model is a double; Gateway, budget and Session Ledger are real.
@@ -588,39 +433,6 @@ func contextE2EAdmittedSession(t *testing.T, projectRoot string) (*session.Manag
 	}
 	t.Cleanup(gateway.Close)
 	return manager, gateway.BindActor
-}
-
-func contextE2EPersistCompaction(manager *session.Manager) func(*codeagentpb.CompactionUpdate) error {
-	return func(update *codeagentpb.CompactionUpdate) error {
-		if update == nil {
-			return errors.New("nil compaction update")
-		}
-		if _, _, ok := manager.ReplaceMessages(update.GetSummary(), int(update.GetKeepRecentMessages())); !ok {
-			return errors.New("Go session compaction commit failed")
-		}
-		return nil
-	}
-}
-
-func sessionConversationHistory(messages []session.Message) []orchestrator.ConversationMessage {
-	history := make([]orchestrator.ConversationMessage, 0, len(messages))
-	for _, message := range messages {
-		history = append(history, orchestrator.ConversationMessage{
-			Role:      string(message.Role),
-			Content:   message.Content,
-			CreatedAt: message.CreatedAt.Format(time.RFC3339Nano),
-		})
-	}
-	return history
-}
-
-func hasSessionSummary(current session.Session) bool {
-	for _, message := range current.Messages {
-		if message.Role == session.RoleSystem && strings.HasPrefix(message.Content, "[Conversation summary]\n") {
-			return true
-		}
-	}
-	return false
 }
 
 func contextE2EProcessID(t *testing.T, response, prefix string) int {

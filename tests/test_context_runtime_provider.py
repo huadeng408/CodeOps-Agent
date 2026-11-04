@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.llm.client import ChatMessage, ChatRequest
+from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
 
 
 def _fixture_module():
@@ -66,3 +67,11 @@ def test_deterministic_resume_and_transport_recovery_prompts_are_distinct(monkey
     assert transport.text.startswith("TRANSPORT_RECOVERED:")
     assert not resume.tool_calls
     assert not transport.tool_calls
+
+
+def test_deterministic_provider_handles_source_only_compaction():
+    client = _fixture_module().DeterministicContextLLM()
+    summary = LLMCompactionSummarizer(client).summarize(CompactionRequest(
+        prefix_messages=(), messages=(ChatMessage(role="user", content="Historical request."),),
+    ))
+    assert summary == "Historical context retained for the next agent turn."

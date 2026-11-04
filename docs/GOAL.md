@@ -7,7 +7,7 @@
 | --- | --- |
 | 仓库整理 | 23个废弃函数、重复依赖和9份过期叙述已处理；清理提交完整CI五项成功，见[处理与验证记录](evidence/repository-cleanup-2026-11-04.md)。普通修复与发布门禁已分开 |
 | [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | **200/200已完成；211个实际 Run＝200完成、10失败、1取消。** 正常停止并封存，211原生核验及Memory结构来源通过；摘要约束/事实质量和旧Trace关联缺口保留，整票仍开放。见[最终累计结果与修复](evidence/product-long-dialogue-final-2026-11-05.md) |
-| 后续修复 | Git只读沙箱信任、无增益压缩重试、Python OpenAI流内错误被吞已修并通过相关回归；真实Git Runner验证通过。继续处理摘要质量，自动Recall注入/因果贡献仍UNKNOWN；不重跑已完成的200项或改写旧负结果 |
+| 后续修复 | Git只读沙箱信任、无增益压缩重试、Python流内错误和摘要来源隔离已修；相关回归及Go/Python原生持久化/重启测试通过，真实Git Runner验证通过。摘要语义质量待真实provider验证，自动Recall注入/因果贡献仍UNKNOWN；不重跑200项或改写旧负结果 |
 | [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 用户暂缓；不作为本机开发或其他票的门禁 |
 | 完整发布 | [七条 lane](release-gate.md)的必需证据未齐，**完整发布范围 BLOCKED**；普通修复和单项任务按自身范围交付 |
 

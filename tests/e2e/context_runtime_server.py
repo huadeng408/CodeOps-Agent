@@ -58,7 +58,9 @@ class DeterministicContextLLM(LLMClient):
             "",
         )
 
-        if latest_user.startswith("Summarize the preceding conversation for a future agent turn."):
+        if request.messages and message_content_text(request.messages[0].content).startswith(
+            "Summarize the supplied historical records for a future agent turn."
+        ):
             return ChatResponse(
                 text="Historical context retained for the next agent turn.",
                 usage=Usage(input_tokens=1, output_tokens=1),
@@ -102,7 +104,7 @@ class DeterministicContextLLM(LLMClient):
             )
 
         if latest_user == "COMPACTION_RECOVER":
-            recovered = "[Conversation summary]" in rendered
+            recovered = "[Compacted conversation history]" in rendered
             return ChatResponse(
                 text=(
                     f"COMPACTION_RECOVERED:{os.getpid()}"

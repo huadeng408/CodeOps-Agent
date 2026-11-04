@@ -37,12 +37,16 @@ Run窗口包含模型、工具、审批及取消194迟到恢复终态前的等�
 1. OpenSandbox共享Runner给当前子进程设置精确`/workspace` Git信任及`GIT_OPTIONAL_LOCKS=0`，解决root所有的只读挂载被Git拒绝的问题；Bash与子目录的结构化Git调用均覆盖。容器环境策略、镜像、分析器及全局Git配置未改。
 2. `compact_surface`遇到原样结果时不发布更新；自动压力压缩没有缩短时停止重试并记录`no_progress`，保留原Surface和来源。手动强制操作仍允许实际结构合并。回归复现的3次无增益更新变为0次，摘要尝试3次变为1次；这是确定性回归结果，不是重跑200项后的改善数据。
 3. Python直接OpenAI适配器不再忽略HTTP200流内错误，也不在错误后发出成功usage/done；复用已有Anthropic的固定脱敏异常策略。默认／快速模型路由及压缩调用方沿用原失败或回退处理。此缺陷未被认定为旧Go托管运行失败的原因。
+4. 内置摘要模型只接收选定的历史来源及专用摘要指令；移除来源之外的Agent系统指令、`Current request`和完整工具schema，保留历史工具调用、失败标记、名称和原生图片。当前请求仍留在原Surface，Go准入、计量及模型配置沿用原路径。C75旧输出接受回放仍能复现约束丢失；输入隔离不等于已证明摘要语义无损。
+5. 三个过期的跨进程压缩测试仍使用不带来源引用的旧Manager历史，其中一个查询已废弃的Python表；实际均失败。合并为自动／手动两个场景，改用Workbench、SessionRunner和公开CompactConversation，验证Go原生持久化、Python重启及原事件前缀，删除重复转换和固定收据写入代码。旧失败日志及旧收据保留。
 
 Python相关回归为183通过、1跳过，exit0；Go sandbox/tools/hooks三个包均exit0。
 流内错误修复扩展既有公共适配器测试，修复前OpenAI两例失败、Anthropic两例通过；修复后provider／compactor／context／router相关92例通过，exit0，JUnit保留在`.scratch/p9-final-code-delivery-v1/`。
 真实OpenSandbox Runner回归exit0：UID65534、root所有挂载、Bash status与子目录Git diff检查通过；fixture文件/索引不变，两个owned沙箱已停止，控制服务恢复exited。复用已有镜像，没有拉取或重建。
 当前源码离线重编译的小型回归探针与实际测试二进制逐字节相同，绑定记录为`.scratch/p9-final-code-delivery-v1/source-binding.json`。
 完整源码CI按后续提交独立记录；上述修复不回改旧200项的质量结果。
+
+摘要输入隔离相关Python回归159通过，exit0；上述两个Go/Python跨进程场景通过，exit0，每例保留25条原事件、最终43条事件。上游使用确定性fixture，仅证明集成行为；真实provider摘要质量仍待独立验证。来源、命令、失败与成功日志及checksum入口为`.scratch/compaction-quality-20261105/validation.json`。
 
 ## 可追溯产物
 
