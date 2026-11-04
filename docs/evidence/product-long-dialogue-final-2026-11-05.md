@@ -62,6 +62,12 @@ C75来源的独立真实回归在原BeeAPI通道返回HTTP502，记为`provider_
 
 后续发现Go托管客户端没有读取`ANTHROPIC_THINKING_BUDGET_TOKENS`，摘要把配置的130048回退成10000；现在复用原解析器读取该配置，仍由摘要输出上限截断和Go准入校验约束。原公共gRPC测试复现1失败／5通过，修复后相关Python回归181通过，exit0；首次回归命令因误写不存在的测试路径退出4，未算通过。记录在`.scratch/compaction-quality-20261105/aliyun-fallback-v1/budget-validation.json`。百炼替代通道的真实结果独立记录，不把本地回归当模型质量通过。
 
+随后在`afe78d02`独立冻结cc-switch的百炼Anthropic通道，沿用原凭据及端点，将已下线的preview别名明确映射到`qwen3.8-max`，不改全局配置；依据[官方别名说明](https://help.aliyun.com/zh/model-studio/token-plan-personal-overview)。实际出站草稿开启thinking、总输出上限131072、思考预算130048；这是现有预留1024输出策略下的最高legacy预算，`xhigh`仅为[官方接口默认值](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)，不冒称服务端实际采用证明。一次Go准入请求返回HTTP403／`provider_authentication_unknown`，没有摘要，具体鉴权原因UNKNOWN。已释放自身任务槽、ActiveCalls=0、owned进程退出；原工作负载及Admission前缀不变，原unknown和新增预留保留。
+
+三条通道的失败完整保留为3／3，未重试无变化的失败通道、查询账单或重跑200项。联合技术核验exit0只证明失败、计量连续性及收尾记录一致，模型语义验证仍BLOCKED；入口`.scratch/compaction-quality-20261105/aliyun-fallback-v1/outcome.json`，SHA256 `53463455b727e6a85944622c7fa47b866e3ca539e5e83fcd687a1f5bd7b0bfdf`。开放票只剩#27及用户暂缓的#20，后者没有被恢复。
+
+取消持久化修复`774e2ed0`的[完整CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41897734205)及配置预算修复`afe78d02`的[完整CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41900806198)均为五项成功；后者包含完整Go测试／vet、Python、前端／浏览器／build、Windows启动和文档检查。技术失败联合核验及票面整理分别经Standards／Spec审查通过；源码CI不改变上述真实回归3／3失败或历史验收缺口。
+
 ## 可追溯产物
 
 本机原件均保留于忽略目录；下列为相对仓库的入口，不含凭据或模型答案。
