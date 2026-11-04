@@ -118,7 +118,7 @@ def test_conversation_reuses_compacted_surface_on_follow_up_turn(tmp_path) -> No
     runner.compactor.calls = 0
     responses = list(
         runner.run(
-            "continue",
+            "continue " + "previous work " * 100,
             iter([
                 orchestrator_pb2.HarnessMessage(
                     tool_result=orchestrator_pb2.ToolResult(
@@ -362,7 +362,8 @@ def test_context_pressure_compaction_records_lifecycle_and_hides_events(tmp_path
     store = SQLiteContextStore(tmp_path / "context.sqlite")
     context = LayeredContext(store, tmp_path)
     compactor = Compactor(
-        context_window=80,
+        max_chars=200,
+        context_window=200,
         pressure_ratio=0.8,
         retain_ratio=0.16,
         compaction_retries=2,
@@ -552,7 +553,8 @@ def test_context_prefers_llm_compaction_summary_and_audits_metadata() -> None:
     assert "short llm summary" not in repr(summary)
 
 
-@pytest.mark.parametrize("returned", ["", "x" * 10_000, RuntimeError("summary unavailable")])
+@pytest.mark.parametrize("returned", ["", "x" * 10_000, RuntimeError("summary unavailable")],
+                         ids=["empty", "oversized", "error"])
 def test_context_falls_back_when_llm_compaction_summary_is_invalid(returned) -> None:
     class SummaryAdapter:
         def summarize(self, request):
@@ -574,7 +576,7 @@ def test_context_falls_back_when_llm_compaction_summary_is_invalid(returned) -> 
 
     result = compact_surface(
         messages,
-        compactor=Compactor(context_window=80, pressure_ratio=0.8, retain_ratio=0.16),
+        compactor=Compactor(max_chars=200, context_window=200, pressure_ratio=0.8, retain_ratio=0.16),
         model="reasoner", summarizer=SummaryAdapter(), record_event=record_event,
     )
 
@@ -582,6 +584,38 @@ def test_context_falls_back_when_llm_compaction_summary_is_invalid(returned) -> 
     assert "short llm summary" not in result.messages[1].content
     summary = next(payload for kind, payload in events if kind == "compaction/summary")
     assert summary["summary_mode"] == "deterministic-fallback"
+
+
+@pytest.mark.parametrize("force, previous_role", [(False, "system"), (True, "system"), (False, "user")],
+                         ids=["automatic-unchanged", "forced-unchanged", "automatic-expanded"])
+def test_context_does_not_publish_or_retry_ineffective_fallback(force, previous_role) -> None:
+    calls, events = [], []
+
+    class UnavailableSummary:
+        def summarize(self, request):
+            calls.append(request)
+            raise RuntimeError("summary unavailable")
+
+    def record_event(kind, payload):
+        events.append((kind, payload))
+        return True
+
+    messages = [
+        ChatMessage(role="system", content="runtime instructions"),
+        ChatMessage(role=previous_role, content="[Compacted conversation history]\n" + "retained fact " * 20,
+                    source_events=(("existing-summary", "checksum"),)),
+        ChatMessage(role="user", content="current live input " * 600),
+    ]
+    result = compact_surface(
+        messages, compactor=Compactor(context_window=1000, retain_ratio=0.01, compaction_retries=2),
+        harness_managed=True, summarizer=UnavailableSummary(), force=force, record_event=record_event,
+    )
+
+    assert result.messages == messages
+    assert result.updates == []
+    assert len(calls) == 1
+    assert [kind for kind, _ in events] == ["compaction/start", "compaction/end"]
+    assert events[-1][1]["status"] == "no_progress"
 
 
 @pytest.mark.parametrize("audit_available", [True, False])

@@ -5,9 +5,9 @@
 
 | 当前范围 | 真实状态与下一步 |
 | --- | --- |
-| 仓库整理 | 已清理23个废弃函数、重复依赖和9份过期叙述；定向回归与双路审查通过，见[处理与验证记录](evidence/repository-cleanup-2026-11-04.md)。完整源码CI按提交单独记录 |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | **193/200 合格；202 个实际 Run＝193 完成、8 失败、1 取消。** 最新段已正常停止并封存，活动调用为0、任务槽空，未知用量及原预留保留。修正共享续跑判定后，从第194项累计 attempt3继续；见[最新断点](evidence/product-long-dialogue-checkpoint-2026-11-04.md) |
-| 故障恢复与 Memory | 后续段核对目标召回、续行、完整工具结果和原前缀；未知副作用先对账。最终累计 Trace、语义、Memory 来源和完整200项仍待验收 |
+| 仓库整理 | 23个废弃函数、重复依赖和9份过期叙述已处理；清理提交完整CI五项成功，见[处理与验证记录](evidence/repository-cleanup-2026-11-04.md)。普通修复与发布门禁已分开 |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | **200/200已完成；211个实际 Run＝200完成、10失败、1取消。** 正常停止并封存，211原生核验及Memory结构来源通过；摘要约束/事实质量和旧Trace关联缺口保留，整票仍开放。见[最终累计结果与修复](evidence/product-long-dialogue-final-2026-11-05.md) |
+| 后续修复 | Git只读沙箱信任、无增益压缩重试已修并通过相关回归；真实Git Runner验证通过。继续处理摘要质量，自动Recall注入/因果贡献仍UNKNOWN；不重跑已完成的200项或改写旧负结果 |
 | [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 用户暂缓；不作为本机开发或其他票的门禁 |
 | 完整发布 | [七条 lane](release-gate.md)的必需证据未齐，**完整发布范围 BLOCKED**；普通修复和单项任务按自身范围交付 |
 

@@ -72,7 +72,7 @@ func TestRoutingRunnerKeepsExplicitOpenSandboxSelectionAndFailsClosed(t *testing
 }
 
 func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *testing.T) {
-	for _, scenario := range []string{"confirm stopped runtime", "long caller deadline", "changed frozen input", "Python changed frozen input", "Python frozen arbitrary command", "Python frozen missing dependency", "Python frozen wrong toolchain", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "server legacy deadline", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
+	for _, scenario := range []string{"confirm stopped runtime", "long caller deadline", "Git subdirectory", "changed frozen input", "Python changed frozen input", "Python frozen arbitrary command", "Python frozen missing dependency", "Python frozen wrong toolchain", "complete failed baseline", "tool partial outcome", "tool rejects foreign dependency", "approved Python prerequisites", "Python missing dependency", "cancellation after creation", "Go profile dependency", "complete failed baseline local image IDs", "complete failed baseline registry named sha256", "mismatched local image ID", "mismatched local image ID task", "short local image ID", "terminal keepalive", "missing execd image", "writable server root", "server working directory", "server environment override", "server duplicate environment", "server ungrouped", "server legacy grouping image", "server legacy deadline", "ungrouped task", "foreign group egress", "privileged egress", "writable root", "stricter scratch limit", "unsupported managed volume", "oversized event", "incomplete outcome", "missing running status", "replaced missing container", "replaced logical binding", "unconfirmed termination"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			serverID, containerID, sidecarID := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
@@ -303,10 +303,16 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 						Timeout int      `json:"timeout"`
 					}
 					wantArgv := []string{"go", "test", "./...", "-count=1"}
+					wantCwd := "/workspace"
 					if scenario == "tool partial outcome" {
 						wantArgv = []string{"sh", "-c", "go test ./... -count=1"}
 					}
-					if json.NewDecoder(r.Body).Decode(&body) != nil || !reflect.DeepEqual(body.Argv, wantArgv) || body.Command != "" || body.Cwd != "/workspace" || body.UID != 65534 || body.GID != 65534 || r.Header.Get("X-EXECD-ACCESS-TOKEN") != "fixture-execd" {
+					if scenario == "Git subdirectory" {
+						wantArgv = []string{"git", "status", "--short"}
+						wantCwd = "/workspace/nested"
+					}
+					wantArgv = append([]string{"env", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace", "GIT_OPTIONAL_LOCKS=0"}, wantArgv...)
+					if json.NewDecoder(r.Body).Decode(&body) != nil || !reflect.DeepEqual(body.Argv, wantArgv) || body.Command != "" || body.Cwd != wantCwd || body.UID != 65534 || body.GID != 65534 || r.Header.Get("X-EXECD-ACCESS-TOKEN") != "fixture-execd" {
 						t.Error("command or execution identity changed across the API")
 						w.WriteHeader(http.StatusBadRequest)
 						return
@@ -502,6 +508,13 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				return
 			}
 			request := sandbox.Request{Workspace: root, WorkingDir: root, OperationID: strings.Repeat("7", 64), Program: "go", Args: []string{"test", "./...", "-count=1"}}
+			if scenario == "Git subdirectory" {
+				request.WorkingDir = filepath.Join(root, "nested")
+				if err := os.Mkdir(request.WorkingDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				request.Program, request.Args = "git", []string{"status", "--short"}
+			}
 			if scenario == "Go profile dependency" {
 				request.DependencyOperationID = strings.Repeat("8", 64)
 			}
@@ -607,7 +620,7 @@ func TestOpenSandboxRunnerReturnsCompleteCommandOutcomeAndStopsOwnedSandbox(t *t
 				}
 				return
 			}
-			if scenario != "long caller deadline" && scenario != "complete failed baseline" && scenario != "complete failed baseline local image IDs" && scenario != "complete failed baseline registry named sha256" && scenario != "terminal keepalive" {
+			if scenario != "Git subdirectory" && scenario != "long caller deadline" && scenario != "complete failed baseline" && scenario != "complete failed baseline local image IDs" && scenario != "complete failed baseline registry named sha256" && scenario != "terminal keepalive" {
 				wantExecuted, wantError := 1, sandbox.ErrSandboxOutcomeUnknown
 				wantDeleted := 1
 				if strings.HasPrefix(scenario, "replaced ") || scenario == "unsupported managed volume" {

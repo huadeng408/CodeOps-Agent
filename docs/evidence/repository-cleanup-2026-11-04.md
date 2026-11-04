@@ -28,6 +28,6 @@
 | `uv lock --offline --no-python-downloads --check` | 同步前exit1；官方更新及同步后检查exit0，只删除14行废弃依赖 |
 | 文档／归档／独立审查 | 当前链接目标无缺失；13/13原件hash匹配；Standards与Spec均GO，锁文件遗漏已修复，无未解决finding |
 
-命令、JUnit、Go JSON、原始RED及审查记录保留在 `.scratch/repository-cleanup-20261104/`。跳过项保留，不当作已运行；全套Go／Python／前端及Windows启动检查由本提交的源码CI执行，源码CI不代替产品或发布验收。
+命令、JUnit、Go JSON、原始RED及审查记录保留在 `.scratch/repository-cleanup-20261104/`。跳过项保留，不当作已运行；清理提交`26d3ff918c96333b1391c7f167589f6a8844c983`的[源码CI](https://github.com/huadeng408/CodeOps-Agent/actions/runs/41851323556)五项成功，覆盖完整Go／Python／前端及Windows启动检查，源码CI不代替产品或发布验收。
 
-续办仍从同一Session的第194项累计attempt3开始，见[真实断点](product-long-dialogue-checkpoint-2026-11-04.md)。旧193个合格项、202次实际Run、失败、取消、unknown与预留不改写；共享续跑判定和最后七项尚待完成。
+本次清理结束时的续办起点是同一Session第194项累计attempt3，见[当时断点](product-long-dialogue-checkpoint-2026-11-04.md)。后续已完成全部200项，见[最终累计结果](product-long-dialogue-final-2026-11-05.md)；当时193个合格项、202次实际Run及全部失败、取消、unknown与预留原样保留。

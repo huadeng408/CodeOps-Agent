@@ -254,6 +254,8 @@ func (r *OpenSandboxRunner) Run(ctx context.Context, request Request) (result Re
 			return result, errors.New("sandbox argv contains NUL")
 		}
 	}
+	// The read-only host mount is root-owned; trust only this invocation's workspace.
+	argv = append([]string{"env", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace", "GIT_OPTIONAL_LOCKS=0"}, argv...)
 	cwd := ""
 	if request.FrozenInput != nil {
 		cwd = "/run/codeops/input-" + request.OperationID

@@ -91,7 +91,8 @@ def test_compaction_preserves_anthropic_system_prefix_and_canonical_count():
     # A sourced system summary is history, not part of the runtime prefix.
     result = compact_surface(current, compactor=compactor, force=True)
     assert result.messages[:2] == prefix
-    assert len(result.updates) == 1
+    assert result.messages == current
+    assert result.updates == []
 
 
 def test_compaction_preserves_exact_canonical_sources_across_recompaction():
@@ -236,7 +237,8 @@ def test_canonical_summary_alone_fits_exact_budget_without_repeated_wrapping(can
 
     for _ in range(3):
         result = compact_surface(messages, compactor=compactor, force=True, harness_managed=True)
-        assert len(result.updates) == 1
+        assert result.updates == []
+        assert result.messages == messages
         assert result.messages[1].content == previous
         assert result.messages[-1] is original[-1]
         assert result.messages[1].source_events == original[1].source_events
@@ -253,7 +255,9 @@ def test_fallback_recompaction_preserves_prior_text_without_json_nesting(canonic
         result = compact_surface(
             messages, compactor=compactor, force=True, retain_ratio=0.1, harness_managed=True,
         )
-        assert len(result.updates) == 1
+        assert len(result.updates) == (1 if turn == 0 else 0)
+        if not result.updates:
+            assert result.messages == messages
         content = result.messages[1].content
         assert previous in content
         assert content.count(amendment) == 1

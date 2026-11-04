@@ -161,8 +161,18 @@ def compact_surface(
             ref for message in compactable for ref in message.source_events
         ))
         summary_message = ChatMessage(role="system", content=summary, source_events=source_events)
-        current = [*current[:selected_start], summary_message, *recent]
-        after_tokens = compactor.estimate_tokens(current)
+        proposed = [*current[:selected_start], summary_message, *recent]
+        after_tokens = compactor.estimate_tokens(proposed)
+        # Manual consolidation may change structure; pressure recovery must reduce it.
+        if proposed == current or (not force and after_tokens >= before_tokens):
+            if lifecycle_started:
+                record_event("compaction/end", {
+                    "status": "no_progress", "replaced_tokens": 0,
+                    "summary_tokens": compactor.estimate_tokens([summary_message]),
+                    "summary_mode": summary_mode, "provider": provider, "model": model,
+                })
+            break
+        current = proposed
         if record_event is not None:
             record_event("compaction/summary", {
                 "replaced_tokens": compactor.estimate_tokens(compactable),

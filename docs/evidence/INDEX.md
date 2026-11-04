@@ -6,7 +6,7 @@
 
 | 范围 | 入口 |
 | --- | --- |
-| 分段续跑与修复 | [193/200、最新失败与封存断点](product-long-dialogue-checkpoint-2026-11-04.md)、[原194项恢复](product-long-dialogue-fault194-2026-11-04.md) |
+| 分段续跑与修复 | [200项累计结果、质量缺口与修复](product-long-dialogue-final-2026-11-05.md)；先前[193项断点](product-long-dialogue-checkpoint-2026-11-04.md)、[原194项恢复](product-long-dialogue-fault194-2026-11-04.md)保留 |
 | Agent 对照实验 | [三组实验的完整实测结果](agent-evaluation-experiments-2026-11-03.md) |
 | 工程检查 | [验证入口](../engineering-verification.md)、[仓库整理与失败停止](repository-cleanup-2026-11-04.md)、[首阶段实测](engineering-execution-efficiency-2026-11-02.md) |
 | Context、准入与 Session 架构 | [Module 深化与范围验证](module-deepening-2026-10-22.md) |
