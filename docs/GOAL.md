@@ -1,69 +1,25 @@
-# CodeOps-Agent Goal
+# CodeOps-Agent 当前目标
 
-## 当前目标
+完成本机单用户 Windows 代码产品，继续同一 Session 的长对话与恢复专项，最终按各自范围验收全部已授权任务。
+工作约定见 [AGENTS.md](../AGENTS.md)，正式任务从[任务导航](refactor-tickets.md)进入。
 
-完成本机单用户 Windows 代码产品，并继续完成真实长对话、故障恢复和完整发布验收。
-正式规格为 [#1](https://github.com/huadeng408/CodeOps-Agent/issues/1)，
-任务入口见 [任务导航](refactor-tickets.md)，工作约定见 [AGENTS.md](../AGENTS.md)。
-
-- 保持 Go Harness 的授权、Session Ledger、隔离工作区、提案审批和进程生命周期边界。
-- 已交付能力的修改按自身范围回归；首批 milestone 的已验收范围见下方证据。
-- 模型调用在服务商已设置的 100,000,000-token 硬上限内推进；保留未知计量和原预留，
-  已结束调用的计量缺口不阻塞新的独立调用。
-- 新的真实运行或恢复段冻结源码、输入、模型／镜像 pin、前驱原生边界和完整场景分母；失败、重试和未运行项均保留。
-
-## 当前缺口
-
-| 范围 | 下一步与验收边界 |
+| 当前范围 | 真实状态与下一步 |
 | --- | --- |
-| [#42 工程执行提效](https://github.com/huadeng408/CodeOps-Agent/issues/42) | 首阶段证据见[候选读取与租约复核](evidence/evaluation-retained-candidate-2026-11-03.md)、[确定性摘要保留](evidence/compaction-summary-preservation-2026-11-03.md)和[启动回放、派发与 Artifact 修复](evidence/startup-recovery-replay-2026-11-03.md)。本轮只读锁等待、能力刷新和续办兼容修复按[各自验证范围](evidence/product-long-dialogue-resume-2026-11-03.md)交付；源码检查不代替产品或长期 SLA |
-| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | 同一Session已完成193/200；201个实际Run为193完成、7失败、1取消，12个已结束计量unknown及原预留保留。最新故障段已停止，原失败封存不改写；经过副本验证、独立审查和Go原库恢复，活动调用归零、任务槽释放，557项工具提交全部闭合。下一段从194项累计attempt2继续；绑定新源码CI／包与恢复证据后冻结新段，完整累计审计及最终200项仍须完成，见[194项故障与恢复边界](evidence/product-long-dialogue-fault194-2026-11-04.md) |
-| 故障恢复与 Memory | 在同一逻辑任务的后续执行段验证目标召回、续行和恢复；保留已验证前缀、历史失败与 unknown，未知副作用先对账。旧测试任务的启动围栏保持 |
-| 可选 [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 按用户要求暂缓；不作为本机开发或首批 milestone 的门禁 |
-| 完整发布 | 七条 lane 的真实运行证据与对应指标仍待齐备，完整发布范围为 BLOCKED；普通任务按声明范围分别交付 |
+| 仓库整理 | 已清理23个废弃函数、重复依赖和9份过期叙述；定向回归与双路审查通过，见[处理与验证记录](evidence/repository-cleanup-2026-11-04.md)。完整源码CI按提交单独记录 |
+| [#27 长对话](https://github.com/huadeng408/CodeOps-Agent/issues/27) | **193/200 合格；202 个实际 Run＝193 完成、8 失败、1 取消。** 最新段已正常停止并封存，活动调用为0、任务槽空，未知用量及原预留保留。修正共享续跑判定后，从第194项累计 attempt3继续；见[最新断点](evidence/product-long-dialogue-checkpoint-2026-11-04.md) |
+| 故障恢复与 Memory | 后续段核对目标召回、续行、完整工具结果和原前缀；未知副作用先对账。最终累计 Trace、语义、Memory 来源和完整200项仍待验收 |
+| [#20 Cloudflare](https://github.com/huadeng408/CodeOps-Agent/issues/20) | 用户暂缓；不作为本机开发或其他票的门禁 |
+| 完整发布 | [七条 lane](release-gate.md)的必需证据未齐，**完整发布范围 BLOCKED**；普通修复和单项任务按自身范围交付 |
 
-凭据、沙箱和外部服务在每次相关运行准备时核对，历史环境错误不作为当前事实。
-单测、集成、产品验证和发布分别记录，源码 CI 不代替产品或发布验收。
+后续执行段保持原 Session、已完成前缀、全部失败／重试和累计分母；冻结实际源码、配置、指令、模型／镜像 pin 及输入，已接受的请求只对账原 ID／Run。
+模型常规调用在已批准的提供方硬上限内推进；已结束的计量 unknown 不阻塞新的独立调用，原预留不清零。
+源码 CI、fixture 或阶段通过不代替真实产品／发布验收；当前服务可用性实际核对，不沿用历史环境 blocker。
 
 ## 证据链接
 
-- 三组 Agent 实测：[完整报告、来源和负结果](evidence/agent-evaluation-experiments-2026-11-03.md)；
-  #36 及五张子票已按小规模实验范围验收关闭，不替代独立长对话或发布门禁。
-- 模块深化：[原工程交付](evidence/module-deepening-2026-10-22.md)、
-  [#31 父规格逐项审计收口](https://github.com/huadeng408/CodeOps-Agent/issues/31#issuecomment-6591882364)；
-  按原source／unit／integration／deterministic fixture范围验收，不把历史收据当当前源码新运行。
-- 首批 Windows milestone：[父规格逐项审计](evidence/milestone-parent-acceptance-2026-10-21.md)、
-  [五类恢复与 Memory](evidence/milestone-v5-matrix-2026-10-19.md)、
-  [文件／兼容、许可包重开与 AC01–AC09](evidence/milestone-v5-compatibility-2026-10-19.md)。
-- 长对话及分段续跑：[v12 封存、规则修订与准备](evidence/product-long-dialogue-resume-2026-11-03.md)、
-  [193项及194项原Run恢复](evidence/product-long-dialogue-fault194-2026-11-04.md)、
-  [186项封存与源码修复](evidence/product-long-dialogue-repairs-2026-11-04.md)、
-  [v9 的首轮刷新及阶段核验](evidence/product-long-dialogue-v9-2026-10-22.md)、
-  [v8 的 0/200 失败与正常收尾](evidence/product-long-dialogue-v8-2026-10-22.md)、
-  [v7 阶段证据、完整失败分母与正常收尾](evidence/product-long-dialogue-v7-2026-10-21.md)、
-  [构建与冻结输入](evidence/product-long-dialogue-preparation-2026-10-21.md)。
-- 模型连接：[独立单请求的 HTTP 402、完整分母与正常收尾](evidence/provider-route-recovery-2026-10-22.md)。
-- 失败尝试与修复：[2026-10-21](evidence/product-long-dialogue-2026-10-21.md)、
-  [2026-10-20](evidence/product-long-dialogue-2026-10-20.md)。
-- 当前输入的压缩保留：[源码修复与离线复现](evidence/compaction-active-input-2026-10-20.md)。
-- 旧取消任务的模型准入：[已批准的实际封存与副本验证](evidence/canceled-model-admission-2026-10-21.md)。
-- 本轮丢失 Read 结果的取消任务：[严格封存边界与副本验证](evidence/canceled-file-read-admission-2026-10-21.md)。
-- 压缩后的 Memory：[真实写回与 Trace](evidence/memory-compaction-2026-10-20.md)、
-  [反思失败诊断](evidence/memory-reflection-diagnostics-2026-10-20.md)。
-- 浏览器重连：[真实双标签页与空闲重启](evidence/browser-reconnect-product-2026-10-19.md)。
-- 其他能力与历史运行：[按领域的证据导航](evidence/INDEX.md)。
-- 本轮指令与门禁整理：[变更范围](evidence/policy-cleanup-2026-10-20.md)。
-- 原始日志和旧结论：[归档索引](archive/INDEX.md)；只在追溯对应范围时读取。
+- [三组 Agent 对照实验](evidence/agent-evaluation-experiments-2026-11-03.md)：#36及五张子票按小规模真实实验范围验收，不代替长对话／发布。
+- [工程执行提效](evidence/engineering-execution-efficiency-2026-11-02.md)：#42首阶段已关闭，后续[只读锁、能力刷新与续办修复](evidence/product-long-dialogue-resume-2026-11-03.md)按各自范围交付。
+- [模块深化](evidence/module-deepening-2026-10-22.md)、[首批 Windows 产品](evidence/milestone-parent-acceptance-2026-10-21.md)：保留各自 source／unit／integration／runtime 证据边界。
+- 其他能力和历史负结果从[范围证据导航](evidence/INDEX.md)、[归档索引](archive/INDEX.md)按需读取；当前设计入口为 [DESIGN-MAP.md](DESIGN-MAP.md)。
 
-## 长期能力与发布目标
-
-| 专项 | 当前目标 |
-| --- | --- |
-| 可扩展 Agent Loop | 同等模块范围，以现有 2 天级基线对照插件接入达到数小时级；记录实际接入工时 |
-| 多 Agent／Workflow | 8 Worker、200 个长任务、30 次真实进程故障，恢复率至少 98.5%；checkpoint 为 Go Ledger 投影 |
-| Context／Memory | P0／P1／P2 按需加载；同任务、同模型、同预算对照，输入 token 降幅至少 60% 且质量不回退 |
-| Skills | 至少 40 个可运行 Skill，在锁定的 1,000 案例上至少 948 项正确 |
-| 官方代码评测 | 固定预算及官方 scorer；SWE 锁定 20 项至少 18 项通过，对照固定 8/20 基线 |
-| 其他产品验收 | 200 assistant-turn／compaction、浏览器 reconnect、CLI／HTTP／Git 恢复、多模态 RAG 和真实评测数据保留各自完整专项验收 |
-
-完整发布契约见 [release-gate.md](release-gate.md)。各专项不自动成为普通修复的前提。
+量化长期目标和发布验收以 [release-gate.md](release-gate.md)及正式专项票为准，避免在多个入口维护副本。

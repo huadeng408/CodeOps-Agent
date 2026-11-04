@@ -183,15 +183,6 @@ def _verify_context_event(event: ContextEvent) -> None:
         raise ValueError(f"context event checksum mismatch at sequence {event.sequence}")
 
 
-def _verify_context_event_chain(events: list[ContextEvent], anchor: str = "") -> None:
-    previous = anchor
-    for event in events:
-        _verify_context_event(event)
-        if event.event_id and event.previous_checksum != previous:
-            raise ValueError(f"context event chain mismatch at sequence {event.sequence}")
-        previous = event.checksum
-
-
 def _canonical_payload(
     event_id: str,
     kind: str,

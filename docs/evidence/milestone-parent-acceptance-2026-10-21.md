@@ -61,6 +61,6 @@ Workflow／Skills、token 对照、官方 scorer 及完整发布仍有各自完�
 #1 原文已将这些专项列为 Out of Scope，不追加为首批 milestone 的门禁。
 
 最新 180/200 失败、缺失工具结果、取消 unknown、任务槽和 Trace 缺口仍见
-[本轮产品记录](product-long-dialogue-2026-10-21.md)。本次未调用模型、未打开真实数据库，
+[本轮产品记录](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-21.md)。本次未调用模型、未打开真实数据库，
 未启动或删除 Docker 资源，未重跑产品源码的功能回归、真实产品或发布。
 后续文档 CI 仅验证本次交付；持续 goal 保持未完成。

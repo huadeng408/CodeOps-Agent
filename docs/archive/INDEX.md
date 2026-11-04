@@ -4,13 +4,29 @@ This tree is historical context, not an execution entry. New conversations read 
 
 Do not treat progress logs, HANDOFF notes, scorer JSON dumps or old design maps as current acceptance.
 
+## Execution cleanup — 2026-11-04
+
+Nine superseded evidence narratives moved byte-for-byte into
+[execution-cleanup-2026-11-04/evidence/](execution-cleanup-2026-11-04/evidence/):
+the 2026-10-31 Agent experiment log, seven early long-dialogue/preparation records,
+and the 2026-10-11 instruction-policy record whose design checker is retired.
+Four previous startup/navigation documents are also snapshotted in this packet.
+The [manifest](execution-cleanup-2026-11-04/manifest.json) maps every original
+source path to its archive path, byte size and SHA-256. Relative links in these
+unaltered originals retain their original source-path context. Git history also
+preserves the originals; frozen runtime profiles and receipts remain in place.
+
+Current progress is in [Goal](../GOAL.md) and the
+[latest checkpoint](../evidence/product-long-dialogue-checkpoint-2026-11-04.md).
+Default ripgrep searches omit this historical tree; open a named file directly
+or use `rg --no-ignore` when tracing one of these originals.
+
 ## Same-Session resumable amendment — 2026-11-03
 
 The following [Goal snapshot](resumable-2026-11-04/docs--GOAL.md) is also retained
 byte-for-byte with its [manifest](resumable-2026-11-04/manifest.json). Its planned
-continuation from124 is historical. The same logical workload has since reached
-186/200; current stopped-run failures and repair boundaries are recorded in the
-[2026-11-04 evidence](../evidence/product-long-dialogue-repairs-2026-11-04.md).
+continuation from124 is historical; current progress and stopped-run failures
+are recorded in the [latest checkpoint](../evidence/product-long-dialogue-checkpoint-2026-11-04.md).
 
 The previous [Goal](resumable-2026-11-03/docs--GOAL.md) is retained byte-for-byte;
 its [manifest](resumable-2026-11-03/manifest.json) records source and checksum.
@@ -25,7 +41,7 @@ The previous [Goal](agent-evaluation-2026-10-31/docs--GOAL.md) is retained byte-
 Its [manifest](agent-evaluation-2026-10-31/manifest.json) records the source commit and checksum.
 The historical statement that the original long-dialogue workload was running is not a live status check.
 Current state and the explicitly approved admission handoff are recorded in
-[the experiment evidence](../evidence/agent-evaluation-experiments-2026-10-31.md).
+[the experiment evidence](execution-cleanup-2026-11-04/evidence/agent-evaluation-experiments-2026-10-31.md).
 
 ## Policy and navigation cleanup — 2026-10-20
 

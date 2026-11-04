@@ -1,6 +1,6 @@
 # 独立模型连接验证：HTTP 402
 
-在 [v7 的 61/200 失败](product-long-dialogue-v7-2026-10-21.md)及
+在 [v7 的 61/200 失败](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-v7-2026-10-21.md)及
 [#29](https://github.com/huadeng408/CodeOps-Agent/issues/29) 的只读准入修复交付后，
 使用新便携包做了一次独立产品连接验证。**1 次计划请求、1 次失败、0 次完成**；
 前台及后台反思各返回一次 HTTP 402，用量和费用均未知。

@@ -1,7 +1,31 @@
+from types import SimpleNamespace
+
 import pytest
 
 from orchestrator.rag.ingestion import IngestionService
 from orchestrator.rag.models import ChunkRequestPayload, ParseResponsePayload
+
+
+@pytest.mark.asyncio
+async def test_ingestion_startup_and_text_chunk_need_no_legacy_tokenizer(monkeypatch) -> None:
+    import tiktoken
+
+    def unavailable(*_args, **_kwargs):
+        raise AssertionError("offline tokenizer data must not be requested at startup")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", unavailable)
+    service = IngestionService(SimpleNamespace(
+        request_timeout_seconds=1, embedding_dimensions=0,
+        embedding=SimpleNamespace(model="test", api_key="test-only", base_url="http://127.0.0.1:1/v1"),
+    ))
+    try:
+        response = await service.chunk(ChunkRequestPayload.model_validate({
+            "task": {"file_md5": "doc-1", "file_name": "guide.md", "user_id": 1, "stage": "chunk"},
+            "text": "# Guide\nOffline structured chunking works.",
+        }))
+        assert response.chunks and response.structuredChunks[0]["document_id"] == "doc-1"
+    finally:
+        await service.close()
 
 
 def test_pdf_parse_response_contains_elements_and_mineru_provenance() -> None:

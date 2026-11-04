@@ -135,15 +135,6 @@ def _sub_agent_worktree_name(request_id: str) -> str:
     return ("agent-" + request_id)[:64]
 
 
-def _explicit_create_file_intent(text: str) -> bool:
-    """Return true only for an explicit single-file creation instruction."""
-    value = str(text or "")
-    return bool(
-        re.search(r"\bcreate\s+file\b", value, re.IGNORECASE)
-        or re.search(r"创建文件", value)
-    )
-
-
 def _required_initial_tool_choice(text: str) -> dict[str, Any] | None:
     """Force SpawnAgent only for an explicit managed-worktree request.
 

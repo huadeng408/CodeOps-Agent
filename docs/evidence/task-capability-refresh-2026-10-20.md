@@ -31,7 +31,7 @@
   不自动结束、服务端拒绝、跨 Session 拒绝展示、额度耗尽后结束、重连及草稿／无重复发送。
   所有 fixture 均零付费模型调用，无 page error；它们不替代真实 Go/provider 产品证据。
 - `git diff --check` 通过。Go／Python 本机回归和真实 provider 回归未在这个前端范围内
-  重跑；上游 502／503 的独立 #27 结果见[原完整分母](product-long-dialogue-2026-10-19.md)。
+  重跑；上游 502／503 的独立 #27 结果见[原完整分母](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-19.md)。
   完整发布未运行，不据此把本修复标为 BLOCKED 或将其作为 #27 的新门禁。
 
 源码 SHA-256：`App.tsx` 为
@@ -48,7 +48,7 @@
 
 ## v10 实际入口补验
 
-后续[独立 #27 v10／v4 尝试](product-long-dialogue-2026-10-19.md)使用本修复源码
+后续[独立 #27 v10／v4 尝试](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-19.md)使用本修复源码
 `60b5b9b7` 和上述相同前端构建指纹。实际会话经历三轮答复、两次失败及后台尝试；
 所有调用停止后，实际断言结束按钮可见且启用，全程未手动检查能力。
 点击结束得到 HTTP 200，native ActiveCalls=0、TaskID 为空，用量及原预留

@@ -10,7 +10,6 @@ type recoveredScope struct {
 	Process scopeProcess `json:"process"`
 }
 
-func scopeHost() (string, error) { return safety.ProcessHost() }
 func currentScopeProcess() (*scopeProcess, error) {
 	process, err := safety.CurrentProcessIdentity()
 	return (*scopeProcess)(process), err

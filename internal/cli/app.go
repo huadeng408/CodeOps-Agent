@@ -887,19 +887,6 @@ func (a *App) applyAgentWorktreeTransition(ctx context.Context, tree worktree.Wo
 	return nil
 }
 
-func containsAgentWorktree(trees []session.WorktreeState, requestID string) bool {
-	requestID = strings.TrimSpace(requestID)
-	if requestID == "" {
-		return false
-	}
-	for _, tree := range trees {
-		if tree.RequestID == requestID && tree.Status == worktree.AgentWorktreeActive && tree.LeaseID != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func containsAgentWorktreeRequest(trees []session.WorktreeState, requestID string) bool {
 	for _, tree := range trees {
 		if tree.RequestID == strings.TrimSpace(requestID) {
@@ -2027,35 +2014,6 @@ func spillBytes(ref *tools.SpillRef) int64 {
 		return 0
 	}
 	return ref.Bytes
-}
-
-func formatToolProgress(progress *orchestrator.ToolProgress) string {
-	if progress == nil {
-		return ""
-	}
-	name := strings.TrimSpace(progress.ToolName)
-	if name == "" {
-		name = "tool"
-	}
-	position := ""
-	if progress.Total > 1 {
-		position = fmt.Sprintf(" %d/%d", progress.Index, progress.Total)
-	}
-	switch progress.Phase {
-	case "start":
-		return fmt.Sprintf("tool%s %s started", position, name)
-	case "finish":
-		status := fmt.Sprintf("tool%s %s finished exit=%d", position, name, progress.ExitCode)
-		if progress.Truncated {
-			status += " truncated=true"
-		}
-		if strings.TrimSpace(progress.Error) != "" {
-			status += " error=" + truncateForMetadata(progress.Error, 120)
-		}
-		return status
-	default:
-		return fmt.Sprintf("tool%s %s %s", position, name, strings.TrimSpace(progress.Phase))
-	}
 }
 
 func (a *App) recordToolWorkingDir(call orchestrator.ToolCall, result tools.ToolResult) {

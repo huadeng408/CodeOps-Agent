@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "source_commit": "2c29eee6a5e7d47c393ebb8a59e2ed4f57ea07cd",
+  "scope": "Historical originals; relative links retain their original source-path context. Current work starts at AGENTS.md and docs/GOAL.md.",
+  "originals": [
+    {
+      "action": "move",
+      "source": "docs/evidence/agent-evaluation-experiments-2026-10-31.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/agent-evaluation-experiments-2026-10-31.md",
+      "bytes": 36508,
+      "sha256": "390ae57ac039df2d9e604ee46e2ff425c6008069c1afdc1c0846b222e6dde779"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-2026-10-19.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-19.md",
+      "bytes": 15491,
+      "sha256": "cc551fbd89b5976f6f2ecad6e16d72e3eca4419f71da2a4adb02b267837ccb40"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-2026-10-20.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-20.md",
+      "bytes": 2923,
+      "sha256": "c18b2a367f6f148db1dbc6c7752c78dc5c3fb85498d253a7fde7395545e22a32"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-2026-10-21.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-21.md",
+      "bytes": 6775,
+      "sha256": "e967f46bb0920a92c1cebc4b40e95abb098979ee6097c3117a9645168f131c22"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-preparation-2026-10-21.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-preparation-2026-10-21.md",
+      "bytes": 4118,
+      "sha256": "c6542d5260fc6bb2d6fabda814cd1123617bbdd7f3face3856cb3935dfd42e55"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-v7-2026-10-21.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-v7-2026-10-21.md",
+      "bytes": 10701,
+      "sha256": "c09c5b844a8016ef1d8f5c490d71e7b882584d9d041a27ca827c5ba5f7768b0c"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-v8-2026-10-22.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-v8-2026-10-22.md",
+      "bytes": 4508,
+      "sha256": "f24da1287ecedb06b1a64fd1ae377b7907360067a5d67a156c0e571cdd3e368a"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/product-long-dialogue-v9-2026-10-22.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-v9-2026-10-22.md",
+      "bytes": 5424,
+      "sha256": "2248ff1f42e64f653838edb3a2d29e7a5b5583ca8612a055842e77adec6b289d"
+    },
+    {
+      "action": "move",
+      "source": "docs/evidence/instruction-policy-2026-10-11.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/evidence/instruction-policy-2026-10-11.md",
+      "bytes": 4646,
+      "sha256": "ce565f724fb32d3e52eedcd08ffc01d975675324e4344b1605ab138687359459"
+    },
+    {
+      "action": "snapshot",
+      "source": "AGENTS.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/root--AGENTS.md",
+      "bytes": 11724,
+      "sha256": "7d603aa20b495933f0bf6c641c18fd9f236ecdbe7703facd398654056db4b234"
+    },
+    {
+      "action": "snapshot",
+      "source": "docs/GOAL.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/docs--GOAL.md",
+      "bytes": 6656,
+      "sha256": "e0fec03ca531fa6418c47cf17bd5c2a2b3f7e331d5e20803bdffe6e9807c1334"
+    },
+    {
+      "action": "snapshot",
+      "source": "docs/refactor-tickets.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/docs--refactor-tickets.md",
+      "bytes": 5082,
+      "sha256": "2542613365215ad050c9dd0e448b01f79625c01a39c140001ab201bc12634d12"
+    },
+    {
+      "action": "snapshot",
+      "source": "docs/evidence/INDEX.md",
+      "archive": "docs/archive/execution-cleanup-2026-11-04/docs--evidence--INDEX.md",
+      "bytes": 3684,
+      "sha256": "fb0e618bd7b459e3848abd60a9ed68d81eac71a8467e4eb7a994f22de22cb692"
+    }
+  ]
+}

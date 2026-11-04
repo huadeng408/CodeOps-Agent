@@ -936,12 +936,6 @@ func failServerCall(server *Server, err error) error {
 	return &CallError{Kind: kind, OutcomeUnknown: true, Stopped: true, Cause: err}
 }
 
-func sendNotification(ctx context.Context, server *Server, method string, params any) error {
-	server.requestMu.Lock()
-	defer server.requestMu.Unlock()
-	return sendNotificationLocked(ctx, server, method, params)
-}
-
 func sendNotificationLocked(ctx context.Context, server *Server, method string, params any) error {
 	if server.stdin == nil {
 		return errors.New("mcp server stdio is not ready")

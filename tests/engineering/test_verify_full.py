@@ -71,9 +71,10 @@ def test_full_verification_executes_again_with_an_existing_matching_pass(tmp_pat
     result = subprocess.run([*command, "--run-id", "bad-source"], cwd=repository, env=environment, capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert result.returncode == 1, result.stdout + result.stderr
     failed = json.loads((output / "bad-source/summary.json").read_text(encoding="utf-8"))
-    assert failed["status"] == "FAIL" and failed["attempted_checks"] == 7
+    assert failed["status"] == "FAIL" and failed["attempted_checks"] == 5
+    assert failed["planned_checks"] == 7 and failed["not_run_checks"] == 2
     assert next(check for check in failed["checks"] if check["id"] == "python-compile")["state"] == "failed"
-    assert next(check for check in failed["checks"] if check["id"] == "diff-check")["state"] == "failed"
+    assert next(check for check in failed["checks"] if check["id"] == "diff-check")["state"] == "not_run"
     assert "eval/invalid_runtime.py" in (output / "bad-source/python-sources.txt").read_text(encoding="utf-8").splitlines()
 
 

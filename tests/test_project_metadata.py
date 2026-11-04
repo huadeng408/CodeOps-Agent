@@ -14,7 +14,6 @@ def test_rag_extra_declares_runtime_imports() -> None:
         "fastapi",
         "httpx",
         "langchain-openai",
-        "langchain-text-splitters",
         "pydantic",
         "typing-extensions",
         "uvicorn",

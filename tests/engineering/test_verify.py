@@ -173,19 +173,25 @@ def test_public_verification_keeps_missing_test_totals_unknown(tmp_path, reposit
     assert check["test_denominator"]["complete"] is False and check["test_denominator"]["total"] is None
 
 
-def test_public_verification_keeps_failed_exit_and_later_checks_and_rejects_overwrite(tmp_path, repository):
+@pytest.mark.parametrize("timeout", [False, True])
+def test_public_verification_stops_failed_plan_and_rejects_overwrite(tmp_path, repository, timeout):
     marker = tmp_path / "later.txt"
     plan = write_plan(tmp_path / "plan.json", [
-        {"id": "failure", "argv": [sys.executable, "-c", "import sys; print('known failure',file=sys.stderr); sys.exit(7)"]},
+        {"id": "failure", "argv": [sys.executable, "-c", "import time; time.sleep(120)" if timeout else "import sys; print('known failure',file=sys.stderr); sys.exit(7)"], "timeout_seconds": 1 if timeout else 10},
         {"id": "later", "argv": [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('done')", str(marker)]},
     ])
     output = tmp_path / "receipts"
     result = verification_command(repository, plan, output)
-    assert result.returncode == 1, result.stderr
+    assert result.returncode == (3 if timeout else 1), result.stderr
     receipt = json.loads((output / "target/summary.json").read_text(encoding="utf-8"))
-    assert receipt["planned_checks"] == receipt["attempted_checks"] == 2
-    assert receipt["failed_checks"] == receipt["passed_checks"] == 1 and receipt["not_run_checks"] == 0
-    assert receipt["checks"][0]["exit_code"] == 7 and marker.exists()
+    assert receipt["planned_checks"] == 2 and receipt["attempted_checks"] == 1
+    assert receipt["passed_checks"] == 0 and receipt["not_run_checks"] == 1
+    assert receipt["checks"][0]["process_tree_stop_confirmed"] is True
+    assert receipt["checks"][0]["state"] == ("timed_out" if timeout else "failed")
+    if not timeout:
+        assert receipt["checks"][0]["exit_code"] == 7 and receipt["failed_checks"] == 1
+    assert receipt["checks"][1]["state"] == "not_run" and not marker.exists()
+    assert receipt["checks"][1]["not_run_reason"] == "previous_check_failed"
     before = {path.relative_to(output): path.read_bytes() for path in (output / "target").rglob("*") if path.is_file()}
     again = verification_command(repository, plan, output)
     assert again.returncode == 2

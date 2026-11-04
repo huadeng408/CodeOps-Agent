@@ -8,7 +8,7 @@
 
 ## 行为与安全边界
 
-本轮原始尝试仍为 [180/200、未通过](product-long-dialogue-2026-10-21.md)。
+本轮原始尝试仍为 [180/200、未通过](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-2026-10-21.md)。
 两个已派发的内置普通文件 Read 丢失原生结果，保留 `tool/unknown` 和取消 unknown；
 不补造结果、停止证明或计量，不修改原 Session，不重放工具或模型。
 
@@ -87,4 +87,4 @@ checksum 为 `b48cf94e9fc17fdf21ee2221701b6545d5f6804272d9c0e80a7fef6aff21aca1`�
 本机实际收据为 `.scratch/readonly-admission-retirement-20261021/live-retirement-receipt.json`，
 SHA-256 为 `ddd17aa8a8f82a7474e01d909f7cce0b09b6e72aab6e7ae863491c91f20d8345`；
 逐列核对及退出码见同目录 `live-retirement-audit.json`，独立 200 轮准备见
-[新运行准备](product-long-dialogue-preparation-2026-10-21.md)。
+[新运行准备](../archive/execution-cleanup-2026-11-04/evidence/product-long-dialogue-preparation-2026-10-21.md)。

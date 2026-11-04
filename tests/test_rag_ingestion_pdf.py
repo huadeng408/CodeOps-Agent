@@ -6,7 +6,26 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.rag.ingestion import IngestionService
-from orchestrator.rag.models import ParseRequestPayload
+from orchestrator.rag.models import ParseRequestPayload, ParseResponsePayload
+
+
+@pytest.mark.asyncio
+async def test_pdf_parse_removes_page_labels_without_changing_element_provenance(monkeypatch) -> None:
+    artifact = ParseResponsePayload(parsedText="alpha\n第 12 页\nbeta\nPage 13\ngamma", parserName="mineru", parserVersion="3.4.4")
+
+    async def parsed(*_args):
+        return artifact
+
+    monkeypatch.setattr("orchestrator.rag.ingestion._parse_pdf_with_mineru", parsed)
+    service = IngestionService.__new__(IngestionService)
+    service._http = _SourceOnlyHTTP(b"%PDF-1.7")
+    service._settings = SimpleNamespace()
+    result = await service.parse(ParseRequestPayload.model_validate({
+        "task": {"file_md5": "doc", "file_name": "guide.pdf", "user_id": 1, "stage": "parse"},
+        "objectUrl": "http://source.invalid/guide.pdf",
+    }))
+    assert result.parsedText == "alpha\nbeta\ngamma"
+    assert result.parserName == artifact.parserName and result.elements == artifact.elements
 
 
 class _Response:

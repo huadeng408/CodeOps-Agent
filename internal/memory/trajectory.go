@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"code-agent/internal/session"
 )
@@ -706,15 +705,6 @@ func safeTrajectoryText(value string) string {
 		value = string([]rune(value)[:477]) + "..."
 	}
 	return value
-}
-
-func boundTrajectoryText(value string, maximum int) string {
-	value = strings.TrimSpace(value)
-	if utf8.RuneCountInString(value) <= maximum {
-		return value
-	}
-	runes := []rune(value)
-	return strings.TrimSpace(string(runes[:maximum-3])) + "..."
 }
 
 func checksumTrajectory(trajectory SessionTrajectory) string {

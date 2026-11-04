@@ -517,6 +517,10 @@ def main(argv: list[str] | None = None) -> int:
                     if records[index]["process_tree_stop_confirmed"] is not True:
                         receipt["errors"].append("process_tree_stop_unconfirmed")
                         break
+                    if records[index]["state"] not in {"passed", "reused"}:
+                        for remaining in records[index + 1:]:
+                            remaining["not_run_reason"] = "previous_check_failed"
+                        break
                 inputs["source_pin_after"] = source_pin(root)
                 if inputs["source_pin_before"] != inputs["source_pin_after"]:
                     receipt["errors"].append("source_changed_during_checks")
@@ -533,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt["failed_checks"] = sum(check["state"] == "failed" for check in records)
         receipt["not_run_checks"] = sum(check["state"] == "not_run" for check in records)
         receipt["finished_utc"] = _utc()
-        if not receipt["errors"] and all(check["state"] in {"passed", "failed", "reused"} for check in records):
+        if not receipt["errors"] and all(check["state"] in {"passed", "failed", "reused", "not_run"} for check in records):
             receipt["status"] = "PASS" if all(check["state"] in {"passed", "reused"} for check in records) else "FAIL"
         artifact.write_summary(receipt)
         artifact.write_checksums()

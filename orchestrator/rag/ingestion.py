@@ -12,18 +12,11 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
 
 import httpx
-from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
-    RecursiveCharacterTextSplitter,
-)
 
 from .chunking import chunk_elements, chunk_elements_for_modality
 from .config import Settings
@@ -43,10 +36,6 @@ from .models import (
 from .native_documents import parse_docx_bytes, parse_pptx_bytes
 from .spreadsheet import parse_xlsx_bytes
 from .trace import current_trace_id, elapsed_ms, log_request
-
-TOKEN_CHUNK_SIZE = 500
-TOKEN_CHUNK_OVERLAP = 50
-
 
 def _task_document_id(task: FileProcessingTaskPayload) -> str:
     return task.document_id.strip() or task.file_md5
@@ -69,7 +58,6 @@ class IngestionService:
         fallback_kwargs = dict(embedding_kwargs)
         fallback_kwargs.pop("dimensions", None)
         self._embeddings_without_dimensions = OpenAIEmbeddings(**fallback_kwargs)
-        _warm_splitter_cache()
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -721,22 +709,6 @@ def _is_lower_sha256(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
-@lru_cache(maxsize=8)
-def _build_token_splitter(*, separators: tuple[str, ...]) -> RecursiveCharacterTextSplitter:
-    return RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=TOKEN_CHUNK_SIZE,
-        chunk_overlap=TOKEN_CHUNK_OVERLAP,
-        separators=list(separators),
-    )
-
-
-def _warm_splitter_cache() -> None:
-    _build_token_splitter(separators=("\n\n", "\n", "?", "?", "?", ".", " ", ""))
-    _build_token_splitter(separators=("\n## ", "\n### ", "\n#### ", "\n\n", "\n", "```", " ", ""))
-    _build_token_splitter(separators=("\n\n", "\n", "?", "?", "?", " ", ""))
-    _build_token_splitter(separators=("\n\n", "\n", " | ", " ", ""))
-
-
 def _text_to_elements(text: str, *, document_id: str) -> list[Element]:
     """Convert plain text (Markdown/reST) into structured Elements.
 
@@ -785,89 +757,6 @@ def _text_to_elements(text: str, *, document_id: str) -> list[Element]:
     return elements
 
 
-def _base_metadata(file_md5: str, file_name: str) -> dict[str, str]:
-    return {
-        "file_md5": file_md5,
-        "file_name": file_name,
-    }
-
-
-def _split_documents_by_type(text: str, file_md5: str, file_name: str, file_type: str) -> list[Document]:
-    metadata = _base_metadata(file_md5, file_name)
-    if not text.strip():
-        return []
-
-    if file_type == "markdown":
-        return _chunk_markdown(text, metadata)
-    if file_type == "pdf":
-        return _chunk_pdf(text, metadata)
-    if file_type == "excel":
-        return _chunk_excel(text, metadata)
-    return _chunk_default(text, metadata)
-
-
-def _chunk_default(text: str, metadata: dict[str, str]) -> list[Document]:
-    separators = ("\n\n", "\n", "?", "?", "?", ".", " ", "")
-    splitter = _build_token_splitter(separators=separators)
-    return splitter.split_documents([Document(page_content=text, metadata=metadata)])
-
-
-def _chunk_markdown(text: str, metadata: dict[str, str]) -> list[Document]:
-    headers_to_split_on = [
-        ("#", "h1"),
-        ("##", "h2"),
-        ("###", "h3"),
-        ("####", "h4"),
-    ]
-    header_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)
-    sections = header_splitter.split_text(text)
-    if not sections:
-        sections = [Document(page_content=text, metadata={})]
-
-    separators = ("\n## ", "\n### ", "\n#### ", "\n\n", "\n", "```", " ", "")
-    splitter = _build_token_splitter(separators=separators)
-    docs: list[Document] = []
-    for section in sections:
-        merged_metadata = dict(metadata)
-        merged_metadata.update({str(k): str(v) for k, v in section.metadata.items()})
-        docs.extend(splitter.split_documents([Document(page_content=section.page_content, metadata=merged_metadata)]))
-    return docs
-
-
-def _chunk_pdf(text: str, metadata: dict[str, str]) -> list[Document]:
-    pages = _split_pdf_pages(text)
-    cleaned_pages = _remove_pdf_repeated_headers_and_footers(pages)
-    separators = ("\n\n", "\n", "?", "?", "?", " ", "")
-    splitter = _build_token_splitter(separators=separators)
-    docs: list[Document] = []
-    if not cleaned_pages:
-        return []
-
-    for idx, page in enumerate(cleaned_pages, start=1):
-        if not page.strip():
-            continue
-        page_metadata = dict(metadata)
-        page_metadata["page"] = str(idx)
-        docs.extend(splitter.split_documents([Document(page_content=page, metadata=page_metadata)]))
-    return docs
-
-
-def _chunk_excel(text: str, metadata: dict[str, str]) -> list[Document]:
-    sections = _build_excel_sections(text)
-    splitter = _build_token_splitter(separators=("\n\n", "\n", " | ", " ", ""))
-    docs: list[Document] = []
-    if not sections:
-        sections = [text]
-
-    for idx, section in enumerate(sections, start=1):
-        if not section.strip():
-            continue
-        section_metadata = dict(metadata)
-        section_metadata["section"] = str(idx)
-        docs.extend(splitter.split_documents([Document(page_content=section, metadata=section_metadata)]))
-    return docs
-
-
 def _clean_parsed_text(text: str, file_name: str) -> str:
     file_type = _detect_file_type(file_name)
     cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -903,7 +792,7 @@ def _clean_markdown_text(text: str) -> str:
 def _clean_pdf_text(text: str) -> str:
     text = text.replace("\f", "\n\f\n")
     text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"\n\s*(缁楃悵s*\d+\s*妞ょpage\s*\d+|[0-9]+/[0-9]+)\s*\n", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"\n\s*(?:第\s*\d+\s*页|page\s*\d+|[0-9]+/[0-9]+)\s*\n", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
@@ -919,87 +808,6 @@ def _clean_excel_text(text: str) -> str:
             continue
         normalized_lines.append(line)
     return "\n".join(normalized_lines)
-
-
-def _split_pdf_pages(text: str) -> list[str]:
-    if "\f" not in text:
-        return [text]
-    return [page.strip() for page in re.split(r"\f+", text) if page.strip()]
-
-
-def _remove_pdf_repeated_headers_and_footers(pages: list[str]) -> list[str]:
-    if len(pages) < 2:
-        return pages
-
-    header_candidates: Counter[str] = Counter()
-    footer_candidates: Counter[str] = Counter()
-    per_page_lines: list[list[str]] = []
-
-    for page in pages:
-        lines = [line.strip() for line in page.splitlines() if line.strip()]
-        per_page_lines.append(lines)
-        for line in lines[:2]:
-            if _looks_like_short_repeating_line(line):
-                header_candidates[line] += 1
-        for line in lines[-2:]:
-            if _looks_like_short_repeating_line(line):
-                footer_candidates[line] += 1
-
-    repeated_headers = {line for line, count in header_candidates.items() if count >= 2}
-    repeated_footers = {line for line, count in footer_candidates.items() if count >= 2}
-
-    cleaned_pages: list[str] = []
-    for lines in per_page_lines:
-        trimmed = list(lines)
-        while trimmed and trimmed[0] in repeated_headers:
-            trimmed.pop(0)
-        while trimmed and trimmed[-1] in repeated_footers:
-            trimmed.pop()
-        cleaned_pages.append("\n".join(trimmed).strip())
-    return cleaned_pages
-
-
-def _looks_like_short_repeating_line(line: str) -> bool:
-    if len(line) > 80:
-        return False
-    if any(token in line for token in ("。", "！", "？", ".", "!", "?", ";", ":")):
-        return False
-    if re.fullmatch(r"(第\s*\d+\s*页|page\s*\d+|[0-9]+/[0-9]+|[0-9]+)", line, flags=re.IGNORECASE):
-        return True
-    return len(line.split()) <= 8
-
-
-def _build_excel_sections(text: str) -> list[str]:
-    sections: list[str] = []
-    current_rows: list[str] = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            if current_rows:
-                sections.append("\n".join(current_rows))
-                current_rows = []
-            continue
-
-        if _looks_like_excel_sheet_header(line) and current_rows:
-            sections.append("\n".join(current_rows))
-            current_rows = [line]
-            continue
-
-        current_rows.append(line)
-        if len(current_rows) >= 40:
-            sections.append("\n".join(current_rows))
-            current_rows = []
-
-    if current_rows:
-        sections.append("\n".join(current_rows))
-
-    return sections
-
-
-def _looks_like_excel_sheet_header(line: str) -> bool:
-    lower_line = line.lower()
-    return lower_line.startswith(("sheet", "工作表")) or lower_line.endswith(":")
 
 
 def _is_dimension_mismatch_error(exc: Exception) -> bool:
