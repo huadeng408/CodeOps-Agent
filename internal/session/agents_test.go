@@ -268,8 +268,8 @@ func TestIndependentAgentArtifactReplayAtCapacity(t *testing.T) {
 		t.Fatalf("completed child run unavailable: %v", err)
 	}
 	// Materialize the terminal report before filling the remaining capacity.
-	runner.completeAgentTurn(context.Background(), runKey{sessionID: task.ChildSessionId, runID: view.Run.RunID})
-	task, _, err = runner.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
+	runner.tasks.completeAgentTurn(context.Background(), runKey{sessionID: task.ChildSessionId, runID: view.Run.RunID})
+	task, _, err = runner.tasks.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestIndependentAgentArtifactReplayAtCapacity(t *testing.T) {
 			t.Fatalf("publish #%d: %+v", i, last)
 		}
 	}
-	before, _, err := runner.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
+	before, _, err := runner.tasks.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestIndependentAgentArtifactReplayAtCapacity(t *testing.T) {
 	if result.ExitCode == 0 {
 		t.Fatal("new artifact must still respect capacity")
 	}
-	after, _, err := runner.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
+	after, _, err := runner.tasks.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
 	if err != nil || len(after.Artifacts) != 16 || after.Revision != before.Revision {
 		t.Fatalf("replay changed durable task: %s, %v", after, err)
 	}
@@ -351,7 +351,7 @@ func TestIndependentAgentConcurrentArtifactsRespectCapacity(t *testing.T) {
 			accepted++
 		}
 	}
-	final, _, err := runner.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
+	final, _, err := runner.tasks.readAgentTask(context.Background(), 7, task.Id, actor.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,10 +445,10 @@ func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
 	t.Run("completed workspace is retained", func(t *testing.T) {
 		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
 		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
-		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+		runner.tasks.workspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
 			return t.TempDir(), nil
 		}
-		runner.options.AgentLifecycle = recorder.handle
+		runner.tasks.lifecycle = recorder.handle
 
 		task := agentTestCall(t, runner, actor, "complete-workspace", "SpawnAgent", `{"kind":"general","title":"complete","objective":"finish"}`)
 		if task.Status != "completed" {
@@ -466,10 +466,10 @@ func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
 		runner, _, actor := agentTestRunner(t, fixture)
 		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
 		workspace := t.TempDir()
-		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+		runner.tasks.workspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
 			return workspace, nil
 		}
-		runner.options.AgentLifecycle = recorder.handle
+		runner.tasks.lifecycle = recorder.handle
 
 		task := agentTestCall(t, runner, actor, "failed-workspace", "SpawnAgent", `{"kind":"general","title":"fail","objective":"fail"}`)
 		if task.Status != "failed" {
@@ -494,10 +494,10 @@ func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
 	t.Run("canceled workspace is released", func(t *testing.T) {
 		runner, _, actor := agentTestRunner(t, &independentAgentFixture{mode: "input"})
 		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
-		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+		runner.tasks.workspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
 			return t.TempDir(), nil
 		}
-		runner.options.AgentLifecycle = recorder.handle
+		runner.tasks.lifecycle = recorder.handle
 
 		task := agentTestCall(t, runner, actor, "cancel-workspace", "SpawnAgent", `{"kind":"general","title":"cancel","objective":"ask first"}`)
 		if task.Status != "input_required" {
@@ -511,11 +511,11 @@ func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
 		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
 		recorder := &agentLifecycleRecorder{notified: make(chan struct{}, 8)}
 		allocations := 0
-		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+		runner.tasks.workspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
 			allocations++
 			return t.TempDir(), nil
 		}
-		runner.options.AgentLifecycle = recorder.handle
+		runner.tasks.lifecycle = recorder.handle
 
 		result := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
 			ID: "invalid-assignment", Name: "SpawnAgent",
@@ -536,11 +536,11 @@ func TestIndependentAgentManagedWorkspaceLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		allocations := 0
-		runner.options.AgentWorkspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
+		runner.tasks.workspace = func(_ context.Context, _ AgentWorkspaceRequest) (string, error) {
 			allocations++
 			return filepath.Join(view.WorkingDir, "missing-worktree"), nil
 		}
-		runner.options.AgentLifecycle = recorder.handle
+		runner.tasks.lifecycle = recorder.handle
 
 		result := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
 			ID: "post-allocation-failure", Name: "SpawnAgent",
@@ -619,10 +619,10 @@ func TestIndependentAgentCancellationPersistsCanceledRun(t *testing.T) {
 func TestIndependentAgentRequiresExplicitRegisteredExternalTool(t *testing.T) {
 	fixture := &independentAgentFixture{}
 	runner, _, actor := agentTestRunner(t, fixture)
-	runner.options.AgentWorkspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
+	runner.tasks.workspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
 		return request.ParentWorkingDir, nil
 	}
-	runner.options.AgentToolBinding = func(name string) (AgentToolBinding, bool) {
+	runner.tasks.toolBinding = func(name string) (AgentToolBinding, bool) {
 		return AgentToolBinding{Name: name, Server: "fixture", InputSchemaSHA256: strings.Repeat("a", 64), ServerConfigSHA256: strings.Repeat("c", 64)}, name == "e2e_echo"
 	}
 
@@ -653,11 +653,11 @@ func TestIndependentAgentRequiresExplicitRegisteredExternalTool(t *testing.T) {
 func TestIndependentAgentPinsAndRevalidatesExternalToolBinding(t *testing.T) {
 	fixture := &independentAgentFixture{mode: "external"}
 	runner, _, actor := agentTestRunner(t, fixture)
-	runner.options.AgentWorkspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
+	runner.tasks.workspace = func(_ context.Context, request AgentWorkspaceRequest) (string, error) {
 		return request.ParentWorkingDir, nil
 	}
 	calls := 0
-	runner.options.AgentToolBinding = func(name string) (AgentToolBinding, bool) {
+	runner.tasks.toolBinding = func(name string) (AgentToolBinding, bool) {
 		calls++
 		configChecksum := strings.Repeat("c", 64)
 		if calls > 1 {

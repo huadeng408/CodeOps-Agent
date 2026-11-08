@@ -204,7 +204,7 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 		return
 	}
 	childCtx, stopChildren := context.WithTimeout(context.Background(), 30*time.Second)
-	if r.stopLinkedAgents(childCtx, key.sessionID, projectionOwner(snapshot.Events), run.cancelRequest.RequestID, map[string]bool{}) != nil {
+	if r.tasks.stopLinkedAgents(childCtx, key.sessionID, projectionOwner(snapshot.Events), run.cancelRequest.RequestID, map[string]bool{}) != nil {
 		state = "unknown"
 	}
 	stopChildren()
@@ -219,23 +219,11 @@ func (r *SessionRunner) finishCancellation(key runKey) {
 			state = "unknown"
 		}
 	}
-	task, _, taskErr := projectAgentTask(snapshot.Events)
-	if taskErr != nil {
+	taskCtx, stopTask := context.WithTimeout(context.Background(), 5*time.Second)
+	if r.tasks.cancelRunTask(taskCtx, snapshot.Events, run.cancelRequest.RequestID) != nil {
 		state = "unknown"
-	} else if task != nil {
-		ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		if task.Status != "canceled" {
-			taskErr = r.appendAgentFact(ctx, key.sessionID, "agent/task-canceled", agentTaskMutation{RequestID: "run-cancel:" + run.cancelRequest.RequestID}, agentMutationExists("agent/task-canceled", "run-cancel:"+run.cancelRequest.RequestID))
-		}
-		if taskErr == nil {
-			task.Status = "canceled"
-			taskErr = r.reconcileAgentWorkspaceLifecycle(ctx, task)
-		}
-		stop()
-		if taskErr != nil {
-			state = "unknown"
-		}
 	}
+	stopTask()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.closeCanceledApprovals(ctx, key, run.leaseID); err != nil {
@@ -334,119 +322,4 @@ func unconfirmedToolStops(events []Event) bool {
 		}
 	}
 	return false
-}
-
-func (r *SessionRunner) stopLinkedAgents(ctx context.Context, parent string, owner uint, requestID string, seen map[string]bool) error {
-	children := map[string][]runKey{}
-	var stopErrors []error
-	stopErrors = append(stopErrors, r.fenceLinkedAgents(ctx, parent, owner, requestID, seen, children))
-	for childID, keys := range children {
-		r.agentMu.Lock()
-		stopping := []*runExecution{}
-		for key, execution := range r.activeAgentRuns {
-			if key.sessionID == childID {
-				execution.stop()
-				stopping = append(stopping, execution)
-			}
-		}
-		r.agentMu.Unlock()
-		for _, execution := range stopping {
-			select {
-			case <-execution.done:
-			case <-ctx.Done():
-				stopErrors = append(stopErrors, ctx.Err())
-			}
-		}
-		child, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, childID)
-		if err != nil {
-			stopErrors = append(stopErrors, err)
-			continue
-		}
-		runs, err := projectRuns(child.Events)
-		if err != nil {
-			stopErrors = append(stopErrors, err)
-			continue
-		}
-		for _, key := range keys {
-			if run := runs[key.runID]; !run.terminal && run.view.Attempt == 0 {
-				r.finishCancellation(key)
-			}
-		}
-		child, err = ReadVerifiedSnapshot(ctx, r.workbench.ledger, childID)
-		if err != nil {
-			stopErrors = append(stopErrors, err)
-			continue
-		}
-		runs, err = projectRuns(child.Events)
-		if err != nil {
-			stopErrors = append(stopErrors, err)
-			continue
-		}
-		for _, run := range runs {
-			if !run.terminal || run.view.CancellationState == "unknown" {
-				stopErrors = append(stopErrors, errors.New("linked agent resource stop unconfirmed"))
-			}
-		}
-		if unconfirmedToolStops(child.Events) {
-			stopErrors = append(stopErrors, errors.New("linked agent tool stop unconfirmed"))
-		}
-	}
-	return errors.Join(stopErrors...)
-}
-
-func (r *SessionRunner) fenceLinkedAgents(ctx context.Context, parent string, owner uint, requestID string, seen map[string]bool, children map[string][]runKey) error {
-	if seen[parent] {
-		return ErrEventIntegrity
-	}
-	seen[parent] = true
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, parent)
-	if err != nil {
-		return err
-	}
-	var stopErrors []error
-	for _, event := range snapshot.Events {
-		if event.Type != "agent/task-linked" {
-			continue
-		}
-		stopErr := func() error {
-			var link agentTaskLink
-			if json.Unmarshal(event.Payload, &link) != nil {
-				return ErrEventIntegrity
-			}
-			task, created, err := r.readAgentTask(ctx, owner, link.TaskID, parent)
-			if err != nil {
-				return err
-			}
-			child, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
-			if err != nil {
-				return err
-			}
-			runs, err := projectRuns(child.Events)
-			if err != nil {
-				return err
-			}
-			children[task.ChildSessionId] = nil
-			for id, run := range runs {
-				if !run.terminal {
-					if _, err := r.requestRunCancellation(ctx, CancelRunCommand{RequestID: "root-cancel:" + requestID + ":" + id, SessionID: task.ChildSessionId, RunID: id, OwnerID: owner, Actor: created.Actor}); err != nil {
-						return err
-					}
-					key := runKey{sessionID: task.ChildSessionId, runID: id}
-					children[task.ChildSessionId] = append(children[task.ChildSessionId], key)
-					r.workbench.signal(task.ChildSessionId)
-					if !r.interruptRun(key) {
-						r.enqueue(ctx, key, time.Time{})
-					}
-				}
-			}
-			if len(children[task.ChildSessionId]) == 0 && !taskTerminal(task.Status) {
-				if err := r.cancelAgentTask(ctx, task, "root-cancel:"+requestID); err != nil {
-					return err
-				}
-			}
-			return r.fenceLinkedAgents(ctx, task.ChildSessionId, owner, requestID, seen, children)
-		}()
-		stopErrors = append(stopErrors, stopErr)
-	}
-	return errors.Join(stopErrors...)
 }

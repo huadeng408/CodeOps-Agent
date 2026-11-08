@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	pb "code-agent/gen/codeagentpb"
@@ -22,6 +23,37 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
+
+type subagentRunScheduler interface {
+	SubmitMessage(context.Context, SubmitMessageCommand) (RunView, error)
+	CancelRun(context.Context, CancelRunCommand) (RunView, error)
+	sessionRunDone(string) <-chan struct{}
+	stopSessionRuns(context.Context, string) error
+	finishCancellation(runKey)
+	cancelLinkedRun(context.Context, CancelRunCommand) error
+	releaseSessionResources(string)
+}
+
+// subagentTasks owns child-task policy and facts; runs supplies execution scheduling.
+type subagentTasks struct {
+	workbench         *Workbench
+	runs              subagentRunScheduler
+	workspace         func(context.Context, AgentWorkspaceRequest) (string, error)
+	readOnlyWorkspace func(context.Context, identity.Actor, string, orchestrator.ToolCall) (TaskModelWorkspace, error)
+	toolBinding       func(string) (AgentToolBinding, bool)
+	lifecycle         orchestrator.AgentLifecycleHandler
+	tracer            genai.Tracer
+	// Serialize workspace callback-plus-acknowledgement across terminal observers.
+	lifecycleMu sync.Mutex
+}
+
+func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Actor, parentSessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
+	return r.tasks.execute(ctx, actor, parentSessionID, call)
+}
+
+func (r *SessionRunner) DecideAgentToolApproval(ctx context.Context, actor identity.Actor, taskID string, command ToolApprovalDecisionCommand) (EventView, error) {
+	return r.tasks.decideApproval(ctx, actor, taskID, command)
+}
 
 type AgentWorkspaceRequest struct {
 	TaskID           string
@@ -116,8 +148,8 @@ func agentTool(name string) bool {
 	return name == "SpawnAgent" || name == "AgentTask" || name == "PublishArtifact"
 }
 
-func (r *SessionRunner) agentCard(kind string) (*pb.AgentCard, []string, error) {
-	if r.options.ReadOnlyAgentWorkspace == nil {
+func (tasks *subagentTasks) agentCard(kind string) (*pb.AgentCard, []string, error) {
+	if tasks.readOnlyWorkspace == nil {
 		return agentCard(kind)
 	}
 	if kind != "explore" {
@@ -186,9 +218,9 @@ func agentParent(events []Event, actor identity.Actor) (uint, string, error) {
 
 // ExecuteAgentTool accepts only the actor already authenticated by the parent
 // Harness invocation. Neither owner IDs nor child histories come from the model.
-func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Actor, parentSessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
+func (tasks *subagentTasks) execute(ctx context.Context, actor identity.Actor, parentSessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
 	result := orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, ExitCode: 1}
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, parentSessionID)
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, parentSessionID)
 	if err != nil {
 		result.Error = "agent parent ledger unavailable"
 		return result
@@ -198,8 +230,8 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 		result.Error = "agent parent authorization rejected"
 		return result
 	}
-	if r.options.ReadOnlyAgentWorkspace != nil {
-		workspace, err := r.options.ReadOnlyAgentWorkspace(ctx, actor, parentSessionID, call)
+	if tasks.readOnlyWorkspace != nil {
+		workspace, err := tasks.readOnlyWorkspace(ctx, actor, parentSessionID, call)
 		if err != nil {
 			result.Error = "read-only agent workspace admission rejected"
 			return result
@@ -209,11 +241,11 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 	var output string
 	switch call.Name {
 	case "SpawnAgent":
-		output, err = r.spawnTask(ctx, owner, actor, workingDir, call)
+		output, err = tasks.spawnTask(ctx, owner, actor, workingDir, call)
 	case "AgentTask":
-		output, err = r.controlTask(ctx, owner, actor, call)
+		output, err = tasks.controlTask(ctx, owner, actor, call)
 	case "PublishArtifact":
-		output, err = r.publishArtifact(ctx, owner, actor, call)
+		output, err = tasks.publishArtifact(ctx, owner, actor, call)
 	default:
 		err = errors.New("unknown agent tool")
 	}
@@ -225,7 +257,7 @@ func (r *SessionRunner) ExecuteAgentTool(ctx context.Context, actor identity.Act
 	return result
 }
 
-func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identity.Actor, parentDir string, call orchestrator.ToolCall) (output string, returnErr error) {
+func (tasks *subagentTasks) spawnTask(ctx context.Context, owner uint, actor identity.Actor, parentDir string, call orchestrator.ToolCall) (output string, returnErr error) {
 	var args agentSpawnArguments
 	decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
 	decoder.DisallowUnknownFields()
@@ -241,17 +273,17 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	}
 	signature := agentDigest([]byte(canonical))
 	taskID := "agent-" + agentDigest([]byte(actor.SessionID + "\x00" + call.ID))[:32]
-	card, allowed, err := r.agentCard(args.Kind)
+	card, allowed, err := tasks.agentCard(args.Kind)
 	if err != nil {
 		return "", err
 	}
-	if r.options.ReadOnlyAgentWorkspace != nil {
+	if tasks.readOnlyWorkspace != nil {
 		if _, err := readOnlySpawnArguments(call.ParametersJSON); err != nil {
 			return "", err
 		}
 	}
-	if existing, _, err := r.readAgentTask(ctx, owner, taskID, actor.SessionID); err == nil {
-		childEvents, _ := r.workbench.ledger.Events(ctx, taskID)
+	if existing, _, err := tasks.readAgentTask(ctx, owner, taskID, actor.SessionID); err == nil {
+		childEvents, _ := tasks.workbench.ledger.Events(ctx, taskID)
 		var created agentTaskCreated
 		for _, e := range childEvents {
 			if e.Type == "agent/task-created" {
@@ -262,10 +294,10 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		if created.Signature != signature {
 			return "", ErrSessionStateConflict
 		}
-		if err := r.admitInitialAgentTurn(ctx, owner, actor, existing); err != nil {
+		if err := tasks.admitInitialAgentTurn(ctx, owner, actor, existing); err != nil {
 			return "", err
 		}
-		return r.taskResult(ctx, owner, taskID, actor.SessionID, !args.Parallel)
+		return tasks.taskResult(ctx, owner, taskID, actor.SessionID, !args.Parallel)
 	} else if !errors.Is(err, ErrSessionNotFound) {
 		return "", err
 	}
@@ -288,8 +320,8 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 			if !found && args.Kind != "general" && args.Kind != "background" {
 				return "", ErrInvalidSessionInput
 			}
-			if !found && r.options.AgentToolBinding != nil {
-				binding, ok := r.options.AgentToolBinding(name)
+			if !found && tasks.toolBinding != nil {
+				binding, ok := tasks.toolBinding(name)
 				if ok && binding.Name == name && validAgentToolBinding(binding) {
 					found = true
 					externalBindings = append(externalBindings, binding)
@@ -303,7 +335,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		// Lifecycle communication is mandatory even with a narrower tool set.
 		allowed = subset
 		mandatory := []string{"PublishArtifact", "AskUser", "AgentTask"}
-		if r.options.ReadOnlyAgentWorkspace != nil {
+		if tasks.readOnlyWorkspace != nil {
 			mandatory = []string{"PublishArtifact"}
 		}
 		for _, name := range mandatory {
@@ -340,10 +372,10 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	workspaceAllocated := false
 	taskCreated := false
 	if args.Kind == "general" || args.Kind == "background" {
-		if r.options.AgentWorkspace == nil {
+		if tasks.workspace == nil {
 			return "", errors.New("isolated agent workspace unavailable")
 		}
-		workingDir, err = r.options.AgentWorkspace(ctx, AgentWorkspaceRequest{TaskID: taskID, ParentSessionID: actor.SessionID, ChildSessionID: taskID, ParentWorkingDir: parentDir, Kind: args.Kind})
+		workingDir, err = tasks.workspace(ctx, AgentWorkspaceRequest{TaskID: taskID, ParentSessionID: actor.SessionID, ChildSessionID: taskID, ParentWorkingDir: parentDir, Kind: args.Kind})
 		if err != nil {
 			return "", err
 		}
@@ -354,7 +386,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 			}
 			var lifecycleErr error
 			for attempt := 0; attempt < 3; attempt++ {
-				lifecycleErr = r.callAgentLifecycle(ctx, &pb.AgentLifecycle{
+				lifecycleErr = tasks.callAgentLifecycle(ctx, &pb.AgentLifecycle{
 					RequestId: taskID, ChildSessionId: taskID, Status: "cancelled", Reason: "agent assignment rejected",
 				})
 				if lifecycleErr == nil {
@@ -375,7 +407,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		return "", err
 	}
 	link := agentTaskLink{TaskID: taskID, ChildSessionID: taskID, Signature: signature}
-	if err := r.appendAgentFact(ctx, actor.SessionID, "agent/task-linked", link, func(events []Event) bool {
+	if err := tasks.appendAgentFact(ctx, actor.SessionID, "agent/task-linked", link, func(events []Event) bool {
 		for _, event := range events {
 			var old agentTaskLink
 			if event.Type == "agent/task-linked" && json.Unmarshal(event.Payload, &old) == nil && old.TaskID == taskID {
@@ -397,17 +429,17 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 	if err != nil {
 		return "", err
 	}
-	events, err := r.workbench.ledger.Events(ctx, taskID)
+	events, err := tasks.workbench.ledger.Events(ctx, taskID)
 	if err != nil {
 		return "", err
 	}
 	if len(events) == 0 {
-		_, err = r.workbench.ledger.Append(ctx, taskID, 0, sessionCreatedEventType, sessionCreatedPayload{OwnerID: owner, ProjectName: "agent", Title: tools.RedactSensitive(args.Title), Goal: "Independent " + args.Kind + " task", WorkingDir: workingDir, Status: "running"})
+		_, err = tasks.workbench.ledger.Append(ctx, taskID, 0, sessionCreatedEventType, sessionCreatedPayload{OwnerID: owner, ProjectName: "agent", Title: tools.RedactSensitive(args.Title), Goal: "Independent " + args.Kind + " task", WorkingDir: workingDir, Status: "running"})
 		if err != nil && !errors.Is(err, ErrSequenceConflict) {
 			return "", err
 		}
 	}
-	if err := r.appendAgentFact(ctx, taskID, "agent/task-created", agentTaskCreated{Task: taskJSON, Signature: signature, AllowedTools: allowed, ExternalToolBindings: externalBindings, Actor: childActor}, func(events []Event) bool {
+	if err := tasks.appendAgentFact(ctx, taskID, "agent/task-created", agentTaskCreated{Task: taskJSON, Signature: signature, AllowedTools: allowed, ExternalToolBindings: externalBindings, Actor: childActor}, func(events []Event) bool {
 		for _, event := range events {
 			if event.Type == "agent/task-created" {
 				return true
@@ -418,7 +450,7 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		return "", err
 	}
 	taskCreated = true
-	actual, metadata, err := r.readAgentTask(ctx, owner, taskID, actor.SessionID)
+	actual, metadata, err := tasks.readAgentTask(ctx, owner, taskID, actor.SessionID)
 	if err != nil {
 		return "", err
 	}
@@ -426,14 +458,14 @@ func (r *SessionRunner) spawnTask(ctx context.Context, owner uint, actor identit
 		return "", ErrSessionStateConflict
 	}
 	task = actual
-	if err := r.admitInitialAgentTurn(ctx, owner, actor, task); err != nil {
+	if err := tasks.admitInitialAgentTurn(ctx, owner, actor, task); err != nil {
 		return "", err
 	}
-	return r.taskResult(ctx, owner, taskID, actor.SessionID, !args.Parallel)
+	return tasks.taskResult(ctx, owner, taskID, actor.SessionID, !args.Parallel)
 }
 
-func (r *SessionRunner) admitInitialAgentTurn(ctx context.Context, owner uint, actor identity.Actor, task *pb.AgentTask) error {
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+func (tasks *subagentTasks) admitInitialAgentTurn(ctx context.Context, owner uint, actor identity.Actor, task *pb.AgentTask) error {
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, task.ChildSessionId)
 	if err != nil {
 		return err
 	}
@@ -453,12 +485,12 @@ func (r *SessionRunner) admitInitialAgentTurn(ctx context.Context, owner uint, a
 	if err != nil {
 		return err
 	}
-	_, err = r.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "agent-assignment", SessionID: task.ChildSessionId, OwnerID: owner, ExpectedSeq: int64(len(snapshot.Events)), Content: "Assigned task and materials:\n" + string(content), Actor: childActor})
+	_, err = tasks.runs.SubmitMessage(ctx, SubmitMessageCommand{RequestID: "agent-assignment", SessionID: task.ChildSessionId, OwnerID: owner, ExpectedSeq: int64(len(snapshot.Events)), Content: "Assigned task and materials:\n" + string(content), Actor: childActor})
 	return err
 }
 
-func (r *SessionRunner) readAgentTask(ctx context.Context, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
-	return readAgentTask(ctx, r.workbench.ledger, owner, taskID, callerSessionID)
+func (tasks *subagentTasks) readAgentTask(ctx context.Context, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
+	return readAgentTask(ctx, tasks.workbench.ledger, owner, taskID, callerSessionID)
 }
 
 func readAgentTask(ctx context.Context, ledger EventLog, owner uint, taskID, callerSessionID string) (*pb.AgentTask, agentTaskCreated, error) {
@@ -911,31 +943,23 @@ func projectAgentTask(events []Event) (*pb.AgentTask, agentTaskCreated, error) {
 	return task, created, nil
 }
 
-func (r *SessionRunner) taskResult(ctx context.Context, owner uint, taskID, parentID string, wait bool) (string, error) {
+func (tasks *subagentTasks) taskResult(ctx context.Context, owner uint, taskID, parentID string, wait bool) (string, error) {
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	deadlineC := deadline.C
-	if r.options.ReadOnlyAgentWorkspace != nil {
+	if tasks.readOnlyWorkspace != nil {
 		deadlineC = nil
 	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		task, _, err := r.readAgentTask(ctx, owner, taskID, parentID)
+		task, _, err := tasks.readAgentTask(ctx, owner, taskID, parentID)
 		if err != nil {
 			return "", err
 		}
 		if !wait || taskTerminal(task.Status) || task.Status == "input_required" || len(task.PendingApprovals) > 0 {
-			if wait && taskTerminal(task.Status) && r.options.ReadOnlyAgentWorkspace != nil {
-				var done <-chan struct{}
-				r.agentMu.Lock()
-				for key, execution := range r.activeAgentRuns {
-					if key.sessionID == taskID {
-						done = execution.done
-						break
-					}
-				}
-				r.agentMu.Unlock()
+			if wait && taskTerminal(task.Status) && tasks.readOnlyWorkspace != nil {
+				done := tasks.runs.sessionRunDone(taskID)
 				if done != nil {
 					select {
 					case <-done:
@@ -959,7 +983,7 @@ func (r *SessionRunner) taskResult(ctx context.Context, owner uint, taskID, pare
 	}
 }
 
-func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (string, error) {
+func (tasks *subagentTasks) controlTask(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (string, error) {
 	var args agentControlArguments
 	decoder := json.NewDecoder(strings.NewReader(call.ParametersJSON))
 	decoder.DisallowUnknownFields()
@@ -969,11 +993,11 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	if args.Action == "cards" {
 		cards := []*pb.AgentCard{}
 		kinds := []string{"deep", "explore", "plan", "general", "background", "review", "security"}
-		if r.options.ReadOnlyAgentWorkspace != nil {
+		if tasks.readOnlyWorkspace != nil {
 			kinds = []string{"explore"}
 		}
 		for _, kind := range kinds {
-			card, _, _ := r.agentCard(kind)
+			card, _, _ := tasks.agentCard(kind)
 			cards = append(cards, card)
 		}
 		items := make([]json.RawMessage, 0, len(cards))
@@ -988,7 +1012,7 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 		return string(encoded), err
 	}
 	if args.Action == "list" {
-		parent, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, actor.SessionID)
+		parent, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, actor.SessionID)
 		if err != nil {
 			return "", err
 		}
@@ -996,7 +1020,7 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 		for _, event := range parent.Events {
 			var link agentTaskLink
 			if event.Type == "agent/task-linked" && json.Unmarshal(event.Payload, &link) == nil {
-				encoded, err := r.taskResult(ctx, owner, link.TaskID, actor.SessionID, false)
+				encoded, err := tasks.taskResult(ctx, owner, link.TaskID, actor.SessionID, false)
 				if err != nil {
 					return "", err
 				}
@@ -1009,27 +1033,27 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	if args.TaskID == "" {
 		args.TaskID = actor.SessionID
 	}
-	task, created, err := r.readAgentTask(ctx, owner, args.TaskID, actor.SessionID)
+	task, created, err := tasks.readAgentTask(ctx, owner, args.TaskID, actor.SessionID)
 	if err != nil {
 		return "", err
 	}
 	if args.Action == "get" || args.Action == "wait" {
-		return r.taskResult(ctx, owner, args.TaskID, actor.SessionID, args.Action == "wait")
+		return tasks.taskResult(ctx, owner, args.TaskID, actor.SessionID, args.Action == "wait")
 	}
 	if args.Action == "cancel" {
 		if task.Status == "canceled" {
-			if err := r.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
+			if err := tasks.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
 				return "", err
 			}
-			return r.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
+			return tasks.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
 		}
 		if actor.SessionID != task.ParentSessionId || taskTerminal(task.Status) {
 			return "", ErrSessionStateConflict
 		}
-		if err := r.cancelAgentTask(ctx, task, call.ID); err != nil {
+		if err := tasks.cancelAgentTask(ctx, task, call.ID); err != nil {
 			return "", err
 		}
-		return r.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
+		return tasks.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
 	}
 	if args.Action != "message" && args.Action != "input_required" {
 		return "", ErrInvalidSessionInput
@@ -1046,13 +1070,13 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	if args.Action == "input_required" {
 		message.Role = "agent"
 	}
-	view, err := r.workbench.Get(ctx, owner, task.ChildSessionId)
+	view, err := tasks.workbench.Get(ctx, owner, task.ChildSessionId)
 	if err != nil {
 		return "", err
 	}
 	sourceDir := view.WorkingDir
 	if args.Action == "message" {
-		parent, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, actor.SessionID)
+		parent, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, actor.SessionID)
 		if err != nil {
 			return "", err
 		}
@@ -1075,22 +1099,22 @@ func (r *SessionRunner) controlTask(ctx context.Context, owner uint, actor ident
 	if args.Action == "input_required" {
 		eventType = "agent/task-input-required"
 	}
-	if err := r.appendAgentFact(ctx, task.ChildSessionId, eventType, agentTaskMutation{RequestID: call.ID, Message: encoded}, agentMutationExists(eventType, call.ID)); err != nil {
+	if err := tasks.appendAgentFact(ctx, task.ChildSessionId, eventType, agentTaskMutation{RequestID: call.ID, Message: encoded}, agentMutationExists(eventType, call.ID)); err != nil {
 		return "", err
 	}
 	if args.Action == "message" {
 		// Messages arriving during a run remain durable. A later child turn is
 		// admitted after the current run closes; the parent never injects them
 		// into a live provider transcript.
-		if err := r.admitAgentMessages(ctx, owner, task.ChildSessionId, created.Actor); err != nil {
+		if err := tasks.admitAgentMessages(ctx, owner, task.ChildSessionId, created.Actor); err != nil {
 			return "", err
 		}
 	}
-	return r.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
+	return tasks.taskResult(ctx, owner, args.TaskID, actor.SessionID, false)
 }
 
-func (r *SessionRunner) admitAgentMessages(ctx context.Context, owner uint, childID string, actor identity.Actor) error {
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, childID)
+func (tasks *subagentTasks) admitAgentMessages(ctx context.Context, owner uint, childID string, actor identity.Actor) error {
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, childID)
 	if err != nil {
 		return err
 	}
@@ -1111,7 +1135,7 @@ func (r *SessionRunner) admitAgentMessages(ctx context.Context, owner uint, chil
 		} else if exists {
 			continue
 		}
-		_, err = r.SubmitMessage(ctx, SubmitMessageCommand{RequestID: requestID, SessionID: childID, OwnerID: owner, ExpectedSeq: int64(len(snapshot.Events)), Content: "Additional task materials:\n" + string(mutation.Message), Actor: actor})
+		_, err = tasks.runs.SubmitMessage(ctx, SubmitMessageCommand{RequestID: requestID, SessionID: childID, OwnerID: owner, ExpectedSeq: int64(len(snapshot.Events)), Content: "Additional task materials:\n" + string(mutation.Message), Actor: actor})
 		return err
 	}
 	return nil
@@ -1129,9 +1153,9 @@ func agentMutationExists(eventType, requestID string) func([]Event) bool {
 	}
 }
 
-func (r *SessionRunner) appendAgentFact(ctx context.Context, sessionID, eventType string, payload any, exists func([]Event) bool) error {
+func (tasks *subagentTasks) appendAgentFact(ctx context.Context, sessionID, eventType string, payload any, exists func([]Event) bool) error {
 	for attempt := 0; attempt < 16; attempt++ {
-		snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, sessionID)
+		snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, sessionID)
 		if err != nil {
 			return err
 		}
@@ -1186,9 +1210,9 @@ func (r *SessionRunner) appendAgentFact(ctx context.Context, sessionID, eventTyp
 				return ErrInvalidSessionInput
 			}
 		}
-		_, err = r.workbench.ledger.Append(ctx, sessionID, int64(len(snapshot.Events)), eventType, payload)
+		_, err = tasks.workbench.ledger.Append(ctx, sessionID, int64(len(snapshot.Events)), eventType, payload)
 		if err == nil {
-			r.workbench.signal(sessionID)
+			tasks.workbench.signal(sessionID)
 			return nil
 		}
 		if !errors.Is(err, ErrSequenceConflict) {
@@ -1284,23 +1308,23 @@ func verifyAgentArtifacts(artifacts []*pb.AgentArtifact, dir string) error {
 	return nil
 }
 
-func (r *SessionRunner) askAgentInput(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
+func (tasks *subagentTasks) askAgentInput(ctx context.Context, actor identity.Actor, sessionID string, call orchestrator.ToolCall) orchestrator.ToolResult {
 	message := &pb.AgentMessage{Id: call.ID, Role: "agent", Parts: []*pb.AgentPart{{Payload: &pb.AgentPart_Text{Text: "Additional input required: " + tools.RedactSensitive(call.ParametersJSON)}}}}
 	encoded, err := agentJSON.Marshal(message)
 	if err != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "invalid agent input request", ExitCode: 1}
 	}
 	args, _ := json.Marshal(map[string]any{"action": "input_required", "task_id": sessionID, "message": json.RawMessage(encoded)})
-	result := r.ExecuteAgentTool(ctx, actor, sessionID, orchestrator.ToolCall{ID: call.ID, Name: "AgentTask", ParametersJSON: string(args)})
+	result := tasks.execute(ctx, actor, sessionID, orchestrator.ToolCall{ID: call.ID, Name: "AgentTask", ParametersJSON: string(args)})
 	result.ToolName = call.Name
 	return result
 }
 
-func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (output string, err error) {
+func (tasks *subagentTasks) publishArtifact(ctx context.Context, owner uint, actor identity.Actor, call orchestrator.ToolCall) (output string, err error) {
 	ctx = genai.WithEvalInstance(ctx, actor.SessionID)
 	var span genai.Span
-	if r.options.Tracer != nil {
-		ctx, span = r.options.Tracer.StartSpan(ctx, "artifact.publish", genai.OperationExecuteTool, genai.SystemGenAI)
+	if tasks.tracer != nil {
+		ctx, span = tasks.tracer.StartSpan(ctx, "artifact.publish", genai.OperationExecuteTool, genai.SystemGenAI)
 		span.SetAttributes(genai.ToolNameKV("PublishArtifact"))
 		defer func() {
 			if err != nil {
@@ -1309,7 +1333,7 @@ func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor i
 			span.End()
 		}()
 	}
-	task, _, err := r.readAgentTask(ctx, owner, actor.SessionID, actor.SessionID)
+	task, _, err := tasks.readAgentTask(ctx, owner, actor.SessionID, actor.SessionID)
 	if err != nil || task.Status == "canceled" {
 		return "", ErrSessionNotFound
 	}
@@ -1325,7 +1349,7 @@ func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor i
 	if protojson.Unmarshal(args.Artifact, artifact) != nil || strings.TrimSpace(artifact.Name) == "" || len(artifact.Name) > 240 || call.ID == "" {
 		return "", ErrInvalidSessionInput
 	}
-	view, err := r.workbench.Get(ctx, owner, task.ChildSessionId)
+	view, err := tasks.workbench.Get(ctx, owner, task.ChildSessionId)
 	if err != nil {
 		return "", err
 	}
@@ -1360,7 +1384,7 @@ func (r *SessionRunner) publishArtifact(ctx context.Context, owner uint, actor i
 	if err != nil {
 		return "", err
 	}
-	if err := r.appendAgentFact(ctx, task.ChildSessionId, "agent/task-artifact", agentTaskMutation{RequestID: call.ID, Artifact: encoded}, agentMutationExists("agent/task-artifact", call.ID)); err != nil {
+	if err := tasks.appendAgentFact(ctx, task.ChildSessionId, "agent/task-artifact", agentTaskMutation{RequestID: call.ID, Artifact: encoded}, agentMutationExists("agent/task-artifact", call.ID)); err != nil {
 		return "", err
 	}
 	return string(encoded), nil
@@ -1505,15 +1529,15 @@ func pinAgentFiles(parts []*pb.AgentPart, dir, destination string) error {
 	return nil
 }
 
-func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask, requestID string) error {
-	if err := r.appendAgentFact(ctx, task.ChildSessionId, "agent/task-canceled", agentTaskMutation{RequestID: requestID}, agentMutationExists("agent/task-canceled", requestID)); err != nil {
+func (tasks *subagentTasks) cancelAgentTask(ctx context.Context, task *pb.AgentTask, requestID string) error {
+	if err := tasks.appendAgentFact(ctx, task.ChildSessionId, "agent/task-canceled", agentTaskMutation{RequestID: requestID}, agentMutationExists("agent/task-canceled", requestID)); err != nil {
 		return err
 	}
-	if err := r.fenceAgentCancellation(ctx, task); err != nil {
+	if err := tasks.fenceAgentCancellation(ctx, task); err != nil {
 		return err
 	}
 	task.Status = "canceled"
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, task.ChildSessionId)
 	if err != nil {
 		return err
 	}
@@ -1526,12 +1550,12 @@ func (r *SessionRunner) cancelAgentTask(ctx context.Context, task *pb.AgentTask,
 			return nil
 		}
 	}
-	r.releaseSessionResources(task.ChildSessionId)
-	return r.reconcileAgentWorkspaceLifecycle(ctx, task)
+	tasks.runs.releaseSessionResources(task.ChildSessionId)
+	return tasks.reconcileAgentWorkspaceLifecycle(ctx, task)
 }
 
-func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+func (tasks *subagentTasks) fenceAgentCancellation(ctx context.Context, task *pb.AgentTask) error {
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, task.ChildSessionId)
 	if err != nil {
 		return err
 	}
@@ -1541,9 +1565,9 @@ func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.Age
 	}
 	for id, run := range runs {
 		if !run.terminal {
-			if _, err := r.CancelRun(ctx, CancelRunCommand{RequestID: "agent-cancel:" + task.Id + ":" + id, SessionID: task.ChildSessionId, RunID: id, OwnerID: projectionOwner(snapshot.Events), Actor: run.actor}); err != nil {
+			if _, err := tasks.runs.CancelRun(ctx, CancelRunCommand{RequestID: "agent-cancel:" + task.Id + ":" + id, SessionID: task.ChildSessionId, RunID: id, OwnerID: projectionOwner(snapshot.Events), Actor: run.actor}); err != nil {
 				if errors.Is(err, ErrSessionStateConflict) {
-					current, readErr := ReadVerifiedSnapshot(ctx, r.workbench.ledger, task.ChildSessionId)
+					current, readErr := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, task.ChildSessionId)
 					if readErr != nil {
 						return readErr
 					}
@@ -1561,8 +1585,8 @@ func (r *SessionRunner) fenceAgentCancellation(ctx context.Context, task *pb.Age
 
 // DecideAgentToolApproval is a human transport interface, not an AgentTask
 // action. The pending fact supplies immutable tool identity and arguments.
-func (r *SessionRunner) DecideAgentToolApproval(ctx context.Context, actor identity.Actor, taskID string, command ToolApprovalDecisionCommand) (EventView, error) {
-	parent, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, actor.SessionID)
+func (tasks *subagentTasks) decideApproval(ctx context.Context, actor identity.Actor, taskID string, command ToolApprovalDecisionCommand) (EventView, error) {
+	parent, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, actor.SessionID)
 	if err != nil {
 		return EventView{}, err
 	}
@@ -1570,41 +1594,41 @@ func (r *SessionRunner) DecideAgentToolApproval(ctx context.Context, actor ident
 	if err != nil {
 		return EventView{}, err
 	}
-	task, _, err := r.readAgentTask(ctx, owner, taskID, actor.SessionID)
+	task, _, err := tasks.readAgentTask(ctx, owner, taskID, actor.SessionID)
 	if err != nil {
 		return EventView{}, err
 	}
 	if task.ParentSessionId != actor.SessionID || task.Status == "canceled" {
 		return EventView{}, ErrSessionStateConflict
 	}
-	return r.workbench.DecideToolApproval(ctx, owner, task.ChildSessionId, command)
+	return tasks.workbench.DecideToolApproval(ctx, owner, task.ChildSessionId, command)
 }
 
-func (r *SessionRunner) recoverAgentTask(ctx context.Context, owner uint, events []Event) error {
+func (tasks *subagentTasks) recoverAgentTask(ctx context.Context, owner uint, events []Event) error {
 	task, created, err := projectAgentTask(events)
 	if err != nil || task == nil {
 		return err
 	}
 	if task.Status == "canceled" {
-		if err := r.fenceAgentCancellation(ctx, task); err != nil {
+		if err := tasks.fenceAgentCancellation(ctx, task); err != nil {
 			return err
 		}
-		return r.reconcileAgentWorkspaceLifecycle(ctx, task)
+		return tasks.reconcileAgentWorkspaceLifecycle(ctx, task)
 	}
 	if task.Status == "failed" {
 		return nil
 	}
-	if _, _, err := r.readAgentTask(ctx, owner, task.Id, task.ChildSessionId); err != nil {
+	if _, _, err := tasks.readAgentTask(ctx, owner, task.Id, task.ChildSessionId); err != nil {
 		return err
 	}
-	if err := r.admitInitialAgentTurn(ctx, owner, created.Actor, task); err != nil {
+	if err := tasks.admitInitialAgentTurn(ctx, owner, created.Actor, task); err != nil {
 		return err
 	}
-	return r.admitAgentMessages(ctx, owner, task.ChildSessionId, created.Actor)
+	return tasks.admitAgentMessages(ctx, owner, task.ChildSessionId, created.Actor)
 }
 
-func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
-	snapshot, err := ReadVerifiedSnapshot(ctx, r.workbench.ledger, key.sessionID)
+func (tasks *subagentTasks) completeAgentTurn(ctx context.Context, key runKey) {
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, key.sessionID)
 	if err != nil {
 		return
 	}
@@ -1613,13 +1637,13 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 		return
 	}
 	if taskTerminal(task.Status) {
-		defer r.releaseSessionResources(key.sessionID)
+		defer tasks.runs.releaseSessionResources(key.sessionID)
 	}
 	if task.Status == "canceled" {
 		// Keep the durable canceled task untouched when the Harness callback
 		// fails. Recover() will see the missing acknowledgement and retry the
 		// cleanup on the next process start instead of projecting success.
-		if err := r.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
+		if err := tasks.reconcileAgentWorkspaceLifecycle(ctx, task); err != nil {
 			return
 		}
 	}
@@ -1647,7 +1671,7 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 				if err != nil {
 					return
 				}
-				_ = r.appendAgentFact(ctx, key.sessionID, "agent/task-artifact", agentTaskMutation{RequestID: requestID, Artifact: body}, agentMutationExists("agent/task-artifact", requestID))
+				_ = tasks.appendAgentFact(ctx, key.sessionID, "agent/task-artifact", agentTaskMutation{RequestID: requestID, Artifact: body}, agentMutationExists("agent/task-artifact", requestID))
 				break
 			}
 		}
@@ -1656,27 +1680,27 @@ func (r *SessionRunner) completeAgentTurn(ctx context.Context, key runKey) {
 	if err != nil {
 		return
 	}
-	_ = r.admitAgentMessages(ctx, view.UserID, key.sessionID, created.Actor)
+	_ = tasks.admitAgentMessages(ctx, view.UserID, key.sessionID, created.Actor)
 }
 
-func (r *SessionRunner) callAgentLifecycle(ctx context.Context, lifecycle *pb.AgentLifecycle) error {
-	if r.options.AgentLifecycle == nil {
+func (tasks *subagentTasks) callAgentLifecycle(ctx context.Context, lifecycle *pb.AgentLifecycle) error {
+	if tasks.lifecycle == nil {
 		return nil
 	}
 	callbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return r.options.AgentLifecycle(callbackCtx, lifecycle)
+	return tasks.lifecycle(callbackCtx, lifecycle)
 }
 
-func (r *SessionRunner) reconcileAgentWorkspaceLifecycle(ctx context.Context, task *pb.AgentTask) error {
-	if task == nil || task.Card == nil || task.Card.Id != "general" && task.Card.Id != "background" || task.Status != "canceled" || r.options.AgentLifecycle == nil {
+func (tasks *subagentTasks) reconcileAgentWorkspaceLifecycle(ctx context.Context, task *pb.AgentTask) error {
+	if task == nil || task.Card == nil || task.Card.Id != "general" && task.Card.Id != "background" || task.Status != "canceled" || tasks.lifecycle == nil {
 		return nil
 	}
 	const status = "cancelled"
 	const reason = "independent agent task cancelled"
 
-	r.agentLifecycleMu.Lock()
-	defer r.agentLifecycleMu.Unlock()
+	tasks.lifecycleMu.Lock()
+	defer tasks.lifecycleMu.Unlock()
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	acknowledged := agentWorkspaceLifecycleAcknowledged{
@@ -1684,7 +1708,7 @@ func (r *SessionRunner) reconcileAgentWorkspaceLifecycle(ctx context.Context, ta
 	}
 	callbackDone := false
 	for attempt := 0; attempt < 16; attempt++ {
-		snapshot, err := ReadVerifiedSnapshot(reconcileCtx, r.workbench.ledger, task.ChildSessionId)
+		snapshot, err := ReadVerifiedSnapshot(reconcileCtx, tasks.workbench.ledger, task.ChildSessionId)
 		if err != nil {
 			return err
 		}
@@ -1699,15 +1723,15 @@ func (r *SessionRunner) reconcileAgentWorkspaceLifecycle(ctx context.Context, ta
 			return nil
 		}
 		if !callbackDone {
-			if err := r.options.AgentLifecycle(reconcileCtx, &pb.AgentLifecycle{
+			if err := tasks.lifecycle(reconcileCtx, &pb.AgentLifecycle{
 				RequestId: task.Id, ChildSessionId: task.ChildSessionId, Status: status, Reason: reason,
 			}); err != nil {
 				return err
 			}
 			callbackDone = true
 		}
-		if _, err := r.workbench.ledger.Append(reconcileCtx, task.ChildSessionId, int64(len(snapshot.Events)), agentWorkspaceLifecycleAcknowledgedEventType, acknowledged); err == nil {
-			r.workbench.signal(task.ChildSessionId)
+		if _, err := tasks.workbench.ledger.Append(reconcileCtx, task.ChildSessionId, int64(len(snapshot.Events)), agentWorkspaceLifecycleAcknowledgedEventType, acknowledged); err == nil {
+			tasks.workbench.signal(task.ChildSessionId)
 			return nil
 		} else if !errors.Is(err, ErrSequenceConflict) {
 			return err
@@ -1716,7 +1740,7 @@ func (r *SessionRunner) reconcileAgentWorkspaceLifecycle(ctx context.Context, ta
 	return ErrSequenceConflict
 }
 
-func (r *SessionRunner) agentRequest(events []Event, request *orchestrator.ConversationRequest) error {
+func (tasks *subagentTasks) agentRequest(ctx context.Context, events []Event, request *orchestrator.ConversationRequest) error {
 	task, created, err := projectAgentTask(events)
 	if err != nil {
 		return err
@@ -1727,7 +1751,7 @@ func (r *SessionRunner) agentRequest(events []Event, request *orchestrator.Conve
 	if task.Status == "canceled" {
 		return context.Canceled
 	}
-	if _, _, err := r.readAgentTask(r.ctx, projectionOwner(events), task.Id, task.ChildSessionId); err != nil {
+	if _, _, err := tasks.readAgentTask(ctx, projectionOwner(events), task.Id, task.ChildSessionId); err != nil {
 		return err
 	}
 	request.AgentTask = proto.Clone(task).(*pb.AgentTask)
@@ -1792,4 +1816,114 @@ func validAgentToolBinding(binding AgentToolBinding) bool {
 	_, schemaErr := hex.DecodeString(binding.InputSchemaSHA256)
 	_, configErr := hex.DecodeString(binding.ServerConfigSHA256)
 	return schemaErr == nil && configErr == nil && strings.ToLower(binding.InputSchemaSHA256) == binding.InputSchemaSHA256 && strings.ToLower(binding.ServerConfigSHA256) == binding.ServerConfigSHA256
+}
+
+func (tasks *subagentTasks) stopLinkedAgents(ctx context.Context, parent string, owner uint, requestID string, seen map[string]bool) error {
+	children := map[string][]runKey{}
+	var stopErrors []error
+	stopErrors = append(stopErrors, tasks.fenceLinkedAgents(ctx, parent, owner, requestID, seen, children))
+	for childID, keys := range children {
+		stopErrors = append(stopErrors, tasks.runs.stopSessionRuns(ctx, childID))
+		child, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, childID)
+		if err != nil {
+			stopErrors = append(stopErrors, err)
+			continue
+		}
+		runs, err := projectRuns(child.Events)
+		if err != nil {
+			stopErrors = append(stopErrors, err)
+			continue
+		}
+		for _, key := range keys {
+			if run := runs[key.runID]; !run.terminal && run.view.Attempt == 0 {
+				tasks.runs.finishCancellation(key)
+			}
+		}
+		child, err = ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, childID)
+		if err != nil {
+			stopErrors = append(stopErrors, err)
+			continue
+		}
+		runs, err = projectRuns(child.Events)
+		if err != nil {
+			stopErrors = append(stopErrors, err)
+			continue
+		}
+		for _, run := range runs {
+			if !run.terminal || run.view.CancellationState == "unknown" {
+				stopErrors = append(stopErrors, errors.New("linked agent resource stop unconfirmed"))
+			}
+		}
+		if unconfirmedToolStops(child.Events) {
+			stopErrors = append(stopErrors, errors.New("linked agent tool stop unconfirmed"))
+		}
+	}
+	return errors.Join(stopErrors...)
+}
+
+func (tasks *subagentTasks) fenceLinkedAgents(ctx context.Context, parent string, owner uint, requestID string, seen map[string]bool, children map[string][]runKey) error {
+	if seen[parent] {
+		return ErrEventIntegrity
+	}
+	seen[parent] = true
+	snapshot, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, parent)
+	if err != nil {
+		return err
+	}
+	var stopErrors []error
+	for _, event := range snapshot.Events {
+		if event.Type != "agent/task-linked" {
+			continue
+		}
+		stopErr := func() error {
+			var link agentTaskLink
+			if json.Unmarshal(event.Payload, &link) != nil {
+				return ErrEventIntegrity
+			}
+			task, created, err := tasks.readAgentTask(ctx, owner, link.TaskID, parent)
+			if err != nil {
+				return err
+			}
+			child, err := ReadVerifiedSnapshot(ctx, tasks.workbench.ledger, task.ChildSessionId)
+			if err != nil {
+				return err
+			}
+			runs, err := projectRuns(child.Events)
+			if err != nil {
+				return err
+			}
+			children[task.ChildSessionId] = nil
+			for id, run := range runs {
+				if !run.terminal {
+					if err := tasks.runs.cancelLinkedRun(ctx, CancelRunCommand{RequestID: "root-cancel:" + requestID + ":" + id, SessionID: task.ChildSessionId, RunID: id, OwnerID: owner, Actor: created.Actor}); err != nil {
+						return err
+					}
+					children[task.ChildSessionId] = append(children[task.ChildSessionId], runKey{sessionID: task.ChildSessionId, runID: id})
+				}
+			}
+			if len(children[task.ChildSessionId]) == 0 && !taskTerminal(task.Status) {
+				if err := tasks.cancelAgentTask(ctx, task, "root-cancel:"+requestID); err != nil {
+					return err
+				}
+			}
+			return tasks.fenceLinkedAgents(ctx, task.ChildSessionId, owner, requestID, seen, children)
+		}()
+		stopErrors = append(stopErrors, stopErr)
+	}
+	return errors.Join(stopErrors...)
+}
+
+func (tasks *subagentTasks) cancelRunTask(ctx context.Context, events []Event, requestID string) error {
+	task, _, err := projectAgentTask(events)
+	if err != nil || task == nil {
+		return err
+	}
+	if task.Status != "canceled" {
+		mutationID := "run-cancel:" + requestID
+		if err := tasks.appendAgentFact(ctx, task.ChildSessionId, "agent/task-canceled", agentTaskMutation{RequestID: mutationID}, agentMutationExists("agent/task-canceled", mutationID)); err != nil {
+			return err
+		}
+	}
+	task.Status = "canceled"
+	return tasks.reconcileAgentWorkspaceLifecycle(ctx, task)
 }

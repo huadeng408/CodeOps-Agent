@@ -9,12 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -572,34 +570,8 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			return nil, status.Error(codes.InvalidArgument, "unsupported model payload field")
 		}
 	}
-	if raw, exists := payload["tools"]; exists {
-		tools, ok := raw.([]any)
-		if !ok {
-			return nil, status.Error(codes.InvalidArgument, "invalid model tools")
-		}
-		for _, item := range tools {
-			tool, ok := item.(map[string]any)
-			if !ok || (config.Protocol == "openai" && tool["type"] != "function") || (config.Protocol == "anthropic" && tool["type"] != nil) {
-				return nil, status.Error(codes.InvalidArgument, "provider-hosted tools are not admitted")
-			}
-		}
-	}
-	payload["stream"] = false
-	if config.ResponseMode == "sse" {
-		payload["stream"] = true
-		payload["stream_options"] = map[string]any{"include_usage": true}
-	} else {
-		delete(payload, "stream_options")
-	}
-	if config.Protocol == "openai" && !strings.HasPrefix(strings.ToLower(config.Model), "deepseek-") {
-		// Provider cap semantics vary; reconcile all returned usage before settlement.
-		payload["max_completion_tokens"] = config.OutputLimit
-		delete(payload, "max_tokens")
-	} else {
-		payload["max_tokens"] = config.OutputLimit
-		delete(payload, "max_completion_tokens")
-	}
-	if err := config.applyRequestProfile(payload); err != nil {
+	protocol := protocolFor(config)
+	if err := protocol.prepare(payload); err != nil {
 		return nil, err
 	}
 	effectiveProfile := config.EvaluationProfile()
@@ -677,17 +649,9 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			return result, nil
 		}
 		upstream.Header.Set("Content-Type", "application/json")
-		if config.ResponseMode == "sse" {
-			upstream.Header.Set("Accept", "text/event-stream")
-		}
+		protocol.authenticate(upstream.Header)
 		if config.ProviderSessionID != "" {
 			upstream.Header.Set("X-Trace-Id", config.ProviderSessionID)
-		}
-		if config.Protocol == "anthropic" {
-			upstream.Header.Set("x-api-key", config.APIKey)
-			upstream.Header.Set("anthropic-version", "2023-06-01")
-		} else {
-			upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
 		}
 		response, err := gateway.http.Do(upstream)
 		if err != nil {
@@ -704,31 +668,8 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 			result.ErrorCode = "provider_http_unknown"
 			return result, nil
 		}
-		var data []byte
-		if config.ResponseMode == "sse" && response.StatusCode == http.StatusOK {
-			data, err = readOpenAIStream(response, config.Model)
-		} else {
-			data, err = io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
-		}
+		data, err := protocol.read(response)
 		if err != nil || len(data) > 16<<20 {
-			if config.ResponseMode == "sse" {
-				reason := "stream_read_unknown"
-				var protocolError streamProtocolError
-				var providerError *streamProviderError
-				if errors.As(err, &providerError) {
-					reason = "provider_stream_error"
-					metadata, _ := json.Marshal(map[string]any{"error": providerError.metadata})
-					logProviderFailure(response.StatusCode, metadata, config.APIKey)
-				} else if errors.As(err, &protocolError) {
-					reason = string(protocolError)
-				} else if errors.Is(err, io.ErrUnexpectedEOF) {
-					reason = "incomplete_stream"
-				}
-				if config.APIKey != "" && strings.Contains(reason, config.APIKey) {
-					reason = "unknown"
-				}
-				log.Printf("model stream failure: http_status=%d reason=%s", response.StatusCode, reason)
-			}
 			result.ErrorCode = "provider_response_unknown"
 			var timeout net.Error
 			if errors.As(err, &timeout) && timeout.Timeout() {
@@ -747,7 +688,7 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 		} else if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			failure = "provider_authentication"
 		}
-		usage, err := normalizeUsage(config.Protocol, config.Model, data)
+		usage, err := protocol.usage(data)
 		if err != nil {
 			result.ErrorCode = "provider_usage_unknown"
 			if response.StatusCode != http.StatusOK {
@@ -829,38 +770,6 @@ func (gateway *Gateway) Invoke(ctx context.Context, request *pb.ModelCallRequest
 	}
 	result.ErrorCode = "token_admission_unavailable"
 	return result, nil
-}
-
-func logProviderFailure(status int, data []byte, key string) {
-	var envelope struct {
-		Error struct{ Type, Code, Param json.RawMessage }
-	}
-	if json.Unmarshal(data, &envelope) != nil {
-		envelope.Error.Type, envelope.Error.Code, envelope.Error.Param = nil, nil, nil
-	}
-	// Only fixed labels survive; provider messages can echo credentials.
-	safe := func(raw json.RawMessage) string {
-		var value string
-		if json.Unmarshal(raw, &value) != nil {
-			return "unknown"
-		}
-		if key != "" && strings.Contains(value, key) {
-			return "unknown"
-		}
-		switch value {
-		case "server_error", "internal_error", "api_error", "new_api_error", "upstream_error", "invalid_request_error",
-			"authentication_error", "permission_error", "not_found_error", "overloaded_error", "rate_limit_error",
-			"rate_limit_exceeded", "insufficient_quota", "insufficient_user_quota", "insufficient_token_quota",
-			"no_available_channel", "model_not_found", "unsupported_parameter", "invalid_parameter", "invalid_api_key",
-			"context_length_exceeded", "bad_response_status_code", "timeout",
-			"model", "messages", "temperature", "max_tokens", "max_completion_tokens", "reasoning_effort",
-			"tools", "tool_choice", "parallel_tool_calls", "response_format", "stream":
-			return value
-		}
-		return "unknown"
-	}
-	log.Printf("model provider failure: http_status=%d type=%s code=%s param=%s", status,
-		safe(envelope.Error.Type), safe(envelope.Error.Code), safe(envelope.Error.Param))
 }
 
 func retryAfterDelay(values []string, now time.Time) (time.Duration, bool) {
@@ -954,166 +863,6 @@ func providerEndpoint(config ProviderConfig) (string, error) {
 	default:
 		return "", ErrInvalidAdmission
 	}
-}
-
-type tokenUsage struct {
-	input, output, cached int64
-	visibleOutput         *int64
-}
-
-func accountingJSONFields(data []byte, uniqueNames ...string) (map[string]json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return nil, ErrUsageUnknown
-	}
-	fields := make(map[string]json.RawMessage)
-	for decoder.More() {
-		token, err := decoder.Token()
-		name, ok := token.(string)
-		if err != nil || !ok {
-			return nil, ErrUsageUnknown
-		}
-		if _, duplicate := fields[name]; duplicate && slices.Contains(uniqueNames, name) {
-			return nil, ErrUsageUnknown
-		}
-		var value json.RawMessage
-		if decoder.Decode(&value) != nil {
-			return nil, ErrUsageUnknown
-		}
-		fields[name] = value
-	}
-	if _, err := decoder.Token(); err != nil {
-		return nil, ErrUsageUnknown
-	}
-	var trailing any
-	if decoder.Decode(&trailing) != io.EOF {
-		return nil, ErrUsageUnknown
-	}
-	return fields, nil
-}
-
-func normalizeUsage(protocol, model string, data []byte) (tokenUsage, error) {
-	// Duplicate accounting fields cannot establish usage, even when a later value is smaller.
-	response, err := accountingJSONFields(data, "usage")
-	if err != nil {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	uniqueNames := []string{"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details"}
-	if protocol == "anthropic" {
-		uniqueNames = []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}
-	}
-	usage, err := accountingJSONFields(response["usage"], uniqueNames...)
-	if err != nil {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	read := func(name string) (int64, error) {
-		raw, found := usage[name]
-		if !found || bytes.Equal(raw, []byte("null")) {
-			return 0, ErrUsageUnknown
-		}
-		var value int64
-		if err := json.Unmarshal(raw, &value); err != nil || value < 0 || value > VerificationTokenLimit {
-			return 0, ErrUsageUnknown
-		}
-		return value, nil
-	}
-	if protocol == "anthropic" {
-		input, inErr := read("input_tokens")
-		output, outErr := read("output_tokens")
-		if inErr != nil || outErr != nil {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-		cached, creation := int64(0), int64(0)
-		var err error
-		if _, ok := usage["cache_read_input_tokens"]; ok {
-			cached, err = read("cache_read_input_tokens")
-			if err != nil {
-				return tokenUsage{}, err
-			}
-		}
-		if _, ok := usage["cache_creation_input_tokens"]; ok {
-			creation, err = read("cache_creation_input_tokens")
-			if err != nil {
-				return tokenUsage{}, err
-			}
-		}
-		if input > VerificationTokenLimit-cached || input+cached > VerificationTokenLimit-creation {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-		return tokenUsage{input: input + cached + creation, output: output, cached: cached}, nil
-	}
-	if protocol != "openai" {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	input, inErr := read("prompt_tokens")
-	output, outErr := read("completion_tokens")
-	if inErr != nil || outErr != nil {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	var cached int64
-	if raw, ok := usage["prompt_tokens_details"]; ok && !bytes.Equal(raw, []byte("null")) {
-		details, err := accountingJSONFields(raw, "cached_tokens")
-		if err != nil {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-		if raw, ok := details["cached_tokens"]; ok && json.Unmarshal(raw, &cached) != nil {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-	}
-	if cached < 0 || cached > input {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	var reasoning int64
-	reasoningKnown := false
-	if raw, ok := usage["completion_tokens_details"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		details, err := accountingJSONFields(raw, "reasoning_tokens")
-		if err != nil {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-		if raw, ok := details["reasoning_tokens"]; ok {
-			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &reasoning) != nil || reasoning < 0 || reasoning > VerificationTokenLimit {
-				return tokenUsage{}, ErrUsageUnknown
-			}
-			reasoningKnown = true
-		}
-	}
-	if _, ok := usage["total_tokens"]; ok {
-		total, err := read("total_tokens")
-		if err != nil {
-			return tokenUsage{}, ErrUsageUnknown
-		}
-		if total != input+output {
-			// Grok can report visible output separately; the total must prove the extra reasoning.
-			if !strings.HasPrefix(model, "grok-") || reasoning == 0 || total != input+output+reasoning {
-				return tokenUsage{}, ErrUsageUnknown
-			}
-			output += reasoning
-		}
-	} else if strings.HasPrefix(model, "grok-") && reasoning > 0 {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	if reasoning > output {
-		return tokenUsage{}, ErrUsageUnknown
-	}
-	var visible *int64
-	if reasoningKnown {
-		var choices []struct {
-			Message struct {
-				Content      *string
-				ToolCalls    []json.RawMessage `json:"tool_calls"`
-				FunctionCall json.RawMessage   `json:"function_call"`
-			}
-		}
-		if json.Unmarshal(response["choices"], &choices) == nil && len(choices) == 1 {
-			message := choices[0].Message
-			// Function tokens are not subject to the visible-answer cap either.
-			if message.Content != nil && len(message.ToolCalls) == 0 && (len(message.FunctionCall) == 0 || bytes.Equal(bytes.TrimSpace(message.FunctionCall), []byte("null"))) {
-				value := output - reasoning
-				visible = &value
-			}
-		}
-	}
-	return tokenUsage{input: input, output: output, cached: cached, visibleOutput: visible}, nil
 }
 
 func admissionErrorCode(err error) string {

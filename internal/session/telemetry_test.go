@@ -215,6 +215,7 @@ func TestIndependentAgentTraceKeepsAsyncParentAndConcreteSession(t *testing.T) {
 
 	runner, parent, actor := agentTestRunner(t, &independentAgentFixture{})
 	runner.options.Tracer = tracer
+	runner.tasks.tracer = tracer
 	ctx := genai.WithEvalJoinBaggage(context.Background(), "run-telemetry-1", parent.ID)
 	ctx, root := tracer.StartSpan(ctx, "agent.main", genai.OperationInvokeAgent, genai.SystemGenAI)
 	root.SetAttributes(genai.AgentNameKV("main"))
@@ -228,7 +229,7 @@ func TestIndependentAgentTraceKeepsAsyncParentAndConcreteSession(t *testing.T) {
 	if result.Error != "" || result.ExitCode != 0 {
 		t.Fatalf("spawn result = %+v", result)
 	}
-	task, _, err := runner.readAgentTask(context.Background(), 7, "agent-"+agentDigest([]byte(actor.SessionID + "\x00trace-spawn"))[:32], actor.SessionID)
+	task, _, err := runner.tasks.readAgentTask(context.Background(), 7, "agent-"+agentDigest([]byte(actor.SessionID + "\x00trace-spawn"))[:32], actor.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}

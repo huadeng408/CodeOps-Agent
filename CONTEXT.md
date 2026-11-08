@@ -16,6 +16,16 @@ A durable stream of user intent, agent decisions, tool activity, and lifecycle
 changes for one coherent outcome.
 _Avoid_: chat record, request
 
+**Run**:
+One durable execution of a request within a Session. A Run can have multiple
+lease attempts; retries remain linked to the original request lineage.
+_Avoid_: model call, worker attempt
+
+**Run Projection**:
+A derived view of Run lifecycle and retry lineage from the complete Session
+Ledger. It is read-only and does not replace or cache the Ledger's facts.
+_Avoid_: run record, mutable status store
+
 **Session Ledger**:
 The append-only source of truth for a Session. Earlier facts remain available
 for audit even when the current view changes.

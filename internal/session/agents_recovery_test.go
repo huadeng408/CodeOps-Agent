@@ -94,7 +94,7 @@ func TestIndependentAgentApprovalIsHumanScopedAndNotInherited(t *testing.T) {
 	controller := permission.NewController(nil, nil)
 	controller.ApproveSessionFor(actor, "Write")
 	runner.options.Permissions = controller
-	runner.options.AgentWorkspace = func(context.Context, AgentWorkspaceRequest) (string, error) { return t.TempDir(), nil }
+	runner.tasks.workspace = func(context.Context, AgentWorkspaceRequest) (string, error) { return t.TempDir(), nil }
 	var effects atomic.Int32
 	runner.tools = ToolExecutionFunc(func(_ context.Context, child identity.Actor, id string, call orchestrator.ToolCall) orchestrator.ToolResult {
 		if child.SessionID != id || id == actor.SessionID {
@@ -151,15 +151,15 @@ func TestIndependentAgentRejectsMutatedPublishedArtifactAndRequestReplay(t *test
 	if err := os.WriteFile(filepath.Join(view.WorkingDir, artifact.Parts[0].GetFile().Path), []byte("mutated pinned file"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := runner.readAgentTask(context.Background(), 7, task.Id, actor.SessionID); !errors.Is(err, ErrEventIntegrity) {
+	if _, _, err := runner.tasks.readAgentTask(context.Background(), 7, task.Id, actor.SessionID); !errors.Is(err, ErrEventIntegrity) {
 		t.Fatalf("artifact mutation accepted: %v", err)
 	}
 	mutation := agentTaskMutation{RequestID: "replayed-message", Message: json.RawMessage(`{"parts":[{"text":"first"}]}`)}
-	if err := runner.appendAgentFact(context.Background(), child.SessionID, "agent/task-message", mutation, agentMutationExists("agent/task-message", mutation.RequestID)); err != nil {
+	if err := runner.tasks.appendAgentFact(context.Background(), child.SessionID, "agent/task-message", mutation, agentMutationExists("agent/task-message", mutation.RequestID)); err != nil {
 		t.Fatal(err)
 	}
 	mutation.Message = json.RawMessage(`{"parts":[{"text":"conflicting"}]}`)
-	if err := runner.appendAgentFact(context.Background(), child.SessionID, "agent/task-message", mutation, agentMutationExists("agent/task-message", mutation.RequestID)); !errors.Is(err, ErrSessionStateConflict) {
+	if err := runner.tasks.appendAgentFact(context.Background(), child.SessionID, "agent/task-message", mutation, agentMutationExists("agent/task-message", mutation.RequestID)); !errors.Is(err, ErrSessionStateConflict) {
 		t.Fatalf("conflicting request replay accepted: %v", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *t
 	ctx := context.Background()
 	fixture := &independentAgentFixture{mode: "input", inputRelease: make(chan struct{})}
 	runner, _, actor := agentTestRunner(t, fixture)
-	runner.options.AgentWorkspace = func(context.Context, AgentWorkspaceRequest) (string, error) {
+	runner.tasks.workspace = func(context.Context, AgentWorkspaceRequest) (string, error) {
 		return t.TempDir(), nil
 	}
 	var lifecycleCalls atomic.Int32
@@ -228,7 +228,7 @@ func TestIndependentAgentRecoveryRetriesWorkspaceLifecycleUntilAcknowledged(t *t
 		}
 		return nil
 	}
-	runner.options.AgentLifecycle = lifecycle
+	runner.tasks.lifecycle = lifecycle
 	task := agentTestCall(t, runner, actor, "spawn-lifecycle-recovery", "SpawnAgent", `{"kind":"general","title":"recover cleanup","objective":"ask before cleanup"}`)
 	view, err := runner.workbench.Get(ctx, 7, task.ChildSessionId)
 	if err != nil || view.Run == nil {

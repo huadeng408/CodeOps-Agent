@@ -252,14 +252,12 @@ type SessionRunner struct {
 	cancelingRuns   map[runKey]bool
 	cancelOwnerID   string
 	ownedLeases     map[string]bool
-	// agentLifecycleMu serializes callback-plus-acknowledgement so concurrent
-	// terminal observers cannot clean the same managed workspace twice.
-	agentLifecycleMu sync.Mutex
-	queuedMu         sync.Mutex
-	queued           map[runKey]struct{}
-	queuedContexts   map[runKey]context.Context
-	lifecycleMu      sync.RWMutex
-	closed           bool
+	tasks           *subagentTasks
+	queuedMu        sync.Mutex
+	queued          map[runKey]struct{}
+	queuedContexts  map[runKey]context.Context
+	lifecycleMu     sync.RWMutex
+	closed          bool
 	// admissionClosed closes the WaitGroup admission gate before Close waits.
 	// It is atomic because enqueue can be called from a worker while a public
 	// request still holds lifecycleMu.RLock.
@@ -584,6 +582,10 @@ func NewSessionRunner(workbench *Workbench, conversation ConversationAdapter, to
 		ctx: ctx, cancel: cancel, queue: make(chan runKey, options.QueueSize), queued: make(map[runKey]struct{}), queuedContexts: make(map[runKey]context.Context),
 		agentQueue: make(chan runKey, options.QueueSize), activeAgentRuns: make(map[runKey]*runExecution), cancelOwnerID: cancelOwnerID, ownedLeases: make(map[string]bool),
 		memoryQueue: make(chan runKey, options.QueueSize),
+	}
+	runner.tasks = &subagentTasks{workbench: workbench, runs: runner,
+		workspace: options.AgentWorkspace, readOnlyWorkspace: options.ReadOnlyAgentWorkspace,
+		toolBinding: options.AgentToolBinding, lifecycle: options.AgentLifecycle, tracer: options.Tracer,
 	}
 	runner.wg.Add(options.WorkerCount + options.AgentWorkerCount + 1)
 	for i := 0; i < options.WorkerCount; i++ {
@@ -1125,7 +1127,7 @@ func (r *SessionRunner) recoverSessions(ctx context.Context, ids []string, start
 		if startup {
 			taskCtx = context.WithValue(ctx, startupRecoveryPlanningContextKey{}, true)
 		}
-		if err := r.recoverAgentTask(taskCtx, view.UserID, events); err != nil {
+		if err := r.tasks.recoverAgentTask(taskCtx, view.UserID, events); err != nil {
 			recoverErrs = append(recoverErrs, fmt.Errorf("recover session %s agent task: %w", sessionID, err))
 			continue
 		}
@@ -1528,7 +1530,7 @@ func (r *SessionRunner) execute(traceCtx context.Context, key runKey) {
 			case <-runCtx.Done():
 			case <-parentDeleted:
 				fenceCtx, fenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = r.cancelAgentTask(fenceCtx, request.AgentTask, "parent-deleted")
+				_ = r.tasks.cancelAgentTask(fenceCtx, request.AgentTask, "parent-deleted")
 				fenceCancel()
 				cancel()
 			}
@@ -1865,7 +1867,7 @@ func (r *SessionRunner) conversationRequest(ctx context.Context, key runKey, lea
 		Actor: projection.actor, History: history, State: planTodo,
 		HarnessManaged: true,
 	}
-	if err := r.agentRequest(events, &request); err != nil {
+	if err := r.tasks.agentRequest(ctx, events, &request); err != nil {
 		return orchestrator.ConversationRequest{}, err
 	}
 	if r.options.Workspace != nil {
@@ -2103,7 +2105,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	if task, _, taskErr := projectAgentTask(events); taskErr != nil {
 		return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "agent task integrity failure", ExitCode: 1}, true
 	} else if task != nil {
-		if _, _, err := r.readAgentTask(ctx, projectionOwner(events), task.Id, key.sessionID); err != nil {
+		if _, _, err := r.tasks.readAgentTask(ctx, projectionOwner(events), task.Id, key.sessionID); err != nil {
 			policyAllowed = false
 		}
 	}
@@ -2278,7 +2280,7 @@ func (r *SessionRunner) executeTool(ctx context.Context, key runKey, lease runLe
 	} else if call.Name == "AskUser" {
 		agentCall := call
 		agentCall.ID = agentInvocationID(key.runID, retryOfRunIDs, call.ID)
-		result = r.askAgentInput(ctx, actor, key.sessionID, agentCall)
+		result = r.tasks.askAgentInput(ctx, actor, key.sessionID, agentCall)
 	} else if scoped, ok := r.tools.(WorkingDirToolExecutionAdapter); ok {
 		result = scoped.ExecuteInWorkingDir(ctx, actor, key.sessionID, workingDir, call)
 	} else {
@@ -2740,7 +2742,7 @@ func (r *SessionRunner) completeRun(parent context.Context, key runKey, allowMem
 	}
 	// Subagent bookkeeping also runs after non-terminal attempts.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-	r.completeAgentTurn(ctx, key)
+	r.tasks.completeAgentTurn(ctx, key)
 	cancel()
 	if !allowMemory || readErr != nil || !run.terminal || run.cancelRequest != nil {
 		return
@@ -3061,6 +3063,7 @@ func projectRun(events []Event, runID string) (runProjection, error) {
 
 func projectRuns(events []Event) (map[string]runProjection, error) {
 	runs := make(map[string]runProjection)
+	createdRuns := make([]string, 0)
 	for _, event := range events {
 		switch event.Type {
 		case continuationEventType:
@@ -3080,6 +3083,7 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 				SessionID: event.SessionID, RunID: payload.RunID, RequestID: payload.RequestID,
 				Status: RunQueued, CheckpointHash: payload.CheckpointHash,
 			}, inputEvent: payload.InputEventID, surfaceHash: payload.SurfaceSHA256, targetSeq: payload.TargetSeq, actor: payload.Actor, order: event.Seq, createdOrder: event.Seq}
+			createdRuns = append(createdRuns, payload.RunID)
 		case runLeasedEventType, runHeartbeatEventType:
 			var payload runLeasePayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -3164,26 +3168,28 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 	// Derive retry lineage from the same immutable event stream. A retry only
 	// points backwards to terminal failures for the same checkpoint and actor;
 	// unrelated or future runs remain isolated.
-	for runID, current := range runs {
+	type retryGroup struct{ checkpoint, actor string }
+	failedRuns := make(map[retryGroup][]string)
+	for _, runID := range createdRuns {
+		candidate := runs[runID]
+		if !candidate.terminal || candidate.view.Status != RunFailed || candidate.view.CheckpointHash == "" {
+			continue
+		}
+		group := retryGroup{candidate.view.CheckpointHash, candidate.actor.ScopeKey()}
+		failedRuns[group] = append(failedRuns[group], runID)
+	}
+	for _, runID := range createdRuns {
+		current := runs[runID]
 		checkpointHash := strings.TrimSpace(current.view.CheckpointHash)
 		if checkpointHash == "" {
 			continue
 		}
-		candidates := make([]runProjection, 0)
-		for candidateID, candidate := range runs {
-			if candidateID == runID || !candidate.terminal || candidate.view.Status != RunFailed || candidate.view.CheckpointHash != checkpointHash || candidate.createdOrder >= current.createdOrder {
-				continue
-			}
-			if current.actor.ScopeKey() != "" && candidate.actor.ScopeKey() != current.actor.ScopeKey() {
-				continue
-			}
-			candidates = append(candidates, candidate)
-		}
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].createdOrder < candidates[j].createdOrder })
-		if len(candidates) > 0 {
-			ids := make([]string, 0, len(candidates))
-			for _, candidate := range candidates {
-				ids = append(ids, candidate.view.RunID)
+		candidates := failedRuns[retryGroup{checkpointHash, current.actor.ScopeKey()}]
+		priorCount := sort.Search(len(candidates), func(i int) bool { return runs[candidates[i]].createdOrder >= current.createdOrder })
+		if priorCount > 0 {
+			ids := make([]string, priorCount)
+			for i := range ids {
+				ids[i] = candidates[i]
 			}
 			current.view.RetryOfRunID = ids[0]
 			current.view.RetryOfRunIDs = ids
@@ -3191,4 +3197,48 @@ func projectRuns(events []Event) (map[string]runProjection, error) {
 		}
 	}
 	return runs, nil
+}
+
+func (r *SessionRunner) sessionRunDone(sessionID string) <-chan struct{} {
+	r.agentMu.Lock()
+	defer r.agentMu.Unlock()
+	for key, execution := range r.activeAgentRuns {
+		if key.sessionID == sessionID {
+			return execution.done
+		}
+	}
+	return nil
+}
+
+func (r *SessionRunner) stopSessionRuns(ctx context.Context, sessionID string) error {
+	r.agentMu.Lock()
+	var stopping []*runExecution
+	for key, execution := range r.activeAgentRuns {
+		if key.sessionID == sessionID {
+			execution.stop()
+			stopping = append(stopping, execution)
+		}
+	}
+	r.agentMu.Unlock()
+	var stopErrors []error
+	for _, execution := range stopping {
+		select {
+		case <-execution.done:
+		case <-ctx.Done():
+			stopErrors = append(stopErrors, ctx.Err())
+		}
+	}
+	return errors.Join(stopErrors...)
+}
+
+func (r *SessionRunner) cancelLinkedRun(ctx context.Context, command CancelRunCommand) error {
+	if _, err := r.requestRunCancellation(ctx, command); err != nil {
+		return err
+	}
+	key := runKey{sessionID: command.SessionID, runID: command.RunID}
+	r.workbench.signal(command.SessionID)
+	if !r.interruptRun(key) {
+		r.enqueue(ctx, key, time.Time{})
+	}
+	return nil
 }

@@ -1035,8 +1035,18 @@ func TestGatewayCountsAnthropicCacheCreationAndReadOnce(t *testing.T) {
 	defer ledger.Close()
 	budget := admission.NewBudget(ledger)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || r.Header.Get("anthropic-version") != "2023-06-01" {
+			t.Error("Anthropic adapter did not preserve its endpoint and version header")
+		}
 		if r.Header.Get("x-api-key") != "fixture-provider-authority" {
 			t.Error("missing Go-owned credential")
+		}
+		var request map[string]any
+		if json.NewDecoder(r.Body).Decode(&request) != nil || request["max_tokens"] != float64(3) || request["stream"] != false {
+			t.Error("Anthropic adapter did not apply its request shape")
+		}
+		if _, exists := request["max_completion_tokens"]; exists {
+			t.Error("OpenAI output cap leaked into Anthropic request")
 		}
 		// OpenAI counters are not part of the Anthropic accounting contract.
 		_, _ = w.Write([]byte(`{"model":"fixture-model","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":8,"output_tokens":3,"prompt_tokens":9,"prompt_tokens":0,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`))

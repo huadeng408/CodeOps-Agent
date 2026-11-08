@@ -19,6 +19,7 @@ func TestIndependentAgentAndArtifactFailuresSetContentFreeStatus(t *testing.T) {
 		t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 		runner, _, actor := agentTestRunner(t, &independentAgentFixture{mode: "failed"})
 		runner.options.Tracer = tracer
+		runner.tasks.tracer = tracer
 
 		task := agentTestCall(t, runner, actor, "trace-failure", "SpawnAgent", `{"kind":"explore","title":"trace","objective":"AGENT_FAILURE_SECRET_SENTINEL"}`)
 		if task.Status != "failed" {
@@ -36,6 +37,7 @@ func TestIndependentAgentAndArtifactFailuresSetContentFreeStatus(t *testing.T) {
 		t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 		runner, _, actor := agentTestRunner(t, &independentAgentFixture{})
 		runner.options.Tracer = tracer
+		runner.tasks.tracer = tracer
 
 		result := runner.ExecuteAgentTool(context.Background(), actor, actor.SessionID, orchestrator.ToolCall{
 			ID: "invalid-artifact", Name: "PublishArtifact",
