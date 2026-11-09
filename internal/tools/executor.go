@@ -15,6 +15,7 @@ import (
 	"code-agent/internal/jobs"
 	"code-agent/internal/mcp"
 	"code-agent/internal/rag"
+	"code-agent/internal/safety"
 	"code-agent/internal/sandbox"
 	"code-agent/internal/skills"
 	"code-agent/internal/telemetry/genai"
@@ -83,6 +84,7 @@ type Executor struct {
 	tracer           genai.Tracer
 	jobs             *jobs.Registry
 	extensions       *extensions.Registry
+	analyzer         *safety.Analyzer
 }
 
 func NewExecutor(root string) *Executor {
@@ -93,7 +95,19 @@ func NewExecutor(root string) *Executor {
 		MaxOutputLines: 250,
 		spill:          spill,
 		jobs:           jobs.NewRegistry(root, jobs.Config{}),
+		analyzer:       safety.NewWorkspaceAnalyzer(root, ".env"),
 	}
+}
+
+// Analyzer returns the workspace-bound safety analyzer for shell and path checks.
+func (e *Executor) Analyzer() *safety.Analyzer {
+	if e != nil && e.analyzer != nil {
+		return e.analyzer
+	}
+	if e != nil && strings.TrimSpace(e.Root) != "" {
+		return safety.NewWorkspaceAnalyzer(e.Root, ".env")
+	}
+	return safety.NewAnalyzer()
 }
 
 // SetJobsRegistry replaces the process lifecycle registry. It is intended for

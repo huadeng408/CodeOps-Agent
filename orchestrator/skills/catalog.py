@@ -53,6 +53,10 @@ _GOAL_SKILL_SPECS: Final[tuple[SkillSpec, ...]] = (
     ("review", "review changes for correctness and risk", ("Read", "Git", "Grep")),
     ("commit", "draft a conventional commit message from the current diff", ("Git",)),
     ("init", "bootstrap project instructions and baseline structure", ("Read", "Glob", "Grep")),
+    ("data-governance", "govern structured datasets with sandboxed batch joins, filters, and aggregations", ("Read", "Bash", "Grep")),
+    ("ast-repomap", "build AST symbol dependency graphs and Personalized PageRank repository maps", ("Read", "Glob", "Grep")),
+    ("trajectory-reward", "evaluate multi-step agent trajectories using tool correctness, test delta, and cost penalty", ("Read", "Bash")),
+    ("sandbox-execution-plan", "validate and execute AST-whitelisted data plans inside an isolated sandbox", ("Read", "Bash")),
 )
 
 

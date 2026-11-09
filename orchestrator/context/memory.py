@@ -816,7 +816,14 @@ class LayeredContext:
         self.max_events = max(1, int(max_events))
         self.max_event_chars = max(256, int(max_event_chars))
 
-    def load(self, session_id: str, raw_paths: Iterable[str] = ()) -> ContextSnapshot:
+    def load(
+        self,
+        session_id: str,
+        raw_paths: Iterable[str] = (),
+        *,
+        query_symbols: Iterable[str] = (),
+        token_budget: int | None = None,
+    ) -> ContextSnapshot:
         files = self._files()
         loaded_events = self.store.events(session_id, limit=self.max_events + 1)
         history_truncated_by_count = len(loaded_events) > self.max_events
@@ -829,11 +836,26 @@ class LayeredContext:
             except OSError:
                 continue
             p0_lines.append(f"{relative} ({size} bytes)")
-        p0 = "\n".join(p0_lines)
 
         requested = list(dict.fromkeys(str(path) for path in raw_paths))
         if not requested:
             requested = self._event_paths(events)
+
+        repomap_text, ppr_scores = self.build_ast_repomap(
+            seed_paths=requested,
+            query_symbols=query_symbols,
+            token_budget=token_budget or 1024,
+        )
+        if files:
+            p0_lines.append(repomap_text)
+        p0 = "\n".join(p0_lines)
+
+        if not requested and ppr_scores:
+            ranked_candidates = sorted(
+                ppr_scores,
+                key=lambda rel: (-ppr_scores.get(rel, 0.0), rel),
+            )
+            requested = ranked_candidates[:8]
         resolved: list[Path] = []
         for raw_path in requested:
             candidate = self._resolve(raw_path)
@@ -922,6 +944,86 @@ class LayeredContext:
 
     def search_memory(self, query: str, limit: int = 20) -> list[LongTermMemory]:
         return self.store.search_memory(query, limit)
+
+    def build_ast_repomap(
+        self,
+        seed_paths: Iterable[str] = (),
+        query_symbols: Iterable[str] = (),
+        token_budget: int = 1024,
+    ) -> tuple[str, dict[str, float]]:
+        """Build a Personalized PageRank AST repository map over workspace files."""
+        from .repomap import build_ppr_repomap
+
+        files_content: dict[str, str] = {}
+        for path in self._files():
+            lower_name = path.name.lower()
+            if lower_name in _SENSITIVE_FILES or lower_name.startswith(".env."):
+                continue
+            relative = path.relative_to(self.project_root).as_posix()
+            try:
+                with path.open("rb") as handle:
+                    data = handle.read(self.max_raw_bytes)
+                files_content[relative] = _redact_text(_decode_bounded_utf8(data, self.max_raw_bytes))
+            except (OSError, UnicodeDecodeError):
+                continue
+        return build_ppr_repomap(
+            files_content,
+            seed_paths=seed_paths,
+            query_symbols=query_symbols,
+            token_budget=token_budget,
+        )
+
+    def snapshot(
+        self,
+        session_id: str,
+        *,
+        seed_paths: Iterable[str] = (),
+        query_symbols: Iterable[str] = (),
+        token_budget: int = 1024,
+    ) -> ContextSnapshot:
+        """Pack P0, P1, and P2 tiers via Personalized PageRank over the AST symbol dependency graph."""
+        from .repomap import pack_ppr_context_tiers
+
+        files_content: dict[str, str] = {}
+        files = self._files()
+        for path in files:
+            lower_name = path.name.lower()
+            if lower_name in _SENSITIVE_FILES or lower_name.startswith(".env."):
+                continue
+            relative = path.relative_to(self.project_root).as_posix()
+            try:
+                with path.open("rb") as handle:
+                    data = handle.read(self.max_raw_bytes)
+                files_content[relative] = _redact_text(_decode_bounded_utf8(data, self.max_raw_bytes))
+            except (OSError, UnicodeDecodeError):
+                continue
+
+        packed = pack_ppr_context_tiers(
+            files_content,
+            seed_paths=seed_paths,
+            query_symbols=query_symbols,
+            token_budget=token_budget,
+        )
+        loaded_events = self.store.events(session_id, limit=self.max_events)
+        event_lines = [
+            f"#{event.sequence} {event.kind}: "
+            f"{json.dumps(self._prompt_event_payload(event), ensure_ascii=False, sort_keys=True)}"
+            for event in loaded_events
+            if not (event.kind.startswith("compaction/") or event.kind.startswith("tool_result/"))
+        ]
+        events_text = "\n".join(event_lines)[-self.max_event_chars :]
+        p0_text = str(packed["p0"])
+        p1_text = str(packed["p1"])
+        p2_map = dict(packed["p2"])  # type: ignore[arg-type]
+        baseline_bytes = sum(self._safe_size(path) for path in files) + len(events_text.encode("utf-8"))
+        return ContextSnapshot(
+            p0=p0_text,
+            p1=p1_text,
+            p2=p2_map,
+            events_text=events_text,
+            estimated_input_tokens=int(packed["used_tokens"]),
+            estimated_baseline_tokens=max(1, (baseline_bytes + 3) // 4),
+        )
 
     def _files(self) -> list[Path]:
         files: list[Path] = []

@@ -21,7 +21,7 @@ func (e *Executor) executeBash(ctx context.Context, req ToolRequest) (ToolResult
 		return ToolResult{Name: "Bash", Error: "command is required", ExitCode: 1}, fmt.Errorf("command is required")
 	}
 
-	analysis := safety.NewAnalyzer().AnalyzeCommand(command)
+	analysis := e.Analyzer().AnalyzeCommand(command)
 	if !analysis.Allowed {
 		err := fmt.Errorf("blocked command: %s", analysis.Reason)
 		return ToolResult{Name: "Bash", Error: err.Error(), ExitCode: 1}, err

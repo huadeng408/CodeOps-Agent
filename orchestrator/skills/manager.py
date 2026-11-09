@@ -167,6 +167,61 @@ class SkillManager:
             revision=self._revision,
         )
 
+    def select_for_budget(
+        self,
+        query: str = "",
+        *,
+        token_budget: int = 512,
+        for_model: bool = True,
+    ) -> list[Skill]:
+        """Rank and select relevant skills from the 40+ skill catalog within a token budget."""
+        candidates = self.list(for_model=for_model) if for_model else self.list()
+        terms = {
+            token
+            for token in re.findall(r"[a-z0-9]+", query.lower())
+            if len(token) >= 2
+        }
+
+        def _score(skill: Skill) -> tuple[float, str]:
+            haystack = f"{skill.name} {skill.description} {skill.when_to_use} {' '.join(skill.tools)}".lower()
+            words = set(re.findall(r"[a-z0-9]+", haystack))
+            overlap = len(terms & words)
+            substr_hits = sum(1 for t in terms if t in skill.name.lower() or t in skill.description.lower())
+            score = overlap * 2.0 + substr_hits * 1.5
+            return (-score, skill.name)
+
+        ranked = sorted(candidates, key=_score)
+        budget_bytes = max(64, int(token_budget) * 4)
+        selected: list[Skill] = []
+        used_bytes = 0
+        for skill in ranked:
+            entry_text = self._format_skill_entry(skill)
+            entry_bytes = len(entry_text.encode("utf-8")) + 1
+            if used_bytes + entry_bytes > budget_bytes and selected:
+                break
+            selected.append(skill)
+            used_bytes += entry_bytes
+        return selected
+
+    @staticmethod
+    def _format_skill_entry(skill: Skill) -> str:
+        return f"- {skill.name}: {skill.description} [tools: {', '.join(skill.tools)}]"
+
+    def render_budgeted_skills(
+        self,
+        query: str = "",
+        *,
+        token_budget: int = 512,
+        for_model: bool = True,
+    ) -> str:
+        """Render the budgeted selection of skills as a compact prompt block."""
+        chosen = self.select_for_budget(query, token_budget=token_budget, for_model=for_model)
+        header = f"Active Skills ({len(chosen)}/{len(self.list())} loaded within {token_budget} token budget):"
+        lines = [header]
+        for skill in chosen:
+            lines.append(self._format_skill_entry(skill))
+        return "\n".join(lines)
+
     def discover(
         self,
         directories: Iterable[str | Path] = (),

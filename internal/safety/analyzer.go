@@ -36,10 +36,519 @@ type Analysis struct {
 	Reason  string
 }
 
-type Analyzer struct{}
+type Analyzer struct {
+	boundary *PathTrie
+}
 
 func NewAnalyzer() *Analyzer {
 	return &Analyzer{}
+}
+
+// NewWorkspaceAnalyzer constructs an Analyzer bound to a PathTrie workspace boundary.
+func NewWorkspaceAnalyzer(workspaceRoot string, deniedPrefixes ...string) *Analyzer {
+	trie := NewPathTrie(workspaceRoot)
+	trie.DenyPrefix(".git/hooks")
+	trie.DenyPrefix(".git/config")
+	for _, prefix := range deniedPrefixes {
+		trie.DenyPrefix(prefix)
+	}
+	return &Analyzer{boundary: trie}
+}
+
+// WithPathTrie attaches a PathTrie boundary to the analyzer.
+func (a *Analyzer) WithPathTrie(trie *PathTrie) *Analyzer {
+	return &Analyzer{boundary: trie}
+}
+
+// CheckWorkspacePath validates a candidate file path against the analyzer's PathTrie boundary.
+func (a *Analyzer) CheckWorkspacePath(candidatePath string) (bool, string) {
+	if a == nil || a.boundary == nil {
+		return true, ""
+	}
+	return a.boundary.CheckPath(candidatePath)
+}
+
+// ShellASTNodeKind classifies nodes in the parsed shell syntax tree.
+type ShellASTNodeKind string
+
+const (
+	ShellNodeProgram      ShellASTNodeKind = "program"
+	ShellNodePipeline     ShellASTNodeKind = "pipeline"
+	ShellNodeCommand      ShellASTNodeKind = "command"
+	ShellNodeSubshell     ShellASTNodeKind = "subshell"
+	ShellNodeCommandSubst ShellASTNodeKind = "command_subst"
+)
+
+// ShellASTNode represents a node in the shell command abstract syntax tree.
+type ShellASTNode struct {
+	Kind     ShellASTNodeKind
+	Operator string
+	Argv     []string
+	RawArgv  []string
+	Children []*ShellASTNode
+}
+
+// ParseShellAST parses a shell command line into a hierarchical ShellASTNode tree,
+// resolving quote obfuscation, command substitutions $(...) / `...`, subshells,
+// and control operators (;, &&, ||, |, &). Unbalanced quotes or substitutions fail closed.
+func ParseShellAST(command string) (*ShellASTNode, error) {
+	root := &ShellASTNode{Kind: ShellNodeProgram}
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return root, nil
+	}
+	statements, SubstNodes, err := splitShellStatements(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	for _, stmt := range statements {
+		argv, rawArgv, innerSubst, tokenErr := tokenizeShellWords(stmt.text)
+		if tokenErr != nil {
+			return nil, tokenErr
+		}
+		if len(argv) > 0 {
+			cmdNode := &ShellASTNode{
+				Kind:     ShellNodeCommand,
+				Operator: stmt.operator,
+				Argv:     argv,
+				RawArgv:  rawArgv,
+			}
+			for _, sub := range innerSubst {
+				subAST, subErr := ParseShellAST(sub)
+				if subErr != nil {
+					return nil, subErr
+				}
+				cmdNode.Children = append(cmdNode.Children, &ShellASTNode{
+					Kind:     ShellNodeCommandSubst,
+					Children: subAST.Children,
+				})
+			}
+			root.Children = append(root.Children, cmdNode)
+		}
+	}
+	for _, sub := range SubstNodes {
+		subAST, subErr := ParseShellAST(sub)
+		if subErr != nil {
+			return nil, subErr
+		}
+		root.Children = append(root.Children, &ShellASTNode{
+			Kind:     ShellNodeSubshell,
+			Children: subAST.Children,
+		})
+	}
+	return root, nil
+}
+
+type rawShellSegment struct {
+	text     string
+	operator string
+}
+
+var errMalformedShellAST = os.ErrInvalid
+
+func splitShellStatements(input string) ([]rawShellSegment, []string, error) {
+	var (
+		segments []rawShellSegment
+		subshell []string
+		buf      strings.Builder
+		inSingle bool
+		inDouble bool
+		escaped  bool
+		parenDep int
+	)
+	flush := func(op string) {
+		seg := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if seg != "" {
+			segments = append(segments, rawShellSegment{text: seg, operator: op})
+		}
+	}
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		if escaped {
+			buf.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			// Preserve Windows path backslashes unless escaping quotes or shell meta-chars.
+			if i+1 < len(input) && strings.ContainsRune(`"'$;|&`+"`", rune(input[i+1])) {
+				escaped = true
+				buf.WriteByte(ch)
+				continue
+			}
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			buf.WriteByte(ch)
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			buf.WriteByte(ch)
+			continue
+		}
+		if inSingle || inDouble {
+			buf.WriteByte(ch)
+			continue
+		}
+		if ch == '(' {
+			// Fork bomb pattern is handled directly by containsForkBomb.
+			parenDep++
+			start := i + 1
+			depth := 1
+			sSingle, sDouble := false, false
+			j := start
+			for ; j < len(input) && depth > 0; j++ {
+				c := input[j]
+				if c == '\'' && !sDouble {
+					sSingle = !sSingle
+				} else if c == '"' && !sSingle {
+					sDouble = !sDouble
+				} else if !sSingle && !sDouble {
+					if c == '(' {
+						depth++
+					} else if c == ')' {
+						depth--
+					}
+				}
+			}
+			if depth != 0 {
+				return nil, nil, errMalformedShellAST
+			}
+			parenDep--
+			inner := strings.TrimSpace(input[start : j-1])
+			if inner != "" {
+				subshell = append(subshell, inner)
+			}
+			buf.WriteString(input[i:j])
+			i = j - 1
+			continue
+		}
+		if ch == ')' && parenDep == 0 {
+			return nil, nil, errMalformedShellAST
+		}
+		switch ch {
+		case ';', '\n':
+			flush(";")
+		case '{', '}':
+			flush(";")
+		case '|':
+			if i+1 < len(input) && input[i+1] == '|' {
+				flush("||")
+				i++
+			} else {
+				flush("|")
+			}
+		case '&':
+			if i+1 < len(input) && input[i+1] == '&' {
+				flush("&&")
+				i++
+			} else {
+				flush("&")
+			}
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+	if inSingle || inDouble || escaped || parenDep != 0 {
+		return nil, nil, errMalformedShellAST
+	}
+	flush("")
+	return segments, subshell, nil
+}
+
+func tokenizeShellWords(segment string) ([]string, []string, []string, error) {
+	var (
+		argv     []string
+		rawArgv  []string
+		substs   []string
+		cleanBuf strings.Builder
+		rawBuf   strings.Builder
+		inToken  bool
+		inSingle bool
+		inDouble bool
+	)
+	flushToken := func() {
+		if !inToken {
+			return
+		}
+		argv = append(argv, strings.ToLower(cleanBuf.String()))
+		rawArgv = append(rawArgv, rawBuf.String())
+		cleanBuf.Reset()
+		rawBuf.Reset()
+		inToken = false
+	}
+	for i := 0; i < len(segment); i++ {
+		ch := segment[i]
+		if !inSingle && ch == '$' && i+1 < len(segment) && segment[i+1] == '(' {
+			inToken = true
+			depth := 1
+			j := i + 2
+			sSingle, sDouble := false, false
+			for ; j < len(segment) && depth > 0; j++ {
+				c := segment[j]
+				if c == '\'' && !sDouble {
+					sSingle = !sSingle
+				} else if c == '"' && !sSingle {
+					sDouble = !sDouble
+				} else if !sSingle && !sDouble {
+					if c == '(' {
+						depth++
+					} else if c == ')' {
+						depth--
+					}
+				}
+			}
+			if depth != 0 {
+				return nil, nil, nil, errMalformedShellAST
+			}
+			inner := strings.TrimSpace(segment[i+2 : j-1])
+			substs = append(substs, inner)
+			cleanBuf.WriteString("$(" + inner + ")")
+			rawBuf.WriteString(segment[i:j])
+			i = j - 1
+			continue
+		}
+		if !inSingle && ch == '`' {
+			inToken = true
+			j := i + 1
+			for j < len(segment) && segment[j] != '`' {
+				if segment[j] == '\\' && j+1 < len(segment) {
+					j += 2
+					continue
+				}
+				j++
+			}
+			if j >= len(segment) {
+				return nil, nil, nil, errMalformedShellAST
+			}
+			inner := strings.TrimSpace(segment[i+1 : j])
+			substs = append(substs, inner)
+			cleanBuf.WriteString("`" + inner + "`")
+			rawBuf.WriteString(segment[i : j+1])
+			i = j
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			inToken = true
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			inToken = true
+			continue
+		}
+		if !inSingle && !inDouble && unicode.IsSpace(rune(ch)) {
+			flushToken()
+			continue
+		}
+		if ch == '\\' && !inSingle && i+1 < len(segment) && strings.ContainsRune(`"'$;|&`+"`", rune(segment[i+1])) {
+			i++
+			ch = segment[i]
+		}
+		inToken = true
+		cleanBuf.WriteByte(ch)
+		rawBuf.WriteByte(ch)
+	}
+	if inSingle || inDouble {
+		return nil, nil, nil, errMalformedShellAST
+	}
+	flushToken()
+	return argv, rawArgv, substs, nil
+}
+
+// PathTrie implements a prefix tree over normalized path segments to enforce
+// workspace confinement and block sensitive subtrees (e.g. .git/hooks) in O(k).
+type PathTrie struct {
+	workspaceRoot string
+	rootSegments  []string
+	allowRoot     *pathTrieNode
+	denyRoot      *pathTrieNode
+}
+
+type pathTrieNode struct {
+	children map[string]*pathTrieNode
+	terminal bool
+}
+
+func newPathTrieNode() *pathTrieNode {
+	return &pathTrieNode{children: make(map[string]*pathTrieNode)}
+}
+
+// NewPathTrie creates a PathTrie rooted at workspaceRoot.
+func NewPathTrie(workspaceRoot string) *PathTrie {
+	cleanedRoot := filepath.Clean(strings.TrimSpace(workspaceRoot))
+	if resolvedRoot, err := filepath.EvalSymlinks(cleanedRoot); err == nil && strings.TrimSpace(resolvedRoot) != "" {
+		cleanedRoot = filepath.Clean(resolvedRoot)
+	}
+	t := &PathTrie{
+		workspaceRoot: cleanedRoot,
+		rootSegments:  splitNormalizedSegments(cleanedRoot),
+		allowRoot:     newPathTrieNode(),
+		denyRoot:      newPathTrieNode(),
+	}
+	if len(t.rootSegments) > 0 {
+		insertSegments(t.allowRoot, t.rootSegments)
+	}
+	return t
+}
+
+// AllowPrefix registers an allowed relative or absolute prefix in the trie.
+func (t *PathTrie) AllowPrefix(prefix string) {
+	if t == nil {
+		return
+	}
+	segs := t.resolveCandidateSegments(prefix)
+	if len(segs) > 0 {
+		insertSegments(t.allowRoot, segs)
+	}
+}
+
+// DenyPrefix registers a denied relative or absolute prefix (such as .git/hooks).
+func (t *PathTrie) DenyPrefix(prefix string) {
+	if t == nil {
+		return
+	}
+	segs := t.resolveCandidateSegments(prefix)
+	if len(segs) > 0 {
+		insertSegments(t.denyRoot, segs)
+	}
+}
+
+// CheckPath validates that candidatePath stays inside the allowed workspace prefix
+// tree and does not match any denied prefix or symlink escape.
+func (t *PathTrie) CheckPath(candidatePath string) (bool, string) {
+	if t == nil || t.workspaceRoot == "" {
+		return true, ""
+	}
+	trimmed := strings.TrimSpace(candidatePath)
+	if trimmed == "" || strings.IndexByte(trimmed, 0) >= 0 {
+		return false, "invalid workspace path"
+	}
+	target := trimmed
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(t.workspaceRoot, target)
+	}
+	cleaned := filepath.Clean(target)
+	segs := splitNormalizedSegments(cleaned)
+	if !matchesPrefixTrie(t.allowRoot, segs) {
+		return false, "workspace boundary escape blocked by PathTrie"
+	}
+	if matchesPrefixTrie(t.denyRoot, segs) {
+		return false, "sensitive workspace path blocked by PathTrie"
+	}
+	if resolved, ok := resolveExistingAncestorSymlinks(cleaned); ok {
+		resolvedSegs := splitNormalizedSegments(filepath.Clean(resolved))
+		if !matchesPrefixTrie(t.allowRoot, resolvedSegs) {
+			return false, "symlink escape outside workspace blocked"
+		}
+		if matchesPrefixTrie(t.denyRoot, resolvedSegs) {
+			return false, "symlink target in denied path blocked"
+		}
+	}
+	return true, ""
+}
+
+func resolveExistingAncestorSymlinks(cleanedPath string) (string, bool) {
+	resolvedPath := cleanedPath
+	resolvedAny := false
+	if evaled, err := filepath.EvalSymlinks(resolvedPath); err == nil && strings.TrimSpace(evaled) != "" {
+		evaled = strings.TrimPrefix(evaled, `\\?\`)
+		if !strings.EqualFold(filepath.Clean(evaled), filepath.Clean(resolvedPath)) {
+			resolvedPath = filepath.Clean(evaled)
+			resolvedAny = true
+		}
+	}
+	current := resolvedPath
+	var tail []string
+	for {
+		if target, err := os.Readlink(current); err == nil && strings.TrimSpace(target) != "" {
+			target = strings.TrimPrefix(target, `\\?\`)
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(current), target)
+			}
+			parts := append([]string{filepath.Clean(target)}, tail...)
+			rebuilt := filepath.Join(parts...)
+			if evaled, evalErr := filepath.EvalSymlinks(rebuilt); evalErr == nil && strings.TrimSpace(evaled) != "" {
+				rebuilt = strings.TrimPrefix(evaled, `\\?\`)
+			}
+			return filepath.Clean(rebuilt), true
+		}
+		if evaled, err := filepath.EvalSymlinks(current); err == nil && strings.TrimSpace(evaled) != "" {
+			evaled = strings.TrimPrefix(evaled, `\\?\`)
+			if !strings.EqualFold(filepath.Clean(evaled), filepath.Clean(current)) {
+				parts := append([]string{filepath.Clean(evaled)}, tail...)
+				return filepath.Clean(filepath.Join(parts...)), true
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		tail = append([]string{filepath.Base(current)}, tail...)
+		current = parent
+	}
+	return resolvedPath, resolvedAny
+}
+
+func (t *PathTrie) resolveCandidateSegments(path string) []string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return nil
+	}
+	if !filepath.IsAbs(trimmed) && t.workspaceRoot != "" {
+		trimmed = filepath.Join(t.workspaceRoot, trimmed)
+	}
+	return splitNormalizedSegments(filepath.Clean(trimmed))
+}
+
+func splitNormalizedSegments(cleanedPath string) []string {
+	normalized := strings.ReplaceAll(strings.ToLower(cleanedPath), "\\", "/")
+	parts := strings.Split(normalized, "/")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" || p == "." {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func insertSegments(root *pathTrieNode, segments []string) {
+	curr := root
+	for _, seg := range segments {
+		next, ok := curr.children[seg]
+		if !ok {
+			next = newPathTrieNode()
+			curr.children[seg] = next
+		}
+		curr = next
+	}
+	curr.terminal = true
+}
+
+func matchesPrefixTrie(root *pathTrieNode, segments []string) bool {
+	if root == nil {
+		return false
+	}
+	curr := root
+	if curr.terminal {
+		return true
+	}
+	for _, seg := range segments {
+		next, ok := curr.children[seg]
+		if !ok {
+			return false
+		}
+		curr = next
+		if curr.terminal {
+			return true
+		}
+	}
+	return curr.terminal
 }
 
 func (a *Analyzer) AnalyzeCommand(command string) Analysis {
@@ -63,7 +572,17 @@ func (a *Analyzer) AnalyzeCommand(command string) Analysis {
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad permission or ownership change blocked"}
 	case containsProcessKill(fields):
 		return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad process termination blocked"}
-	case len(fields) > 0:
+	}
+
+	astRoot, err := ParseShellAST(trimmed)
+	if err != nil {
+		return Analysis{Allowed: false, Level: RiskHigh, Reason: "malformed shell syntax blocked"}
+	}
+	if astAnalysis, blocked := a.analyzeASTNode(astRoot); blocked {
+		return astAnalysis
+	}
+
+	if len(fields) > 0 {
 		if gitIndex := findGitExecutable(fields); gitIndex >= 0 {
 			gitArgs := fields[gitIndex+1:]
 			if end := gitShellBoundary(gitArgs); end >= 0 {
@@ -71,10 +590,83 @@ func (a *Analyzer) AnalyzeCommand(command string) Analysis {
 			}
 			return a.AnalyzeGit(gitArgs)
 		}
-		return Analysis{Allowed: true, Level: RiskLow, Reason: "no obvious risk detected"}
-	default:
-		return Analysis{Allowed: true, Level: RiskLow, Reason: "no obvious risk detected"}
 	}
+	return Analysis{Allowed: true, Level: RiskLow, Reason: "no obvious risk detected"}
+}
+
+func (a *Analyzer) analyzeASTNode(node *ShellASTNode) (Analysis, bool) {
+	if node == nil {
+		return Analysis{}, false
+	}
+	if node.Kind == ShellNodeCommand && len(node.Argv) > 0 {
+		stmtJoined := strings.Join(node.Argv, " ")
+		switch {
+		case containsRecursiveDelete(node.Argv):
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "recursive delete blocked"}, true
+		case containsDiskFormat(stmtJoined, node.Argv):
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "destructive disk format blocked"}, true
+		case containsBroadOwnershipChange(node.Argv):
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad permission or ownership change blocked"}, true
+		case containsProcessKill(node.Argv):
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "broad process termination blocked"}, true
+		case isDynamicEvalCommand(node.Argv):
+			return Analysis{Allowed: false, Level: RiskHigh, Reason: "dynamic shell eval blocked"}, true
+		}
+		if gitIndex := findGitExecutable(node.Argv); gitIndex >= 0 {
+			gitRes := a.AnalyzeGit(node.Argv[gitIndex+1:])
+			if !gitRes.Allowed {
+				return gitRes, true
+			}
+		}
+		if a.boundary != nil {
+			for _, rawArg := range node.RawArgv[1:] {
+				if looksLikePathArg(rawArg) || a.isExistingWorkspaceLink(rawArg) {
+					if ok, reason := a.boundary.CheckPath(rawArg); !ok {
+						return Analysis{Allowed: false, Level: RiskHigh, Reason: reason}, true
+					}
+				}
+			}
+		}
+	}
+	for _, child := range node.Children {
+		if res, blocked := a.analyzeASTNode(child); blocked {
+			return res, true
+		}
+	}
+	return Analysis{}, false
+}
+
+func (a *Analyzer) isExistingWorkspaceLink(rawArg string) bool {
+	if a == nil || a.boundary == nil || a.boundary.workspaceRoot == "" {
+		return false
+	}
+	if strings.HasPrefix(rawArg, "-") || strings.ContainsAny(rawArg, "=/\\:") {
+		return false
+	}
+	candidate := filepath.Join(a.boundary.workspaceRoot, rawArg)
+	_, err := os.Readlink(candidate)
+	return err == nil
+}
+
+func isDynamicEvalCommand(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	cmd := argv[0]
+	return cmd == "eval" || strings.HasSuffix(cmd, "/eval")
+}
+
+func looksLikePathArg(arg string) bool {
+	if strings.HasPrefix(arg, "-") || strings.Contains(arg, "://") || strings.HasPrefix(arg, "$") {
+		return false
+	}
+	if arg == "/dev/null" || arg == "/workspace" || strings.HasPrefix(arg, "/workspace/") {
+		return false
+	}
+	return strings.Contains(arg, "../") || strings.Contains(arg, `..\`) ||
+		strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, ".git/") || strings.HasPrefix(arg, `.git\`) ||
+		arg == ".env" || strings.HasPrefix(arg, ".env.") ||
+		strings.Contains(arg, "/") || strings.Contains(arg, `\`)
 }
 
 func (a *Analyzer) AnalyzeGit(args []string) Analysis {

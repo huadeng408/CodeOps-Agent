@@ -266,7 +266,7 @@ func newAppWithTaskInventory(cfg config.Config, stdin io.Reader, stdout io.Write
 		executor:        executor,
 		ragClient:       ragClient,
 		ragIngester:     ragClient,
-		safety:          safety.NewAnalyzer(),
+		safety:          safety.NewWorkspaceAnalyzer(cfg.ProjectRoot, ".env"),
 		mcp:             mcpManager,
 		worktree:        worktree.NewManager(cfg.ProjectRoot, cfg.WorktreeBaseRef),
 		undo:            undo.NewManager(),
@@ -1028,6 +1028,12 @@ func (a *App) handleToolCall(ctx context.Context, call orchestrator.ToolCall) or
 		// user approval. AlwaysAsk tools remain one-shot because the permission
 		// controller deliberately ignores sessionApproved for that level.
 		a.permissions.RecordApproval(call.Name, params)
+		if a.actor.Validate() == nil {
+			tier := a.permissions.TierForTool(call.Name)
+			if grant, grantErr := a.permissions.IssueSignedGrant(a.actor, call.Name, params, tier, 15*time.Minute); grantErr != nil || a.permissions.EvaluateWithGrant(a.actor, call.Name, params, grant).Decision != permission.Approve {
+				return orchestrator.ToolResult{ToolCallID: call.ID, ToolName: call.Name, Error: "signed authorization verification failed", ExitCode: 1}
+			}
+		}
 		a.session.SetApprovalHistory(a.permissions.ApprovalHistory())
 		if a.permissions.Level(call.Name) == permission.AskSession {
 			a.session.SetApprovedTools(a.permissions.ApprovedTools())

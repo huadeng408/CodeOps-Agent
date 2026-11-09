@@ -110,3 +110,19 @@ _Avoid_: log excerpt, synthetic report
 A Receipt for a declared engineering verification scope and its observed result.
 It does not establish completion of a product task or acceptance of a release.
 _Avoid_: Session state, Checkpoint, product acceptance
+
+**Signed Authorization Grant**:
+A verifiable, actor- and Session-bound authorization decision that governs tool execution across the three-tier permission levels (auto-allow, session-signed, and high-risk manual intercept).
+_Avoid_: unsigned allow flag, global bypass
+
+**Symbol Dependency Map**:
+The ranked graph of repository definitions and cross-file references used to allocate Context budget across P0 overview, P1 module summaries, and P2 source excerpts.
+_Avoid_: flat file list, raw directory dump
+
+**Controlled Execution Plan**:
+An agent-authored data processing plan validated against a static syntax-tree allowlist before running inside an isolated boundary, returning only bounded digests, anomaly samples, and artifact references to the Context.
+_Avoid_: arbitrary script execution, raw dataset dump
+
+**Trajectory Reward**:
+A composite evaluation signal over a multi-step Run that combines tool-call validity, unit-test progress, and resource budget compliance.
+_Avoid_: single-turn accuracy, unpenalized pass rate

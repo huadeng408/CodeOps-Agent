@@ -772,6 +772,9 @@ async def _run_child(
     store = SQLiteWorkflowStore(db_path)
     try:
         for task_id in task_ids:
+            existing = store.load(task_id)
+            if existing is not None and existing.state == "completed":
+                continue
             _write_progress(
                 path=progress_path,
                 payload={
@@ -814,6 +817,7 @@ async def _run_child(
                     title=f"Stage {index} for {task_id}",
                     objective="checkpoint, resume, and preserve dependency output",
                     depends_on=(f"stage-{index - 1}",) if index > 1 else (),
+                    max_attempts=5,
                 )
                 for index in range(1, stage_count + 1)
             ]

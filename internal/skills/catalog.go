@@ -45,5 +45,9 @@ func goalSkills() []Skill {
 		{Name: "review", Description: "review changes for correctness and risk", Prompt: "Review the current change set and report concrete correctness, security, and regression risks first.", Tools: []string{"Read", "Git", "Grep"}},
 		{Name: "commit", Description: "draft a conventional commit message from the current diff", Prompt: "Given the current diff, draft one conventional-commit message with a concise subject and body.", Tools: []string{"Git"}},
 		{Name: "init", Description: "bootstrap project instructions and baseline structure", Prompt: "Initialize the repository skeleton and explain the active structure.", Tools: []string{"Read", "Glob", "Grep"}},
+		{Name: "data-governance", Description: "govern structured datasets with sandboxed batch joins, filters, and aggregations", Prompt: "Generate an AST-whitelisted execution plan to join, filter, and aggregate structured datasets inside the sandbox and return only anomaly samples, summary statistics, and SHA-256 artifact references.", Tools: []string{"Read", "Bash", "Grep"}},
+		{Name: "ast-repomap", Description: "build AST symbol dependency graphs and Personalized PageRank repository maps", Prompt: "Extract AST symbol definitions and cross-file references to rank P0-P2 context within the active token budget.", Tools: []string{"Read", "Glob", "Grep"}},
+		{Name: "trajectory-reward", Description: "evaluate multi-step agent trajectories using tool correctness, test delta, and cost penalty", Prompt: "Score multi-step agent trajectories by combining tool schema/permission correctness, unit test pass delta, and token budget penalty.", Tools: []string{"Read", "Bash"}},
+		{Name: "sandbox-execution-plan", Description: "validate and execute AST-whitelisted data plans inside an isolated sandbox", Prompt: "Validate the Python AST execution plan against the security whitelist before executing in the isolated sandbox.", Tools: []string{"Read", "Bash"}},
 	}
 }

@@ -65,6 +65,10 @@ from typing import Any, Protocol, Sequence
 # The harness owns the scorer contract; the adapter implements it.  Verified
 # acyclic: eval/harness/ imports nothing from eval/benchmarks/.
 from eval.harness.runner import SCORER_RAW_OUTPUT_KEY
+from orchestrator.eval.metrics import (
+    evaluate_swebench_trajectory_subset,
+    score_trajectory_reward,
+)
 
 #: Trace capabilities this benchmark exercises (see
 #: ``eval.harness.trace_contract.ALL_CAPABILITIES``).  Solving a SWE-bench
@@ -2634,6 +2638,29 @@ def _read_official_resolution(
             if instance_id in summary.get(key, []):
                 return False
     return None
+
+
+def rank_swebench_trajectories(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    token_budget: int = 8000,
+    step_budget: int = 12,
+) -> list[dict[str, Any]]:
+    """Rank candidate SWE-bench trajectories by multi-step process reward."""
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for idx, cand in enumerate(candidates):
+        reward = score_trajectory_reward(
+            list(cand.get("steps", [])),
+            tests_passed_before=int(cand.get("tests_passed_before", 0)),
+            tests_passed_after=int(cand.get("tests_passed_after", 0)),
+            total_tests=int(cand.get("total_tests", 10)),
+            token_budget=token_budget,
+            step_budget=step_budget,
+        )
+        enriched = {**cand, "trajectory_reward": reward}
+        ranked.append((reward["total_reward"], -idx, enriched))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in ranked]
 
 
 if __name__ == "__main__":

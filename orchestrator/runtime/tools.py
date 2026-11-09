@@ -96,6 +96,71 @@ class ToolRegistry:
         self._refresh_extensions_catalog()
         return [tool.to_openai_schema() for tool in self.list()]
 
+    def retrieve_tools_for_query(self, query: str, *, top_k: int = 6) -> list[ToolSpec]:
+        """Retrieve the top-k most relevant tools on-demand for a task query."""
+        all_tools = self.list()
+        limit = max(1, min(int(top_k), len(all_tools)))
+        terms = {
+            t
+            for t in re.findall(r"[a-z0-9]+", query.lower())
+            if len(t) >= 2
+        }
+
+        def _score(spec: ToolSpec) -> tuple[float, str]:
+            props = spec.parameters.get("properties", {}) if isinstance(spec.parameters, dict) else {}
+            prop_text = " ".join(
+                f"{k} {v.get('description', '')}"
+                for k, v in props.items()
+                if isinstance(v, dict)
+            )
+            haystack = f"{spec.name} {spec.description} {prop_text}".lower()
+            words = set(re.findall(r"[a-z0-9]+", haystack))
+            overlap = len(terms & words)
+            substr_hits = sum(1 for t in terms if t in haystack)
+            core_bonus = 0.25 if spec.name in {"Read", "Grep", "Glob", "DataGovernancePlan"} else 0.0
+            return (-(overlap * 2.5 + substr_hits * 1.0 + core_bonus), spec.name.lower())
+
+        ranked = sorted(all_tools, key=_score)
+        return ranked[:limit]
+
+    def openai_schemas_for_query(
+        self,
+        query: str,
+        *,
+        top_k: int = 6,
+    ) -> tuple[list[dict[str, Any]], float]:
+        """Return on-demand tool schemas and the input token reduction ratio vs full catalog."""
+        full_schemas = self.openai_schemas()
+        selected_specs = self.retrieve_tools_for_query(query, top_k=top_k)
+        selected_schemas = [spec.to_openai_schema() for spec in selected_specs]
+        full_bytes = len(json.dumps(full_schemas, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        sel_bytes = len(json.dumps(selected_schemas, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        full_tokens = max(1, (full_bytes + 3) // 4)
+        sel_tokens = max(1, (sel_bytes + 3) // 4)
+        reduction = round(max(0.0, 1.0 - (sel_tokens / full_tokens)), 4)
+        return selected_schemas, reduction
+
+    def execute_data_governance_plan(
+        self,
+        arguments: dict[str, Any],
+        *,
+        datasets: dict[str, list[dict[str, Any]]],
+        sandbox_dir: str | Path,
+    ) -> dict[str, Any]:
+        """Dispatch the ``DataGovernancePlan`` tool against ``execute_sandbox_governance_plan``."""
+        if self.get("DataGovernancePlan") is None:
+            raise PermissionError("DataGovernancePlan tool is not enabled in this registry")
+        plan_code = str(arguments.get("plan_code", ""))
+        numeric_field = str(arguments.get("numeric_field", "latency_ms"))
+        anomaly_threshold = float(arguments.get("anomaly_threshold", 500.0))
+        return execute_sandbox_governance_plan(
+            plan_code,
+            datasets,
+            sandbox_dir=sandbox_dir,
+            numeric_field=numeric_field,
+            anomaly_threshold=anomaly_threshold,
+        )
+
     def permission_for(self, name: str) -> int:
         spec = self.get(name)
         if spec is None:
@@ -907,4 +972,416 @@ class ToolRegistry:
                     }, "required": ["action"],
                 },
             ),
+            ToolSpec(
+                name="DataGovernancePlan",
+                description=(
+                    "Execute an AST-whitelisted Python structured data governance plan inside an isolated sandbox "
+                    "to perform batch join, row filtering, and group-by aggregation. Raw data stays inside the sandbox "
+                    "domain; returns only anomaly samples, summary statistics, and a SHA-256 artifact reference."
+                ),
+                permission=orchestrator_pb2.ASK_SESSION,
+                parameters={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "plan_code": {
+                            "type": "string",
+                            "description": "AST-whitelisted Python transform(datasets) plan using batch_join, filter_rows, and aggregate_by_group.",
+                        },
+                        "join_key": {
+                            "type": "string",
+                            "description": "Join key column for structured dataset reconciliation.",
+                        },
+                        "numeric_field": {
+                            "type": "string",
+                            "description": "Numeric metric field for summary statistics and anomaly detection.",
+                        },
+                        "anomaly_threshold": {
+                            "type": "number",
+                            "description": "Numeric threshold above which rows are sampled as anomalies.",
+                        },
+                    },
+                    "required": ["plan_code", "numeric_field"],
+                },
+            ),
         ]
+
+
+import ast
+
+ALLOWED_SANDBOX_MODULES: frozenset[str] = frozenset({
+    "collections",
+    "csv",
+    "datetime",
+    "decimal",
+    "functools",
+    "hashlib",
+    "itertools",
+    "json",
+    "math",
+    "re",
+    "statistics",
+})
+
+FORBIDDEN_SANDBOX_CALLS: frozenset[str] = frozenset({
+    "__import__",
+    "breakpoint",
+    "compile",
+    "delattr",
+    "eval",
+    "exec",
+    "exit",
+    "getattr",
+    "globals",
+    "input",
+    "locals",
+    "open",
+    "quit",
+    "setattr",
+    "vars",
+})
+
+FORBIDDEN_DUNDER_ATTRIBUTES: frozenset[str] = frozenset({
+    "__bases__",
+    "__builtins__",
+    "__class__",
+    "__closure__",
+    "__code__",
+    "__dict__",
+    "__func__",
+    "__globals__",
+    "__loader__",
+    "__mro__",
+    "__spec__",
+    "__subclasses__",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ASTPlanValidationResult:
+    allowed: bool
+    violations: tuple[str, ...]
+    plan_sha256: str
+
+
+class PythonASTPlanValidator(ast.NodeVisitor):
+    """Static AST whitelist validator for programmatic sandbox execution plans.
+
+    Enforces that agent-generated Python data-governance plans only import
+    whitelisted pure data/math modules, never invoke arbitrary code execution
+    or filesystem/network I/O builtins, and never traverse dunder reflection
+    attributes (such as ``__subclasses__`` or ``__globals__``).
+    """
+
+    def __init__(self, allowed_modules: Collection[str] = ALLOWED_SANDBOX_MODULES) -> None:
+        self.allowed_modules = frozenset(allowed_modules)
+        self.violations: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            top_module = alias.name.split(".", 1)[0]
+            if top_module not in self.allowed_modules:
+                self.violations.append(f"unauthorized import: {alias.name}")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module_name = (node.module or "").split(".", 1)[0]
+        if node.level > 0 or module_name not in self.allowed_modules:
+            self.violations.append(f"unauthorized from-import: {node.module or '.'}")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_SANDBOX_CALLS:
+            self.violations.append(f"forbidden builtin call: {node.func.id}")
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_SANDBOX_CALLS:
+            self.violations.append(f"forbidden method call: {node.func.attr}")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr in FORBIDDEN_DUNDER_ATTRIBUTES or (
+            node.attr.startswith("__") and node.attr.endswith("__")
+        ):
+            self.violations.append(f"forbidden dunder attribute access: {node.attr}")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id in FORBIDDEN_DUNDER_ATTRIBUTES:
+            self.violations.append(f"forbidden dunder identifier: {node.id}")
+        self.generic_visit(node)
+
+
+def validate_python_execution_plan(
+    source_code: str,
+    *,
+    allowed_modules: Collection[str] = ALLOWED_SANDBOX_MODULES,
+) -> ASTPlanValidationResult:
+    """Validate an agent-generated Python execution plan against the AST whitelist."""
+    plan_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+    if not source_code or not source_code.strip():
+        return ASTPlanValidationResult(False, ("empty execution plan",), plan_hash)
+    try:
+        tree = ast.parse(source_code, mode="exec")
+    except SyntaxError as exc:
+        return ASTPlanValidationResult(False, (f"syntax error: {exc.msg}",), plan_hash)
+
+    validator = PythonASTPlanValidator(allowed_modules=allowed_modules)
+    validator.visit(tree)
+    violations = tuple(dict.fromkeys(validator.violations))
+    return ASTPlanValidationResult(len(violations) == 0, violations, plan_hash)
+
+
+def build_sandbox_data_digest(
+    records: list[dict[str, Any]],
+    *,
+    numeric_field: str,
+    anomaly_threshold: float,
+    max_anomaly_samples: int = 5,
+) -> dict[str, Any]:
+    """Aggregate structured records inside the sandbox and return a compact digest.
+
+    Raw records stay inside the execution boundary; only summary statistics,
+    bounded anomaly samples, and the canonical SHA-256 artifact reference are
+    returned to the model context.
+    """
+    raw_serialized = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    artifact_sha256 = hashlib.sha256(raw_serialized.encode("utf-8")).hexdigest()
+
+    values: list[float] = []
+    anomalies: list[dict[str, Any]] = []
+    for row in records:
+        val = float(row.get(numeric_field, 0.0))
+        values.append(val)
+        if val > anomaly_threshold and len(anomalies) < max(1, int(max_anomaly_samples)):
+            anomalies.append(row)
+
+    count = len(values)
+    mean_val = (sum(values) / count) if count > 0 else 0.0
+    max_val = max(values) if count > 0 else 0.0
+    min_val = min(values) if count > 0 else 0.0
+
+    digest_payload: dict[str, Any] = {
+        "total_records": count,
+        "summary_stats": {
+            "field": numeric_field,
+            "min": round(min_val, 4),
+            "max": round(max_val, 4),
+            "mean": round(mean_val, 4),
+        },
+        "anomaly_count": sum(1 for v in values if v > anomaly_threshold),
+        "anomaly_samples": anomalies,
+        "artifact_ref": f"sha256:{artifact_sha256}",
+    }
+    digest_serialized = json.dumps(digest_payload, ensure_ascii=False, sort_keys=True)
+    raw_tokens = max(1, (len(raw_serialized.encode("utf-8")) + 3) // 4)
+    digest_tokens = max(1, (len(digest_serialized.encode("utf-8")) + 3) // 4)
+    digest_payload["token_reduction_ratio"] = round(
+        max(0.0, 1.0 - (digest_tokens / raw_tokens)), 4
+    )
+    return digest_payload
+
+
+def batch_join(
+    left_rows: list[dict[str, Any]],
+    right_rows: list[dict[str, Any]],
+    *,
+    key: str,
+) -> list[dict[str, Any]]:
+    """Perform an in-sandbox inner/left hash join across two structured record lists."""
+    lookup: dict[Any, dict[str, Any]] = {}
+    for row in right_rows:
+        if key in row:
+            lookup[row[key]] = dict(row)
+    joined: list[dict[str, Any]] = []
+    for left in left_rows:
+        merged = dict(left)
+        match = lookup.get(left.get(key))
+        if match is not None:
+            for k, v in match.items():
+                if k not in merged:
+                    merged[k] = v
+        joined.append(merged)
+    return joined
+
+
+def filter_rows(
+    rows: list[dict[str, Any]],
+    *,
+    field: str,
+    equals: Any = None,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> list[dict[str, Any]]:
+    """Filter structured records in-sandbox by equality or numeric range."""
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        val = row.get(field)
+        if equals is not None and val != equals:
+            continue
+        if min_value is not None and (val is None or float(val) < float(min_value)):
+            continue
+        if max_value is not None and (val is None or float(val) > float(max_value)):
+            continue
+        output.append(dict(row))
+    return output
+
+
+def aggregate_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    group_field: str,
+    metric_field: str,
+) -> dict[str, dict[str, float]]:
+    """Group records by ``group_field`` and compute count/min/max/mean for ``metric_field``."""
+    buckets: dict[str, list[float]] = {}
+    for row in rows:
+        group_key = str(row.get(group_field, "unknown"))
+        buckets.setdefault(group_key, []).append(float(row.get(metric_field, 0.0)))
+    summary: dict[str, dict[str, float]] = {}
+    for group_key in sorted(buckets):
+        vals = buckets[group_key]
+        cnt = len(vals)
+        summary[group_key] = {
+            "count": float(cnt),
+            "min": round(min(vals), 4) if cnt else 0.0,
+            "max": round(max(vals), 4) if cnt else 0.0,
+            "mean": round(sum(vals) / cnt, 4) if cnt else 0.0,
+        }
+    return summary
+
+
+aggregate_by_group = aggregate_metrics
+
+
+def execute_sandbox_governance_plan(
+    plan_code: str,
+    datasets: dict[str, list[dict[str, Any]]],
+    *,
+    sandbox_dir: str | Path,
+    numeric_field: str = "latency_ms",
+    anomaly_threshold: float = 500.0,
+    max_anomaly_samples: int = 5,
+) -> dict[str, Any]:
+    """Validate and execute a Controlled Execution Plan inside the sandbox boundary.
+
+    1. Validates ``plan_code`` against ``PythonASTPlanValidator`` (fail-closed).
+    2. Executes ``transform(datasets)`` in a restricted builtin namespace with
+       ``batch_join``, ``filter_rows``, and ``aggregate_metrics``.
+    3. Writes the full processed dataset only to a sandbox artifact file so raw
+       data never crosses into the model context.
+    4. Returns only ``anomaly_samples``, ``summary_stats``, ``artifact_ref``
+       (``sha256:...``), and ``token_reduction_ratio``.
+    """
+    import collections
+    import copy
+    import datetime
+    import decimal
+    import functools
+    import itertools
+    import math
+    import statistics
+
+    validation = validate_python_execution_plan(plan_code)
+    if not validation.allowed:
+        raise PermissionError(
+            "Controlled execution plan rejected by AST whitelist: "
+            + "; ".join(validation.violations)
+        )
+
+    safe_builtins = {
+        "abs": abs,
+        "all": all,
+        "any": any,
+        "bool": bool,
+        "dict": dict,
+        "enumerate": enumerate,
+        "float": float,
+        "int": int,
+        "len": len,
+        "list": list,
+        "max": max,
+        "min": min,
+        "range": range,
+        "round": round,
+        "set": set,
+        "sorted": sorted,
+        "str": str,
+        "sum": sum,
+        "tuple": tuple,
+        "zip": zip,
+    }
+    sandbox_globals: dict[str, Any] = {
+        "__builtins__": safe_builtins,
+        "batch_join": batch_join,
+        "filter_rows": filter_rows,
+        "aggregate_metrics": aggregate_metrics,
+        "aggregate_by_group": aggregate_metrics,
+        "collections": collections,
+        "datetime": datetime,
+        "decimal": decimal,
+        "functools": functools,
+        "itertools": itertools,
+        "json": json,
+        "math": math,
+        "re": re,
+        "statistics": statistics,
+    }
+    sandbox_locals: dict[str, Any] = {}
+    compiled = compile(plan_code, "<sandbox_governance_plan>", "exec")
+    exec(compiled, sandbox_globals, sandbox_locals)  # noqa: S102
+    transform_fn = sandbox_locals.get("transform") or sandbox_globals.get("transform")
+    if not callable(transform_fn):
+        raise ValueError("Controlled execution plan must define a callable transform(datasets)")
+
+    isolated_input = copy.deepcopy(datasets)
+    plan_output = transform_fn(isolated_input)
+    if isinstance(plan_output, dict):
+        processed_rows = list(plan_output.get("rows", []))
+        group_aggregates = dict(plan_output.get("group_aggregates", {}))
+    elif isinstance(plan_output, list):
+        processed_rows = list(plan_output)
+        group_aggregates = {}
+    else:
+        raise ValueError("transform(datasets) must return a list of rows or a dict with 'rows'")
+
+    sandbox_root = Path(sandbox_dir).resolve()
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    raw_artifact_payload = {
+        "plan_sha256": validation.plan_sha256,
+        "rows": processed_rows,
+        "group_aggregates": group_aggregates,
+    }
+    raw_artifact_bytes = json.dumps(
+        raw_artifact_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    artifact_sha256 = hashlib.sha256(raw_artifact_bytes).hexdigest()
+    artifact_filename = f"governance-artifact-{artifact_sha256[:16]}.json"
+    artifact_path = sandbox_root / artifact_filename
+    artifact_path.write_bytes(raw_artifact_bytes)
+
+    digest = build_sandbox_data_digest(
+        processed_rows,
+        numeric_field=numeric_field,
+        anomaly_threshold=anomaly_threshold,
+        max_anomaly_samples=max_anomaly_samples,
+    )
+    digest["summary_stats"]["group_aggregates"] = group_aggregates
+    digest["artifact_ref"] = f"sha256:{artifact_sha256}"
+    digest["artifact_filename"] = artifact_filename
+    digest["plan_sha256"] = validation.plan_sha256
+
+    raw_input_bytes = json.dumps(
+        datasets,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    total_raw_tokens = max(1, (len(raw_input_bytes) + len(raw_artifact_bytes) + 3) // 4)
+    digest_bytes = json.dumps(digest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    digest_tokens = max(1, (len(digest_bytes) + 3) // 4)
+    digest["token_reduction_ratio"] = round(
+        max(0.0, 1.0 - (digest_tokens / total_raw_tokens)), 4
+    )
+    return digest

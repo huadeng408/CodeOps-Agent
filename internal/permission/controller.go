@@ -32,6 +32,7 @@ type Controller struct {
 	sessionApproved map[string]map[string]bool
 	approvalHistory map[string][]ApprovalRecord
 	currentScope    string
+	signingKey      []byte
 }
 
 const defaultScope = "legacy"
