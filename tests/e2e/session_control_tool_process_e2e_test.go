@@ -123,7 +123,7 @@ func TestProductionSessionControlToolsCrossProcess(t *testing.T) {
 		t.Fatalf("open receipt database: %v", err)
 	}
 	var sessionCount int
-	if err := database.QueryRow("SELECT COUNT(DISTINCT session_id) FROM session_events").Scan(&sessionCount); err != nil {
+	if err := database.QueryRow("SELECT COUNT(DISTINCT session_id) FROM session_events WHERE session_id NOT LIKE 'admission:%'").Scan(&sessionCount); err != nil {
 		database.Close()
 		t.Fatalf("count session histories: %v", err)
 	}
@@ -171,6 +171,9 @@ func readSessionControlHistories(t *testing.T, log *session.SQLiteEventLog) (str
 	var parentID string
 	var childEvents, parentEvents []session.Event
 	for _, id := range ids {
+		if strings.HasPrefix(id, "admission:") {
+			continue
+		}
 		events, eventsErr := log.Events(context.Background(), id)
 		if eventsErr != nil {
 			t.Fatalf("read session %s: %v", id, eventsErr)

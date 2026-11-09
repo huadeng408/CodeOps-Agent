@@ -419,3 +419,32 @@ def test_conversation_retries_failed_run_with_fresh_harness_binding(
         server.stop(0).wait()
         model_server.stop(0).wait()
         app.close()
+
+
+def test_unconfigured_gateway_binding_falls_back_only_when_admission_optional(tmp_path, monkeypatch):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MODEL_FAST", "CODE_AGENT_PROVIDER_CONFIG"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", "")
+    app = OrchestratorServer(ServerConfig(project_root=str(tmp_path), working_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")))
+
+    class _FixtureLLM:
+        model = "fixture-llm"
+
+        async def chat(self, request):
+            return ChatResponse(text="from-fixture", usage=Usage(input_tokens=1, output_tokens=1))
+
+    app.llm = _FixtureLLM()
+    app.fast_llm = app.llm
+    service = OrchestratorService(app)
+    empty_binding = pb.ModelGatewayBinding(
+        schema_version=1,
+        address="127.0.0.1:12345",
+        capability=b"a" * 32,
+        protocol="openai",
+        model="",
+    )
+    assert service._effective_model_gateway(empty_binding) is None
+    monkeypatch.setenv("CODE_AGENT_MODEL_ADMISSION", "required")
+    assert service._effective_model_gateway(empty_binding) is empty_binding
+    app.close()

@@ -7,6 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from orchestrator.context import LayeredContext, build_context_store
 from orchestrator.llm.client import (
     ChatMessage,
     ChatRequest,
@@ -16,6 +17,7 @@ from orchestrator.llm.client import (
     Usage,
     message_content_text,
 )
+from orchestrator.memory.manager import MemoryManager
 from orchestrator.server import OrchestratorServer, ServerConfig, build_parser
 from orchestrator.runtime.hooks import HookResult
 from orchestrator.llm.providers.anthropic import AnthropicClient
@@ -247,6 +249,14 @@ def main() -> None:
             context_window=context_window,
         )
     )
+    if app.memory is None:
+        app.memory = MemoryManager(app.config.memory_dir)
+    if app.context_store is None:
+        app.context_store = build_context_store(
+            app.config.context_backend,
+            project_root=app.project_root,
+        )
+        app.layered_context = LayeredContext(app.context_store, app.project_root)
     loop_receipt = os.environ.get("CODE_AGENT_AGENT_LOOP_E2E_RECEIPT", "").strip()
     if loop_receipt:
         receipt_path = Path(loop_receipt).resolve()

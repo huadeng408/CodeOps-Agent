@@ -36,6 +36,7 @@ func TestActorIdentityProcessE2E(t *testing.T) {
 		t.Fatalf("create project root: %v", err)
 	}
 	address := contextE2EAddress(t)
+	_, modelScope := contextE2EAdmittedSession(t, projectRoot)
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
 		AutoStart:           true,
@@ -46,6 +47,7 @@ func TestActorIdentityProcessE2E(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      20 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(manager.Stop)
 

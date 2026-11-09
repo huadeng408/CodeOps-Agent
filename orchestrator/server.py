@@ -407,6 +407,18 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             version="0.1.0",
         )
 
+    def _effective_model_gateway(self, model_gateway):
+        if model_gateway is None:
+            return None
+        if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required":
+            return model_gateway
+        if (
+            self.app.llm is not None
+            and not str(getattr(model_gateway, "model", "") or "").strip()
+        ):
+            return None
+        return model_gateway
+
     def ReflectMemory(self, request, context):
         self._authorize_actor(
             request.actor if request.HasField("actor") else None,
@@ -415,9 +427,11 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         cancel = threading.Event()
         context.add_callback(cancel.set)
 
-        if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and not request.HasField("model_gateway"):
+        raw_model_gateway = request.model_gateway if request.HasField("model_gateway") else None
+        if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and raw_model_gateway is None:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "model admission binding required")
-        client = HarnessModelClient(request.model_gateway) if request.HasField("model_gateway") else self.app.llm
+        model_gateway = self._effective_model_gateway(raw_model_gateway)
+        client = HarnessModelClient(model_gateway) if model_gateway is not None else self.app.llm
         parent_ctx = _admitted_grpc_trace_context(context.invocation_metadata())
         otel_token = None
         if parent_ctx is not None:
@@ -523,8 +537,9 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
         # as normal turns while making the path explicit in production.
         if os.getenv("CODE_AGENT_MODEL_ADMISSION") == "required" and model_gateway is None:
             raise ModelGatewayError("model_prerequisites_missing")
-        client = HarnessModelClient(model_gateway) if model_gateway is not None else self.app.llm
-        provider_clients = ({"default": client, model_gateway.protocol: client} if model_gateway is not None else self._provider_clients_for_request())
+        effective_gateway = self._effective_model_gateway(model_gateway)
+        client = HarnessModelClient(effective_gateway) if effective_gateway is not None else self.app.llm
+        provider_clients = ({"default": client, effective_gateway.protocol: client} if effective_gateway is not None else self._provider_clients_for_request())
         compaction_summarizer = None
         if client is not None:
             compaction_summarizer = LLMCompactionSummarizer(
@@ -544,18 +559,18 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
             tool_registry=ToolRegistry(runner_root, skills=skills, mcp_tools=mcp_catalog.tools if mcp_catalog is not None else None),
             todo_manager=self.app.todos,
             memory_manager=self.app.memory,
-            harness_managed=model_gateway is not None,
+            harness_managed=False,
             skills=skills,
             project_root=runner_root,
             working_dir=runner_working_dir,
             token_budget=self.app.token_budget,
-            fast_llm=client if model_gateway is not None else self.app.fast_llm,
+            fast_llm=client if effective_gateway is not None else self.app.fast_llm,
             main_llm=client,
             provider_clients=provider_clients,
             layered_context=self.app.layered_context,
             context_window=self.app.config.context_window,
             loop_plugins=self.app.loop_plugins,
-            provider_router=build_provider_router(provider_clients) if model_gateway is not None else self._provider_router_for_request(),
+            provider_router=build_provider_router(provider_clients) if effective_gateway is not None else self._provider_router_for_request(),
             hooks=self.app.hooks,
             commands=self.app.commands,
             extensions=self.app.session_extensions(runner_root),
@@ -759,7 +774,8 @@ class OrchestratorService(orchestrator_pb2_grpc.OrchestratorServicer):
                     runner.harness_context += "\n\n" + evaluation_context
                 runner.layered_context = None
                 runner.todo_manager = TodoManager()
-                runner.token_budget = (None if model_gateway is not None else
+                effective_gateway = self._effective_model_gateway(model_gateway)
+                runner.token_budget = (None if effective_gateway is not None else
                                        TokenBudget(max_tokens=self.app.config.max_tokens, max_cost=self.app.config.max_cost))
                 if agent_task is not None:
                     task_identity = orchestrator_pb2.AgentTask()

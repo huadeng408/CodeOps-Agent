@@ -70,6 +70,13 @@ func TestProductionSessionControlToolsRecoverAcrossProcessTermination(t *testing
 	if err := firstAgent.Start(); err != nil {
 		t.Fatalf("start first production agent: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = writer.Close()
+		if firstAgent.Process != nil {
+			_ = firstAgent.Process.Kill()
+			_, _ = firstAgent.Process.Wait()
+		}
+	})
 	if _, err := io.WriteString(writer, "SESSION_CONTROL_E2E\n"); err != nil {
 		t.Fatalf("send first control request: %v", err)
 	}
@@ -201,6 +208,7 @@ func startSessionControlServer(t *testing.T, python, fixture, repositoryRoot, pr
 	if err := server.Start(); err != nil {
 		t.Fatalf("start %s session control server: %v", stage, err)
 	}
+	t.Cleanup(func() { stopSessionControlServer(server) })
 	return server
 }
 

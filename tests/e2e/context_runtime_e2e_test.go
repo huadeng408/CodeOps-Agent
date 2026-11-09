@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"code-agent/gen/codeagentpb"
 	"code-agent/internal/admission"
 	"code-agent/internal/identity"
 	"code-agent/internal/orchestrator"
@@ -45,6 +46,7 @@ func TestLongTermMemoryRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 	}
 	t.Setenv("PYTHONPATH", pythonPath)
 
+	_, modelScope := contextE2EAdmittedSession(t, projectRoot)
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
 		AutoStart:           true,
@@ -55,6 +57,7 @@ func TestLongTermMemoryRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      15 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(manager.Stop)
 
@@ -167,6 +170,7 @@ func TestContextRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 	}
 	t.Setenv("PYTHONPATH", pythonPath)
 
+	_, modelScope := contextE2EAdmittedSession(t, projectRoot)
 	manager := orchestrator.NewProcessManager(orchestrator.ProcessConfig{
 		Address:             address,
 		AutoStart:           true,
@@ -177,6 +181,7 @@ func TestContextRuntimeSurvivesOrchestratorRestart(t *testing.T) {
 		MemoryDir:           filepath.Join(projectRoot, ".agent", "memory"),
 		StartupTimeout:      15 * time.Second,
 		ConversationTimeout: 30 * time.Second,
+		ModelScopeFactory:   modelScope,
 	})
 	t.Cleanup(manager.Stop)
 
@@ -290,8 +295,11 @@ func TestCanonicalCompactionRuntimeAcrossRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			for index := 0; index < 24; index++ {
-				if _, err := workbench.AppendUserMessage(ctx, 7, created.ID, int64(index+1),
-					fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160))); err != nil {
+				text := fmt.Sprintf("historical context %02d %s", index, strings.Repeat("h", 160))
+				if index == 0 {
+					text = "Standing constraint: 禁止网络访问，不增依赖 (no network, no new deps). " + text
+				}
+				if _, err := workbench.AppendUserMessage(ctx, 7, created.ID, int64(index+1), text); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -320,6 +328,9 @@ func TestCanonicalCompactionRuntimeAcrossRestart(t *testing.T) {
 			if err := json.Unmarshal(surface[0].Payload, &summary); err != nil ||
 				!strings.Contains(summary.Summary, "Historical context retained for the next agent turn.") {
 				t.Fatal("expected model summary, not a silent deterministic fallback")
+			}
+			if !strings.Contains(summary.Summary, "禁止网络访问，不增依赖") {
+				t.Fatalf("canonical compaction dropped standing constraint: %q", summary.Summary)
 			}
 			if err := runner.Close(); err != nil {
 				t.Fatal(err)
@@ -432,7 +443,13 @@ func contextE2EAdmittedSession(t *testing.T, projectRoot string) (*session.Manag
 		t.Fatal(err)
 	}
 	t.Cleanup(gateway.Close)
-	return manager, gateway.BindActor
+	return manager, func(actor identity.Actor, purpose string) (*codeagentpb.ModelGatewayBinding, func(), error) {
+		binding, release, err := gateway.BindActor(actor, purpose)
+		if err == nil {
+			return binding, release, nil
+		}
+		return gateway.Bind(admission.ActorOwner(actor), current.ID, current.ID)
+	}
 }
 
 func contextE2EProcessID(t *testing.T, response, prefix string) int {

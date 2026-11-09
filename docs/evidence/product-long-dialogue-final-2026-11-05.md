@@ -82,9 +82,15 @@ C75来源的独立真实回归在原BeeAPI通道返回HTTP502，记为`provider_
 | 最终语义 | `p9-final-semantic-assessment-v1/index.json`；`b63ef5200469055d1c240b17447580e5b2eff2f817250f9073902e896ceae92f` |
 | 耗时定义和逐Run区间 | `p9-final-offline-v1/elapsed-windows-v1.json` |
 | 真实Git回归 | `deployments/docker/.local/receipts/git-trust-regression-20261105/receipt.json`；`9bd357ca04424c17dca3b5dd028480caa42c2b16cab4a8e16da0baed5ee4dbd7` |
+| OpenSandbox复验（2026-11-09） | `deployments/docker/.local/receipts/opensandbox-e2e-20261109-01/receipt.json`；`2a9e3a18b7fa812db897215991e049561417552992be88225ad0642a3de8f8cd` |
 
 上表缩写的审计目录均在`.scratch/issue27-resumable-20261103/`下。
 负完整性报告声明disposition3，实际PowerShell外层返回1，未记为通过。Memory首次便携Python启动因隔离导入失败且未运行observer，改用既有venv后真实捕获exit0。
 语义提取器v2仅增强output/error并存时的展示；此前误称9480/9544实际漏错已纠正，v1原本能显示这两条错误，旧记录未覆盖。
 
-完整七lane发布及暂缓的#20继续单独验收；普通修复不等待它们。#27剩余的是摘要约束/事实质量和已知Trace证据缺口，不再是“200项尚未执行”。
+2026-11-09 追加修复与复验（`f0cb5ae6` 及后续提交）：
+- 确定性 Standing Constraints 提取器（`orchestrator/context/compaction.py`）：在选定压缩来源历史中确定性提取 `禁止网络/不增依赖/只读` 等显式约束并注入 `[Compacted conversation history]`，同时在 `compact_surface` 重试循环中消除重复发布。离线回放 `.scratch/compaction-quality-20261105/replay.py` 与 `replay.py --minimal` 均返回 `exit 0`（`"standing_constraints_retained": true`）；不倒改原200项中C75的历史投影记录。
+- 跨进程 Go + Python E2E 与 CLI 多轮强制压缩复验：`tests/e2e` 全部21项用例（含9项跨进程 gRPC/重启恢复/约束保留用例）及 `internal/cli` 的 `TestEvaluationForcedCompactionPreservesUpdatedRequirementsAcrossProcesses` 均 `exit 0`。
+- Docker + OpenSandbox 容器级复验：`go test ./internal/sandbox ./internal/tools ./internal/hooks -count=1` 与真实 OpenSandbox 容器探针（UID 65534、只读 `/workspace`、`ConfirmStopped`、控制容器恢复 `exited` 且零残留容器）均 `exit 0`。
+
+完整七lane发布及暂缓的#20继续单独验收；普通修复不等待它们。#27剩余的是真实上游Provider摘要语义回归与已知旧Trace证据缺口，不再是“200项尚未执行”。
