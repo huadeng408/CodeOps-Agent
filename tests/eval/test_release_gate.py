@@ -275,7 +275,7 @@ def test_release_gate_accepts_receipt_commit_bound_to_its_source_parent(tmp_path
 def test_release_gate_keeps_receipts_across_explanatory_document_commits(tmp_path: Path) -> None:
     repo, source_sha = _git_repo(tmp_path)
     _passing_receipts(repo, source_sha)
-    for path in ("README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/usage.md"):
+    for path in ("README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/usage.md", "docs/DESIGN-MAP.md"):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("Explanatory documentation only.\n", encoding="utf-8")
@@ -300,12 +300,44 @@ def test_browser_source_change_retains_only_the_independent_workflow_receipt(tmp
 
     report = evaluate_release(repo, run_tests=False)
     lanes = {check.name: check for check in report.checks if check.name.startswith("evidence.")}
+    non_browser = {
+        "evidence.workflow",
+        "evidence.context-token",
+        "evidence.skills",
+        "evidence.terminalbench",
+        "evidence.swebench",
+    }
 
     assert report.status is GateStatus.BLOCKED
-    assert lanes["evidence.workflow"].status == "PASS"
-    assert source_sha in lanes["evidence.workflow"].detail
-    assert "workflow" in lanes["evidence.workflow"].detail
-    assert all(check.status == "BLOCKED" for name, check in lanes.items() if name != "evidence.workflow")
+    for lane_name in non_browser:
+        assert lanes[lane_name].status == "PASS"
+        assert source_sha in lanes[lane_name].detail
+    assert all(check.status == "BLOCKED" for name, check in lanes.items() if name not in non_browser)
+
+
+@pytest.mark.parametrize(("runner_path", "blocked_lane"), [
+    ("eval/harness/fault_injection.py", "evidence.workflow"),
+    ("eval/harness/skill_selection_eval.py", "evidence.skills"),
+    ("eval/benchmarks/terminalbench.py", "evidence.terminalbench"),
+    ("eval/benchmarks/swebench.py", "evidence.swebench"),
+])
+def test_lane_exclusive_runner_change_invalidates_only_its_own_lane(
+    tmp_path: Path, runner_path: str, blocked_lane: str
+) -> None:
+    repo, source_sha = _git_repo(tmp_path)
+    _passing_receipts(repo, source_sha)
+    target = repo / runner_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# updated lane runner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--", runner_path], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "lane runner change"], cwd=repo, check=True)
+
+    report = evaluate_release(repo, run_tests=False)
+    lanes = {check.name: check for check in report.checks if check.name.startswith("evidence.")}
+
+    assert report.status is GateStatus.BLOCKED
+    assert lanes[blocked_lane].status == "BLOCKED"
+    assert all(check.status == "PASS" for name, check in lanes.items() if name != blocked_lane)
 
 
 def test_workflow_scope_still_rejects_a_changed_instruction_link_target(tmp_path: Path) -> None:
@@ -336,7 +368,7 @@ def test_workflow_scope_still_rejects_a_changed_instruction_link_target(tmp_path
     "runtime/data/eval/demo/receipts/input.json", "runtime/data/eval/workflow/receipts/input.json",
     "data/eval/demo/receipts/input.json",
     "frontend/src/AGENTS.md", "frontend/package.json", "frontend/src/runtime.py",
-    "eval/harness/fault_injection.py", "orchestrator/workflows/engine.py", "unclassified/new.ts",
+    "orchestrator/workflows/engine.py", "unclassified/new.ts",
 ])
 def test_release_gate_rejects_changed_runtime_inputs(tmp_path: Path, path: str) -> None:
     repo, source_sha = _git_repo(tmp_path)

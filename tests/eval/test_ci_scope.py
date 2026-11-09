@@ -39,6 +39,7 @@ def _scope(repo: Path, base: str, head: str) -> str:
 @pytest.mark.parametrize(("path", "expected"), [
     ("README.md", "full=false"),
     ("docs/usage.md", "full=false"),
+    ("docs/DESIGN-MAP.md", "full=false"),
     ("AGENTS.md", "full=true"),
     ("docs/GOAL.md", "full=true"),
     ("docs/agents/rules.md", "full=true"),

@@ -36,6 +36,10 @@ The ordered projection of Session facts currently visible to a model or user.
 A Surface may replace a range without erasing it from the Session Ledger.
 _Avoid_: full history, transcript
 
+**Standing Constraint**:
+An explicit user rule, prohibition, or revision in a Session that remains binding across Surface replacements until superseded.
+_Avoid_: hint, soft preference, ephemeral instruction
+
 **Context**:
 The bounded information assembled for one agent step from the current Surface,
 repository evidence, instructions, retrieved Memory, and tool definitions.

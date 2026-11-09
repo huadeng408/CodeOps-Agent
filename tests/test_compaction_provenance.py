@@ -297,3 +297,209 @@ def test_python_grpc_compaction_returns_canonical_sources(tmp_path):
     finally:
         server.stop(grace=0).wait()
         app.close()
+
+
+def test_runner_retains_surface_when_automatic_compaction_refuses_budget(tmp_path):
+    prior_summary = ("[Compacted conversation history]\n" + ("Prior canonical constraint. " * 20)).strip()
+    history = [
+        {
+            "role": "system",
+            "content": prior_summary,
+            "event_id": "summary-1",
+            "event_checksum": "a" * 64,
+        },
+        {
+            "role": "user",
+            "content": "Earlier user turn " * 20,
+            "event_id": "user-1",
+            "event_checksum": "b" * 64,
+        },
+        {
+            "role": "assistant",
+            "content": "Earlier assistant reply " * 20,
+            "event_id": "assistant-1",
+            "event_checksum": "c" * 64,
+        },
+    ]
+
+    class HealthyLLM:
+        model = "fixture"
+
+        def __init__(self):
+            self.requests = []
+
+        async def chat(self, request):
+            self.requests.append(request)
+            return ChatResponse(text="completed with intact surface")
+
+    def make_runner(llm, *, max_messages: int, max_overflow_retries: int = 3, memory_subdir: str = "memory"):
+        return ConversationRunner(
+            graph=build_graph(),
+            llm=llm,
+            tool_registry=ToolRegistry(str(tmp_path), allowed_tools=[]),
+            todo_manager=TodoManager(),
+            memory_manager=MemoryManager(str(tmp_path / memory_subdir)),
+            skills=SkillManager(),
+            project_root=str(tmp_path),
+            working_dir=str(tmp_path),
+            harness_managed=True,
+            max_overflow_retries=max_overflow_retries,
+            compactor=Compactor(max_chars=len(prior_summary) - 1, max_messages=max_messages),
+        )
+
+    llm = HealthyLLM()
+    runner = make_runner(llm, max_messages=2)
+    responses = list(runner.run("Continue under the existing constraints", iter([]), history=history))
+
+    assert responses[-1].done.success is True
+    assert len(llm.requests) == 1
+    assert any(msg.content == prior_summary for msg in llm.requests[0].messages)
+
+    class OverflowLLM:
+        model = "fixture"
+
+        async def chat(self, request):
+            raise RuntimeError("maximum context length exceeded")
+
+    overflow_runner = make_runner(
+        OverflowLLM(),
+        max_messages=100,
+        max_overflow_retries=1,
+        memory_subdir="memory-overflow",
+    )
+    overflow_responses = list(
+        overflow_runner.run("Trigger overflow recovery", iter([]), history=history)
+    )
+
+    assert overflow_responses[-1].HasField("done")
+    assert overflow_responses[-1].done.success is False
+    assert overflow_responses[-1].done.error_code == "context_window_exceeded"
+
+
+def test_llm_compaction_summarizer_succeeds_inside_running_event_loop():
+    import asyncio
+    from orchestrator.context.compaction import CompactionRequest, LLMCompactionSummarizer
+
+    class AsyncSummaryClient:
+        model = "summary-fixture"
+
+        async def chat(self, request):
+            await asyncio.sleep(0)
+            return ChatResponse(text="Preserved summary from running loop")
+
+    summarizer = LLMCompactionSummarizer(client=AsyncSummaryClient())
+    request = CompactionRequest(
+        prefix_messages=(),
+        messages=(ChatMessage(role="user", content="Keep network disabled."),),
+        model="summary-fixture",
+    )
+
+    async def invoke_from_running_loop():
+        return summarizer.summarize(request)
+
+    assert asyncio.run(invoke_from_running_loop()) == "Preserved summary from running loop"
+
+
+def test_llm_compaction_retains_standing_constraints_across_replacements():
+    class OmittingSummarizer:
+        def __init__(self):
+            self.calls = 0
+
+        def summarize(self, request):
+            self.calls += 1
+            return f"Concise summary pass {self.calls}."
+
+    constraint_line = "Standing constraint: 禁止网络访问，不增依赖 (do not add dependencies or use network)."
+    revision_block = 'Revision: keep "literal" \\values\nincluding this second line.'
+    messages = [
+        ChatMessage(role="system", content="runtime rules"),
+        ChatMessage(
+            role="user",
+            content="Inspect the repository structure.\n" + constraint_line,
+            source_events=(("event-u1", "1" * 64),),
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Detailed inspection findings. " * 80,
+            source_events=(("event-a1", "2" * 64),),
+        ),
+        ChatMessage(
+            role="user",
+            content="Apply the updated rule.\n" + revision_block,
+            source_events=(("event-u2", "3" * 64),),
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Updated findings. " * 80,
+            source_events=(("event-a2", "4" * 64),),
+        ),
+        ChatMessage(
+            role="user",
+            content="Continue with the next package.",
+            source_events=(("event-u3", "5" * 64),),
+        ),
+    ]
+    summarizer = OmittingSummarizer()
+    compactor = Compactor(max_chars=16_000, max_messages=100)
+
+    first = compact_surface(
+        messages,
+        compactor=compactor,
+        force=True,
+        retain_ratio=0.05,
+        harness_managed=True,
+        summarizer=summarizer,
+    )
+    assert len(first.updates) == 1
+    assert constraint_line in first.messages[1].content
+    assert revision_block in first.messages[1].content
+
+    deterministic = compact_surface(
+        [
+            *first.messages,
+            ChatMessage(
+                role="assistant",
+                content="Intermediate deterministic fallback turn. " * 80,
+                source_events=(("event-a3", "6" * 64),),
+            ),
+            ChatMessage(
+                role="user",
+                content="Proceed after fallback.",
+                source_events=(("event-u4", "7" * 64),),
+            ),
+        ],
+        compactor=compactor,
+        force=True,
+        retain_ratio=0.05,
+        harness_managed=True,
+        summarizer=None,
+    )
+
+    second_input = [
+        *deterministic.messages,
+        ChatMessage(
+            role="assistant",
+            content="Second package inspection findings. " * 80,
+            source_events=(("event-a4", "8" * 64),),
+        ),
+        ChatMessage(
+            role="user",
+            content="Prepare final handoff.",
+            source_events=(("event-u5", "9" * 64),),
+        ),
+    ]
+    second = compact_surface(
+        second_input,
+        compactor=compactor,
+        force=True,
+        retain_ratio=0.05,
+        harness_managed=True,
+        summarizer=summarizer,
+    )
+    assert len(second.updates) == 1
+    assert constraint_line in second.messages[1].content
+    assert revision_block in second.messages[1].content
+    assert '{"role":' not in second.messages[1].content
+    assert [ref for msg in second.messages for ref in msg.source_events] == [
+        ref for msg in second_input for ref in msg.source_events
+    ]

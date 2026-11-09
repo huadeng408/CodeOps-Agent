@@ -108,6 +108,21 @@ def _check(name: str, ok: bool, detail: str) -> GateCheck:
     return GateCheck(name=name, status="PASS" if ok else GateStatus.BLOCKED.value, detail=detail)
 
 
+_NON_BROWSER_LANES = frozenset({
+    "workflow",
+    "context-token",
+    "skills",
+    "terminalbench",
+    "swebench",
+})
+_LANE_EXCLUSIVE_PATHS = {
+    "eval/harness/fault_injection.py": "workflow",
+    "eval/harness/skill_selection_eval.py": "skills",
+    "eval/benchmarks/terminalbench.py": "terminalbench",
+    "eval/benchmarks/swebench.py": "swebench",
+}
+
+
 def _non_runtime_path(path: str) -> bool:
     relative = PurePosixPath(path)
     parts = relative.parts
@@ -127,7 +142,7 @@ def _non_runtime_path(path: str) -> bool:
     if relative.name.upper() in {"AGENTS.MD", "AGENT.MD", "CLAUDE.MD", "CONTEXT.MD", "SKILL.MD"}:
         return False
     folded = path.casefold()
-    return folded not in {"docs/goal.md", "docs/design-map.md", "docs/release-gate.md"} and not any(
+    return folded not in {"docs/goal.md", "docs/release-gate.md"} and not any(
         folded.startswith("docs/" + directory + "/")
         for directory in ("agents", "adr", "design", "prompts", "templates")
     )
@@ -176,13 +191,19 @@ def _source_pin_matches_runtime(
         modes = metadata.split()[:2]
         if len(modes) != 2 or modes[0] not in {":000000", ":100644"} or modes[1] not in {"000000", "100644"}:
             return False
-        # The fixed workflow fault runner never loads browser source or fixtures.
-        workflow_browser_file = (
-            lane == "workflow" and not dependency_tree
+        # Non-browser lanes never load browser source or fixtures; lane-exclusive
+        # evaluation runners only invalidate their own lane.
+        browser_exempt = (
+            lane in _NON_BROWSER_LANES and not dependency_tree
             and path.startswith(("frontend/src/", "frontend/tests/"))
             and PurePosixPath(path).suffix in {".ts", ".tsx", ".css", ".mjs"}
         )
-        if not _non_runtime_path(path) and not workflow_browser_file:
+        owner_lane = _LANE_EXCLUSIVE_PATHS.get(path)
+        lane_runner_exempt = (
+            bool(lane) and not dependency_tree
+            and owner_lane is not None and owner_lane != lane
+        )
+        if not _non_runtime_path(path) and not browser_exempt and not lane_runner_exempt:
             return False
 
     # An unchanged instruction symlink can still load a changed documentation blob.

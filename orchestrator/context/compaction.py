@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -156,9 +157,11 @@ def compact_surface(
                 messages=tuple(compactable), provider=provider,
                 model=model, target=summary_target, cancel_event=cancel_event,
             ), tool_schemas)
-        except Exception:
+        except Exception as exc:
             if lifecycle_started:
                 record_event("compaction/end", {"status": "failed"})
+            if isinstance(exc, ValueError) and updates:
+                break
             raise
         source_events = tuple(dict.fromkeys(
             ref for message in compactable for ref in message.source_events
@@ -220,6 +223,80 @@ def _message_for_compaction(message: ChatMessage) -> dict[str, object]:
     }
 
 
+_COMPACTED_HISTORY_HEADING = "[Compacted conversation history]"
+_STANDING_CONSTRAINT_HEADING = "[Standing constraints]"
+_STANDING_CONSTRAINT_MARKERS = (
+    "standing constraint",
+    "updated_constraint",
+    "revision:",
+    "revised",
+    "amendment",
+    "supersedes",
+    "instead of",
+    "must not",
+    "do not ",
+    "don't ",
+    "never ",
+    "prohibited",
+    "forbidden",
+    "without modifying",
+    "no network",
+    "no new dependencies",
+    "禁止",
+    "不得",
+    "严禁",
+    "不增依赖",
+    "禁止网络",
+    "改为",
+    "修订",
+)
+
+
+def _extract_constraint_units(block: str) -> list[str]:
+    units: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", block.strip()):
+        lines = [
+            line.strip()
+            for line in paragraph.splitlines()
+            if line.strip() and line.strip() != _COMPACTED_HISTORY_HEADING
+        ]
+        if not lines:
+            continue
+        matched_start: int | None = None
+        for idx, line in enumerate(lines):
+            if any(marker in line.lower() for marker in _STANDING_CONSTRAINT_MARKERS):
+                matched_start = idx
+                break
+        if matched_start is not None:
+            unit = "\n".join(lines[matched_start:])[:500]
+            units.append(unit)
+    return units
+
+
+def _extract_standing_constraints(messages: tuple[ChatMessage, ...] | list[ChatMessage]) -> list[str]:
+    constraints: list[str] = []
+    for message in messages:
+        is_prior_summary = message.role == "system" and bool(message.source_events)
+        if message.role != "user" and not is_prior_summary:
+            continue
+        text = message_content_text(message.content)
+        segments = text.split(_COMPACTED_HISTORY_HEADING) if is_prior_summary else [text]
+        for segment in segments:
+            if not segment.strip():
+                continue
+            if is_prior_summary and _STANDING_CONSTRAINT_HEADING in segment:
+                body, pinned_block = segment.split(_STANDING_CONSTRAINT_HEADING, 1)
+                for paragraph in re.split(r"\n\s*\n", pinned_block.strip()):
+                    cleaned = "\n".join(
+                        line.strip() for line in paragraph.splitlines() if line.strip()
+                    )
+                    if cleaned and not cleaned.startswith("{"):
+                        constraints.append(cleaned[:500])
+                segment = body
+            constraints.extend(_extract_constraint_units(segment))
+    return list(dict.fromkeys(constraints))
+
+
 def _build_summary(compactor, summarizer, request: CompactionRequest, tool_schemas) -> tuple[str, str]:
     messages = [_message_for_compaction(message) for message in request.messages]
     if summarizer is None:
@@ -237,7 +314,14 @@ def _build_summary(compactor, summarizer, request: CompactionRequest, tool_schem
         return compactor.compact_history(messages), "deterministic-fallback"
     if not isinstance(candidate, str) or not candidate.strip():
         return compactor.compact_history(messages), "deterministic-fallback"
-    framed = "[Compacted conversation history]\n" + candidate.strip()
+    body = candidate.strip()
+    missing_constraints = [
+        item for item in _extract_standing_constraints(request.messages)
+        if item not in body
+    ]
+    if missing_constraints:
+        body = f"{body}\n\n{_STANDING_CONSTRAINT_HEADING}\n" + "\n".join(missing_constraints)
+    framed = f"{_COMPACTED_HISTORY_HEADING}\n{body}"
     replaced_tokens = compactor.estimate_tokens(messages)
     summary_tokens = compactor.estimate_tokens([{"role": "system", "content": framed}])
     if summary_tokens >= replaced_tokens:
@@ -343,7 +427,28 @@ class LLMCompactionSummarizer:
             purpose="compaction",
             cancel_event=request.cancel_event,
         )
-        return asyncio.run(self._collect(chat_request))
+        return self._run_collect(chat_request)
+
+    def _run_collect(self, request: ChatRequest) -> str:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._collect(request))
+        result: list[str] = []
+        error: list[BaseException] = []
+
+        def target() -> None:
+            try:
+                result.append(asyncio.run(self._collect(request)))
+            except BaseException as exc:  # pragma: no cover - re-raised on caller thread
+                error.append(exc)
+
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        worker.join()
+        if error:
+            raise error[0]
+        return result[0] if result else ""
 
     async def _collect(self, request: ChatRequest) -> str:
         stream_fn = getattr(self.client, "stream", None)

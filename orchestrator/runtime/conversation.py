@@ -3945,20 +3945,21 @@ class ConversationRunner:
         )
         if messages and messages[-1].role == "user" and not message_content_text(messages[-1].content).strip():
             messages.pop()
-        self._compact_messages(
-            messages,
-            session_id=session_id,
-            trigger="manual",
-            force=True,
-            retain_ratio=getattr(self.compactor, "retain_ratio", 0.16),
-        )
-        if not self._pending_compaction_updates:
+        try:
+            self._compact_messages(
+                messages,
+                session_id=session_id,
+                trigger="manual",
+                force=True,
+                retain_ratio=getattr(self.compactor, "retain_ratio", 0.16),
+            )
+            if not self._pending_compaction_updates:
+                return None
+            update = self._pending_compaction_updates[-1]
+            self._pending_compaction_updates.clear()
+            return orchestrator_pb2.CompactionUpdate(**update)
+        finally:
             self._active_actor = None
-            return None
-        update = self._pending_compaction_updates[-1]
-        self._pending_compaction_updates.clear()
-        self._active_actor = None
-        return orchestrator_pb2.CompactionUpdate(**update)
 
     def _compact_messages(
         self,
@@ -3990,17 +3991,22 @@ class ConversationRunner:
             return not bool(self._context_persistence_error)
 
         registry = getattr(self, "tool_registry", None)
-        result = compact_surface(
-            messages, compactor=self.compactor, model=model, provider=provider,
-            context_window=context_window,
-            harness_managed=getattr(self, "harness_managed", False),
-            trigger=trigger, force=force, retain_ratio=retain_ratio,
-            summarizer=getattr(self, "compaction_summarizer", None),
-            tool_schemas=(lambda: registry.openai_schemas()) if registry is not None else None,
-            summary_target=self._compaction_summary_target(provider, model),
-            cancel_event=cancel_event,
-            record_event=record_event if session_id.strip() else None,
-        )
+        try:
+            result = compact_surface(
+                messages, compactor=self.compactor, model=model, provider=provider,
+                context_window=context_window,
+                harness_managed=getattr(self, "harness_managed", False),
+                trigger=trigger, force=force, retain_ratio=retain_ratio,
+                summarizer=getattr(self, "compaction_summarizer", None),
+                tool_schemas=(lambda: registry.openai_schemas()) if registry is not None else None,
+                summary_target=self._compaction_summary_target(provider, model),
+                cancel_event=cancel_event,
+                record_event=record_event if session_id.strip() else None,
+            )
+        except ValueError:
+            if trigger == "manual":
+                raise
+            return messages
         pending = getattr(self, "_pending_compaction_updates", None)
         if pending is not None:
             pending.extend(result.updates)

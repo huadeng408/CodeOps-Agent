@@ -50,13 +50,15 @@ non-executable explanatory Markdown (`README.md` and ordinary `docs/` pages)
 may differ. Loaded instructions, Goal/acceptance policy, design/agent guidance,
 prompts/templates, source, configuration, dependencies and task inputs remain
 protected; symlink/executable-mode or unknown changes refuse inheritance.
-The current lane-specific exception is the deterministic three-stage workflow
-fault-injection runner: it does not load browser source or browser fixtures, so
-regular `.ts`, `.tsx`, `.css` and `.mjs` files under `frontend/src/` or
-`frontend/tests/` do not invalidate that lane. Other lanes retain the conservative
-whole-tree check until their dependencies are confirmed. This is a gate-owned
-scope, not a receipt-supplied exclusion list. Workflow source, configuration,
-dependencies, task inputs, instructions and unknown paths remain protected.
+The current lane-specific exemptions cover non-browser lanes (`workflow`,
+`context-token`, `skills`, `terminalbench`, and `swebench`), which do not load
+browser source or browser fixtures (`frontend/src/` or `frontend/tests/` with
+`.ts`, `.tsx`, `.css`, and `.mjs`), and dedicated lane runner entrypoints under
+`eval/`, which invalidate only their corresponding lane. Browser-coupled lanes
+(`extension-onboarding` and `agent-e2e`) retain the conservative browser check.
+This is a gate-owned scope, not a receipt-supplied exclusion list. Shared runtime
+source, configuration, dependencies, task inputs, instructions and unknown paths
+remain protected.
 Existing runtime symlinks are resolved in the Git tree; changed targets or
 unconfirmed external/dangling/cyclic targets also refuse inheritance.
 The same pin still requires confirmed inputs. Submodule pins and dirty or
